@@ -67,6 +67,7 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 - **[`main.py`](./main.py):** Primary CLI and orchestration entrypoint (`python -m scale_forecasting.main --config ...`).
 - **[`review.py`](./review.py):** Live run progress monitoring (`monitor_run`), post-run evaluation (`review_run`), two-tier feature attribution analytics (`build_attributions_frame`, `plot_attributions`), and matplotlib visualization helpers.
 - **[`playground.py`](./playground.py):** Offline single-series sandbox (`python -m scale_forecasting.playground`) for testing models and backtests without cloud infrastructure.
+- **[`agent_surfaces.py`](./agent_surfaces.py) & [`mcp.py`](./mcp.py):** Single-source generator/drift-checker for JSON Schema, `llms.txt`, `llms-full.txt`, and `skills/scale-forecasting/references/*.md`, local environment readiness probe (`probe_environment`), and built-in `stdio` Model Context Protocol server (`python -m scale_forecasting.mcp`).
 - **[`airflow_emit.py`](./airflow_emit.py) & [`airflow_tasks.py`](./airflow_tasks.py):** Renders any `RunConfig` into a standalone Cloud Composer / Airflow Python DAG (`dag_<run_id>.py`) and provides the task callables it executes.
 
 ### 2. Core Forecasting & Evaluation Pipeline

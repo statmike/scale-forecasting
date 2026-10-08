@@ -119,6 +119,9 @@ _LAZY: dict[str, tuple[str, str]] = {
     "reconcile_oof": (".reconciliation", "reconcile_oof"),
     "reconcile_cells": (".reconciliation", "reconcile_cells"),
     "verify_coherence": (".reconciliation", "verify_coherence"),
+    # AI agent surfaces & MCP server.
+    "probe_environment": (".agent_surfaces", "probe_environment"),
+    "McpServer": (".mcp", "McpServer"),
 }
 
 __all__ = [
@@ -142,6 +145,7 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports (re-exported below)
+    from .agent_surfaces import probe_environment  # noqa: F401
     from .dag import DagNode  # noqa: F401
     from .engines.ray_io import chunk_cells, make_chunk_runner  # noqa: F401
     from .engines.spark_io import (  # noqa: F401
@@ -152,6 +156,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     )
     from .ensemble_run import ensemble_cross_runs, merge_configs_for_ensemble  # noqa: F401
     from .main import run  # noqa: F401
+    from .mcp import McpServer  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
     from .playground import metric_catalog, model_catalog  # noqa: F401
     from .reconciliation import (  # noqa: F401

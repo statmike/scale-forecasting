@@ -1,0 +1,1298 @@
+{
+  "$defs": {
+    "BacktestConfig": {
+      "additionalProperties": false,
+      "description": "Time-series cross-validation. Off by default (cheapest first run).\n\nEvery field here is now honoured. The five that arrived ahead of the code that reads them \u2014\n``short_series``, ``min_folds``, ``min_train_floor``, ``gap`` and ``window`` \u2014 were declared in\none commit because ``run_id`` is a digest of the whole config: adding a field moves every\nidentity ever recorded, so landing them together cost one identity break instead of five.\n``test_declared_ahead_fields.py`` holds the other half of that bargain: each field reaches\nthe digest.\n\n``short_series`` decides what happens to a series too short for the requested fold grid, and\nevery branch of it is a different trade rather than a different amount of the same thing.\n``adapt`` (the default) holds the geometry exactly and drops the **oldest** folds, so a short\nseries is scored on the most recent window it can reach. ``overlap`` holds the fold *count* and\nshrinks the step to buy it, which means validation windows share observations and the per-fold\nscores stop being independent evidence. ``shrink_train`` holds the count and the step and lowers\nthe training requirement instead, never past ``min_train_floor`` \u2014 which is why that field is\nrequired with this mode rather than optional. ``skip`` leaves any series short of the full grid\nunscored, so every series on the leaderboard was measured identically. ``error`` refuses the\nrun outright; it is checked before any cell runs and never raises inside one, because a scoring\nshortfall must never cost a forecast. ``min_folds`` is the give-up floor the first three\nrespect: a series that cannot reach it is left unscored rather than weakly scored.\n\n``gap`` and ``window`` are also honoured. ``gap`` is an **embargo**: training stops ``gap``\nobservations before the validation window starts, so ``train_end + gap == val_start`` and the\nfold measures a forecast issued with a reporting lag. It moves the training end, never the\nvalidation window \u2014 the folds of a ``gap=14`` run cover the same dates as the folds of a\n``gap=0`` run, so the two are comparable \u2014 and it costs history, so a series may achieve fewer\nfolds under it. ``window`` is the ``sliding`` scheme's training width, defaulting to\n``min_train``, which frees ``min_train`` to mean only the feasibility floor. Both are mirrored\ninto the BigQuery-native fold SQL, so the two engines score the same windows.\n\n``scheme`` is the one that is fully honoured, and it decides *what a fold's score is a score\nof*. ``expanding`` and ``sliding`` refit at every origin, so a score is about a freshly-trained\nmodel. ``expanding_frozen`` fits once and then feeds the model the observations that arrive\nbetween origins with its parameters held fixed, which measures what refitting less often costs.\n``expanding_stale`` fits once and never tells the model what happened next, which measures how\nfast it decays untouched \u2014 the only one of the three every model can answer identically, and so\nthe one where a cross-model leaderboard is comparing like with like. Widening this Literal moves\nno existing ``run_id`` \u2014 the digest hashes dumped values, not the schema.\n\n``control_arm`` is what lets a refit scheme answer the frozen schemes' question without becoming\none. Both frozen schemes score a blind arm \u2014 one fit, walked forward untouched \u2014 beside their\nprimary arm, and ``expanding`` and ``sliding`` did not, so the run most people actually make\ncould not say what refitting was buying it. The arm costs one extra fit per *cell*, not per\nfold, plus a forecast, which is why it is affordable on the default path. On ``expanding_stale``\nit is refused rather than ignored: that scheme's primary arm already is the blind arm.\nSee `backtest.BacktestOutcome` for what the two arms produce.\n\nOne asymmetry worth knowing: ``short_series`` is a **Python-path** policy. The BigQuery-native\nmodels count their folds back from one global ``MAX(ds)`` rather than from each series' own last\nobservation, so they have no per-series grid to adapt; a short series there simply contributes\nfewer scored rows. ``error`` is the exception, because it is checked against the panel before\neither engine starts.",
+      "properties": {
+        "control_arm": {
+          "default": false,
+          "title": "Control Arm",
+          "type": "boolean"
+        },
+        "decision_metric": {
+          "default": "wape",
+          "title": "Decision Metric",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "gap": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Gap",
+          "type": "integer"
+        },
+        "horizon": {
+          "default": 28,
+          "exclusiveMinimum": 0,
+          "title": "Horizon",
+          "type": "integer"
+        },
+        "min_folds": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Min Folds",
+          "type": "integer"
+        },
+        "min_train": {
+          "default": 180,
+          "exclusiveMinimum": 0,
+          "title": "Min Train",
+          "type": "integer"
+        },
+        "min_train_floor": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Train Floor"
+        },
+        "n_folds": {
+          "default": 3,
+          "minimum": 1,
+          "title": "N Folds",
+          "type": "integer"
+        },
+        "scheme": {
+          "default": "expanding",
+          "enum": [
+            "expanding",
+            "sliding",
+            "expanding_frozen",
+            "expanding_stale"
+          ],
+          "title": "Scheme",
+          "type": "string"
+        },
+        "short_series": {
+          "default": "adapt",
+          "enum": [
+            "adapt",
+            "overlap",
+            "shrink_train",
+            "skip",
+            "error"
+          ],
+          "title": "Short Series",
+          "type": "string"
+        },
+        "step": {
+          "default": 28,
+          "exclusiveMinimum": 0,
+          "title": "Step",
+          "type": "integer"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window"
+        }
+      },
+      "title": "BacktestConfig",
+      "type": "object"
+    },
+    "CapacityConfig": {
+      "additionalProperties": false,
+      "description": "How hard to look for room when a service says it has none \u2014 per service (G2).\n\n\"Resources are not available\" is a **state**, not an exception: a run walks its candidate\nplaces, and if none has room it waits and walks them again, until an attempt budget or a clock\nruns out. `scale_forecasting.capacity` implements that; this is where a run tunes it.\n\n**Not part of the ``run_id`` digest** \u2014 excluded in `registry.ids._NOT_IDENTITY`, and there is a\ntest that says so. Same rule as ``compute.profile.source``, for the same reason: a run's\nidentity is *what was asked for*, and patience is an operational knob. If it moved the digest,\nwaiting longer for a GPU would fork your run id and break dedupe-on-read.\n\n``enabled: false`` restores the pre-retry behaviour exactly \u2014 one pass over the candidates, no\nback-off \u2014 which is the escape hatch if a retry loop ever misbehaves in production. It does not\ndisable *classification*: a config fault still stops immediately and a quota ceiling is still\nnamed as one in the ledger, because those were improvements to the diagnosis, not to the\npatience.\n\nBigQuery has no entry and that omission is deliberate (`capacity.UNMANAGED_SERVICES`): slot\ncontention is resolved BigQuery-side and surfaces as latency, not as a create that failed\nsomewhere and could be retried elsewhere. There is no candidate list to walk.",
+      "properties": {
+        "dataproc_cluster": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "dataproc_serverless": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "gce": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "gke": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "preflight": {
+          "default": true,
+          "title": "Preflight",
+          "type": "boolean"
+        },
+        "ray": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryResources"
+        },
+        "vertex": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        },
+        "vertex_automl": {
+          "$ref": "#/$defs/CapacityServicePolicy"
+        }
+      },
+      "title": "CapacityConfig",
+      "type": "object"
+    },
+    "CapacityServicePolicy": {
+      "additionalProperties": false,
+      "description": "A partial override of one service's shipped retry policy \u2014 every field optional.\n\nPartial on purpose. A user who wants to wait longer for a GPU should be able to say only\n``{\"max_wall_seconds\": 7200}`` and inherit the rest; requiring the whole policy would mean\ncopying four numbers they have no opinion about and silently freezing them against future\ndefault changes. Unset fields fall through to `capacity.DEFAULT_POLICIES[service]`.\n\nBounds are validated here as well as in `capacity.CapacityPolicy`, so a bad config fails at load\nwith a pydantic error naming the field rather than at provisioning time with a ValueError.",
+      "properties": {
+        "backoff_max_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backoff Max Seconds"
+        },
+        "backoff_multiplier": {
+          "anyOf": [
+            {
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backoff Multiplier"
+        },
+        "backoff_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backoff Seconds"
+        },
+        "max_attempts": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Attempts"
+        },
+        "max_passes": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Passes"
+        },
+        "max_wall_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Wall Seconds"
+        }
+      },
+      "title": "CapacityServicePolicy",
+      "type": "object"
+    },
+    "ComputeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime scale, dependency delivery, and cost guardrails.",
+      "properties": {
+        "accelerator_count": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Accelerator Count",
+          "type": "integer"
+        },
+        "automl_mode": {
+          "default": "tabular_workflow",
+          "enum": [
+            "tabular_workflow",
+            "training_job"
+          ],
+          "title": "Automl Mode",
+          "type": "string"
+        },
+        "bucket_target_cells": {
+          "default": 8,
+          "exclusiveMinimum": 0,
+          "title": "Bucket Target Cells",
+          "type": "integer"
+        },
+        "budget_usd": {
+          "default": 50.0,
+          "minimum": 0.0,
+          "title": "Budget Usd",
+          "type": "number"
+        },
+        "capacity": {
+          "$ref": "#/$defs/CapacityConfig"
+        },
+        "ensemble": {
+          "$ref": "#/$defs/EnsembleCompute"
+        },
+        "families": {
+          "additionalProperties": {
+            "$ref": "#/$defs/FamilyCompute"
+          },
+          "propertyNames": {
+            "enum": [
+              "statistical",
+              "ml",
+              "deep_learning",
+              "automl"
+            ]
+          },
+          "title": "Families",
+          "type": "object"
+        },
+        "gke_cluster_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gke Cluster Name"
+        },
+        "gke_mode": {
+          "default": "job",
+          "enum": [
+            "job",
+            "ray"
+          ],
+          "title": "Gke Mode",
+          "type": "string"
+        },
+        "gke_namespace": {
+          "default": "default",
+          "title": "Gke Namespace",
+          "type": "string"
+        },
+        "gpu_calibration_samples": {
+          "default": 3,
+          "exclusiveMinimum": 0,
+          "title": "Gpu Calibration Samples",
+          "type": "integer"
+        },
+        "gpu_fraction": {
+          "anyOf": [
+            {
+              "const": "auto",
+              "type": "string"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "default": "auto",
+          "title": "Gpu Fraction"
+        },
+        "gpu_safety_margin": {
+          "default": 1.3,
+          "exclusiveMinimum": 1.0,
+          "title": "Gpu Safety Margin",
+          "type": "number"
+        },
+        "gpu_type": {
+          "default": "T4",
+          "enum": [
+            "T4",
+            "L4",
+            "A100",
+            "A100_80GB"
+          ],
+          "title": "Gpu Type",
+          "type": "string"
+        },
+        "machine_family": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "n1",
+            "n2",
+            "n2d",
+            "e2",
+            "c2"
+          ],
+          "title": "Machine Family",
+          "type": "string"
+        },
+        "machine_type": {
+          "default": "auto",
+          "title": "Machine Type",
+          "type": "string"
+        },
+        "max_executors": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Executors"
+        },
+        "max_parallelism": {
+          "default": 1000,
+          "exclusiveMinimum": 0,
+          "title": "Max Parallelism",
+          "type": "integer"
+        },
+        "max_workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Workers"
+        },
+        "min_workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Workers"
+        },
+        "persist_models": {
+          "default": false,
+          "title": "Persist Models",
+          "type": "boolean"
+        },
+        "profile": {
+          "$ref": "#/$defs/ProfileConfig"
+        },
+        "ray_autoscale": {
+          "default": true,
+          "title": "Ray Autoscale",
+          "type": "boolean"
+        },
+        "ray_cluster_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ray Cluster Name"
+        },
+        "ray_cpu_machine_type": {
+          "default": "n1-standard-8",
+          "title": "Ray Cpu Machine Type",
+          "type": "string"
+        },
+        "ray_cpu_max_nodes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ray Cpu Max Nodes"
+        },
+        "ray_cpu_min_nodes": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Ray Cpu Min Nodes",
+          "type": "integer"
+        },
+        "ray_gpu_machine_type": {
+          "default": "n1-standard-8",
+          "title": "Ray Gpu Machine Type",
+          "type": "string"
+        },
+        "ray_gpu_max_nodes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ray Gpu Max Nodes"
+        },
+        "ray_gpu_min_nodes": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Ray Gpu Min Nodes",
+          "type": "integer"
+        },
+        "ray_head_machine_type": {
+          "default": "n1-standard-16",
+          "title": "Ray Head Machine Type",
+          "type": "string"
+        },
+        "ray_max_nodes": {
+          "default": 16,
+          "exclusiveMinimum": 0,
+          "title": "Ray Max Nodes",
+          "type": "integer"
+        },
+        "ray_mode": {
+          "default": "vertex",
+          "enum": [
+            "vertex",
+            "gke"
+          ],
+          "title": "Ray Mode",
+          "type": "string"
+        },
+        "ray_read_mode": {
+          "default": "driver_collect",
+          "enum": [
+            "driver_collect",
+            "ray_data"
+          ],
+          "title": "Ray Read Mode",
+          "type": "string"
+        },
+        "ray_regions": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ray Regions"
+        },
+        "ray_target_cells_per_slot": {
+          "default": 8,
+          "exclusiveMinimum": 0,
+          "title": "Ray Target Cells Per Slot",
+          "type": "integer"
+        },
+        "read_max_streams": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Read Max Streams",
+          "type": "integer"
+        },
+        "spark_deps": {
+          "default": "packed_venv",
+          "enum": [
+            "packed_venv",
+            "container"
+          ],
+          "title": "Spark Deps",
+          "type": "string"
+        },
+        "use_gpu": {
+          "default": false,
+          "title": "Use Gpu",
+          "type": "boolean"
+        },
+        "workers": {
+          "default": 1,
+          "exclusiveMinimum": 0,
+          "title": "Workers",
+          "type": "integer"
+        }
+      },
+      "title": "ComputeConfig",
+      "type": "object"
+    },
+    "DataConfig": {
+      "additionalProperties": false,
+      "description": "Where the series come from and their shape.",
+      "properties": {
+        "date_col": {
+          "default": "ds",
+          "title": "Date Col",
+          "type": "string"
+        },
+        "freq": {
+          "default": "D",
+          "title": "Freq",
+          "type": "string"
+        },
+        "horizon": {
+          "default": 28,
+          "exclusiveMinimum": 0,
+          "title": "Horizon",
+          "type": "integer"
+        },
+        "series_limit": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Series Limit"
+        },
+        "source_table": {
+          "title": "Source Table",
+          "type": "string"
+        },
+        "target_col": {
+          "default": "y",
+          "title": "Target Col",
+          "type": "string"
+        },
+        "ts_id_col": {
+          "default": "ts_id",
+          "title": "Ts Id Col",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_table"
+      ],
+      "title": "DataConfig",
+      "type": "object"
+    },
+    "EnsembleCompute": {
+      "additionalProperties": false,
+      "description": "*When* the ensemble DAG node runs. Not *where* \u2014 there is only one where.\n\nDistinct from `EnsembleConfig`, which selects the ensemble *strategies*. ``mode=\"barrier\"``\nensembles once after every base model finishes; ``mode=\"microbatch\"`` ensembles each series as\nsoon as its upstream base models complete, so the ensemble overlaps the families instead of\nqueueing behind the slowest one.\n\nBoth modes are live. The microbatch shape was measured on Airflow in smoke 15 (2026-09-20): the\nensemble task started in the same second as the four family tasks, ran 2,879 s alongside them,\nand finished 20 s after the last member \u2014 which is not a shape barrier mode can produce.\n\n**This model used to carry ``runtime``, ``spark_mode`` and ``spark_cluster_name`` too.** They\nwere accepted by the loader, documented as inert, and read by nothing: the ensemble node is\nhard-wired to the driver (`dag.build_dag_nodes` stamps it ``runtime=\"bigquery\"``, and\n`job_launch.run_ensemble` blends in driver pandas, taking no cluster of its own). Because they\nwere still in the config digest, setting one started a new run and changed nothing about it.\nThey are gone rather than documented-as-inert so the surface stops offering a choice that does\nnot exist. Setting one now fails at load, which beats quietly starting a differently-keyed run\nthat behaves identically.\n\n**No ``run_id`` moved.** Identity hashes ``model_dump()``, defaults included, so dropping three\ndefaulted fields would ordinarily re-key every config in existence and stale the whole\nvalidation ledger to buy a tidier surface. ``registry.ids._REMOVED_DEFAULTS`` pins the three\nkeys back into the digest at the values they used to carry, which is legitimate here precisely\nbecause nothing ever read them: no id on record ever meant anything different from what it\nmeans now.",
+      "properties": {
+        "microbatch_interval_s": {
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "title": "Microbatch Interval S",
+          "type": "number"
+        },
+        "mode": {
+          "default": "barrier",
+          "enum": [
+            "barrier",
+            "microbatch"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "EnsembleCompute",
+      "type": "object"
+    },
+    "EnsembleConfig": {
+      "additionalProperties": false,
+      "description": "Consensus across base models.\n\n``strategies`` is a list so several ensembles can run at once. The singular\n``strategy`` string is accepted as shorthand for a one-element list.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "prune_threshold": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Prune Threshold",
+          "type": "number"
+        },
+        "strategies": {
+          "default": [
+            "median"
+          ],
+          "items": {
+            "enum": [
+              "mean",
+              "median",
+              "inverse_error",
+              "nnls",
+              "ridge",
+              "xgb"
+            ],
+            "type": "string"
+          },
+          "title": "Strategies",
+          "type": "array"
+        }
+      },
+      "title": "EnsembleConfig",
+      "type": "object"
+    },
+    "FamilyCompute": {
+      "additionalProperties": false,
+      "description": "A sparse per-family compute override, layered over the flat `ComputeConfig` defaults.\n\nEvery field is optional: an unset field inherits the run-level default (``python_runtime``,\nSpark ``serverless``, CPU, the flat ``gpu_type``), so a config sets only what a family needs to\ndiffer on. There is no ``native`` family here \u2014 native models always run in BigQuery. See\n`RunConfig.resolve_family_compute` for how these layer onto the defaults; the block is inert\nuntil the DAG orchestrator consumes it.\n\nHardware constraints (validated): only the ``deep_learning`` family may request a GPU (enforced\nwhere the family key is known, in `ComputeConfig`); Dataproc Serverless offers **L4 only** (no\nT4/A100 \u2014 use ``spark_mode=\"cluster\"`` or ``runtime=\"ray\"``/``\"vertex\"``/``\"gce\"``); Spark-only\nfields (``spark_mode``/``spark_cluster_name``) are rejected on ``runtime in (\"ray\", \"vertex\",\n\"gce\")``; VM fields (``machine_type``/``workers``) are rejected on ``runtime in (\"spark\",\n\"ray\")``; and ``runtime=\"gce\"`` is strictly single-VM (``workers`` cannot exceed 1).",
+      "properties": {
+        "accelerator_count": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Accelerator Count"
+        },
+        "automl_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "tabular_workflow",
+                "training_job"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Automl Mode"
+        },
+        "gke_cluster_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gke Cluster Name"
+        },
+        "gke_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "job",
+                "ray"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gke Mode"
+        },
+        "gpu_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "T4",
+                "L4",
+                "A100",
+                "A100_80GB"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gpu Type"
+        },
+        "hardware": {
+          "anyOf": [
+            {
+              "enum": [
+                "cpu",
+                "gpu"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hardware"
+        },
+        "machine_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Machine Type"
+        },
+        "max_workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Workers"
+        },
+        "min_workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Workers"
+        },
+        "ray_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "vertex",
+                "gke"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ray Mode"
+        },
+        "runtime": {
+          "anyOf": [
+            {
+              "enum": [
+                "spark",
+                "ray",
+                "vertex",
+                "gce",
+                "gke",
+                "vertex_automl"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime"
+        },
+        "spark_cluster_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spark Cluster Name"
+        },
+        "spark_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "serverless",
+                "cluster"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Spark Mode"
+        },
+        "workers": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workers"
+        }
+      },
+      "title": "FamilyCompute",
+      "type": "object"
+    },
+    "FeaturesConfig": {
+      "additionalProperties": false,
+      "description": "Optional feature engineering for the Python models.\n\nDefaults are conservative/generic (no transform, no holidays); the shipped\n``example_config.json`` turns on holidays + log1p.\n\n**There is no ``lags`` field, and the reason is a design rule rather than an omission.**\n\"Lag\" means two different things, and only one of them can be built out here:\n\n- A lag of the **target** is only honest at predict time if the model rolls its own\n  forecasts forward one step at a time. That is recursion, it belongs to the model, and\n  the models that need it already own it \u2014 `_lag_forecaster` does it for ``lightgbm`` /\n  ``xgboost`` / ``regression_lags``, and NeuralProphet does it behind ``n_lags``. A\n  config cannot supply one, because nobody knows the future target; the removed field\n  filled the horizon with a flat line at the last observation and handed the result to\n  models that had fitted coefficients against real history.\n- A lag of a **covariate** is honest, because a covariate's future is as knowable as the\n  covariate itself. No model in the suite lags one internally, so this is the gap that\n  ``exog_lags`` fills.\n\n``exog_lags`` maps an ``exog`` column to the lags to build from it: ``{\"promo\": [1, 7]}``\nadds ``promo_lag_1`` and ``promo_lag_7``. They are ordinary columns by the time any model\nsees them, so every ``supports_exog`` model can use them.\n\nPrecedence, when the two rules ever meet: **the model wins.** A model that lags covariates\ninternally sets ``lags_covariates_internally`` and is handed the unlagged columns only, so\na covariate is never lagged twice. Every shipped model leaves that flag False today.",
+      "properties": {
+        "exog": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Exog",
+          "type": "array"
+        },
+        "exog_lags": {
+          "additionalProperties": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Exog Lags",
+          "type": "object"
+        },
+        "fourier": {
+          "default": false,
+          "title": "Fourier",
+          "type": "boolean"
+        },
+        "future_covariates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Future Covariates",
+          "type": "array"
+        },
+        "holidays": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Holidays",
+          "type": "array"
+        },
+        "level_shift": {
+          "default": false,
+          "title": "Level Shift",
+          "type": "boolean"
+        },
+        "on_unsupported_covariates": {
+          "default": "fallback",
+          "enum": [
+            "fallback",
+            "error"
+          ],
+          "title": "On Unsupported Covariates",
+          "type": "string"
+        },
+        "past_covariates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Past Covariates",
+          "type": "array"
+        },
+        "static_covariates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Static Covariates",
+          "type": "array"
+        },
+        "transform": {
+          "default": "none",
+          "enum": [
+            "none",
+            "log1p",
+            "boxcox"
+          ],
+          "title": "Transform",
+          "type": "string"
+        }
+      },
+      "title": "FeaturesConfig",
+      "type": "object"
+    },
+    "HierarchyConfig": {
+      "additionalProperties": false,
+      "description": "Hierarchical and grouped time-series aggregation and coherent forecast reconciliation.\n\nOff by default (``enabled: false``). When enabled, ``levels`` defines the cross-sectional\naggregation hierarchy from top to bottom (for example ``[[\"region\"], [\"region\", \"category\"]]``),\nwith the total aggregate (``\"__total__\"``) prepended automatically and the bottom-level series\n(``data.ts_id_col``) at the leaves.\n\nImplements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection\n``y_tilde = S @ G @ y_hat`` across seven methods:\n\n* ``bottom_up`` \u2014 sum bottom-level forecasts upward via the summing matrix ``S``.\n* ``top_down`` \u2014 disaggregate the top-level forecast downward by average historical proportions\n  (FPP3 \u00a711.2).\n* ``middle_out`` \u2014 anchor on ``middle_level`` (sum upward above it, disaggregate downward below\n  it by historical proportions within each middle-level node).\n* ``ols`` \u2014 ordinary least squares MinT reconciliation (``W_h = I``).\n* ``wls_struct`` \u2014 structural scaling WLS (``W_h = diag(S @ 1)``), requiring only the hierarchy\n  structure ``S``.\n* ``wls_var`` \u2014 variance scaling WLS (``W_h = diag(W_hat_1)``) weighted by inverse residual\n  variances.\n* ``mint_shrink`` \u2014 Wickramasuriya et al. (2019) Minimum Trace with Sch\u00e4fer-Strimmer shrinkage\n  covariance of residuals, positive-definite even when ``n_series >> T_obs``.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "levels": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Levels",
+          "type": "array"
+        },
+        "middle_level": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Middle Level"
+        },
+        "reconciliation_methods": {
+          "default": [
+            "bottom_up",
+            "wls_struct",
+            "mint_shrink"
+          ],
+          "items": {
+            "enum": [
+              "bottom_up",
+              "top_down",
+              "middle_out",
+              "ols",
+              "wls_struct",
+              "wls_var",
+              "mint_shrink"
+            ],
+            "type": "string"
+          },
+          "title": "Reconciliation Methods",
+          "type": "array"
+        }
+      },
+      "title": "HierarchyConfig",
+      "type": "object"
+    },
+    "HpoConfig": {
+      "additionalProperties": false,
+      "description": "Hyperparameter optimization on the aligned backtest (optional).\n\nOff by default. When ``enabled``, an Optuna study tunes each model's ``search_space`` on the\nbacktest folds and the winning params are stamped to ``forecast_metadata.best_params`` (see\n`scale_forecasting.hpo`). HPO therefore requires ``backtest.enabled``.\n\n``granularity`` is the DS-facing cost knob:\n\n* ``fleetwide`` (default) \u2014 tune each model **once** on a ``sample_size`` sample of series and\n  apply the winner across *all* series. The only granularity affordable at the 100k hero scale:\n  the study runs on the driver before fan-out (a handful of series \u00d7 ``n_trials`` fits), not per\n  cell.\n* ``per_series`` \u2014 tune inside every cell (``n_trials`` fits *per series*). Accurate for the\n  tail of hard series but multiplies fit cost by ``n_trials`` fleet-wide; an explicit opt-in.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "engine": {
+          "const": "optuna",
+          "default": "optuna",
+          "title": "Engine",
+          "type": "string"
+        },
+        "granularity": {
+          "default": "fleetwide",
+          "enum": [
+            "fleetwide",
+            "per_series"
+          ],
+          "title": "Granularity",
+          "type": "string"
+        },
+        "n_trials": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "title": "N Trials",
+          "type": "integer"
+        },
+        "sample_size": {
+          "default": 20,
+          "exclusiveMinimum": 0,
+          "title": "Sample Size",
+          "type": "integer"
+        }
+      },
+      "title": "HpoConfig",
+      "type": "object"
+    },
+    "OutputConfig": {
+      "additionalProperties": false,
+      "description": "What the numbers we ship *mean* \u2014 the functional behind ``yhat``.\n\nIts own section rather than a field on `BacktestConfig`, even though both of its rules involve\nthe backtest, because a reader asking \"how do I control the point forecast?\" will not look\nunder `backtest`, and the docs are a product surface here.\n\nEvery model emits one number per future date, so something decides what that number is. For a\nlong time this project decided by accident: ten of sixteen models built their band from\nresidual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped\nforecast was silently ``prediction + median(in-sample residual)`` \u2014 un-named, un-configurable,\nand applied to some models and not others. Measurement said the correction was worth keeping\n(it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an\nopinion into a default: the alternative is now sayable.\n\n``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never\ndestructive and the two arms can always be compared after the fact. See `calibration.py`.",
+      "properties": {
+        "point_forecast": {
+          "anyOf": [
+            {
+              "enum": [
+                "raw",
+                "median",
+                "mean",
+                "auto"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Point Forecast"
+        }
+      },
+      "title": "OutputConfig",
+      "type": "object"
+    },
+    "ProfileConfig": {
+      "additionalProperties": false,
+      "description": "Whether to *measure* what a run costs before sizing it, and with how much headroom.\n\nSizing today is a pure cell **count**: ``n_series x n_models x n_folds``, turned into nodes by a\nflat cells-per-slot constant. Nothing in that arithmetic knows that a deep-learning fit and a\nnaive mean differ by orders of magnitude, so a fleet is provisioned for the count and not for\nthe work. Turning this on replaces the guess with a short instrumented pre-pass\n(``scale_forecasting.profiling``): fit a stratified sample of series, measure what they actually\nconsumed, and size each family's slot from the measurement.\n\nThe two margins are deliberately different, and the asymmetry is the point: over-estimating\ntime buys extra slots, which costs money, while under-estimating memory OOM-kills the task,\nwhich costs the run. So memory carries the larger headroom, and the two are applied to\ndifferent tails \u2014 ``memory_margin`` to the sample **max** (a slot must hold the worst case that\nlands in it), ``time_margin`` to the **median** (a fleet is sized for typical work, and sizing\nit for the worst case over-provisions every run).\n\nPart of the ``run_id`` digest \u2014 unlike the two fields that are not (its own ``source``, and\n``compute.capacity``, both of which are resolved or operational rather than authored). It\nchanges the resource\nshape rather than the numbers a run produces, so it is arguable \u2014 but the config *is* the\nexperiment record, and a run whose fleet was sized differently is not the same run for\nperformance purposes. Silently varying the shape under a stable id would be the worse trade.\n\n**A profile is produced by one run and consumed by later ones**, which is why ``mode`` is\nsplit into a *source* (what evidence to consume) and a *measure* (what evidence to produce)\nbelow. Every runtime consumes: ``submit.sizing_properties``, ``dataproc_cluster.cluster_sizing``\nand the Ray sizing paths all resolve one through `profiling.source.profile_for_run`.\n\nWhat differs per runtime is **when the measurement can be taken**, and only Ray gets a choice.\n``spark.executor.cores`` and ``spark.task.cpus`` are fixed at submit (Serverless) or at create\n(cluster), before any of our code runs out there, so on Spark the only evidence that can reach\na sizing decision is *prior* evidence \u2014 a harvest, or the shipped baseline. ``ray_engine`` can\nadditionally call `profiling.source.resolve_profile` and measure in-run, because a Ray task's\n``num_cpus``/``num_gpus`` is a request made against a pool that already exists. So ``\"auto\"``\nand ``\"always\"`` still differ only on the Ray path; ``\"off\"`` is the setting that is\nload-bearing everywhere, where it also suppresses the static-arithmetic overlay.",
+      "properties": {
+        "measure": {
+          "default": "harvest",
+          "enum": [
+            "off",
+            "harvest",
+            "controlled"
+          ],
+          "title": "Measure",
+          "type": "string"
+        },
+        "memory_margin": {
+          "default": 1.3,
+          "exclusiveMinimum": 1.0,
+          "title": "Memory Margin",
+          "type": "number"
+        },
+        "min_cells": {
+          "default": 1000,
+          "exclusiveMinimum": 0,
+          "title": "Min Cells",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "auto",
+          "enum": [
+            "off",
+            "auto",
+            "always"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "samples": {
+          "default": 8,
+          "exclusiveMinimum": 0,
+          "title": "Samples",
+          "type": "integer"
+        },
+        "source": {
+          "default": "auto",
+          "title": "Source",
+          "type": "string"
+        },
+        "time_margin": {
+          "default": 1.2,
+          "exclusiveMinimum": 1.0,
+          "title": "Time Margin",
+          "type": "number"
+        }
+      },
+      "title": "ProfileConfig",
+      "type": "object"
+    },
+    "RetryResources": {
+      "additionalProperties": false,
+      "description": "What a **repair** may claim differently from the attempt it repairs.\n\nA repair re-submits a handful of cells out of a run that was sized for all of them. The fleet\narithmetic does not know that: it sizes from the config's fan-out, so a forty-cell repair of a\nhundred-thousand-cell family asks for the hundred-thousand-cell fleet and pays for it. This is\nwhere a run says how wide its repairs should be instead.\n\nIt lives here, under ``compute.capacity``, for the reason the parent's docstring already gives:\neverything under ``capacity`` is excluded from the ``run_id`` digest, and a repair that resized\nitself must stay the *same run*. A sibling of ``compute.max_executors`` would fork the id, which\nwould mean the repair wrote its rows under a run nobody was looking at.\n\nIt is a config block rather than only a CLI flag for the same reason ``compute.max_executors``\nis: the unattended repair paths (`airflow_tasks.retry_families`, `main`'s ``--retry``) launch\nfrom a config and nothing else, so a ceiling reachable only through an argument is a ceiling an\norchestrated repair can never set. An explicit ``max_executors=`` argument still wins over it\n(`job_launch.submit_retry`) \u2014 the operator at the terminal overrides the file.\n\n**Why only this one knob, and what may join it.** A repair reuses the config its run staged, so\nthe only settings it can vary are the ones the *driver* reads at launch: anything the worker\nreads out of the staged config (``bucket_target_cells``, ``max_parallelism``, the model list,\nthe data block) is the same bytes for the repair as for the attempt, by construction. Of the\ndriver-side knobs, ``max_executors`` is the one the launchers already take as an argument\n(`job_launch.launch_family_job`). Note its reach: it caps a Spark **batch's**\n``spark.dynamicAllocation.maxExecutors`` and is ignored by the Ray and in-process paths, so a\nRay family's repair still provisions from the fan-out.",
+      "properties": {
+        "max_executors": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Executors"
+        }
+      },
+      "title": "RetryResources",
+      "type": "object"
+    }
+  },
+  "$id": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A complete, validated, frozen run specification.",
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema URI for editor autocomplete and static validation.",
+      "title": "$Schema",
+      "type": "string"
+    },
+    "backtest": {
+      "$ref": "#/$defs/BacktestConfig"
+    },
+    "compute": {
+      "$ref": "#/$defs/ComputeConfig"
+    },
+    "data": {
+      "$ref": "#/$defs/DataConfig"
+    },
+    "ensemble": {
+      "$ref": "#/$defs/EnsembleConfig"
+    },
+    "features": {
+      "$ref": "#/$defs/FeaturesConfig"
+    },
+    "hierarchy": {
+      "$ref": "#/$defs/HierarchyConfig"
+    },
+    "hpo": {
+      "$ref": "#/$defs/HpoConfig"
+    },
+    "model_params": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": "object"
+      },
+      "title": "Model Params",
+      "type": "object"
+    },
+    "models": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Models",
+      "type": "array"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputConfig"
+    },
+    "python_runtime": {
+      "default": "spark",
+      "enum": [
+        "spark",
+        "ray",
+        "vertex",
+        "gce",
+        "gke",
+        "vertex_automl"
+      ],
+      "title": "Python Runtime",
+      "type": "string"
+    },
+    "run_name": {
+      "title": "Run Name",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_name",
+    "data",
+    "models"
+  ],
+  "title": "RunConfig",
+  "type": "object"
+}

@@ -1,0 +1,32 @@
+# scale-forecasting
+
+> Declarative, multi-runtime enterprise time-series forecasting platform for Google Cloud. One frozen Pydantic `RunConfig` orchestrates 34 models across 5 families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, conformal/quantile calibration, FPP3 hierarchical reconciliation, and stacked ensembling into a 5-table, 5-view BigQuery registry.
+
+## Agent-First Surfaces (MCP, Skills & Schemas)
+
+- [AI Agents, Skills & MCP Guide](https://statmike.github.io/scale-forecasting/agent_and_mcp_guide/): How to connect Gemini CLI, Claude Code, Antigravity/Jetski, Cursor, and VS Code via the built-in MCP server (`python -m scale_forecasting.mcp`), `SKILL.md`, and JSON Schema.
+- [RunConfig JSON Schema (Draft 2020-12)](https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json): Machine-readable schema for `RunConfig` with editor autocomplete (`"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"`).
+- [Comprehensive LLM Context Bundle (`llms-full.txt`)](https://statmike.github.io/scale-forecasting/llms-full.txt): Single-file reference containing all `RunConfig` fields, all 34 models, 21 metrics, 7 runtimes, 12 extras, and 5 execution paths.
+- [Repository Portable Skill (`skills/scale-forecasting/SKILL.md`)](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md): Portable Agent Skill with Progressive Disclosure reference tables.
+
+## Start Here & Positioning
+
+- [Documentation Home](https://statmike.github.io/scale-forecasting/): Navigation hub by role and goal.
+- [Platform Overview](https://statmike.github.io/scale-forecasting/overview/): End-to-end architecture, capabilities summary, and registry model.
+- [Getting Started](https://statmike.github.io/scale-forecasting/getting_started/): 5-minute offline sandbox (`pip install scale-forecasting`) to first cloud run.
+- [Choosing a Runtime](https://statmike.github.io/scale-forecasting/choosing_a_runtime/): Decision flow and fit matrix across all 7 Google Cloud runtimes.
+- [Cost Estimates](https://statmike.github.io/scale-forecasting/cost_estimates/): Service-by-service cost drivers, zero-idle vs. always-on resources, and run cost bands.
+- [Why Google Cloud](https://statmike.github.io/scale-forecasting/why_google_cloud/): Six architectural proof points with code and validation citations.
+- [FAQ](https://statmike.github.io/scale-forecasting/faq/): Direct answers on installation, runtimes, pricing, covariates, and operations.
+- [Glossary](https://statmike.github.io/scale-forecasting/glossary/): Definitions of platform, forecasting, and BigQuery registry terms.
+
+## Reference & Operations
+
+- [Configuration Reference (`RunConfig`)](https://statmike.github.io/scale-forecasting/configuration_reference/): Complete JSON configuration guide.
+- [Models Reference (34 Models)](https://statmike.github.io/scale-forecasting/models_reference/): All 34 models, covariate support, explainability, and granular extras.
+- [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
+- [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
+- [Using the Python SDK (`Forecaster`)](https://statmike.github.io/scale-forecasting/using_the_sdk/): Programmatic execution, monitoring, review, and plotting.
+- [Output Schemas & Views](https://statmike.github.io/scale-forecasting/output_schemas/): DDL and query recipes for the 5 registry tables and 5 analytical views.
+- [Operations & Surgical Repair](https://statmike.github.io/scale-forecasting/operations/): Probing, settling, canceling, and repairing runs (`retry_run`, `registry.ops`).
+- [Live Validation Ledger](https://statmike.github.io/scale-forecasting/validation/): Proven `run_id` records across 42 smokes, 20 demo configs, and 11 notebooks.

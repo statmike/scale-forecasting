@@ -142,6 +142,8 @@ flowchart LR
 4. **Cloud Composer 3 DAG generation (`--emit-airflow`):** Compiles a `RunConfig` into a self-contained Apache Airflow DAG with parallel per-family tasks.
 5. **Direct cluster embedding:** Embed `make_group_runner` (PySpark `applyInPandas`) or `make_chunk_runner` (Ray) inside an existing pipeline.
 
+**AI coding agents & MCP clients:** Every execution surface above is also exposed through the built-in Model Context Protocol server (`python -m scale_forecasting.mcp`), the portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md), and the [`RunConfig` JSON Schema](./schemas/run_config.schema.json) — see [AI Agents, Portable Skills & Built-in MCP Server](./agent_and_mcp_guide.md).
+
 Details: [Using the SDK](./using_the_sdk.md) and [Running and reviewing](./running_and_reviewing.md).
 
 ---

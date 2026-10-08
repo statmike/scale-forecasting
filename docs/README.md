@@ -18,6 +18,7 @@ flowchart LR
 Understand what the platform does, fit your first forecast locally in 5 minutes, choose a runtime, and review cost controls before launching your first cloud run.
 - [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 34 models, 21 evaluation metrics, per-family DAG, and 5 analytical SQL views.
 - [getting_started.md](./getting_started.md) — **Getting started**: install the offline layer or `[gcp]` extra, run the local playground, validate a `RunConfig` with `dry_run()`, connect to a Google Cloud deployment, and read the leaderboard.
+- [agent_and_mcp_guide.md](./agent_and_mcp_guide.md) — **AI agents, portable skills & built-in MCP server**: connect Gemini CLI, Claude Code, Antigravity/Jetski, Cursor, and VS Code via `python -m scale_forecasting.mcp`, `SKILL.md`, JSON Schema autocomplete, and `llms.txt`.
 - [choosing_a_runtime.md](./choosing_a_runtime.md) — **Choosing a runtime**: decision flowchart, 7-runtime fit matrix, structural advantages, and multi-runtime per-family routing example.
 - [cost_estimates.md](./cost_estimates.md) — **Cost estimates & controls**: service-by-service billing drivers, always-on disclosures (Composer 3 & GKE), order-of-magnitude run bands, and built-in cost safeguards.
 - [why_google_cloud.md](./why_google_cloud.md) — **Why Google Cloud for forecasting at any scale**: the six architectural pillars and how each Google Cloud service is used.

@@ -57,6 +57,7 @@ output="$(env "${sf_unset[@]}" "${runner[@]}" \
   tests/unit/test_test_dependencies_declared.py \
   tests/unit/test_notebook_hygiene.py \
   tests/unit/test_packaging_extras.py \
+  tests/unit/test_agent_surfaces.py \
   tests/smokes/test_smoke_configs.py \
   -q --no-header -p no:cacheprovider 2>&1)"
 status=$?
@@ -86,6 +87,8 @@ pre-commit: a consistency tripwire failed — see above.
                                     Google client, composed spark/ray/models/all) and every surface
                                     that names an extra — Makefile, CI, Dockerfile, Markdown, notebook
                                     bootstraps, errors.EXTRA_MODULES — names one that exists.
+  test_agent_surfaces             — JSON Schema, llms.txt, llms-full.txt, and skills/scale-forecasting
+                                    reference files are in sync with code (`make agent-surfaces`).
   test_smoke_configs              — every configs/smokes/*.json validates against RunConfig.
 
 Fix the row, map, declaration, or documentation and commit again. To commit anyway: git commit --no-verify
