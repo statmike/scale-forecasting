@@ -329,9 +329,12 @@ def test_markdown_relative_links_and_config_paths_exist(markdown_files: list[Pat
     errors: list[str] = []
     link_re = re.compile(r"\[[^\]]+\]\(([^)#\s]*)(?:#([^)\s]+))?\)")
     cfg_re = re.compile(r"`((?:configs/)?(?:smokes/)?[0-9a-z_]+\.json)`")
-    all_json_names = {p.name for p in (_REPO_ROOT / "configs").rglob("*.json")} | {
-        p.name for p in (_REPO_ROOT / "tests").rglob("*.json")
-    }
+    all_json_names = (
+        {p.name for p in (_REPO_ROOT / "configs").rglob("*.json")}
+        | {p.name for p in (_REPO_ROOT / "tests").rglob("*.json")}
+        | {p.name for p in _REPO_ROOT.glob("*.json")}
+        | {p.name for p in (_REPO_ROOT / ".agents").glob("*.json")}
+    )
     anchor_cache: dict[Path, set[str]] = {}
     for path in markdown_files:
         rel = path.relative_to(_REPO_ROOT)

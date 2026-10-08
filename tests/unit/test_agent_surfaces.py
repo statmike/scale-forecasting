@@ -14,8 +14,9 @@ Verifies that:
 3. ``ALL_EXTRA_MODULES`` keys match ``pyproject.toml`` ``[project.optional-dependencies]``.
 4. ``probe_environment()`` and the ``python -m scale_forecasting.agent_surfaces`` CLI flags
    (``--check``, ``--write``, ``--probe-env``) behave deterministically.
-5. ``skills/scale-forecasting/SKILL.md``, ``gemini-extension.json``, and
-   ``cloudshell_tutorial.md`` conform to their respective specifications.
+5. ``skills/scale-forecasting/SKILL.md``, ``.agents/skills.json``, ``plugin.json``,
+   ``mcp_config.json``, ``.mcp.json``, and ``cloudshell_tutorial.md`` conform to their respective
+   specifications.
 """
 
 from __future__ import annotations
@@ -154,12 +155,33 @@ def test_skill_md_and_extension_manifests() -> None:
         assert ref_name in text
         assert (skill_path.parent / ref_name).is_file()
 
-    ext_path = REPO_ROOT / "gemini-extension.json"
-    assert ext_path.is_file()
-    ext = json.loads(ext_path.read_text(encoding="utf-8"))
-    assert ext["name"] == "scale-forecasting"
-    assert "scale-forecasting" in ext["mcpServers"]
-    assert ext["mcpServers"]["scale-forecasting"]["args"] == ["-m", "scale_forecasting.mcp"]
+    # Google Antigravity workspace auto-discovery (.agents/skills.json + .agents/skills/ symlink)
+    agents_skills_json = REPO_ROOT / ".agents" / "skills.json"
+    assert agents_skills_json.is_file()
+    skills_cfg = json.loads(agents_skills_json.read_text(encoding="utf-8"))
+    assert skills_cfg == {"entries": [{"path": "skills"}]}
+    symlinked_skill = REPO_ROOT / ".agents" / "skills" / "scale-forecasting" / "SKILL.md"
+    assert symlinked_skill.is_file()
+    assert symlinked_skill.resolve() == skill_path.resolve()
+
+    # Google Antigravity plugin.json manifest (no legacy gemini-extension.json or `author` key)
+    assert not (REPO_ROOT / "gemini-extension.json").exists()
+    plugin_path = REPO_ROOT / "plugin.json"
+    assert plugin_path.is_file()
+    plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+    assert plugin["name"] == "scale-forecasting"
+    assert plugin["version"] == "1.0.0"
+    assert "author" not in plugin
+    assert isinstance(plugin.get("suggestedPrompts"), list)
+    assert 1 <= len(plugin["suggestedPrompts"]) <= 3
+
+    # MCP server manifests (Antigravity mcp_config.json and portable project-root .mcp.json)
+    for mcp_filename in ("mcp_config.json", ".mcp.json"):
+        mcp_path = REPO_ROOT / mcp_filename
+        assert mcp_path.is_file()
+        mcp_cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+        assert "scale-forecasting" in mcp_cfg["mcpServers"]
+        assert mcp_cfg["mcpServers"]["scale-forecasting"]["args"] == ["-m", "scale_forecasting.mcp"]
 
     tutorial_path = REPO_ROOT / "cloudshell_tutorial.md"
     assert tutorial_path.is_file()

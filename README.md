@@ -116,15 +116,15 @@ Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](./
 
 ## AI agents, portable skills & built-in MCP server
 
-`scale-forecasting` ships with a **portable [`SKILL.md`](./skills/scale-forecasting/SKILL.md)**, a **built-in Model Context Protocol (MCP) server (`python -m scale_forecasting.mcp`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](./docs/schemas/run_config.schema.json)**, and **[`llms.txt`](./docs/llms.txt) / [`llms-full.txt`](./docs/llms-full.txt)** — all generated directly from the Python code and verified in pre-commit (`make agent-surfaces`):
+`scale-forecasting` is ready out of the box for **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code Copilot**, and **Windsurf** — shipping a **portable [`SKILL.md`](./skills/scale-forecasting/SKILL.md)** (auto-discovered via [`.agents/skills.json`](./.agents/skills.json)), an **Antigravity [`plugin.json`](./plugin.json) + [`mcp_config.json`](./mcp_config.json)**, a **built-in MCP server (`python -m scale_forecasting.mcp`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](./docs/schemas/run_config.schema.json)**, and **[`llms.txt`](./docs/llms.txt) / [`llms-full.txt`](./docs/llms-full.txt)** compiled directly from code (`make agent-surfaces`):
 
 ```bash
 # Probe installed extras, available models, and SF_* readiness:
 python -m scale_forecasting.agent_surfaces --probe-env
 
-# Register the built-in stdio MCP server (7 resources, 9 tools, zero extra dependencies):
-gemini mcp add scale-forecasting -- python -m scale_forecasting.mcp
-claude mcp add scale-forecasting -- python -m scale_forecasting.mcp
+# Launch Google Antigravity CLI (auto-discovers .agents/skills/ & AGENTS.md) or register MCP:
+agy
+claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 ```
 
 Full setup and architectural guide: **[AI Agents, Portable Skills & Built-in MCP Server (`docs/agent_and_mcp_guide.md`)](./docs/agent_and_mcp_guide.md)**.

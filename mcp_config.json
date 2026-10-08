@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scale-forecasting": {
+      "command": "python3",
+      "args": ["-m", "scale_forecasting.mcp"]
+    }
+  }
+}

@@ -3,8 +3,8 @@
 Exposes the platform's configuration schema, canonical catalogs (34 models, 21 metrics, 7 runtimes,
 4 GPU types, 12 extras, 5 views, 62 shipped configs), environment readiness probe, offline model
 playground, `RunConfig` validator and DAG planner, Airflow DAG emitter, and live BigQuery registry
-inspection/review/repair tools to any MCP-compatible AI coding agent (Gemini CLI, Claude Code,
-Antigravity / Jetski, Cursor, VS Code Copilot, Windsurf).
+inspection/review/repair tools to any MCP-compatible AI coding agent (Google Antigravity `agy` CLI
+& IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI Codex CLI).
 
 Zero extra dependencies are required: the server runs on a bare ``pip install scale-forecasting``
 core installation using the Python standard library and Pydantic. Tools that query or mutate Google
