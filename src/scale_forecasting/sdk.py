@@ -28,7 +28,7 @@ from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     import pandas as pd
@@ -1103,6 +1103,185 @@ class Forecaster:
             ts_id=ts_id,
             model_type=model_type,
             top_k=top_k,
+            ax=ax,
+            title=title,
+        )
+
+    def fva_df(
+        self,
+        run_id: str | None = None,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute Forecast Value Added (FVA) & Diebold–Mariano statistical significance for
+        ``run_id`` (`diagnostics.compute_fva`).
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_fva
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_fva(oof_df, baseline=baseline, metric=eff_metric)
+
+    def plot_fva(
+        self,
+        run_id: str | None = None,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot the Forecast Value Added (FVA) accuracy waterfall for ``run_id``."""
+        from .diagnostics import plot_fva
+
+        rid = run_id or self.run_id
+        df = self.fva_df(rid, baseline=baseline, metric=metric, limit=limit)
+        return plot_fva(df, ax=ax, title=title or f"{rid} — Forecast Value Added")
+
+    def horizon_decay_df(
+        self,
+        run_id: str | None = None,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute lead-time accuracy decay across horizon steps ($h = 1 \\dots H$)."""
+        import pandas as pd
+
+        from .diagnostics import compute_horizon_decay
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_horizon_decay(oof_df, metric=eff_metric, baseline=baseline)
+
+    def plot_horizon_decay(
+        self,
+        run_id: str | None = None,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot lead-time accuracy decay by horizon step ($h = 1 \\dots H$) for ``run_id``."""
+        from .diagnostics import plot_horizon_decay
+
+        rid = run_id or self.run_id
+        df = self.horizon_decay_df(rid, metric=metric, baseline=baseline, limit=limit)
+        return plot_horizon_decay(df, ax=ax, title=title or f"{rid} — Horizon Accuracy Decay")
+
+    def bias_report_df(
+        self,
+        run_id: str | None = None,
+        *,
+        threshold_pct: float = 0.05,
+        tracking_signal_limit: float = 4.0,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Audit every ``(ts_id, model_type)`` cell for directional bias and Trigg Tracking Signal
+        on ``run_id``.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_bias_report
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        return compute_bias_report(
+            oof_df,
+            threshold_pct=threshold_pct,
+            tracking_signal_limit=tracking_signal_limit,
+        )
+
+    def rollup_time(
+        self,
+        freq: str = "W",
+        *,
+        run_id: str | None = None,
+        level: float = 0.80,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Aggregate ``run_id`` future predictions to Weekly (`"W"`), Monthly (`"MS"`/`"M"`), or
+        Quarterly (`"QS"`/`"Q"`) buckets with autocorrelation-aware prediction intervals.
+        """
+        import pandas as pd
+
+        from .diagnostics import rollup_time
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        return rollup_time(pred_df, freq=freq, oof_df=oof_df, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: Mapping[str, Mapping[str, Any]],
+        *,
+        data: pd.DataFrame | None = None,
+        models: Sequence[str] | None = None,
+        future_covariates_df: pd.DataFrame | None = None,
+        price_col: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual covariate shocks (`scenarios.simulate_scenarios`) across ``data``
+        (or synthetic sample data when ``data`` is omitted) using this config's settings.
+        """
+        from . import playground
+        from .scenarios import simulate_scenarios
+
+        panel = (
+            data
+            if data is not None
+            else playground.sample_data(
+                n_series=min(self._config.data.series_limit or 3, 5),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        )
+        return simulate_scenarios(
+            panel,
+            self._config,
+            scenarios,
+            models=models,
+            future_covariates_df=future_covariates_df,
+            price_col=price_col,
+        )
+
+    def plot_scenarios(
+        self,
+        sim_df: pd.DataFrame,
+        *,
+        ts_id: str | None = None,
+        model_type: str | None = None,
+        show_revenue: bool = False,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot baseline vs. counterfactual scenario trajectories from `simulate_scenarios`."""
+        from .scenarios import plot_scenarios
+
+        return plot_scenarios(
+            sim_df,
+            ts_id=ts_id,
+            model_type=model_type,
+            show_revenue=show_revenue,
             ax=ax,
             title=title,
         )

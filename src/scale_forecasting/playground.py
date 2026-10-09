@@ -201,6 +201,38 @@ class PlaygroundRun:
     series: pd.DataFrame
     backtest: bool
 
+    def horizon_decay_df(self, *, metric: str = "wape") -> pd.DataFrame:
+        """Compute lead-time error decay across horizon steps for this run's backtest OOF."""
+        from .diagnostics import compute_horizon_decay
+
+        if self.result.oof is None or self.result.oof.empty:
+            return compute_horizon_decay(pd.DataFrame(), metric=metric)
+        oof = self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+        return compute_horizon_decay(oof, metric=metric)
+
+    def bias_report_df(self) -> pd.DataFrame:
+        """Compute directional bias and Trigg Tracking Signal for this run's backtest OOF."""
+        from .diagnostics import compute_bias_report
+
+        if self.result.oof is None or self.result.oof.empty:
+            return compute_bias_report(pd.DataFrame())
+        oof = self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+        return compute_bias_report(oof)
+
+    def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
+        """Aggregate this run's future predictions to coarser calendar buckets with AR(1) bounds."""
+        from .diagnostics import rollup_time
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        return rollup_time(preds, freq=freq, oof_df=oof, level=level)
+
 
 @dataclass(frozen=True)
 class BakeOff:
@@ -209,13 +241,78 @@ class BakeOff:
     ``leaderboard`` is one row per model — base models *and* the ensemble pseudo-models —
     ranked by the decision metric. ``predictions`` is the long-format future forecast for
     every model (base + ensemble) so the notebook can overlay them. ``series`` is the history
-    they were fit on; ``config`` is the frozen `RunConfig` that drove the whole thing.
+    they were fit on; ``config`` is the frozen `RunConfig` that drove the whole thing; ``oof``
+    holds the combined base + ensemble out-of-fold rows for FVA, horizon-decay, and bias audits.
     """
 
     leaderboard: pd.DataFrame
     predictions: pd.DataFrame
     series: pd.DataFrame
     config: RunConfig
+    oof: pd.DataFrame | None = None
+
+    def fva_df(
+        self,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+    ) -> pd.DataFrame:
+        """Compute Forecast Value Added (FVA) and Diebold–Mariano p-values across models."""
+        from .diagnostics import compute_fva
+
+        eff_metric = metric or self.config.backtest.decision_metric
+        return compute_fva(
+            self.oof if self.oof is not None else pd.DataFrame(),
+            baseline=baseline,
+            metric=eff_metric,
+            series_df=self.series,
+        )
+
+    def horizon_decay_df(
+        self,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+    ) -> pd.DataFrame:
+        """Compute lead-time accuracy decay by horizon step across all bake-off models."""
+        from .diagnostics import compute_horizon_decay
+
+        eff_metric = metric or self.config.backtest.decision_metric
+        return compute_horizon_decay(
+            self.oof if self.oof is not None else pd.DataFrame(),
+            metric=eff_metric,
+            baseline=baseline,
+        )
+
+    def bias_report_df(self) -> pd.DataFrame:
+        """Audit each bake-off model for directional bias and Trigg Tracking Signal."""
+        from .diagnostics import compute_bias_report
+
+        return compute_bias_report(self.oof if self.oof is not None else pd.DataFrame())
+
+    def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
+        """Aggregate bake-off future predictions to coarser calendar periods with AR(1) bounds."""
+        from .diagnostics import rollup_time
+
+        return rollup_time(self.predictions, freq=freq, oof_df=self.oof, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: dict[str, dict[str, Any]],
+        *,
+        models: list[str] | None = None,
+        price_col: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual covariate scenarios across this bake-off's series and models."""
+        from .scenarios import simulate_scenarios
+
+        return simulate_scenarios(
+            self.series,
+            self.config,
+            scenarios,
+            models=models,
+            price_col=price_col,
+        )
 
 
 def bakeoff(
@@ -387,7 +484,15 @@ def bakeoff(
         pd.DataFrame(base_rows).sort_values(decision, na_position="last").reset_index(drop=True)
     )
     predictions = pd.concat(pred_parts, ignore_index=True) if pred_parts else pd.DataFrame()
-    return BakeOff(leaderboard=leaderboard, predictions=predictions, series=series, config=cfg)
+    all_oof_parts = [p for p in (oof_df, ens_oof) if not p.empty]
+    all_oof = pd.concat(all_oof_parts, ignore_index=True) if all_oof_parts else pd.DataFrame()
+    return BakeOff(
+        leaderboard=leaderboard,
+        predictions=predictions,
+        series=series,
+        config=cfg,
+        oof=all_oof,
+    )
 
 
 def run_model(

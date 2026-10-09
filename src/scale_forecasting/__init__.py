@@ -122,6 +122,19 @@ _LAZY: dict[str, tuple[str, str]] = {
     # AI agent surfaces & MCP server.
     "probe_environment": (".agent_surfaces", "probe_environment"),
     "McpServer": (".mcp", "McpServer"),
+    # Forecaster Workbench diagnostics & scenario simulation.
+    "compute_fva": (".diagnostics", "compute_fva"),
+    "diebold_mariano_test": (".diagnostics", "diebold_mariano_test"),
+    "wilcoxon_pvalue": (".diagnostics", "wilcoxon_pvalue"),
+    "compute_horizon_decay": (".diagnostics", "compute_horizon_decay"),
+    "compute_bias_report": (".diagnostics", "compute_bias_report"),
+    "rollup_time": (".diagnostics", "rollup_time"),
+    "plot_fva": (".diagnostics", "plot_fva"),
+    "plot_horizon_decay": (".diagnostics", "plot_horizon_decay"),
+    "apply_scenario_shocks": (".scenarios", "apply_scenario_shocks"),
+    "simulate_scenarios": (".scenarios", "simulate_scenarios"),
+    "summarize_scenarios": (".scenarios", "summarize_scenarios"),
+    "plot_scenarios": (".scenarios", "plot_scenarios"),
 }
 
 __all__ = [
@@ -147,6 +160,16 @@ __all__ = [
 if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports (re-exported below)
     from .agent_surfaces import probe_environment  # noqa: F401
     from .dag import DagNode  # noqa: F401
+    from .diagnostics import (  # noqa: F401
+        compute_bias_report,
+        compute_fva,
+        compute_horizon_decay,
+        diebold_mariano_test,
+        plot_fva,
+        plot_horizon_decay,
+        rollup_time,
+        wilcoxon_pvalue,
+    )
     from .engines.ray_io import chunk_cells, make_chunk_runner  # noqa: F401
     from .engines.spark_io import (  # noqa: F401
         RunOutcome,
@@ -194,6 +217,12 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         review_run,
     )
     from .router import split_by_runtime  # noqa: F401
+    from .scenarios import (  # noqa: F401
+        apply_scenario_shocks,
+        plot_scenarios,
+        simulate_scenarios,
+        summarize_scenarios,
+    )
     from .sdk import (  # noqa: F401
         DryRunResult,
         Forecaster,
