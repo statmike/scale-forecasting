@@ -580,6 +580,18 @@
           "title": "Freq",
           "type": "string"
         },
+        "grid_policy": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "fill_zero",
+            "zero_fill",
+            "ffill",
+            "linear"
+          ],
+          "title": "Grid Policy",
+          "type": "string"
+        },
         "horizon": {
           "default": 28,
           "exclusiveMinimum": 0,
@@ -607,6 +619,11 @@
           "default": "y",
           "title": "Target Col",
           "type": "string"
+        },
+        "trim_leading_zeros": {
+          "default": false,
+          "title": "Trim Leading Zeros",
+          "type": "boolean"
         },
         "ts_id_col": {
           "default": "ts_id",
@@ -919,6 +936,18 @@
       "additionalProperties": false,
       "description": "Optional feature engineering for the Python models.\n\nDefaults are conservative/generic (no transform, no holidays); the shipped\n``example_config.json`` turns on holidays + log1p.\n\n**There is no ``lags`` field, and the reason is a design rule rather than an omission.**\n\"Lag\" means two different things, and only one of them can be built out here:\n\n- A lag of the **target** is only honest at predict time if the model rolls its own\n  forecasts forward one step at a time. That is recursion, it belongs to the model, and\n  the models that need it already own it \u2014 `_lag_forecaster` does it for ``lightgbm`` /\n  ``xgboost`` / ``regression_lags``, and NeuralProphet does it behind ``n_lags``. A\n  config cannot supply one, because nobody knows the future target; the removed field\n  filled the horizon with a flat line at the last observation and handed the result to\n  models that had fitted coefficients against real history.\n- A lag of a **covariate** is honest, because a covariate's future is as knowable as the\n  covariate itself. No model in the suite lags one internally, so this is the gap that\n  ``exog_lags`` fills.\n\n``exog_lags`` maps an ``exog`` column to the lags to build from it: ``{\"promo\": [1, 7]}``\nadds ``promo_lag_1`` and ``promo_lag_7``. They are ordinary columns by the time any model\nsees them, so every ``supports_exog`` model can use them.\n\nPrecedence, when the two rules ever meet: **the model wins.** A model that lags covariates\ninternally sets ``lags_covariates_internally`` and is handed the unlagged columns only, so\na covariate is never lagged twice. Every shipped model leaves that flag False today.",
       "properties": {
+        "censored_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Censored Col"
+        },
         "exog": {
           "items": {
             "type": "string"
@@ -969,6 +998,24 @@
           "title": "On Unsupported Covariates",
           "type": "string"
         },
+        "outlier_policy": {
+          "default": "none",
+          "enum": [
+            "none",
+            "winsorize",
+            "interpolate",
+            "flag",
+            "stl_resid"
+          ],
+          "title": "Outlier Policy",
+          "type": "string"
+        },
+        "outlier_sigma": {
+          "default": 3.5,
+          "exclusiveMinimum": 0.0,
+          "title": "Outlier Sigma",
+          "type": "number"
+        },
         "past_covariates": {
           "items": {
             "type": "string"
@@ -976,12 +1023,22 @@
           "title": "Past Covariates",
           "type": "array"
         },
+        "regime_routing": {
+          "default": false,
+          "title": "Regime Routing",
+          "type": "boolean"
+        },
         "static_covariates": {
           "items": {
             "type": "string"
           },
           "title": "Static Covariates",
           "type": "array"
+        },
+        "trading_days": {
+          "default": false,
+          "title": "Trading Days",
+          "type": "boolean"
         },
         "transform": {
           "default": "none",
@@ -1161,6 +1218,19 @@
           "title": "Integer Rounding",
           "type": "string"
         },
+        "overage_cost": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overage Cost"
+        },
         "point_forecast": {
           "anyOf": [
             {
@@ -1178,6 +1248,48 @@
           ],
           "default": null,
           "title": "Point Forecast"
+        },
+        "quantiles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quantiles"
+        },
+        "target_quantile": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Quantile"
+        },
+        "underage_cost": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Underage Cost"
         }
       },
       "title": "OutputConfig",

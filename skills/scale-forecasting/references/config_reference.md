@@ -43,6 +43,8 @@ Source BigQuery table, column names, frequency, and horizon.
 | `freq` | `str` | `"D"` | — |
 | `horizon` | `int` | `28` | `> 0` |
 | `series_limit` | `int \| None` | `null` | `> 0` |
+| `grid_policy` | `'strict' \| 'fill_zero' \| 'zero_fill' \| 'ffill' \| 'linear'` | `"strict"` | — |
+| `trim_leading_zeros` | `bool` | `false` | — |
 
 ### `features (FeaturesConfig)`
 
@@ -60,6 +62,11 @@ Target transforms, country holidays, covariates (future/past/static), lags, and 
 | `on_unsupported_covariates` | `'fallback' \| 'error'` | `"fallback"` | — |
 | `fourier` | `bool` | `false` | — |
 | `level_shift` | `bool` | `false` | — |
+| `trading_days` | `bool` | `false` | — |
+| `censored_col` | `str \| None` | `null` | — |
+| `outlier_policy` | `'none' \| 'winsorize' \| 'interpolate' \| 'flag' \| 'stl_resid'` | `"none"` | — |
+| `outlier_sigma` | `float` | `3.5` | `> 0.0` |
+| `regime_routing` | `bool` | `false` | — |
 
 ### `backtest (BacktestConfig)`
 
@@ -93,6 +100,10 @@ Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).
 | `floor_col` | `str \| None` | `null` | — |
 | `cap_col` | `str \| None` | `null` | — |
 | `integer_rounding` | `'none' \| 'round' \| 'ceil' \| 'floor' \| 'cumulative_round'` | `"none"` | — |
+| `quantiles` | `list[float] \| None` | `null` | — |
+| `underage_cost` | `float \| None` | `null` | `> 0.0` |
+| `overage_cost` | `float \| None` | `null` | `> 0.0` |
+| `target_quantile` | `float \| None` | `null` | `> 0.0`, `< 1.0` |
 
 ### `hpo (HpoConfig)`
 

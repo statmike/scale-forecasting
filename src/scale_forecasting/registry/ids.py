@@ -175,8 +175,19 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("output", "floor_col"): None,
     ("output", "cap_col"): None,
     ("output", "integer_rounding"): "none",
+    ("output", "quantiles"): None,
+    ("output", "underage_cost"): None,
+    ("output", "overage_cost"): None,
+    ("output", "target_quantile"): None,
     ("ensemble", "top_k"): None,
     ("ensemble", "parsimony_margin"): 0.0,
+    ("data", "grid_policy"): "strict",
+    ("data", "trim_leading_zeros"): False,
+    ("features", "trading_days"): False,
+    ("features", "censored_col"): None,
+    ("features", "outlier_policy"): "none",
+    ("features", "outlier_sigma"): 3.5,
+    ("features", "regime_routing"): False,
 }
 
 

@@ -24,6 +24,7 @@ Public surface: `combine_calculated`, `combine_oof`, `fit_learned`,
 
 from __future__ import annotations
 
+import json
 import pickle
 from typing import TYPE_CHECKING, Any
 
@@ -34,8 +35,10 @@ from scipy.optimize import nnls
 from .backtest import holdout_fold_id
 from .calibration import (
     apply_output_constraints,
+    apply_quantile_and_cost_rules,
     calibrate_from_oof,
     has_output_constraints,
+    rearrange_monotone_quantiles,
 )
 from .config import CALCULATED_STRATEGIES, LEARNED_STRATEGIES
 from .errors import ConfigError, get_logger
@@ -1065,43 +1068,100 @@ def calibrate_ensemble_predictions(
     if not pred_rows:
         return pred_rows
     need_constraints = has_output_constraints(cfg.output)
+    need_q_or_cost = (
+        cfg.output.quantiles is not None or cfg.output.effective_target_quantile is not None
+    )
     need_cal = not ens_oof.empty
-    if not need_constraints and not need_cal:
+    if not need_constraints and not need_cal and not need_q_or_cost:
         return pred_rows
 
     df = pd.DataFrame(pred_rows)
+    had_quantiles_col = "quantiles" in df.columns
+    target_qs = cfg.output.effective_quantiles
+    lo_q, hi_q = target_qs[0], target_qs[-1]
     oof_by_cell: dict[tuple[str, str], pd.DataFrame] = {}
     if need_cal:
         for (tid, mtype), g in ens_oof.groupby(["ts_id", "model_type"]):
             oof_by_cell[(str(tid), str(mtype))] = g
 
+    emit_quantiles = cfg.output.quantiles is not None or had_quantiles_col
     out_parts: list[pd.DataFrame] = []
     for (tid, mtype), group in df.groupby(["ts_id", "model_type"], sort=False):
         cell_df = group.copy()
+        calibrated_this_cell = False
         if need_cal:
             oof_slice = oof_by_cell.get((str(tid), str(mtype)))
             if oof_slice is not None and not oof_slice.empty:
-                cal = calibrate_from_oof(oof_slice, (0.1, 0.5, 0.9), residual_column="yhat")
+                cal = calibrate_from_oof(oof_slice, target_qs, residual_column="yhat")
                 if cal is not None:
+                    calibrated_this_cell = True
                     yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
-                    q10_arr = np.array(
-                        [cal.for_step(s).quantiles[0.1] for s in range(1, len(cell_df) + 1)],
+                    qlo_arr = np.array(
+                        [cal.for_step(s).quantiles[lo_q] for s in range(1, len(cell_df) + 1)],
                         dtype=float,
                     )
-                    q90_arr = np.array(
-                        [cal.for_step(s).quantiles[0.9] for s in range(1, len(cell_df) + 1)],
+                    qhi_arr = np.array(
+                        [cal.for_step(s).quantiles[hi_q] for s in range(1, len(cell_df) + 1)],
                         dtype=float,
                     )
-                    cell_df["yhat_lower"] = yhat_vals + q10_arr
-                    cell_df["yhat_upper"] = yhat_vals + q90_arr
+                    cell_df["yhat_lower"] = yhat_vals + qlo_arr
+                    cell_df["yhat_upper"] = yhat_vals + qhi_arr
+                    if emit_quantiles:
+                        qjson_rows: list[str] = []
+                        for idx in range(len(cell_df)):
+                            step_q = cal.for_step(idx + 1).quantiles
+                            raw_qmap = {
+                                q: float(yhat_vals[idx] + step_q[q])
+                                for q in target_qs
+                                if q in step_q
+                            }
+                            mono_qmap = rearrange_monotone_quantiles(raw_qmap)
+                            qjson_rows.append(
+                                json.dumps(
+                                    {str(q): v for q, v in mono_qmap.items()}, sort_keys=True
+                                )
+                            )
+                        cell_df["quantiles"] = qjson_rows
+                    if cfg.output.effective_target_quantile is not None:
+                        q_star = cfg.output.effective_target_quantile
+                        qstar_arr = np.array(
+                            [cal.for_step(s).quantiles[q_star] for s in range(1, len(cell_df) + 1)],
+                            dtype=float,
+                        )
+                        cell_df["yhat"] = yhat_vals + qstar_arr
                 else:
                     resid = (oof_slice["y_true"] - oof_slice["yhat"]).dropna().to_numpy(dtype=float)
                     resid = resid[np.isfinite(resid)]
                     if len(resid) >= 2:
-                        q10, q90 = np.percentile(resid, [10.0, 90.0])
+                        calibrated_this_cell = True
+                        qlo, qhi = np.percentile(resid, [lo_q * 100.0, hi_q * 100.0])
                         yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
-                        cell_df["yhat_lower"] = yhat_vals + float(q10)
-                        cell_df["yhat_upper"] = yhat_vals + float(q90)
+                        cell_df["yhat_lower"] = yhat_vals + float(qlo)
+                        cell_df["yhat_upper"] = yhat_vals + float(qhi)
+                        if emit_quantiles:
+                            q_pcts = np.percentile(resid, [q * 100.0 for q in target_qs])
+                            qjson_rows = []
+                            for idx in range(len(cell_df)):
+                                raw_qmap = {
+                                    q: float(yhat_vals[idx] + q_pcts[j])
+                                    for j, q in enumerate(target_qs)
+                                }
+                                mono_qmap = rearrange_monotone_quantiles(raw_qmap)
+                                qjson_rows.append(
+                                    json.dumps(
+                                        {str(q): v for q, v in mono_qmap.items()}, sort_keys=True
+                                    )
+                                )
+                            cell_df["quantiles"] = qjson_rows
+                        if cfg.output.effective_target_quantile is not None:
+                            qstar = float(
+                                np.percentile(resid, cfg.output.effective_target_quantile * 100.0)
+                            )
+                            cell_df["yhat"] = yhat_vals + qstar
+        if not calibrated_this_cell and need_q_or_cost:
+            cell_df, _ = apply_quantile_and_cost_rules(cell_df, cfg.output)
+            if not emit_quantiles and "quantiles" in cell_df.columns:
+                cell_df = cell_df.drop(columns=["quantiles"])
         if need_constraints:
             cell_df = apply_output_constraints(cell_df, cfg.output)
         out_parts.append(cell_df)

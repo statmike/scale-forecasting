@@ -41,9 +41,11 @@ import numpy as np
 import pandas as pd
 
 from .errors import ConfigError
-from .seasonality import periods_per_year
+from .seasonality import periods_per_year, seasonal_period
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .config import RunConfig
 
 
@@ -315,6 +317,338 @@ def _with_inferred_freq(index: pd.Index) -> pd.Index:
     return with_freq
 
 
+# --- SBC demand regime profiling & routing -------------------------------------
+
+_INTERMITTENT_MODELS: frozenset[str] = frozenset(
+    {
+        "croston",
+        "naive_mean",
+        "naive_seasonal",
+        "naive_moving_average",
+        "lightgbm",
+        "xgboost",
+        "catboost",
+        "random_forest",
+    }
+)
+_COLD_START_MODELS: frozenset[str] = frozenset(
+    {
+        "naive_mean",
+        "naive_drift",
+        "naive_moving_average",
+        "theta",
+        "croston",
+    }
+)
+_PURE_INTERMITTENT_MODELS: frozenset[str] = frozenset({"croston"})
+
+
+def compute_demand_profile(
+    y: pd.Series | np.ndarray,
+    *,
+    min_cold_start_obs: int = 14,
+) -> dict[str, Any]:
+    """Syntetos–Boylan–Croston (2005) demand regime classification (pure).
+
+    Computes the Average Demand Interval (``adi = n_obs / n_nonzero``), the squared coefficient of
+    variation of non-zero demand (``cv2 = (std / mean)^2``), ``zero_share``, and ``n_obs``, and
+    assigns one of five canonical regimes:
+
+    - ``"cold_start"``: ``n_obs < min_cold_start_obs`` or fewer than 3 non-zero observations
+    - ``"smooth"``: ``adi < 1.32`` and ``cv2 < 0.49``
+    - ``"erratic"``: ``adi < 1.32`` and ``cv2 >= 0.49``
+    - ``"intermittent"``: ``adi >= 1.32`` and ``cv2 < 0.49``
+    - ``"lumpy"``: ``adi >= 1.32`` and ``cv2 >= 0.49``
+    """
+    arr = np.asarray(y, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    n_obs = int(finite.size)
+    if n_obs == 0:
+        return {
+            "demand_class": "cold_start",
+            "adi": None,
+            "cv2": None,
+            "zero_share": 1.0,
+            "n_obs": 0,
+        }
+
+    nz = finite[finite > 0.0] if np.any(finite > 0.0) else finite[finite != 0.0]
+    n_nz = int(nz.size)
+    zero_share = float(np.mean(finite == 0.0))
+    adi = float(n_obs / n_nz) if n_nz > 0 else float("inf")
+    if n_nz >= 2 and float(np.mean(nz)) != 0.0:
+        cv2 = float((np.std(nz, ddof=1) / abs(float(np.mean(nz)))) ** 2)
+    else:
+        cv2 = 0.0
+
+    if n_obs < min_cold_start_obs or n_nz < 3:
+        demand_class = "cold_start"
+    elif adi < 1.32 and cv2 < 0.49:
+        demand_class = "smooth"
+    elif adi < 1.32 and cv2 >= 0.49:
+        demand_class = "erratic"
+    elif adi >= 1.32 and cv2 < 0.49:
+        demand_class = "intermittent"
+    else:
+        demand_class = "lumpy"
+
+    return {
+        "demand_class": demand_class,
+        "adi": round(adi, 4) if np.isfinite(adi) else None,
+        "cv2": round(cv2, 4) if np.isfinite(cv2) else None,
+        "zero_share": round(zero_share, 4),
+        "n_obs": n_obs,
+    }
+
+
+def regime_compatible_models(demand_class: str, models: Sequence[str]) -> list[str]:
+    """Filter ``models`` to those suited for ``demand_class``, never returning an empty list."""
+    model_list = list(models)
+    if not model_list:
+        return []
+    if demand_class in ("intermittent", "lumpy"):
+        matched = [m for m in model_list if m in _INTERMITTENT_MODELS]
+    elif demand_class == "cold_start":
+        matched = [m for m in model_list if m in _COLD_START_MODELS]
+    elif demand_class == "smooth":
+        non_intermittent = [m for m in model_list if m not in _PURE_INTERMITTENT_MODELS]
+        matched = non_intermittent if non_intermittent else model_list
+    else:
+        matched = model_list
+    return matched if matched else model_list
+
+
+def select_models_for_series(series: pd.DataFrame, cfg: RunConfig) -> list[str]:
+    """Return the active model list for ``series`` under ``cfg.features.regime_routing``."""
+    if not cfg.features.regime_routing:
+        return list(cfg.models)
+    reg_df = regularize_series_grid(series, cfg)
+    tcol = cfg.data.target_col
+    y_vals = (
+        pd.to_numeric(reg_df[tcol], errors="coerce").to_numpy(dtype=float)
+        if tcol in reg_df.columns
+        else np.array([], dtype=float)
+    )
+    prof = compute_demand_profile(y_vals)
+    return regime_compatible_models(str(prof["demand_class"]), cfg.models)
+
+
+# --- grid regularization & fold-safe target cleaning ---------------------------
+
+
+def regularize_series_grid(series: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame:
+    """Regularize missing calendar timestamps (`grid_policy`) and trim pre-launch leading zeros
+    (`trim_leading_zeros`) for one series (pure).
+    """
+    d, f = cfg.data, cfg.features
+    if d.grid_policy == "strict" and not d.trim_leading_zeros:
+        return series
+    if series.empty or d.date_col not in series.columns or d.target_col not in series.columns:
+        return series
+
+    frame = series.copy()
+    frame[d.date_col] = pd.to_datetime(frame[d.date_col]).astype("datetime64[ns]")
+    frame = frame.sort_values(d.date_col).drop_duplicates(subset=[d.date_col], keep="last")
+
+    if d.grid_policy != "strict" and len(frame) >= 2:
+        full_idx = pd.date_range(
+            start=frame[d.date_col].iloc[0],
+            end=frame[d.date_col].iloc[-1],
+            freq=d.freq,
+        ).as_unit("ns")
+        indexed = frame.set_index(d.date_col).reindex(full_idx)
+        indexed.index.name = d.date_col
+
+        # Carry series identifier and static covariates across newly inserted calendar dates.
+        for scol in [d.ts_id_col, *f.static_covariates]:
+            if scol in indexed.columns:
+                indexed[scol] = indexed[scol].ffill().bfill()
+
+        # Fill target column according to grid_policy.
+        t_series = pd.to_numeric(indexed[d.target_col], errors="coerce")
+        if d.grid_policy in ("fill_zero", "zero_fill"):
+            indexed[d.target_col] = t_series.fillna(0.0)
+        elif d.grid_policy == "ffill":
+            indexed[d.target_col] = t_series.ffill().bfill().fillna(0.0)
+        elif d.grid_policy == "linear":
+            indexed[d.target_col] = (
+                t_series.interpolate(method="linear").ffill().bfill().fillna(0.0)
+            )
+
+        # Fill dynamic covariates and censored_col on inserted calendar rows.
+        for ccol in f.dynamic_covariates:
+            if ccol in indexed.columns:
+                indexed[ccol] = (
+                    pd.to_numeric(indexed[ccol], errors="coerce").ffill().bfill().fillna(0.0)
+                )
+        if f.censored_col and f.censored_col in indexed.columns:
+            indexed[f.censored_col] = pd.to_numeric(
+                indexed[f.censored_col], errors="coerce"
+            ).fillna(0.0)
+        frame = indexed.reset_index()
+
+    if d.trim_leading_zeros and len(frame) > 1:
+        y_num = (
+            pd.to_numeric(frame[d.target_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        )
+        nonzero_idx = np.flatnonzero(np.abs(y_num) > 0.0)
+        if nonzero_idx.size > 0 and int(nonzero_idx[0]) > 0:
+            frame = frame.iloc[int(nonzero_idx[0]) :].reset_index(drop=True)
+
+    return frame
+
+
+def _local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
+    """Fast, fold-safe local trend + seasonal baseline for outlier and stockout imputation."""
+    n = arr.size
+    if n < 4:
+        return np.full(n, float(np.nanmedian(arr)) if n else 0.0, dtype=float)
+    win = max(5, min(n // 2, max(period, 7)))
+    if win % 2 == 0:
+        win += 1
+    trend = (
+        pd.Series(arr)
+        .rolling(window=win, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+    if period >= 2 and n >= 2 * period:
+        detrended = arr - trend
+        slots = np.arange(n) % period
+        seas = np.zeros(n, dtype=float)
+        for s in range(period):
+            mask = slots == s
+            vals = detrended[mask]
+            finite = vals[np.isfinite(vals)]
+            if finite.size:
+                seas[mask] = float(np.median(finite))
+        return trend + seas
+    return trend
+
+
+def clean_training_target(
+    raw_y: pd.Series,
+    frame: pd.DataFrame,
+    cfg: RunConfig,
+) -> tuple[pd.Series, np.ndarray | None]:
+    """Apply fold-safe censored demand recovery (`censored_col`) and outlier treatment
+    (`outlier_policy`) strictly on the provided training window (pure).
+
+    Returns ``(cleaned_y, outlier_flag_array_or_None)``.
+    """
+    d, f = cfg.data, cfg.features
+    if not f.censored_col and f.outlier_policy == "none":
+        return raw_y, None
+
+    arr = raw_y.to_numpy(dtype=float).copy()
+    n = arr.size
+    period = seasonal_period(d.freq)
+
+    # 1. Censored demand (stockout/outage) imputation strictly from uncensored training history.
+    if f.censored_col:
+        if f.censored_col not in frame.columns:
+            raise ConfigError(
+                f"censored_col '{f.censored_col}' not found in series; has {list(frame.columns)}"
+            )
+        cens_mask = (
+            pd.to_numeric(frame[f.censored_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            > 0.0
+        )
+        if cens_mask.any() and (~cens_mask).any():
+            uncensored_arr = arr.copy()
+            uncensored_arr[cens_mask] = np.nan
+            # Interpolate uncensored series + seasonal slot medians from uncensored observations.
+            interp_uncens = (
+                pd.Series(uncensored_arr)
+                .interpolate(method="linear")
+                .ffill()
+                .bfill()
+                .to_numpy(dtype=float)
+            )
+            base_uncens = _local_seasonal_baseline(interp_uncens, period)
+            # Censoring (stockout) caps observed sales below true demand, so true >= observed.
+            arr[cens_mask] = np.maximum(arr[cens_mask], base_uncens[cens_mask])
+
+    # 2. Fold-safe outlier despiking or flagging.
+    outlier_flag: np.ndarray | None = None
+    if f.outlier_policy != "none" and n >= 6:
+        baseline = _local_seasonal_baseline(arr, period)
+        resid = arr - baseline
+        med = float(np.nanmedian(resid))
+        mad = float(np.nanmedian(np.abs(resid - med)))
+        sigma = mad * 1.4826
+        if not np.isfinite(sigma) or sigma <= 1e-12:
+            sigma = float(np.nanstd(resid))
+        if np.isfinite(sigma) and sigma > 1e-12:
+            thresh = float(f.outlier_sigma) * sigma
+            is_out = np.abs(resid - med) > thresh
+            if f.outlier_policy in ("winsorize", "stl_resid"):
+                arr = np.clip(arr, baseline + med - thresh, baseline + med + thresh)
+            elif f.outlier_policy == "interpolate":
+                if is_out.any():
+                    arr[is_out] = baseline[is_out] + med
+            elif f.outlier_policy == "flag":
+                outlier_flag = is_out.astype(float)
+        elif f.outlier_policy == "flag":
+            outlier_flag = np.zeros(n, dtype=float)
+    elif f.outlier_policy == "flag":
+        outlier_flag = np.zeros(n, dtype=float)
+
+    return pd.Series(arr, index=raw_y.index, name=raw_y.name), outlier_flag
+
+
+def _trading_day_terms(index: pd.DatetimeIndex, freq: str) -> dict[str, np.ndarray]:
+    """Deterministic X-13 style trading-day calendar features from ``index`` and ``freq`` (pure).
+
+    Emits ``days_in_period``, ``n_weekdays`` (Mon–Fri count), and ``n_weekend_days`` (Sat–Sun count)
+    so monthly/quarterly models capture calendar-length and weekend-composition shifts while daily
+    and weekly models see exact weekday/weekend indicators.
+    """
+    n = len(index)
+    if n == 0:
+        empty = np.array([], dtype=float)
+        return {"days_in_period": empty, "n_weekdays": empty, "n_weekend_days": empty}
+
+    freq_upper = str(freq).upper()
+    if freq_upper.startswith(("M", "Q", "Y", "A")):
+        days_arr = np.zeros(n, dtype=float)
+        wk_arr = np.zeros(n, dtype=float)
+        we_arr = np.zeros(n, dtype=float)
+        for i, ts in enumerate(index):
+            if freq_upper.startswith("M"):
+                start = pd.Timestamp(year=ts.year, month=ts.month, day=1)
+                end = start + pd.offsets.MonthEnd(1)
+            elif freq_upper.startswith("Q"):
+                q_month = ((ts.month - 1) // 3) * 3 + 1
+                start = pd.Timestamp(year=ts.year, month=q_month, day=1)
+                end = start + pd.offsets.QuarterEnd(1)
+            else:
+                start = pd.Timestamp(year=ts.year, month=1, day=1)
+                end = pd.Timestamp(year=ts.year, month=12, day=31)
+            span = pd.date_range(start, end, freq="D")
+            dow = span.dayofweek.to_numpy()
+            days_arr[i] = float(len(span))
+            wk_arr[i] = float(np.sum(dow < 5))
+            we_arr[i] = float(np.sum(dow >= 5))
+        return {"days_in_period": days_arr, "n_weekdays": wk_arr, "n_weekend_days": we_arr}
+
+    if freq_upper.startswith("W"):
+        return {
+            "days_in_period": np.full(n, 7.0, dtype=float),
+            "n_weekdays": np.full(n, 5.0, dtype=float),
+            "n_weekend_days": np.full(n, 2.0, dtype=float),
+        }
+
+    dow = index.dayofweek.to_numpy()
+    is_wk = (dow < 5).astype(float)
+    is_we = (dow >= 5).astype(float)
+    return {
+        "days_in_period": index.days_in_month.to_numpy(dtype=float),
+        "n_weekdays": is_wk,
+        "n_weekend_days": is_we,
+    }
+
+
 def build_features(
     series: pd.DataFrame,
     cfg: RunConfig,
@@ -324,21 +658,13 @@ def build_features(
     """Build ``(y, X)`` fit inputs for one series.
 
     ``series`` is one ts_id's rows with the configured date/target (and optional covariates)
-    columns. ``y`` is returned indexed by ds, sorted, with the transform applied, and with the
-    index's frequency set whenever the dates are regular (see `_with_inferred_freq`). ``X``
-    carries any configured dynamic covariates (``exog``, ``future_covariates``,
-    ``past_covariates``), an ``is_holiday`` flag, Fourier terms, and lagged covariates —
-    aligned to ``y`` — or None when nothing is configured.
-
-    ``lam`` is the fitted Box-Cox λ (from `fit_transform_lambda`), threaded in so the
-    forward transform matches the inverse a model applies at predict; ``None`` (the default)
-    for the stateless transforms.
-
-    ``owns_covariate_lags`` is the receiving model's ``lags_covariates_internally``. When set,
-    ``features.exog_lags`` is skipped entirely for this frame — the model builds its own, and
-    the config does not get a second opinion. It is a parameter rather than something read off
-    the model because both callers (`worker.run_cell` and `backtest.backtest_cell`) build the
-    frame before, or independently of, the model instance that will receive it.
+    columns. ``y`` is returned indexed by ds, sorted, with fold-safe target hygiene
+    (`grid_policy`, `trim_leading_zeros`, `censored_col`, `outlier_policy`) and the transform
+    applied, and with the index's frequency set whenever the dates are regular (see
+    `_with_inferred_freq`). ``X`` carries any configured dynamic covariates (``exog``,
+    ``future_covariates``, ``past_covariates``), an ``is_holiday`` flag, Fourier terms,
+    ``trading_days`` terms, ``level_shift``, ``is_outlier`` (when ``outlier_policy="flag"``),
+    and lagged covariates — aligned to ``y`` — or None when nothing is configured.
     """
     d, f = cfg.data, cfg.features
     exog_lags = {} if owns_covariate_lags else f.exog_lags
@@ -350,14 +676,15 @@ def build_features(
     if f.static_covariates:
         extract_static_covariates(series, cfg)
 
-    frame = series.copy()
+    frame = regularize_series_grid(series, cfg).copy()
     frame[d.date_col] = pd.to_datetime(frame[d.date_col]).astype("datetime64[ns]")
     frame = frame.sort_values(d.date_col).set_index(d.date_col)
     frame.index.name = "ds"
     frame.index = _with_inferred_freq(frame.index)
 
-    y = frame[d.target_col].astype(float)
-    y = apply_transform(y, f.transform, lam)
+    raw_y = frame[d.target_col].astype(float)
+    cleaned_y, outlier_flag = clean_training_target(raw_y, frame, cfg)
+    y = apply_transform(cleaned_y, f.transform, lam)
     y.name = "y"
 
     cols: dict[str, np.ndarray] = {}
@@ -379,9 +706,17 @@ def build_features(
     if f.fourier:
         cols.update(_fourier_terms(pd.DatetimeIndex(frame.index), d.freq, order=3))
 
+    # X-13 style trading-day / calendar composition terms.
+    if f.trading_days:
+        cols.update(_trading_day_terms(pd.DatetimeIndex(frame.index), d.freq))
+
     # Step dummy for one detected regime change (see `level_shift_step`).
     if f.level_shift:
         cols["level_shift"] = level_shift_step(y)
+
+    # Outlier dummy when outlier_policy == "flag".
+    if outlier_flag is not None:
+        cols["is_outlier"] = outlier_flag
 
     # Lagged covariates. Only ever built from a declared dynamic covariate column — `FeaturesConfig`
     # has already rejected a name that is not in `dynamic_covariates`, so the lookup cannot miss.
@@ -394,13 +729,6 @@ def build_features(
     X = pd.DataFrame(cols, index=frame.index)
 
     if exog_lags:
-        # A lag of k is undefined for the first k observations, so those rows leave the
-        # training frame. They are dropped rather than filled because a fabricated value at
-        # the head becomes a fabricated coefficient everywhere, and dropped from the *head*
-        # specifically rather than by `dropna` because the head is the only place the lags
-        # are undefined — cutting scattered interior rows would leave an irregularly spaced
-        # index, which several models read the frequency off. This is the same rule
-        # `_lag_forecaster.build_design` applies to the target lags it owns.
         head = max(lag for lags in exog_lags.values() for lag in lags)
         X, y = X.iloc[head:], y.iloc[head:]
 
@@ -415,33 +743,7 @@ def build_future_features(
     horizon: int | None = None,
     future_covariates_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame | None:
-    """The design frame for the forecast horizon, indexed by the *future* dates.
-
-    Takes the training pair from `build_features` and returns the ``horizon``-row frame a
-    model should be handed at predict time, with **the same columns in the same order** (it
-    is built from ``X.columns``, so parity holds by construction rather than by convention —
-    `_lag_forecaster.recursive_predict` reads exog positionally and a reordered frame would
-    silently feed the wrong column to the wrong coefficient).
-
-    Column by column:
-
-    - ``is_holiday``, ``fourier_*`` — recomputed at the real future dates. Deterministic
-      functions of the date, so these are *exact*, not estimated.
-    - ``level_shift`` — 1.0 throughout: a detected regime change is still in force over the
-      horizon. (0.0 throughout when none was detected, matching the historical column.)
-    - ``future_covariates`` (and ``exog`` when ``future_covariates_df`` is provided) — read
-      directly from ``future_covariates_df`` when supplied (e.g. known future rows or a
-      backtest validation window); otherwise falls back to the recency stand-in.
-    - ``past_covariates`` — strictly observed in history and unknown over the forecast
-      horizon. Even when ``future_covariates_df`` is supplied (as in a backtest fold),
-      ``past_covariates`` never read future rows; they use only historical observations up
-      to the cutoff, preventing lookahead leakage.
-    - ``<name>_lag_<k>`` — the configured ``features.exog_lags``, read off the covariate's own
-      past-and-future run. For step ``i < k`` that is a genuine observation; from ``i >= k``
-      it is whatever the covariate itself resolves to at step ``i - k``. **A lagged covariate
-      is exactly as knowable as the covariate it lags** — it inherits its source's honesty
-      rather than inventing its own.
-    """
+    """The design frame for the forecast horizon, indexed by the *future* dates."""
     if X is None:
         return None
     d, f = cfg.data, cfg.features
@@ -455,8 +757,12 @@ def build_future_features(
         known["is_holiday"] = np.isin(future.to_numpy(), list(holiday_days)).astype(float)
     if f.fourier:
         known.update(_fourier_terms(future, d.freq, order=3))
+    if f.trading_days:
+        known.update(_trading_day_terms(future, d.freq))
     if f.level_shift and "level_shift" in X.columns:
         known["level_shift"] = np.full(h, float(X["level_shift"].to_numpy()[-1]))
+    if "is_outlier" in X.columns:
+        known["is_outlier"] = np.zeros(h, dtype=float)
 
     if future_covariates_df is not None and len(future_covariates_df) >= h:
         for name in f.known_future_covariates:
@@ -464,22 +770,10 @@ def build_future_features(
                 known[name] = future_covariates_df[name].to_numpy(dtype=float)[:h]
 
     # Recency stand-in for the columns we cannot know: the last `h` observed rows.
-    # Clipped, so a history shorter than the horizon repeats its earliest row instead of
-    # returning a frame that silently disagrees in length with the future index.
     tail_rows = np.clip(np.arange(len(X) - h, len(X)), 0, len(X) - 1)
     tail = X.iloc[tail_rows]
 
     if f.exog_lags:
-        # Each lagged covariate is read off its source column's own timeline, history followed
-        # by whatever that source resolves to over the horizon — a real forward covariate when
-        # known in advance (`known[name]`), otherwise the same recency stand-in the unlagged
-        # column gets just above. Nothing is invented here that the covariate did not already
-        # carry.
-        #
-        # Which lags to build is read off ``X`` rather than off the config, so that a model
-        # that owns its covariate lags (`lags_covariates_internally`, which made `build_features`
-        # skip them) gets a horizon frame shaped like the one it was fitted on. Same reason the
-        # column *order* comes from ``X`` below: parity by construction, not by convention.
         steps = np.arange(len(X), len(X) + h)
         for name, lags in f.exog_lags.items():
             wanted = [lag for lag in lags if f"{name}_lag_{lag}" in X.columns]

@@ -174,6 +174,10 @@ _RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$")
 # --- nested config blocks ------------------------------------------------------
 
 
+GridPolicy = Literal["strict", "fill_zero", "zero_fill", "ffill", "linear"]
+OutlierPolicy = Literal["none", "winsorize", "interpolate", "flag", "stl_resid"]
+
+
 class DataConfig(BaseModel):
     """Where the series come from and their shape."""
 
@@ -188,6 +192,8 @@ class DataConfig(BaseModel):
     # None = use every series; an int subsets the shipped data to demo small→large
     # on the *same* series. Must be positive when set.
     series_limit: int | None = Field(default=None, gt=0)
+    grid_policy: GridPolicy = "strict"
+    trim_leading_zeros: bool = False
 
 
 class FeaturesConfig(BaseModel):
@@ -231,6 +237,11 @@ class FeaturesConfig(BaseModel):
     on_unsupported_covariates: Literal["fallback", "error"] = "fallback"
     fourier: bool = False
     level_shift: bool = False
+    trading_days: bool = False
+    censored_col: str | None = None
+    outlier_policy: OutlierPolicy = "none"
+    outlier_sigma: float = Field(default=3.5, gt=0.0)
+    regime_routing: bool = False
 
     @property
     def dynamic_covariates(self) -> list[str]:
@@ -476,6 +487,35 @@ class OutputConfig(BaseModel):
     cap_col: str | None = None
     integer_rounding: IntegerRounding = "none"
 
+    # Multi-percentile probability fans and Newsvendor / SLA quantile targeting (Phase G.2).
+    quantiles: list[float] | None = None
+    underage_cost: float | None = Field(default=None, gt=0.0)
+    overage_cost: float | None = Field(default=None, gt=0.0)
+    target_quantile: float | None = Field(default=None, gt=0.0, lt=1.0)
+
+    @property
+    def effective_target_quantile(self) -> float | None:
+        """Resolved operational quantile $q^* = c_u / (c_u + c_o)$ or `target_quantile`."""
+        if self.target_quantile is not None:
+            return round(float(self.target_quantile), 6)
+        if self.underage_cost is not None and self.overage_cost is not None:
+            return round(float(self.underage_cost / (self.underage_cost + self.overage_cost)), 6)
+        return None
+
+    @property
+    def effective_quantiles(self) -> tuple[float, ...]:
+        """Sorted quantile levels to calibrate and emit for each horizon step."""
+        q_star = self.effective_target_quantile
+        if self.quantiles is None and q_star is None:
+            return (0.1, 0.5, 0.9)
+        base = {round(float(q), 6) for q in self.quantiles} if self.quantiles else {0.1, 0.5, 0.9}
+        base.add(0.5)
+        if q_star is not None:
+            base.add(q_star)
+        if len(base) < 3:
+            base.update((0.1, 0.9))
+        return tuple(sorted(base))
+
     @model_validator(mode="after")
     def _check_bounds(self) -> OutputConfig:
         if self.floor is not None and _is_non_finite(self.floor):
@@ -484,6 +524,36 @@ class OutputConfig(BaseModel):
             raise ValueError(f"output.cap must be a finite float (got {self.cap!r})")
         if self.floor is not None and self.cap is not None and self.floor > self.cap:
             raise ValueError(f"output.floor ({self.floor}) cannot exceed output.cap ({self.cap})")
+        if self.quantiles is not None:
+            if not self.quantiles:
+                raise ValueError("output.quantiles cannot be empty when specified")
+            for q in self.quantiles:
+                if _is_non_finite(q) or q <= 0.0 or q >= 1.0:
+                    raise ValueError(
+                        f"output.quantiles entries must lie strictly in (0, 1); got {q!r}"
+                    )
+            object.__setattr__(
+                self, "quantiles", sorted({round(float(q), 6) for q in self.quantiles})
+            )
+        if (self.underage_cost is None) != (self.overage_cost is None):
+            raise ValueError(
+                "output.underage_cost and output.overage_cost must both be specified together"
+            )
+        if self.underage_cost is not None and (
+            _is_non_finite(self.underage_cost) or _is_non_finite(self.overage_cost)
+        ):
+            raise ValueError(
+                "output.underage_cost and output.overage_cost must be finite positive floats"
+            )
+        if self.target_quantile is not None and _is_non_finite(self.target_quantile):
+            raise ValueError(
+                f"output.target_quantile must be a finite float in (0, 1); "
+                f"got {self.target_quantile!r}"
+            )
+        if self.target_quantile is not None and self.underage_cost is not None:
+            raise ValueError(
+                "cannot set both output.target_quantile and output.underage_cost/overage_cost"
+            )
         return self
 
 

@@ -234,6 +234,27 @@ UNPROVEN: dict[str, str] = {
         "join — which reads configs — is structurally blind to that. Read the ledger's prose, not "
         "this entry, before concluding the path is untested."
     ),
+    # --- data ----------------------------------------------------------------------------------
+    "data.grid_policy=ffill": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_grid_regularization_and_trim_leading_zeros"
+    ),
+    "data.grid_policy=fill_zero": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_grid_regularization_and_trim_leading_zeros"
+    ),
+    "data.grid_policy=linear": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_grid_regularization_and_trim_leading_zeros"
+    ),
+    "data.grid_policy=zero_fill": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_grid_regularization_and_trim_leading_zeros"
+    ),
+    "data.trim_leading_zeros=true": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_grid_regularization_and_trim_leading_zeros"
+    ),
     # --- ensemble ------------------------------------------------------------------------------
     "ensemble.strategies=champion": (
         "tests/unit/test_phase_g1_workbench.py::"
@@ -251,6 +272,30 @@ UNPROVEN: dict[str, str] = {
     "features.on_unsupported_covariates=error": (
         "tests/unit/test_features.py::"
         "test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_config"
+    ),
+    "features.outlier_policy=flag": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_trading_days_censored_demand_and_outlier_hygiene"
+    ),
+    "features.outlier_policy=interpolate": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_trading_days_censored_demand_and_outlier_hygiene"
+    ),
+    "features.outlier_policy=stl_resid": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_trading_days_censored_demand_and_outlier_hygiene"
+    ),
+    "features.outlier_policy=winsorize": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_trading_days_censored_demand_and_outlier_hygiene"
+    ),
+    "features.regime_routing=true": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_sbc_demand_profile_and_regime_routing"
+    ),
+    "features.trading_days=true": (
+        "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
+        "test_trading_days_censored_demand_and_outlier_hygiene"
     ),
     # --- hierarchy -----------------------------------------------------------------------------
     "hierarchy.reconciliation_methods=mint_nonneg": (

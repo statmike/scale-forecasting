@@ -660,19 +660,22 @@ def _cut_forecast(
     """
     if X is None:
         return None
+    X_out = X.copy() if "is_outlier" in X.columns else X
+    if "is_outlier" in X_out.columns:
+        X_out.loc[X_out.index[start:end], "is_outlier"] = 0.0
     if cfg is None or y is None or not cfg.features.past_covariates:
-        return X.iloc[start:end]
+        return X_out.iloc[start:end]
     from .features import build_future_features
 
     span = end - start
     if span <= 0:
-        return X.iloc[start:end]
+        return X_out.iloc[start:end]
     return build_future_features(
         y.iloc[:start],
-        X.iloc[:start],
+        X_out.iloc[:start],
         cfg,
         horizon=span,
-        future_covariates_df=X.iloc[start:end],
+        future_covariates_df=X_out.iloc[start:end],
     )
 
 
@@ -700,12 +703,51 @@ def _forecast_validation(
     return frame.iloc[gap:] if gap else frame
 
 
+def _fold_hygiene_inputs(
+    y: pd.Series,
+    X: pd.DataFrame | None,
+    fold: Fold,
+    series: pd.DataFrame | None = None,
+    cfg: RunConfig | None = None,
+    lam: float | None = None,
+) -> tuple[pd.Series, pd.DataFrame | None]:
+    """Build fold-safe ``(y_fold, X_fold)`` cleaned on ``fold.train_start : fold.train_end``."""
+    if (
+        series is None
+        or cfg is None
+        or (not cfg.features.censored_col and cfg.features.outlier_policy == "none")
+    ):
+        return y, X
+    from .features import apply_transform, clean_training_target
+
+    sub_train = series.iloc[fold.train_start : fold.train_end]
+    raw_train = pd.Series(
+        pd.to_numeric(sub_train[cfg.data.target_col], errors="coerce").to_numpy(dtype=float),
+        index=y.index[fold.train_start : fold.train_end],
+        name=cfg.data.target_col,
+    )
+    cleaned_train, out_flag = clean_training_target(raw_train, sub_train, cfg)
+    y_train_trans = apply_transform(cleaned_train, cfg.features.transform, lam)
+    y_fold = y.copy()
+    y_fold.iloc[fold.train_start : fold.train_end] = y_train_trans
+    X_fold = X
+    if X is not None and "is_outlier" in X.columns:
+        X_fold = X.copy()
+        X_fold["is_outlier"] = 0.0
+        if out_flag is not None:
+            X_fold.loc[X_fold.index[fold.train_start : fold.train_end], "is_outlier"] = out_flag
+    return y_fold, X_fold
+
+
 def _fit_one(
     est: BaseModel,
     y: pd.Series,
     X: pd.DataFrame | None,
     fold: Fold,
     tally: FitTally | None,
+    series: pd.DataFrame | None = None,
+    cfg: RunConfig | None = None,
+    lam: float | None = None,
 ) -> BaseModel:
     """Fit ``est`` on ``fold``'s training window and count it (pure but for the fit itself).
 
@@ -713,8 +755,9 @@ def _fit_one(
     branches and each fits a different number of times, so a tally maintained per branch would be
     the kind of arithmetic that goes quietly wrong the next time a branch is added.
     """
-    window = y.iloc[fold.train_start : fold.train_end]
-    est.fit(window, _cut(X, fold.train_start, fold.train_end))
+    y_fold, X_fold = _fold_hygiene_inputs(y, X, fold, series, cfg, lam)
+    window = y_fold.iloc[fold.train_start : fold.train_end]
+    est.fit(window, _cut(X_fold, fold.train_start, fold.train_end))
     if tally is not None:
         tally.record(len(window))
     return est
@@ -728,10 +771,13 @@ def _fit_predict(
     gap: int,
     tally: FitTally | None = None,
     cfg: RunConfig | None = None,
+    series: pd.DataFrame | None = None,
+    lam: float | None = None,
 ) -> pd.DataFrame:
     """A fresh model fit on this fold's training window and asked for its validation window."""
-    est = _fit_one(model_factory(), y, X, fold, tally)
-    return _forecast_validation(est, X, fold, gap, y, cfg)
+    y_fold, X_fold = _fold_hygiene_inputs(y, X, fold, series, cfg, lam)
+    est = _fit_one(model_factory(), y_fold, X_fold, fold, tally)
+    return _forecast_validation(est, X_fold, fold, gap, y_fold, cfg)
 
 
 def _predict_blind(
@@ -769,6 +815,8 @@ def _walk_folds(
     model_factory: Callable[[], BaseModel],
     cfg: RunConfig,
     tally: FitTally | None = None,
+    series: pd.DataFrame | None = None,
+    lam: float | None = None,
 ) -> tuple[Sequence[tuple[pd.DataFrame, pd.DataFrame | None]], str]:
     """Produce each fold's forecast frames, and report how the model was carried between them.
 
@@ -792,7 +840,9 @@ def _walk_folds(
     """
     scheme, gap = cfg.backtest.scheme, cfg.backtest.gap
     if scheme in ("expanding", "sliding"):
-        primaries = [_fit_predict(model_factory, y, X, f, gap, tally, cfg) for f in folds]
+        primaries = [
+            _fit_predict(model_factory, y, X, f, gap, tally, cfg, series, lam) for f in folds
+        ]
         if not cfg.backtest.control_arm:
             return [(p, None) for p in primaries], "per_fold"
         # The control arm on a refit scheme: one extra fit for the whole cell, on the oldest fold's
@@ -805,7 +855,7 @@ def _walk_folds(
         control = model_factory()
         if not control.supports_extrapolate:
             return [(p, None) for p in primaries], "per_fold"
-        _fit_one(control, y, X, base, tally)
+        _fit_one(control, y, X, base, tally, series, cfg, lam)
         control_blind = [_predict_blind(control, X, base, f, gap, y, cfg) for f in folds]
         return list(zip(primaries, control_blind, strict=True)), "per_fold"
 
@@ -816,9 +866,10 @@ def _walk_folds(
         # paid for. No model in this tree lands here — all sixteen opt in — but an out-of-tree model
         # inherits the ``False`` default, and it has to degrade to a refit rather than raise.
         return [
-            (_fit_predict(model_factory, y, X, f, gap, tally, cfg), None) for f in folds
+            (_fit_predict(model_factory, y, X, f, gap, tally, cfg, series, lam), None)
+            for f in folds
         ], "unsupported"
-    _fit_one(blind, y, X, base, tally)
+    _fit_one(blind, y, X, base, tally, series, cfg, lam)
 
     if scheme == "expanding_stale":
         # The primary arm *is* the blind arm here, so there is no second arm and ``yhat_stale``
@@ -834,7 +885,7 @@ def _walk_folds(
         # arm still runs and the staleness diagnostic is still available for this model.
         return [
             (
-                _fit_predict(model_factory, y, X, f, gap, tally, cfg),
+                _fit_predict(model_factory, y, X, f, gap, tally, cfg, series, lam),
                 _predict_blind(blind, X, base, f, gap, y, cfg),
             )
             for f in folds
@@ -842,7 +893,7 @@ def _walk_folds(
 
     # The frozen arm proper: a second fit on the same window, then walked forward on the real
     # observations between origins with its parameters held fixed.
-    frozen = _fit_one(model_factory(), y, X, base, tally)
+    frozen = _fit_one(model_factory(), y, X, base, tally, series, cfg, lam)
 
     arms: list[tuple[pd.DataFrame, pd.DataFrame | None]] = []
     mode, cursor = "recondition", base.train_end
@@ -856,7 +907,7 @@ def _walk_folds(
         primary = (
             _forecast_validation(frozen, X, fold, gap, y, cfg)
             if mode == "recondition"
-            else _fit_predict(model_factory, y, X, fold, gap, tally, cfg)
+            else _fit_predict(model_factory, y, X, fold, gap, tally, cfg, series, lam)
         )
         arms.append((primary, _predict_blind(blind, X, base, fold, gap, y, cfg)))
     return arms, mode
@@ -916,11 +967,38 @@ def backtest_cell(
         it would be picked up as if it were a second model. It lives in ``oof["yhat_stale"]`` and is
         summarised once as ``outcome.staleness_gap``.
     """
-    y, X = build_features(series, cfg, lam, owns_covariate_lags)
+    from .features import regularize_series_grid
+
+    reg_series = regularize_series_grid(series, cfg)
+    if cfg.data.date_col in reg_series.columns:
+        reg_series = (
+            reg_series.sort_values(cfg.data.date_col)
+            .drop_duplicates(subset=[cfg.data.date_col], keep="last")
+            .reset_index(drop=True)
+        )
+    y, X = build_features(reg_series, cfg, lam, owns_covariate_lags)
+    raw_target_orig = (
+        pd.to_numeric(reg_series[cfg.data.target_col], errors="coerce").to_numpy(dtype=float)
+        if cfg.data.target_col in reg_series.columns and len(reg_series) == len(y)
+        else invert_transform(y.to_numpy(), cfg.features.transform, lam)
+    )
+    cens_full: np.ndarray | None = None
+    if (
+        cfg.features.censored_col
+        and cfg.features.censored_col in reg_series.columns
+        and len(reg_series) == len(y)
+    ):
+        cens_full = (
+            pd.to_numeric(reg_series[cfg.features.censored_col], errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+            > 0.0
+        )
+
     n = len(y)
     folds = make_folds(n, cfg)
     arms, refit_mode = (
-        _walk_folds(folds, y, X, model_factory, cfg, tally)
+        _walk_folds(folds, y, X, model_factory, cfg, tally, reg_series, lam)
         if folds
         else ([], _NOMINAL_MODE[cfg.backtest.scheme])
     )
@@ -930,7 +1008,6 @@ def backtest_cell(
     stale_metrics: list[dict[str, float]] = []
 
     for fold, (pred, blind_pred) in zip(folds, arms, strict=True):
-        y_train = y.iloc[fold.train_start : fold.train_end]
         y_val = y.iloc[fold.val_start : fold.val_end]
 
         # Align yhat to the true validation dates by position (folds are contiguous).
@@ -955,8 +1032,8 @@ def backtest_cell(
         # A leaderboard cannot compare the two engines on a metric only one of them fills.
         lower = pred["yhat_lower"].to_numpy()[: fold.val_size]
         upper = pred["yhat_upper"].to_numpy()[: fold.val_size]
-        y_true = invert_transform(y_val.to_numpy(), cfg.features.transform, lam)
-        y_train_orig = invert_transform(y_train.to_numpy(), cfg.features.transform, lam)
+        y_true = raw_target_orig[fold.val_start : fold.val_end].copy()
+        y_train_orig = raw_target_orig[fold.train_start : fold.train_end].copy()
         val_dates = y_val.index
         # The control arm, selected by the same rule as the primary one so the two are comparable:
         # a gap between a raw forecast and a bias-corrected one would be measuring the correction.
@@ -970,11 +1047,19 @@ def backtest_cell(
             )
         )
 
+        val_uncensored = np.ones(fold.val_size, dtype=bool)
+        if cens_full is not None:
+            vc = cens_full[fold.val_start : fold.val_end]
+            if vc.any() and (~vc).any():
+                val_uncensored = ~vc
+
+        y_true_oof = np.where(val_uncensored, y_true, np.nan)
+
         fold_oof = pd.DataFrame(
             {
                 "ds": pd.DatetimeIndex(val_dates).as_unit("ns"),
                 "fold_id": fold.fold_id,
-                "y_true": y_true,
+                "y_true": y_true_oof,
                 "yhat": yhat,
                 "yhat_raw": yhat_raw,
                 "yhat_adjusted": yhat_adjusted,
@@ -997,11 +1082,7 @@ def backtest_cell(
         from .calibration import apply_output_constraints, has_output_constraints
 
         if has_output_constraints(cfg.output):
-            val_bounds = (
-                series.sort_values(cfg.data.date_col).iloc[fold.val_start : fold.val_end]
-                if cfg.data.date_col in series.columns
-                else series.iloc[fold.val_start : fold.val_end]
-            )
+            val_bounds = reg_series.iloc[fold.val_start : fold.val_end]
             fold_oof = apply_output_constraints(fold_oof, cfg.output, bounds_df=val_bounds)
             yhat = fold_oof["yhat"].to_numpy(dtype=float)
             lower = fold_oof["yhat_lower"].to_numpy(dtype=float)
@@ -1012,11 +1093,11 @@ def backtest_cell(
         fold_metrics.append(
             {
                 **compute_metrics(
-                    y_true,
-                    yhat,
+                    y_true[val_uncensored],
+                    yhat[val_uncensored],
                     y_train=y_train_orig,
-                    lower=lower,
-                    upper=upper,
+                    lower=lower[val_uncensored],
+                    upper=upper[val_uncensored],
                     seasonal_period=seasonal_period(cfg.data.freq),
                 ),
                 # Which fold this panel belongs to, so a caller can hold the newest one out of a
@@ -1031,16 +1112,18 @@ def backtest_cell(
             # Scored on the same dates, the same actuals and the same training window as the
             # primary arm, so the difference between the two panels is the staleness and nothing
             # else. Kept out of `fold_metrics` — see the note in this function's docstring.
+            stale_lower = blind_pred["yhat_lower"].to_numpy()[: fold.val_size]
+            stale_upper = blind_pred["yhat_upper"].to_numpy()[: fold.val_size]
             stale_metrics.append(
                 compute_metrics(
-                    y_true,
-                    yhat_stale,
+                    y_true[val_uncensored],
+                    yhat_stale[val_uncensored],
                     y_train=y_train_orig,
                     # Its own bounds, not the primary arm's — an interval that widens as the model
                     # goes stale is part of what the control arm has to say, and borrowing the
                     # fresh arm's band would score `coverage` against the wrong interval.
-                    lower=blind_pred["yhat_lower"].to_numpy()[: fold.val_size],
-                    upper=blind_pred["yhat_upper"].to_numpy()[: fold.val_size],
+                    lower=stale_lower[val_uncensored],
+                    upper=stale_upper[val_uncensored],
                     seasonal_period=seasonal_period(cfg.data.freq),
                 )
             )

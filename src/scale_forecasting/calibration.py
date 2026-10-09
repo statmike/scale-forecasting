@@ -337,8 +337,10 @@ def apply_calibration(
     for i in range(len(out)):
         step = cal.for_step(i + 1)
         shift = step.mean if arm == "mean" else step.quantiles.get(0.5, 0.0)
-        lower.append(raw[i] + step.quantiles[lo_q])
-        upper.append(raw[i] + step.quantiles[hi_q])
+        raw_qmap = {q: v for q in qs if math.isfinite(v := raw[i] + step.quantiles[q])}
+        mono_qmap = rearrange_monotone_quantiles(raw_qmap)
+        lower.append(mono_qmap.get(lo_q, raw[i] + step.quantiles[lo_q]))
+        upper.append(mono_qmap.get(hi_q, raw[i] + step.quantiles[hi_q]))
         adjusted.append(raw[i] + shift)
         # The full map is rewritten, not just the two bounds it brackets. Leaving `quantiles`
         # holding the model's own band beside a recalibrated `yhat_lower`/`yhat_upper` would ship
@@ -346,9 +348,7 @@ def apply_calibration(
         # different number than the one in the column named for it. Non-finite values are dropped
         # per step for the same reason `_assemble_frame` drops them: `json.dumps` would otherwise
         # mint bare `NaN`, which BigQuery's JSON parser rejects for the whole append.
-        qjson.append(
-            json.dumps({str(q): v for q in qs if math.isfinite(v := raw[i] + step.quantiles[q])})
-        )
+        qjson.append(json.dumps({str(q): v for q, v in mono_qmap.items()}))
 
     out["yhat_lower"] = np.asarray(lower, dtype=float)
     out["yhat_upper"] = np.asarray(upper, dtype=float)
@@ -356,6 +356,131 @@ def apply_calibration(
     out["yhat"] = raw if arm == "raw" else out["yhat_adjusted"].to_numpy(dtype=float)
     out["quantiles"] = pd.array(qjson, dtype="string")
     return out[list(CALIBRATED_COLUMNS)], cal.source
+
+
+def rearrange_monotone_quantiles(q_map: dict[float, float]) -> dict[float, float]:
+    """Chernozhukov, Fernández-Val & Galichon (2010) monotone quantile rearrangement.
+
+    Sorts the finite quantile levels ``q_1 < q_2 < ... < q_k`` and arranges their values into
+    non-decreasing order ``v_(1) <= v_(2) <= ... <= v_(k)``, eliminating quantile crossing by
+    construction while weakly improving $L_p$ estimation accuracy.
+    """
+    finite_pairs = sorted((float(q), float(v)) for q, v in q_map.items() if math.isfinite(float(v)))
+    if not finite_pairs:
+        return {}
+    qs = [p[0] for p in finite_pairs]
+    sorted_vals = np.sort(np.array([p[1] for p in finite_pairs], dtype=float))
+    return {q: float(v) for q, v in zip(qs, sorted_vals, strict=True)}
+
+
+def format_target_quantile_arm(q_star: float) -> str:
+    """Canonical ``point_forecast_source`` label for a Newsvendor or SLA quantile target."""
+    if round(q_star, 2) == round(q_star, 6):
+        return f"quantile:{q_star:.2f}"
+    formatted = f"{q_star:.4f}".rstrip("0").rstrip(".")
+    return f"quantile:{formatted}"
+
+
+def apply_quantile_and_cost_rules(
+    pred: pd.DataFrame,
+    output_cfg: OutputConfig | None,
+) -> tuple[pd.DataFrame, str | None]:
+    """Apply multi-percentile fan expansion, Chernozhukov monotone rearrangement, and Newsvendor /
+    SLA quantile shifting (`underage_cost` / `overage_cost` / `target_quantile`) to ``pred``.
+
+    Returns ``(updated_df, point_source_override)`` where ``point_source_override`` is
+    ``"quantile:<q*>"`` when a Newsvendor or SLA target quantile is active, else ``None``.
+    """
+    if (
+        pred is None
+        or pred.empty
+        or output_cfg is None
+        or (output_cfg.quantiles is None and output_cfg.effective_target_quantile is None)
+    ):
+        return pred, None
+
+    from scipy.stats import norm
+
+    out = pred.copy()
+    target_qs = output_cfg.effective_quantiles
+    q_star = output_cfg.effective_target_quantile
+    z_90 = float(norm.ppf(0.9))
+
+    yh = pd.to_numeric(out["yhat"], errors="coerce").to_numpy(dtype=float)
+    yl = (
+        pd.to_numeric(out["yhat_lower"], errors="coerce").to_numpy(dtype=float)
+        if "yhat_lower" in out.columns
+        else yh.copy()
+    )
+    yu = (
+        pd.to_numeric(out["yhat_upper"], errors="coerce").to_numpy(dtype=float)
+        if "yhat_upper" in out.columns
+        else yh.copy()
+    )
+    has_qcol = "quantiles" in out.columns
+    raw_q_series = out["quantiles"].tolist() if has_qcol else [None] * len(out)
+
+    new_yh = yh.copy()
+    new_yl = yl.copy()
+    new_yu = yu.copy()
+    new_qjson: list[str] = []
+
+    for i in range(len(out)):
+        parsed_map: dict[float, float] = {}
+        raw_q = raw_q_series[i]
+        if isinstance(raw_q, str) and raw_q.strip():
+            try:
+                loaded = json.loads(raw_q)
+                if isinstance(loaded, dict):
+                    for k, v in loaded.items():
+                        if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                            parsed_map[round(float(k), 6)] = float(v)
+            except (TypeError, ValueError):
+                pass
+
+        # Anchor center and spread for any quantile not yet in parsed_map (e.g. backtest=False).
+        center = parsed_map.get(0.5, float(yh[i]) if math.isfinite(yh[i]) else 0.0)
+        lo_ref = parsed_map.get(0.1, float(yl[i]) if math.isfinite(yl[i]) else center)
+        hi_ref = parsed_map.get(0.9, float(yu[i]) if math.isfinite(yu[i]) else center)
+        sigma = (
+            max((hi_ref - lo_ref) / (2.0 * z_90), 0.0) if math.isfinite(hi_ref - lo_ref) else 0.0
+        )
+
+        for q in target_qs:
+            rq = round(float(q), 6)
+            if rq not in parsed_map and math.isfinite(center):
+                parsed_map[rq] = float(center + float(norm.ppf(rq)) * sigma)
+
+        mono_map = rearrange_monotone_quantiles(parsed_map)
+        if output_cfg.quantiles is not None:
+            keep_set = {round(float(q), 6) for q in output_cfg.quantiles}
+            if q_star is not None:
+                keep_set.add(q_star)
+            emit_map = {q: v for q, v in mono_map.items() if q in keep_set}
+        else:
+            emit_map = mono_map
+
+        if emit_map:
+            emit_qs = sorted(emit_map)
+            if output_cfg.quantiles is not None:
+                new_yl[i] = emit_map[emit_qs[0]]
+                new_yu[i] = emit_map[emit_qs[-1]]
+            if q_star is not None and q_star in mono_map:
+                new_yh[i] = mono_map[q_star]
+            new_yl[i] = min(new_yl[i], new_yh[i])
+            new_yu[i] = max(new_yu[i], new_yh[i])
+        new_qjson.append(json.dumps({str(q): v for q, v in emit_map.items()}))
+
+    out["yhat"] = new_yh
+    if "yhat_lower" in out.columns:
+        out["yhat_lower"] = new_yl
+    if "yhat_upper" in out.columns:
+        out["yhat_upper"] = new_yu
+    if has_qcol or output_cfg.quantiles is not None:
+        out["quantiles"] = pd.array(new_qjson, dtype="string")
+
+    arm_override = format_target_quantile_arm(q_star) if q_star is not None else None
+    return out, arm_override
 
 
 def has_output_constraints(output_cfg: OutputConfig | None) -> bool:
