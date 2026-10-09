@@ -98,9 +98,20 @@ def corrected_arm_for(decision_metric: str) -> str:
 
 # Ensemble strategies. "Learned" strategies train on backtest OOF and
 # therefore require backtesting to be ON; "calculated" ones work either way.
-CALCULATED_STRATEGIES = frozenset({"mean", "median", "inverse_error"})
+CALCULATED_STRATEGIES = frozenset(
+    {"mean", "median", "inverse_error", "champion", "horizon_specialist"}
+)
 LEARNED_STRATEGIES = frozenset({"nnls", "ridge", "xgb"})
-Strategy = Literal["mean", "median", "inverse_error", "nnls", "ridge", "xgb"]
+Strategy = Literal[
+    "mean",
+    "median",
+    "inverse_error",
+    "champion",
+    "horizon_specialist",
+    "nnls",
+    "ridge",
+    "xgb",
+]
 
 # Per-family compute vocabulary (kept as Literals to match python_runtime/spark_deps idiom).
 # ``ComputeFamily`` mirrors ``models.base_model.Family`` *minus* "native": native models always run
@@ -410,8 +421,11 @@ class BacktestConfig(BaseModel):
         return self
 
 
+IntegerRounding = Literal["none", "round", "ceil", "floor", "cumulative_round"]
+
+
 class OutputConfig(BaseModel):
-    """What the numbers we ship *mean* — the functional behind ``yhat``.
+    """What the numbers we ship *mean* — the functional behind ``yhat`` and physical bounds.
 
     Its own section rather than a field on `BacktestConfig`, even though both of its rules involve
     the backtest, because a reader asking "how do I control the point forecast?" will not look
@@ -426,7 +440,11 @@ class OutputConfig(BaseModel):
     opinion into a default: the alternative is now sayable.
 
     ``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never
-    destructive and the two arms can always be compared after the fact. See `calibration.py`.
+    destructive and the two arms can always be compared after the fact. Physical constraints
+    (``floor``, ``cap``, ``floor_col``, ``cap_col``, and ``integer_rounding``) are applied
+    post-calibration so ``calibrate_from_oof`` estimates empirical residuals on unclamped raw
+    model outputs while ``yhat``, ``yhat_lower``, ``yhat_upper``, ``quantiles``, and scored OOF
+    predictions respect physical reality. See `calibration.py`.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -449,6 +467,24 @@ class OutputConfig(BaseModel):
     #            run_id records that selection was asked for, and `forecast_metadata` records what
     #            each cell chose. See `calibration.select_arm`.
     point_forecast: Literal["raw", "median", "mean", "auto"] | None = None
+
+    # Physical bounds and discrete rounding (applied post-calibration to yhat, bounds, quantiles,
+    # and scored OOF while keeping yhat_raw unclamped for unbiased residual estimation).
+    floor: float | None = None
+    cap: float | None = None
+    floor_col: str | None = None
+    cap_col: str | None = None
+    integer_rounding: IntegerRounding = "none"
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> OutputConfig:
+        if self.floor is not None and _is_non_finite(self.floor):
+            raise ValueError(f"output.floor must be a finite float (got {self.floor!r})")
+        if self.cap is not None and _is_non_finite(self.cap):
+            raise ValueError(f"output.cap must be a finite float (got {self.cap!r})")
+        if self.floor is not None and self.cap is not None and self.floor > self.cap:
+            raise ValueError(f"output.floor ({self.floor}) cannot exceed output.cap ({self.cap})")
+        return self
 
 
 class HpoConfig(BaseModel):
@@ -491,6 +527,8 @@ class EnsembleConfig(BaseModel):
     # Pydantic v2 deep-copies mutable defaults, so a literal default is safe here.
     strategies: list[Strategy] = ["median"]
     prune_threshold: float = Field(default=0.0, ge=0.0)
+    top_k: int | None = Field(default=None, gt=0)
+    parsimony_margin: float = Field(default=0.0, ge=0.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -511,6 +549,7 @@ ReconciliationMethod = Literal[
     "wls_struct",
     "wls_var",
     "mint_shrink",
+    "mint_nonneg",
 ]
 RECONCILIATION_METHODS = frozenset(
     {
@@ -521,6 +560,7 @@ RECONCILIATION_METHODS = frozenset(
         "wls_struct",
         "wls_var",
         "mint_shrink",
+        "mint_nonneg",
     }
 )
 

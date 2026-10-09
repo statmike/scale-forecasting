@@ -3,11 +3,12 @@
 The outer loop combines every base model's forecast per ``ts_id`` into a
 consensus. Two families, both **pure** here (no GCP calls):
 
-* **Calculated** (``mean``, ``median``, ``inverse_error``) — heuristics that need no training,
-  so they work even when backtesting is off. `combine_calculated` blends the base
-  ``forecast_predictions`` **in pandas** and returns ``ensemble_<s>`` prediction rows the caller
-  appends via the Storage Write API — the same append path the learned strategies use (every
-  append-only cell-table write goes through the Write API, no ``INSERT…SELECT`` DML).
+* **Calculated** (``mean``, ``median``, ``inverse_error``, ``champion``, ``horizon_specialist``) —
+  heuristics and per-series selectors that need no cross-series meta-learner training.
+  `combine_calculated` blends the base ``forecast_predictions`` **in pandas** and returns
+  ``ensemble_<s>`` prediction rows the caller appends via the Storage Write API — the same append
+  path the learned strategies use (every append-only cell-table write goes through the Write API,
+  no ``INSERT…SELECT`` DML).
 * **Learned** (``nnls``, ``ridge``, ``xgb``) — meta-learners that train on the backtest OOF to
   learn per-model trust weights. `fit_learned` fits them; because it only ever sees
   ``backtest_oof`` (never in-sample fits) leakage is structurally impossible, and it refuses to
@@ -16,8 +17,9 @@ consensus. Two families, both **pure** here (no GCP calls):
 A run may request several strategies at once (``ensemble.strategies`` is a list); each yields
 its own weights/rows so calculated and learned consensuses sit side-by-side in one run.
 
-Public surface: `combine_calculated`, `combine_oof`, `fit_learned` (plus the
-pure combine helpers `mean_combine`, `median_combine`, `inverse_error_weights`).
+Public surface: `combine_calculated`, `combine_oof`, `fit_learned`,
+`calibrate_ensemble_predictions`, `ensemble_oof_bounds` (plus the pure combine helpers
+`mean_combine`, `median_combine`, `inverse_error_weights`).
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ import pandas as pd
 from scipy.optimize import nnls
 
 from .backtest import holdout_fold_id
+from .calibration import (
+    apply_output_constraints,
+    calibrate_from_oof,
+    has_output_constraints,
+)
 from .config import CALCULATED_STRATEGIES, LEARNED_STRATEGIES
 from .errors import ConfigError, get_logger
 from .metrics import loss_of
@@ -45,6 +52,57 @@ _RIDGE_ALPHA = 1.0  # L2 strength for the ridge meta-learner
 # `X.shape[0] == 0` check rather than two branches that have to stay in step.
 _EMPTY_X = np.empty((0, 0))
 _EMPTY_Y = np.empty(0)
+
+_BASELINE_MODELS: frozenset[str] = frozenset(
+    {
+        "naive",
+        "naive_last",
+        "naive_mean",
+        "naive_seasonal",
+        "naive_drift",
+        "naive_moving_average",
+        "snaive",
+        "moving_average",
+        "croston",
+        "sba",
+        "tsb",
+        "adida",
+        "imapa",
+    }
+)
+_STATISTICAL_MODELS: frozenset[str] = frozenset(
+    {
+        "theta",
+        "auto_theta",
+        "holtwinters",
+        "ets",
+        "autoets",
+        "auto_arima",
+        "auto_ces",
+        "sarimax",
+        "stl_bagging",
+        "tbats",
+        "ces",
+        "mstl",
+        "fft",
+        "kalman",
+        "ucm",
+        "arima_plus",
+    }
+)
+_ML_MODELS: frozenset[str] = frozenset({"ridge_lags", "xgboost", "lightgbm", "catboost", "prophet"})
+
+
+def _model_simplicity_rank(model_name: str, order_idx: int) -> tuple[int, int]:
+    """Return ``(complexity_tier, config_order_idx)`` for Occam's-razor parsimony tie-breaking."""
+    base = model_name.split("_")[0] if model_name not in _BASELINE_MODELS else model_name
+    if model_name in _BASELINE_MODELS or base in _BASELINE_MODELS:
+        return (0, order_idx)
+    if model_name in _STATISTICAL_MODELS:
+        return (1, order_idx)
+    if model_name in _ML_MODELS:
+        return (2, order_idx)
+    return (3, order_idx)
 
 
 # --- pure combine helpers (calculated) -----------------------------------------
@@ -87,6 +145,78 @@ def inverse_error_weights(errors: np.ndarray) -> np.ndarray:
 
     inv = np.where(finite, 1.0 / err, 0.0)
     return inv / inv.sum()
+
+
+def _select_or_weight_models(
+    errors: np.ndarray,
+    models: list[str],
+    *,
+    top_k: int | None = None,
+    parsimony_margin: float = 0.0,
+    champion_only: bool = False,
+) -> np.ndarray:
+    """Compute per-model weights from losses ``errors`` under ``champion``, ``top_k``, and
+    ``parsimony_margin`` rules (pure).
+    """
+    err = np.asarray(errors, dtype=float)
+    n = err.size
+    if n == 0:
+        return np.empty(0, dtype=float)
+    finite_idx = [i for i in range(n) if np.isfinite(err[i]) and err[i] >= 0.0]
+    if not finite_idx:
+        if champion_only:
+            best_i = min(range(n), key=lambda i: _model_simplicity_rank(models[i], i))
+            w = np.zeros(n, dtype=float)
+            w[best_i] = 1.0
+            return w
+        return np.full(n, 1.0 / n, dtype=float)
+
+    min_err = min(float(err[i]) for i in finite_idx)
+    tol = min_err * (1.0 + parsimony_margin) if min_err > 0.0 else parsimony_margin
+
+    if champion_only:
+        if parsimony_margin > 0.0:
+            elig = [i for i in finite_idx if float(err[i]) <= tol + 1e-12]
+        else:
+            elig = [i for i in finite_idx if abs(float(err[i]) - min_err) <= 1e-12]
+        winner = min(elig, key=lambda i: _model_simplicity_rank(models[i], i))
+        w = np.zeros(n, dtype=float)
+        w[winner] = 1.0
+        return w
+
+    filtered = err.copy()
+    if parsimony_margin > 0.0:
+        # Drop any higher-complexity model that fails to beat the best simpler model by at least
+        # `parsimony_margin`.
+        for i in finite_idx:
+            rank_i = _model_simplicity_rank(models[i], i)[0]
+            simpler_losses = [
+                float(err[j])
+                for j in finite_idx
+                if _model_simplicity_rank(models[j], j)[0] < rank_i
+            ]
+            if simpler_losses:
+                best_simple = min(simpler_losses)
+                req = best_simple / (1.0 + parsimony_margin) if best_simple > 0.0 else 0.0
+                if float(err[i]) > req + 1e-12:
+                    filtered[i] = np.nan
+
+    surviving = [i for i in range(n) if np.isfinite(filtered[i]) and filtered[i] >= 0.0]
+    if not surviving:
+        surviving = finite_idx
+        filtered = err.copy()
+
+    if top_k is not None and top_k < len(surviving):
+        ranked = sorted(
+            surviving,
+            key=lambda i: (float(filtered[i]), _model_simplicity_rank(models[i], i)),
+        )
+        keep_set = set(ranked[:top_k])
+        for i in range(n):
+            if i not in keep_set:
+                filtered[i] = np.nan
+
+    return inverse_error_weights(filtered)
 
 
 # --- OOF-space consensus (scoring) ---------------------------------------------
@@ -248,9 +378,18 @@ def combine_oof(
     fit_rows = (fold_ids != holdout_fold_id(cfg)).to_numpy(dtype=bool)
 
     parts: list[pd.DataFrame] = []
+    steps_arr = steps.to_numpy(dtype=float)
     for strategy in cfg.ensemble.strategies:
         yhat = _blend_oof_strategy(
-            strategy, vals, present_models, ts_ids, truth, learned_weights, fit_rows
+            strategy,
+            vals,
+            present_models,
+            ts_ids,
+            steps_arr,
+            truth,
+            learned_weights,
+            fit_rows,
+            cfg,
         )
         if yhat is None:
             continue
@@ -275,22 +414,57 @@ def _blend_oof_strategy(
     vals: np.ndarray,
     models: list[str],
     ts_ids: np.ndarray,
+    steps: np.ndarray,
     truth: np.ndarray,
     learned_weights: dict[str, dict[str, float]],
     fit_rows: np.ndarray,
+    cfg: RunConfig,
 ) -> np.ndarray | None:
     """The blended yhat for one strategy over the OOF value matrix, or ``None`` to skip it.
 
     ``vals`` is ``(n_rows, n_models)`` of base OOF yhats aligned to ``models``; ``ts_ids``,
-    ``truth`` and ``fit_rows`` are per-row, the last marking the folds a weight may be estimated
-    from. Skips (returns ``None``) a learned strategy with no fitted weights.
+    ``steps``, ``truth`` and ``fit_rows`` are per-row, the last marking the folds a weight may be
+    estimated from. Skips (returns ``None``) a learned strategy with no fitted weights.
     """
-    if strategy == "mean":
-        return _weighted_blend(vals, np.ones(len(models)))
-    if strategy == "median":
+    top_k = cfg.ensemble.top_k
+    margin = cfg.ensemble.parsimony_margin
+    if strategy in ("mean", "median") and top_k is None and margin == 0.0:
+        if strategy == "mean":
+            return _weighted_blend(vals, np.ones(len(models)))
         return np.nanmedian(vals, axis=1)
-    if strategy == "inverse_error":
-        return _inverse_error_blend(vals, ts_ids, truth, fit_rows)
+    if strategy in ("mean", "median"):
+        return _filtered_unweighted_oof_blend(
+            strategy,
+            vals,
+            models,
+            ts_ids,
+            truth,
+            fit_rows,
+            top_k=top_k,
+            parsimony_margin=margin,
+        )
+    if strategy in ("inverse_error", "champion"):
+        return _inverse_error_blend(
+            vals,
+            models,
+            ts_ids,
+            truth,
+            fit_rows,
+            top_k=top_k,
+            parsimony_margin=margin,
+            champion_only=(strategy == "champion"),
+        )
+    if strategy == "horizon_specialist":
+        return _horizon_specialist_oof_blend(
+            vals,
+            models,
+            ts_ids,
+            steps,
+            truth,
+            fit_rows,
+            top_k=top_k,
+            parsimony_margin=margin,
+        )
     wmap = learned_weights.get(strategy)
     if not wmap:  # learned strategy not fitted (e.g. backtest off) → nothing to score
         return None
@@ -298,25 +472,67 @@ def _blend_oof_strategy(
     return _weighted_blend(vals, weights)
 
 
-def _inverse_error_blend(
-    vals: np.ndarray, ts_ids: np.ndarray, truth: np.ndarray, fit_rows: np.ndarray
-) -> np.ndarray:
-    """Inverse-WAPE-weighted blend, weights computed **per ts_id** from the OOF itself.
+def _series_oof_wape(wblock: np.ndarray, wtruth: np.ndarray) -> np.ndarray:
+    """Per-model WAPE over ``wblock`` (``(n_rows, n_models)``) vs ``wtruth`` (``(n_rows,)``).
 
-    For each series, every base model's WAPE over its **inner-fold** OOF rows sets its weight
-    (`inverse_error_weights`); the blend then applies those weights to *all* of that series' rows,
-    renormalizing over the models present per row. Estimating the weight on the same rows it is
-    scored on is what made this strategy flatter than it deserved: a model that happened to fit the
-    newest window well was rewarded with the weight that then produced the number it was judged by.
-    Self-contained — computed straight from the OOF rather than read back from
-    ``forecast_metadata`` — so scoring needs no registry round-trip. (WAPE is the natural error for
-    this weighting; it need not equal ``backtest.decision_metric``, which drives the *future*
-    ``inverse_error`` blend — this is the scored counterpart, not a byte-for-byte replay.)
-
-    ``fit_rows`` is the run-wide inner-fold mask. A series that achieved only the holdout has no
-    inner row of its own, so it falls back to weighting on everything it has — per series, not per
-    run, because one short series must not push the whole panel back to in-sample weights.
+    Returns ``np.nan`` for any model column that is entirely NaN on ``wblock``.
     """
+    denom = float(np.nansum(np.abs(wtruth)))
+    abs_err = np.abs(wblock - wtruth[:, None])
+    has_obs = np.any(~np.isnan(abs_err), axis=0)
+    raw = np.nansum(abs_err, axis=0) / denom if denom > 0.0 else np.nansum(abs_err, axis=0)
+    return np.where(has_obs, raw, np.nan)
+
+
+def _filtered_unweighted_oof_blend(
+    strategy: str,
+    vals: np.ndarray,
+    models: list[str],
+    ts_ids: np.ndarray,
+    truth: np.ndarray,
+    fit_rows: np.ndarray,
+    *,
+    top_k: int | None,
+    parsimony_margin: float,
+) -> np.ndarray:
+    """``mean`` or ``median`` after per-series ``top_k`` and ``parsimony_margin`` pruning."""
+    out = np.full(vals.shape[0], np.nan)
+    for tid in np.unique(ts_ids):
+        rows = ts_ids == tid
+        block = vals[rows].copy()
+        weight_rows = rows & fit_rows
+        if not weight_rows.any():
+            weight_rows = rows
+        wape = _series_oof_wape(vals[weight_rows], truth[weight_rows])
+        w = _select_or_weight_models(
+            wape,
+            models,
+            top_k=top_k,
+            parsimony_margin=parsimony_margin,
+            champion_only=False,
+        )
+        active = w > 0.0
+        if strategy == "median":
+            masked = np.where(active[None, :], block, np.nan)
+            out[rows] = np.nanmedian(masked, axis=1)
+        else:
+            uniform_active = np.where(active, 1.0, 0.0)
+            out[rows] = _weighted_blend(block, uniform_active)
+    return out
+
+
+def _inverse_error_blend(
+    vals: np.ndarray,
+    models: list[str],
+    ts_ids: np.ndarray,
+    truth: np.ndarray,
+    fit_rows: np.ndarray,
+    *,
+    top_k: int | None = None,
+    parsimony_margin: float = 0.0,
+    champion_only: bool = False,
+) -> np.ndarray:
+    """Inverse-WAPE-weighted (or single-winner ``champion``) blend per ``ts_id`` from OOF."""
     out = np.full(vals.shape[0], np.nan)
     for tid in np.unique(ts_ids):
         rows = ts_ids == tid
@@ -324,13 +540,68 @@ def _inverse_error_blend(
         weight_rows = rows & fit_rows
         if not weight_rows.any():
             weight_rows = rows
-        wblock = vals[weight_rows]
-        denom = np.nansum(np.abs(truth[weight_rows]))
-        # Per-model WAPE over this series' OOF (NaN where the model never forecast the series).
-        abs_err = np.abs(wblock - truth[weight_rows][:, None])
-        wape = np.nansum(abs_err, axis=0) / denom if denom > 0 else np.nansum(abs_err, axis=0)
-        weights = inverse_error_weights(wape)
+        wape = _series_oof_wape(vals[weight_rows], truth[weight_rows])
+        weights = _select_or_weight_models(
+            wape,
+            models,
+            top_k=top_k,
+            parsimony_margin=parsimony_margin,
+            champion_only=champion_only,
+        )
         out[rows] = _weighted_blend(block, weights)
+    return out
+
+
+def _horizon_specialist_oof_blend(
+    vals: np.ndarray,
+    models: list[str],
+    ts_ids: np.ndarray,
+    steps: np.ndarray,
+    truth: np.ndarray,
+    fit_rows: np.ndarray,
+    *,
+    top_k: int | None = None,
+    parsimony_margin: float = 0.0,
+) -> np.ndarray:
+    """Per-``(ts_id, horizon_step)`` inverse-WAPE blend over inner folds."""
+    out = np.full(vals.shape[0], np.nan)
+    for tid in np.unique(ts_ids):
+        s_rows = ts_ids == tid
+        s_fit = s_rows & fit_rows
+        if not s_fit.any():
+            s_fit = s_rows
+        fallback_wape = _series_oof_wape(vals[s_fit], truth[s_fit])
+        fallback_w = _select_or_weight_models(
+            fallback_wape,
+            models,
+            top_k=top_k,
+            parsimony_margin=parsimony_margin,
+            champion_only=False,
+        )
+        s_steps = steps[s_rows]
+        if np.all(np.isnan(s_steps)):
+            out[s_rows] = _weighted_blend(vals[s_rows], fallback_w)
+            continue
+        for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
+            h_rows = s_rows & (steps == step_val)
+            h_fit = h_rows & fit_rows
+            if not h_fit.any():
+                h_fit = h_rows
+            wape = _series_oof_wape(vals[h_fit], truth[h_fit])
+            if np.all(np.isnan(wape)):
+                weights = fallback_w
+            else:
+                weights = _select_or_weight_models(
+                    wape,
+                    models,
+                    top_k=top_k,
+                    parsimony_margin=parsimony_margin,
+                    champion_only=False,
+                )
+            out[h_rows] = _weighted_blend(vals[h_rows], weights)
+        nan_step_rows = s_rows & np.isnan(steps)
+        if nan_step_rows.any():
+            out[nan_step_rows] = _weighted_blend(vals[nan_step_rows], fallback_w)
     return out
 
 
@@ -476,12 +747,6 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
     mean_by_model = metric_df.groupby("model_type")[metric].mean()
 
     def keep(name: str) -> bool:
-        # Compared as a loss, not as the raw metric. The threshold has always meant "worse than
-        # this is not worth blending", and for the thirteen error metrics the raw value says that
-        # directly. For the other two it said the opposite: with `decision_metric="coverage"` the
-        # model with 95% coverage exceeded the threshold and was pruned while the one with 50% was
-        # kept, and with `"bias"` a large negative bias never exceeded anything at all. `loss_of`
-        # makes all fifteen answer the same question and leaves the thirteen unchanged.
         mean = mean_by_model.get(name, float("nan"))
         if mean != mean:  # no scored rows for this model — no evidence, so keep it (as before)
             return True
@@ -493,13 +758,14 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
 def _calc_blend(strategy: str, vals: np.ndarray, weights: np.ndarray | None) -> np.ndarray:
     """Blend an ``(n_rows, n_models)`` value matrix by one calculated strategy (pure).
 
-    ``mean``/``median`` are unweighted (``median`` robust to a wild base forecast);
-    ``inverse_error`` passes the per-model weights (∝ 1/decision_metric, renormalized over the
-    present models per row). NaNs (a model absent for a row) are ignored — the same
-    renormalize-over-present rule as the learned blend, so a date only some base models forecast
-    still yields a value rather than NaN.
+    ``mean``/``median`` are unweighted when ``weights`` is ``None``; when ``top_k`` or
+    ``parsimony_margin`` is active on ``median``, zero-weight columns are masked to NaN before
+    taking the row median. Weighted strategies pass their per-row weight matrix.
     """
     if strategy == "median":
+        if weights is not None:
+            masked = np.where(weights > 0.0, vals, np.nan)
+            return np.nanmedian(masked, axis=1)
         return np.nanmedian(vals, axis=1)
     w = np.ones(vals.shape[1]) if weights is None else weights
     return _weighted_blend(vals, w)
@@ -509,22 +775,17 @@ def combine_calculated(
     base_df: pd.DataFrame,
     cfg: RunConfig,
     metric_df: pd.DataFrame | None = None,
+    oof_df: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     """Blend base predictions into ``ensemble_<s>`` rows for every calculated strategy (pure).
 
     Builds the ``ensemble_<s>`` rows in pandas rather than via SQL ``INSERT…SELECT``: reads the base
     ``forecast_predictions`` (long-format ``ts_id, model_type, forecast_date, yhat, yhat_lower,
     yhat_upper``) and returns prediction-row dicts the caller stamps with ``run_id``/``ensemble_id``
-    and appends via the Storage Write API — the same path `ensemble_run._apply_weights` uses
-    for the learned strategies. ``inverse_error`` weights each model by ``1/mean(decision_metric)``
-    from ``metric_df`` (``forecast_metadata`` for this run), estimated **per series** so the answer
-    does not depend on which series arrive together (`_inverse_error_weight_matrix`);
-    ``mean``/``median`` need no metrics.
-    Optional pruning drops weak base models first (`_pruned_models`). Blends over whichever
-    (pruned) base models are present per ``(ts_id, forecast_date)``, renormalizing weights over that
-    present subset. Returns an empty list when no calculated strategy is requested or the base is
-    empty. ``yhat``/bounds are floats or ``None`` (NaN → NULL); ``run_id``/``ensemble_id`` are added
-    by the orchestrator so this stays a pure, config-only function.
+    and appends via the Storage Write API. Supports ``mean``, ``median``, ``inverse_error``,
+    ``champion`` (per-series single winner), and ``horizon_specialist`` (per-series,
+    per-horizon-step inverse-error blend when ``oof_df`` is supplied, falling back to series-level
+    ``inverse_error`` otherwise), as well as ``top_k`` and ``parsimony_margin`` pruning.
     """
     calculated = [s for s in cfg.ensemble.strategies if s in CALCULATED_STRATEGIES]
     if not calculated or base_df.empty:
@@ -543,18 +804,38 @@ def combine_calculated(
         for col in ("yhat", "yhat_lower", "yhat_upper")
     }
     index = wide["yhat"].index
+    ts_ids_arr = np.asarray(index.get_level_values("ts_id"))
+    has_selection_filter = cfg.ensemble.top_k is not None or cfg.ensemble.parsimony_margin > 0.0
 
-    # inverse_error weights: 1/mean(metric) per model, estimated per *series* and renormalized;
-    # uniform when no metric frame. Per-row, so the matrix is built against `index`.
     ie_weights: np.ndarray | None = None
-    if "inverse_error" in calculated:
+    if "inverse_error" in calculated or (
+        has_selection_filter and ("mean" in calculated or "median" in calculated)
+    ):
         ie_weights = _inverse_error_weight_matrix(
-            present, cfg, metric_df, np.asarray(index.get_level_values("ts_id"))
+            present, cfg, metric_df, ts_ids_arr, champion_only=False
         )
+
+    champ_weights: np.ndarray | None = None
+    if "champion" in calculated:
+        champ_weights = _inverse_error_weight_matrix(
+            present, cfg, metric_df, ts_ids_arr, champion_only=True
+        )
+
+    hs_weights: np.ndarray | None = None
+    if "horizon_specialist" in calculated:
+        hs_weights = _horizon_specialist_weight_matrix(present, cfg, metric_df, oof_df, index)
 
     rows: list[dict[str, Any]] = []
     for strategy in calculated:
-        weights = ie_weights if strategy == "inverse_error" else None
+        weights: np.ndarray | None = None
+        if strategy == "inverse_error":
+            weights = ie_weights
+        elif strategy == "champion":
+            weights = champ_weights
+        elif strategy == "horizon_specialist":
+            weights = hs_weights
+        elif has_selection_filter and ie_weights is not None:
+            weights = np.where(ie_weights > 0.0, 1.0, 0.0)
         blended = {
             col: _calc_blend(strategy, wide[col].to_numpy(dtype=float), weights)
             for col in ("yhat", "yhat_lower", "yhat_upper")
@@ -579,32 +860,30 @@ def combine_calculated(
 
 
 def _inverse_error_weight_matrix(
-    models: list[str], cfg: RunConfig, metric_df: pd.DataFrame | None, ts_ids: np.ndarray
+    models: list[str],
+    cfg: RunConfig,
+    metric_df: pd.DataFrame | None,
+    ts_ids: np.ndarray,
+    *,
+    champion_only: bool = False,
 ) -> np.ndarray:
-    """Inverse-error weights per prediction row, estimated **per series** — ``(n_rows, n_models)``.
-
-    Weight ∝ ``1/mean(decision_metric)`` over that series' own ``forecast_metadata`` rows, through
-    `inverse_error_weights` exactly as the pooled version did.
-
-    Per-series estimation makes ``inverse_error`` reproducible across ensemble triggers. The
-    microbatch ensemble trigger hands `combine_calculated` one ready-batch of series at a time while
-    the barrier trigger hands it all of them, so any weight pooled across series would depend on how
-    the run happened to batch. Estimating weights per series keeps the future blend invariant to
-    series partitioning and in step with `_inverse_error_blend`, the OOF-scored counterpart, which
-    is also computed per series. See `docs/validation.md`.
-
-    A series with no metadata of its own falls back to **uniform**, degrading to ``mean``: the same
-    NULL-tolerant behaviour as a missing metric frame, and partition-invariant for the same reason.
-    A frame with no ``ts_id`` column carries no series grain to use, so it keeps the pooled weights
-    (`_inverse_error_run_weights`); the production read always selects ``ts_id``.
-    """
+    """Inverse-error (or ``champion``) weights per prediction row, estimated **per series**."""
     n = len(models)
     metric = cfg.backtest.decision_metric
+    top_k = cfg.ensemble.top_k
+    margin = cfg.ensemble.parsimony_margin
     uniform = np.full(n, 1.0 / n)
     if metric_df is None or metric_df.empty or metric not in metric_df.columns:
+        if champion_only:
+            fallback = np.zeros(n, dtype=float)
+            fallback[0] = 1.0
+            return np.tile(fallback, (len(ts_ids), 1))
         return np.tile(uniform, (len(ts_ids), 1))
     if "ts_id" not in metric_df.columns:
-        return np.tile(_inverse_error_run_weights(models, cfg, metric_df), (len(ts_ids), 1))
+        return np.tile(
+            _inverse_error_run_weights(models, cfg, metric_df, champion_only=champion_only),
+            (len(ts_ids), 1),
+        )
 
     mean_by_series = (
         metric_df.groupby(["ts_id", "model_type"])[metric]
@@ -612,12 +891,13 @@ def _inverse_error_weight_matrix(
         .unstack("model_type")
         .reindex(columns=models)
     )
-    # One call to the shared 1-D helper per series rather than a vectorized re-implementation: the
-    # zero-error and all-non-finite branches have to stay identical to the OOF path's, and the only
-    # way to guarantee that is to call the same function.
     per_series = {
-        str(ts_id): inverse_error_weights(
-            np.array([loss_of(metric, float(v)) for v in row], dtype=float)
+        str(ts_id): _select_or_weight_models(
+            np.array([loss_of(metric, float(v)) for v in row], dtype=float),
+            models,
+            top_k=top_k,
+            parsimony_margin=margin,
+            champion_only=champion_only,
         )
         for ts_id, row in zip(mean_by_series.index, mean_by_series.to_numpy(), strict=True)
     }
@@ -625,31 +905,215 @@ def _inverse_error_weight_matrix(
 
 
 def _inverse_error_run_weights(
-    models: list[str], cfg: RunConfig, metric_df: pd.DataFrame | None
+    models: list[str],
+    cfg: RunConfig,
+    metric_df: pd.DataFrame | None,
+    *,
+    champion_only: bool = False,
 ) -> np.ndarray:
-    """Per-model inverse-error weights pooled over the whole metric frame (pure).
-
-    The fallback arm of `_inverse_error_weight_matrix`, for a frame with no ``ts_id`` column to
-    group by. Not the production path — pooling across series is what made ``inverse_error``
-    depend on microbatch batching; read that function's docstring before reaching for this one.
-
-    Weight ∝ ``1/mean(decision_metric)`` over the model's metadata rows, via
-    `inverse_error_weights` (zeros dominate, non-finite → uniform). Falls back to uniform when
-    no metric frame / column is available — degrading ``inverse_error`` to ``mean`` rather than
-    failing (the ``SAFE_DIVIDE(1, NULLIF(AVG(metric), 0))`` NULL-tolerant behavior).
-    """
+    """Per-model inverse-error weights pooled over the whole metric frame (pure)."""
     n = len(models)
     metric = cfg.backtest.decision_metric
     if metric_df is None or metric_df.empty or metric not in metric_df.columns:
         return np.full(n, 1.0 / n)
     mean_by_model = metric_df.groupby("model_type")[metric].mean()
-    # Weighted on the *loss*, not on the metric as stored. `inverse_error_weights` gives more
-    # weight to a smaller number, which is only what you want if smaller is better — for
-    # `coverage` it handed the 50%-covered model nearly twice the weight of the 95% one, and for
-    # `bias` it gave any negative bias a weight of exactly zero (the `err > 0` filter), punishing
-    # a model for being accurate in the wrong direction. `loss_of` is identity for the thirteen
-    # error metrics, so nothing moves for the metrics anyone actually ships with.
     errors = np.array(
         [loss_of(metric, float(mean_by_model.get(m, np.nan))) for m in models], dtype=float
     )
-    return inverse_error_weights(errors)
+    return _select_or_weight_models(
+        errors,
+        models,
+        top_k=cfg.ensemble.top_k,
+        parsimony_margin=cfg.ensemble.parsimony_margin,
+        champion_only=champion_only,
+    )
+
+
+def _horizon_specialist_weight_matrix(
+    models: list[str],
+    cfg: RunConfig,
+    metric_df: pd.DataFrame | None,
+    oof_df: pd.DataFrame | None,
+    index: pd.Index,
+) -> np.ndarray:
+    """Per-``(ts_id, horizon_step)`` weight matrix ``(n_rows, n_models)`` for future predictions.
+
+    Assigns each future prediction row its 1-based ordinal ``horizon_step`` within its ``ts_id``
+    (sorted by ``forecast_date``) and looks up the inner-fold OOF WAPE for ``(ts_id, step)``.
+    Falls back to series-level `_inverse_error_weight_matrix` when ``oof_df`` is absent or empty.
+    """
+    ts_ids = np.asarray(index.get_level_values("ts_id"))
+    fallback = _inverse_error_weight_matrix(models, cfg, metric_df, ts_ids, champion_only=False)
+    if oof_df is None or oof_df.empty or "horizon_step" not in oof_df.columns:
+        return fallback
+
+    keys = _fold_key(oof_df)
+    wide = oof_df.pivot_table(index=keys, columns="model_type", values="yhat", aggfunc="first")
+    present_in_oof = [m for m in models if m in wide.columns]
+    if not present_in_oof:
+        return fallback
+
+    vals = wide.reindex(columns=models).to_numpy(dtype=float)
+    aligned = oof_df.drop_duplicates(keys).set_index(keys).reindex(wide.index)
+    truth = aligned["y_true"].to_numpy(dtype=float)
+    fold_ids = _carried(aligned, keys, "fold_id", "float64")
+    steps = _carried(aligned, keys, "horizon_step", "float64").to_numpy(dtype=float)
+    oof_ts = wide.index.get_level_values("ts_id").to_numpy()
+    fit_rows = (fold_ids != holdout_fold_id(cfg)).to_numpy(dtype=bool)
+
+    top_k = cfg.ensemble.top_k
+    margin = cfg.ensemble.parsimony_margin
+    step_weights: dict[tuple[str, int], np.ndarray] = {}
+    for tid in np.unique(oof_ts):
+        s_rows = oof_ts == tid
+        s_steps = steps[s_rows]
+        if np.all(np.isnan(s_steps)):
+            continue
+        for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
+            h_rows = s_rows & (steps == step_val)
+            h_fit = h_rows & fit_rows
+            if not h_fit.any():
+                h_fit = h_rows
+            wape = _series_oof_wape(vals[h_fit], truth[h_fit])
+            if not np.all(np.isnan(wape)):
+                step_weights[(str(tid), round(float(step_val)))] = _select_or_weight_models(
+                    wape,
+                    models,
+                    top_k=top_k,
+                    parsimony_margin=margin,
+                    champion_only=False,
+                )
+
+    if not step_weights:
+        return fallback
+
+    out = fallback.copy()
+    # Compute 1-based horizon_step for each row in `index` (already sorted by (ts_id, forecast_date)
+    # from pivot_table).
+    step_counter: dict[str, int] = {}
+    for i, tid_raw in enumerate(ts_ids):
+        tid_str = str(tid_raw)
+        step_idx = step_counter.get(tid_str, 0) + 1
+        step_counter[tid_str] = step_idx
+        w = step_weights.get((tid_str, step_idx))
+        if w is not None:
+            out[i] = w
+    return out
+
+
+# --- ensemble empirical interval calibration & constraint enforcement ----------
+
+
+def ensemble_oof_bounds(
+    ens_oof_group: pd.DataFrame,
+    fold_id: object,
+    cfg: RunConfig,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Empirical 80% prediction intervals for one fold of an ensemble's OOF rows (pure).
+
+    Uses leave-one-fold-out OOF residuals (``y_true - yhat`` from all other folds in
+    ``ens_oof_group``, falling back to all folds when only a single fold exists) so every
+    ``ensemble_*`` pseudo-model earns non-NaN interval metrics (``coverage_80``, ``pinball_loss``,
+    ``winkler_score``, ``interval_width``, ``wis``) on the same footing as base models. Applies
+    `calibration.apply_output_constraints` when configured.
+    """
+
+    fg = ens_oof_group[ens_oof_group["fold_id"] == fold_id].sort_values("forecast_date")
+    if fg.empty:
+        return None, None
+    other = ens_oof_group[ens_oof_group["fold_id"] != fold_id]
+    ref = other if not other.empty else ens_oof_group
+    residuals = (ref["y_true"] - ref["yhat"]).dropna().to_numpy(dtype=float)
+    residuals = residuals[np.isfinite(residuals)]
+    if len(residuals) == 0:
+        return None, None
+    if len(residuals) == 1:
+        half = max(abs(float(residuals[0])), 1e-6)
+        q10, q90 = -half, half
+    else:
+        q10, q90 = np.percentile(residuals, [10.0, 90.0])
+        if q10 == q90:
+            half = max(abs(float(q10)) * 0.1, 1e-6)
+            q10, q90 = float(q10) - half, float(q90) + half
+
+    yhat = fg["yhat"].to_numpy(dtype=float)
+    frame = pd.DataFrame(
+        {
+            "yhat": yhat,
+            "yhat_lower": yhat + float(q10),
+            "yhat_upper": yhat + float(q90),
+        }
+    )
+    if has_output_constraints(cfg.output):
+        frame = apply_output_constraints(frame, cfg.output)
+    return frame["yhat_lower"].to_numpy(dtype=float), frame["yhat_upper"].to_numpy(dtype=float)
+
+
+def calibrate_ensemble_predictions(
+    pred_rows: list[dict[str, Any]],
+    ens_oof: pd.DataFrame,
+    cfg: RunConfig,
+) -> list[dict[str, Any]]:
+    """Calibrate ensemble future prediction intervals from ``ens_oof`` & apply output constraints.
+
+    When ``cfg.output.calibrate_intervals`` is True and ``ens_oof`` has >= 5 residual rows for a
+    ``(ts_id, model_type)`` cell, replaces the linearly blended bounds with empirical 10th/90th
+    residual quantiles from `calibration.calibrate_from_oof`. Always enforces physical output
+    constraints (`calibration.apply_output_constraints`) when configured.
+    """
+
+    if not pred_rows:
+        return pred_rows
+    need_constraints = has_output_constraints(cfg.output)
+    need_cal = not ens_oof.empty
+    if not need_constraints and not need_cal:
+        return pred_rows
+
+    df = pd.DataFrame(pred_rows)
+    oof_by_cell: dict[tuple[str, str], pd.DataFrame] = {}
+    if need_cal:
+        for (tid, mtype), g in ens_oof.groupby(["ts_id", "model_type"]):
+            oof_by_cell[(str(tid), str(mtype))] = g
+
+    out_parts: list[pd.DataFrame] = []
+    for (tid, mtype), group in df.groupby(["ts_id", "model_type"], sort=False):
+        cell_df = group.copy()
+        if need_cal:
+            oof_slice = oof_by_cell.get((str(tid), str(mtype)))
+            if oof_slice is not None and not oof_slice.empty:
+                cal = calibrate_from_oof(oof_slice, (0.1, 0.5, 0.9), residual_column="yhat")
+                if cal is not None:
+                    yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
+                    q10_arr = np.array(
+                        [cal.for_step(s).quantiles[0.1] for s in range(1, len(cell_df) + 1)],
+                        dtype=float,
+                    )
+                    q90_arr = np.array(
+                        [cal.for_step(s).quantiles[0.9] for s in range(1, len(cell_df) + 1)],
+                        dtype=float,
+                    )
+                    cell_df["yhat_lower"] = yhat_vals + q10_arr
+                    cell_df["yhat_upper"] = yhat_vals + q90_arr
+                else:
+                    resid = (oof_slice["y_true"] - oof_slice["yhat"]).dropna().to_numpy(dtype=float)
+                    resid = resid[np.isfinite(resid)]
+                    if len(resid) >= 2:
+                        q10, q90 = np.percentile(resid, [10.0, 90.0])
+                        yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
+                        cell_df["yhat_lower"] = yhat_vals + float(q10)
+                        cell_df["yhat_upper"] = yhat_vals + float(q90)
+        if need_constraints:
+            cell_df = apply_output_constraints(cell_df, cfg.output)
+        out_parts.append(cell_df)
+
+    merged = pd.concat(out_parts, ignore_index=True)
+    # Restore None for any NaN bounds so BigQuery Write API receives NULL rather than NaN.
+    result: list[dict[str, Any]] = []
+    for raw_rec in merged.to_dict(orient="records"):
+        rec: dict[str, Any] = {str(k): v for k, v in raw_rec.items()}
+        for bcol in ("yhat_lower", "yhat_upper"):
+            val = rec.get(bcol)
+            if val is not None and isinstance(val, float) and np.isnan(val):
+                rec[bcol] = None
+        result.append(rec)
+    return result

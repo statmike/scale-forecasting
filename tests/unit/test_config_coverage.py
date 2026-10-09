@@ -234,6 +234,15 @@ UNPROVEN: dict[str, str] = {
         "join — which reads configs — is structurally blind to that. Read the ledger's prose, not "
         "this entry, before concluding the path is untested."
     ),
+    # --- ensemble ------------------------------------------------------------------------------
+    "ensemble.strategies=champion": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_smart_ensembles_champion_horizon_specialist_topk_and_parsimony"
+    ),
+    "ensemble.strategies=horizon_specialist": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_smart_ensembles_champion_horizon_specialist_topk_and_parsimony"
+    ),
     # --- features ------------------------------------------------------------------------------
     # `fourier=true` and `level_shift=true` sat here until 2026-09-26, pointed at their offline
     # tests, because the only config that set them was smoke 29 and smoke 29 could not finish: the
@@ -242,6 +251,11 @@ UNPROVEN: dict[str, str] = {
     "features.on_unsupported_covariates=error": (
         "tests/unit/test_features.py::"
         "test_on_unsupported_covariates_error_refuses_in_preflight_and_effective_config"
+    ),
+    # --- hierarchy -----------------------------------------------------------------------------
+    "hierarchy.reconciliation_methods=mint_nonneg": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_reconciliation_mint_nonneg_guarantees_nonnegative_coherent_forecasts"
     ),
     # --- models --------------------------------------------------------------------------------
     "models=vertex_l2l": (
@@ -254,6 +268,22 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
     ),
     # --- output ------------------------------------------------------------------------------
+    "output.integer_rounding=ceil": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_output_constraints_floor_cap_and_rounding_modes"
+    ),
+    "output.integer_rounding=cumulative_round": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_output_constraints_floor_cap_and_rounding_modes"
+    ),
+    "output.integer_rounding=floor": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_output_constraints_floor_cap_and_rounding_modes"
+    ),
+    "output.integer_rounding=round": (
+        "tests/unit/test_phase_g1_workbench.py::"
+        "test_output_constraints_floor_cap_and_rounding_modes"
+    ),
     "output.point_forecast=(unset)": (
         "reason: unreachable rather than unproven. The field is declared `… | None = None`, but "
         "validation resolves the `None` into a concrete arm before any object holds it, so no "

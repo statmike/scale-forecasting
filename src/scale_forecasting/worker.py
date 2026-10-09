@@ -24,7 +24,14 @@ import numpy as np
 import pandas as pd
 
 from .backtest import FitTally, achievable_folds, backtest_cell, resolve_geometry
-from .calibration import apply_calibration, calibrate_from_oof, compare_arms, resolve_arm
+from .calibration import (
+    apply_calibration,
+    apply_output_constraints,
+    calibrate_from_oof,
+    compare_arms,
+    has_output_constraints,
+    resolve_arm,
+)
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
 from .features import (
@@ -742,6 +749,11 @@ def run_cell(
         arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
         cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
         predictions, interval_calibration = apply_calibration(predictions, cal, arm)
+        if has_output_constraints(cfg.output):
+            bounds_src = (
+                future_exog if future_exog is not None and not future_exog.empty else series
+            )
+            predictions = apply_output_constraints(predictions, cfg.output, bounds_df=bounds_src)
         # `corrected`, not `arm`: the margin has to mean the same thing on every row for a
         # fleet-wide GROUP BY to be worth reading, so the comparison is always
         # corrected-vs-raw under the metric's own functional. Passing the selected arm would
@@ -1010,6 +1022,30 @@ def run_panel(
                         )
                         lower = pred["yhat_lower"].to_numpy(dtype=float)
                         upper = pred["yhat_upper"].to_numpy(dtype=float)
+                        cutoff = pd.Timestamp(train_slice[date_col].iloc[-1]).normalize()
+                        fold_oof = pd.DataFrame(
+                            {
+                                "ds": pd.to_datetime(val_slice[date_col]).to_numpy(),
+                                "fold_id": fold.fold_id,
+                                "y_true": y_val,
+                                "yhat": yhat,
+                                "yhat_raw": yhat_raw,
+                                "yhat_adjusted": yhat_adjusted,
+                                "yhat_lower": lower,
+                                "yhat_upper": upper,
+                                "cutoff_date": cutoff,
+                                "horizon_step": np.arange(1, len(y_val) + 1),
+                                "yhat_stale": np.full(len(y_val), np.nan),
+                            },
+                            columns=list(OOF_COLUMNS),
+                        )
+                        if has_output_constraints(model_cfg.output):
+                            fold_oof = apply_output_constraints(
+                                fold_oof, model_cfg.output, bounds_df=val_slice
+                            )
+                            yhat = fold_oof["yhat"].to_numpy(dtype=float)
+                            lower = fold_oof["yhat_lower"].to_numpy(dtype=float)
+                            upper = fold_oof["yhat_upper"].to_numpy(dtype=float)
                         fmetrics_by_uid[uid].append(
                             compute_metrics(
                                 y_val,
@@ -1020,25 +1056,7 @@ def run_panel(
                                 seasonal_period=m_period,
                             )
                         )
-                        cutoff = pd.Timestamp(train_slice[date_col].iloc[-1]).normalize()
-                        oof_chunks_by_uid[uid].append(
-                            pd.DataFrame(
-                                {
-                                    "ds": pd.to_datetime(val_slice[date_col]).to_numpy(),
-                                    "fold_id": fold.fold_id,
-                                    "y_true": y_val,
-                                    "yhat": yhat,
-                                    "yhat_raw": yhat_raw,
-                                    "yhat_adjusted": yhat_adjusted,
-                                    "yhat_lower": lower,
-                                    "yhat_upper": upper,
-                                    "cutoff_date": cutoff,
-                                    "horizon_step": np.arange(1, len(y_val) + 1),
-                                    "yhat_stale": np.full(len(y_val), np.nan),
-                                },
-                                columns=list(OOF_COLUMNS),
-                            )
-                        )
+                        oof_chunks_by_uid[uid].append(fold_oof)
 
                 for uid in uids:
                     sub = series_frames[uid]
@@ -1108,6 +1126,14 @@ def run_panel(
             arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
             cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
             predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
+            if has_output_constraints(cfg.output):
+                fut_df = full_futr_map.get(uid)
+                bounds_src = (
+                    fut_df if fut_df is not None and not fut_df.empty else series_frames[uid]
+                )
+                predictions = apply_output_constraints(
+                    predictions, cfg.output, bounds_df=bounds_src
+                )
             arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
 
             artifact_bytes: bytes | None = None

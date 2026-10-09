@@ -251,7 +251,13 @@ def bakeoff(
     """
     from .backtest import training_window
     from .ensemble_run import _apply_weights
-    from .ensembler import combine_calculated, combine_oof, fit_learned
+    from .ensembler import (
+        calibrate_ensemble_predictions,
+        combine_calculated,
+        combine_oof,
+        ensemble_oof_bounds,
+        fit_learned,
+    )
     from .metrics import METRIC_NAMES, compute_metrics
     from .seasonality import seasonal_period
     from .worker import rollup_metrics
@@ -323,10 +329,13 @@ def bakeoff(
     metric_df = pd.DataFrame(metric_long)
 
     # --- ensembles: calculated + learned, both via the framework's pure functions ------------
-    ens_pred_rows: list[dict[str, Any]] = list(combine_calculated(base_df, cfg, metric_df))
+    ens_pred_rows: list[dict[str, Any]] = list(combine_calculated(base_df, cfg, metric_df, oof_df))
     learned_weights, _artifacts, _basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
         ens_pred_rows.extend(_apply_weights(base_df, wmap, cfg.run_name, strategy))
+
+    ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
+    ens_pred_rows = calibrate_ensemble_predictions(ens_pred_rows, ens_oof, cfg)
 
     for r in ens_pred_rows:
         pred_parts.append(
@@ -347,29 +356,28 @@ def bakeoff(
         )
 
     # --- score the ensembles on the OOF window (identical to ensemble_run) --------------------
-    # The MASE/RMSSE denominator is the *fold's* training window, cut at its cutoff — the same rule
-    # `backtest_cell` applies to the base models above, so the two halves of this leaderboard are
-    # scaled by the same thing. Handing over the whole series would scale the ensembles by a history
-    # that includes the window they are being judged on.
     hist = series.sort_values(cfg.data.date_col)
     hist_ds = pd.to_datetime(hist[cfg.data.date_col]).to_numpy()
     hist_y = hist[cfg.data.target_col].to_numpy()
-    ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
     for model_type, g in ens_oof.groupby("model_type"):
-        fold_panels = [
-            compute_metrics(
-                fg["y_true"].to_numpy(),
-                fg["yhat"].to_numpy(),
-                y_train=training_window(
-                    hist_ds,
-                    hist_y,
-                    fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None,
-                    cfg,
-                ),
-                seasonal_period=seasonal_period(cfg.data.freq),
+        fold_panels: list[dict[str, float]] = []
+        for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
+            lo, hi = ensemble_oof_bounds(g, _fold, cfg)
+            fold_panels.append(
+                compute_metrics(
+                    fg["y_true"].to_numpy(),
+                    fg["yhat"].to_numpy(),
+                    lower=lo,
+                    upper=hi,
+                    y_train=training_window(
+                        hist_ds,
+                        hist_y,
+                        fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None,
+                        cfg,
+                    ),
+                    seasonal_period=seasonal_period(cfg.data.freq),
+                )
             )
-            for _fold, fg in g.sort_values("forecast_date").groupby("fold_id")
-        ]
         panel = rollup_metrics(fold_panels)
         row = {"model": str(model_type), "kind": "ensemble", "status": "ok"}
         row.update({m: panel.get(m, float("nan")) for m in METRIC_NAMES})

@@ -970,32 +970,45 @@ def backtest_cell(
             )
         )
 
-        oof_parts.append(
-            pd.DataFrame(
-                {
-                    "ds": pd.DatetimeIndex(val_dates).as_unit("ns"),
-                    "fold_id": fold.fold_id,
-                    "y_true": y_true,
-                    "yhat": yhat,
-                    "yhat_raw": yhat_raw,
-                    "yhat_adjusted": yhat_adjusted,
-                    "yhat_lower": lower,
-                    "yhat_upper": upper,
-                    # The last training date — the origin the fold forecasts from, `ds <= cutoff`.
-                    # `fold_id` is an ordinal within one series' plan and the native path derives
-                    # its folds from a single global `MAX(ds)`, so on a ragged panel the same
-                    # `fold_id` is not the same window. The date is, which is why it is recorded
-                    # here rather than reconstructed by a reader who would have to know the
-                    # geometry to do it.
-                    "cutoff_date": y.index[fold.train_end - 1],
-                    # 1-based position within this fold's horizon, so "how fast does this model
-                    # decay?" is a GROUP BY instead of a re-run. Every fold answers h=1 and h=28
-                    # in the same rows; nothing else in the schema separates them.
-                    "horizon_step": range(1, fold.val_size + 1),
-                    "yhat_stale": yhat_stale,
-                }
-            )
+        fold_oof = pd.DataFrame(
+            {
+                "ds": pd.DatetimeIndex(val_dates).as_unit("ns"),
+                "fold_id": fold.fold_id,
+                "y_true": y_true,
+                "yhat": yhat,
+                "yhat_raw": yhat_raw,
+                "yhat_adjusted": yhat_adjusted,
+                "yhat_lower": lower,
+                "yhat_upper": upper,
+                # The last training date — the origin the fold forecasts from, `ds <= cutoff`.
+                # `fold_id` is an ordinal within one series' plan and the native path derives
+                # its folds from a single global `MAX(ds)`, so on a ragged panel the same
+                # `fold_id` is not the same window. The date is, which is why it is recorded
+                # here rather than reconstructed by a reader who would have to know the
+                # geometry to do it.
+                "cutoff_date": y.index[fold.train_end - 1],
+                # 1-based position within this fold's horizon, so "how fast does this model
+                # decay?" is a GROUP BY instead of a re-run. Every fold answers h=1 and h=28
+                # in the same rows; nothing else in the schema separates them.
+                "horizon_step": range(1, fold.val_size + 1),
+                "yhat_stale": yhat_stale,
+            }
         )
+        from .calibration import apply_output_constraints, has_output_constraints
+
+        if has_output_constraints(cfg.output):
+            val_bounds = (
+                series.sort_values(cfg.data.date_col).iloc[fold.val_start : fold.val_end]
+                if cfg.data.date_col in series.columns
+                else series.iloc[fold.val_start : fold.val_end]
+            )
+            fold_oof = apply_output_constraints(fold_oof, cfg.output, bounds_df=val_bounds)
+            yhat = fold_oof["yhat"].to_numpy(dtype=float)
+            lower = fold_oof["yhat_lower"].to_numpy(dtype=float)
+            upper = fold_oof["yhat_upper"].to_numpy(dtype=float)
+            yhat_stale = fold_oof["yhat_stale"].to_numpy(dtype=float)
+
+        oof_parts.append(fold_oof)
         fold_metrics.append(
             {
                 **compute_metrics(

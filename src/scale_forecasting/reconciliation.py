@@ -11,7 +11,7 @@ pandas/NumPy:
    ``S`` of shape ``(n_total, n_bottom)`` satisfying ``y_t = S @ b_t``.
 2. **Reconciliation projection (`reconcile_matrix`)** — Computes the mapping matrix ``G`` of shape
    ``(n_bottom, n_total)`` such that ``y_tilde = S @ G @ y_hat`` is coherent across the entire
-   hierarchy for all seven supported methods:
+   hierarchy for all eight supported methods:
 
    * ``bottom_up`` — sum bottom-level base forecasts upward (``G = [0 | I]``).
    * ``top_down`` — disaggregate the top-level base forecast by average historical proportions
@@ -26,6 +26,10 @@ pandas/NumPy:
    * ``mint_shrink`` — Minimum Trace with analytical Schäfer-Strimmer shrinkage covariance of
      residuals (``W_h = lambda_D * diag(W_hat_1) + (1 - lambda_D) * W_hat_1``), guaranteed
      symmetric positive-definite even when ``n_series >> T_obs``.
+   * ``mint_nonneg`` — Wickramasuriya, Turlach & Hyndman (2020) non-negative Minimum Trace
+     reconciliation solving the constrained quadratic program
+     ``min_{b >= 0} (y_hat - S b)^T W_h^{-1} (y_hat - S b)`` via non-negative least squares
+     (`scipy.optimize.nnls`) so ``y_tilde = S @ b_tilde >= 0`` is both coherent and non-negative.
 3. **Forecast, OOF, and cell reconciliation (`reconcile_forecasts`, `reconcile_oof`,
    `reconcile_cells`, `verify_coherence`)** — Projects point forecasts (`yhat`, `yhat_raw`) via
    ``P = S @ G`` and prediction intervals (`yhat_lower`, `yhat_upper`) via the projected error
@@ -464,7 +468,7 @@ def reconcile_matrix(
         st_winv = s_mat.T * inv_w[np.newaxis, :]
         return np.linalg.solve(st_winv @ s_mat, st_winv)
 
-    # method == "mint_shrink"
+    # method in ("mint_shrink", "mint_nonneg")
     if res_mat is None or res_mat.shape[0] == 0:
         inv_w = 1.0 / np.maximum(spec.structural_weights, _VAR_FLOOR)
         st_winv = s_mat.T * inv_w[np.newaxis, :]
@@ -477,12 +481,57 @@ def reconcile_matrix(
     return np.linalg.solve(st_winv_s, winv_s.T)
 
 
+def _mint_whitener(
+    spec: HierarchySpec,
+    residuals_df: pd.DataFrame | None,
+    *,
+    ts_id_col: str = "ts_id",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(W_h^{-1/2} @ S, W_h^{-1/2})`` for constrained non-negative MinT (`mint_nonneg`).
+
+    By Wickramasuriya, Turlach & Hyndman (2020), minimizing
+    ``(y_hat - S @ b)^T W_h^{-1} (y_hat - S @ b)`` subject to ``b >= 0`` is equivalent to the
+    whitened non-negative least-squares problem
+    ``min_{b >= 0} ||(W_h^{-1/2} S) b - W_h^{-1/2} y_hat||_2^2``.
+    """
+    s_mat = spec.summing_matrix
+    res_mat = _residual_matrix(residuals_df, spec.node_ids, ts_id_col=ts_id_col)
+    if res_mat is None or res_mat.shape[0] == 0:
+        inv_sqrt = 1.0 / np.sqrt(np.maximum(spec.structural_weights, _VAR_FLOOR))
+        w_inv_sqrt = np.diag(inv_sqrt)
+    else:
+        w_shrink, _lam = schafer_strimmer_shrinkage(res_mat)
+        eigvals, eigvecs = np.linalg.eigh(w_shrink)
+        inv_sqrt_eig = 1.0 / np.sqrt(np.maximum(eigvals, _VAR_FLOOR))
+        w_inv_sqrt = (eigvecs * inv_sqrt_eig[np.newaxis, :]) @ eigvecs.T
+    return w_inv_sqrt @ s_mat, w_inv_sqrt
+
+
+def _solve_nonneg_projection(
+    vec: np.ndarray,
+    spec: HierarchySpec,
+    p_mat: np.ndarray,
+    nonneg_lhs: np.ndarray,
+    w_inv_sqrt: np.ndarray,
+) -> np.ndarray:
+    """Project ``vec`` coherently and non-negatively via unconstrained check + `nnls` fallback."""
+    unconstrained = p_mat @ vec
+    if np.all(unconstrained >= 0.0):
+        return unconstrained
+    from scipy.optimize import nnls
+
+    b_nonneg, _ = nnls(nonneg_lhs, w_inv_sqrt @ vec)
+    return np.maximum(0.0, spec.summing_matrix @ b_nonneg)
+
+
 def _project_slice(
     slice_df: pd.DataFrame,
     spec: HierarchySpec,
     p_mat: np.ndarray,
     *,
     ts_id_col: str,
+    nonneg_lhs: np.ndarray | None = None,
+    w_inv_sqrt: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Apply the coherent projection ``P = S @ G`` to one ``(model, date)`` cross-section."""
     indexed = slice_df.drop_duplicates(subset=[ts_id_col], keep="first").set_index(ts_id_col)
@@ -495,11 +544,21 @@ def _project_slice(
 
     out = aligned.reset_index()
     yhat = out["yhat"].to_numpy(dtype=float)
-    yhat_reconciled = p_mat @ yhat
+    is_nonneg = nonneg_lhs is not None and w_inv_sqrt is not None
+    if is_nonneg:
+        assert nonneg_lhs is not None and w_inv_sqrt is not None
+        yhat_reconciled = _solve_nonneg_projection(yhat, spec, p_mat, nonneg_lhs, w_inv_sqrt)
+    else:
+        yhat_reconciled = p_mat @ yhat
     out["yhat"] = yhat_reconciled
 
     if "yhat_raw" in out.columns and out["yhat_raw"].notna().all():
-        out["yhat_raw"] = p_mat @ out["yhat_raw"].to_numpy(dtype=float)
+        raw_vec = out["yhat_raw"].to_numpy(dtype=float)
+        out["yhat_raw"] = (
+            _solve_nonneg_projection(raw_vec, spec, p_mat, nonneg_lhs, w_inv_sqrt)
+            if is_nonneg and nonneg_lhs is not None and w_inv_sqrt is not None
+            else (p_mat @ raw_vec)
+        )
     if "yhat_adjusted" in out.columns and out["yhat_adjusted"].notna().all():
         out["yhat_adjusted"] = yhat_reconciled
 
@@ -519,8 +578,13 @@ def _project_slice(
         # diag(P @ diag(base_var) @ P.T) == (P**2) @ base_var
         reconciled_var = np.maximum(0.0, (p_mat**2) @ base_var)
         reconciled_hw = _Z_80 * np.sqrt(reconciled_var)
-        out["yhat_lower"] = yhat_reconciled - reconciled_hw
-        out["yhat_upper"] = yhat_reconciled + reconciled_hw
+        lo = yhat_reconciled - reconciled_hw
+        hi = yhat_reconciled + reconciled_hw
+        if is_nonneg:
+            lo = np.maximum(0.0, lo)
+            hi = np.maximum(yhat_reconciled, hi)
+        out["yhat_lower"] = lo
+        out["yhat_upper"] = hi
 
     return out
 
@@ -582,9 +646,21 @@ def reconcile_forecasts(
             target_col=target_col,
         )
         p_mat = spec.summing_matrix @ g_mat
+        nonneg_lhs, w_inv_sqrt = (
+            _mint_whitener(spec, model_oof, ts_id_col=ts_id_col)
+            if method == "mint_nonneg"
+            else (None, None)
+        )
 
         for _dt, slice_df in model_preds.groupby(dcol, sort=True):
-            rec_slice = _project_slice(slice_df, spec, p_mat, ts_id_col=ts_id_col)
+            rec_slice = _project_slice(
+                slice_df,
+                spec,
+                p_mat,
+                ts_id_col=ts_id_col,
+                nonneg_lhs=nonneg_lhs,
+                w_inv_sqrt=w_inv_sqrt,
+            )
             if stamp_method and model_name is not None:
                 rec_slice["model_type"] = f"{model_name}_{method}"
             reconciled_parts.append(rec_slice)
@@ -611,8 +687,9 @@ def reconcile_oof(
     """Reconcile backtest OOF predictions across ``spec`` using ``method`` (pure).
 
     When ``cfg`` is provided and more than one backtest fold exists, estimates residual-covariance
-    weights (`wls_var`, `mint_shrink`) strictly from inner folds (`fold_id != holdout_fold_id(cfg)`)
-    so the holdout fold is never leaked into the reconciliation matrix ``G``.
+    weights (`wls_var`, `mint_shrink`, `mint_nonneg`) strictly from inner folds
+    (`fold_id != holdout_fold_id(cfg)`) so the holdout fold is never leaked into the reconciliation
+    matrix ``G``.
     """
     if oof_df.empty:
         return oof_df.copy()
@@ -643,10 +720,22 @@ def reconcile_oof(
             target_col=target_col,
         )
         p_mat = spec.summing_matrix @ g_mat
+        nonneg_lhs, w_inv_sqrt = (
+            _mint_whitener(spec, fit_oof, ts_id_col=ts_id_col)
+            if method == "mint_nonneg"
+            else (None, None)
+        )
 
         group_keys = [fold_col, dcol] if fold_col in m_oof.columns else [dcol]
         for _key, slice_df in m_oof.groupby(group_keys, sort=True):
-            rec_slice = _project_slice(slice_df, spec, p_mat, ts_id_col=ts_id_col)
+            rec_slice = _project_slice(
+                slice_df,
+                spec,
+                p_mat,
+                ts_id_col=ts_id_col,
+                nonneg_lhs=nonneg_lhs,
+                w_inv_sqrt=w_inv_sqrt,
+            )
             if stamp_method and model_name is not None:
                 rec_slice["model_type"] = f"{model_name}_{method}"
             parts.append(rec_slice)

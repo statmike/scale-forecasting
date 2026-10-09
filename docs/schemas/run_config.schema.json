@@ -652,6 +652,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "parsimony_margin": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Parsimony Margin",
+          "type": "number"
+        },
         "prune_threshold": {
           "default": 0.0,
           "minimum": 0.0,
@@ -667,6 +673,8 @@
               "mean",
               "median",
               "inverse_error",
+              "champion",
+              "horizon_specialist",
               "nnls",
               "ridge",
               "xgb"
@@ -675,6 +683,19 @@
           },
           "title": "Strategies",
           "type": "array"
+        },
+        "top_k": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Top K"
         }
       },
       "title": "EnsembleConfig",
@@ -1024,7 +1045,8 @@
               "ols",
               "wls_struct",
               "wls_var",
-              "mint_shrink"
+              "mint_shrink",
+              "mint_nonneg"
             ],
             "type": "string"
           },
@@ -1077,8 +1099,68 @@
     },
     "OutputConfig": {
       "additionalProperties": false,
-      "description": "What the numbers we ship *mean* \u2014 the functional behind ``yhat``.\n\nIts own section rather than a field on `BacktestConfig`, even though both of its rules involve\nthe backtest, because a reader asking \"how do I control the point forecast?\" will not look\nunder `backtest`, and the docs are a product surface here.\n\nEvery model emits one number per future date, so something decides what that number is. For a\nlong time this project decided by accident: ten of sixteen models built their band from\nresidual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped\nforecast was silently ``prediction + median(in-sample residual)`` \u2014 un-named, un-configurable,\nand applied to some models and not others. Measurement said the correction was worth keeping\n(it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an\nopinion into a default: the alternative is now sayable.\n\n``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never\ndestructive and the two arms can always be compared after the fact. See `calibration.py`.",
+      "description": "What the numbers we ship *mean* \u2014 the functional behind ``yhat`` and physical bounds.\n\nIts own section rather than a field on `BacktestConfig`, even though both of its rules involve\nthe backtest, because a reader asking \"how do I control the point forecast?\" will not look\nunder `backtest`, and the docs are a product surface here.\n\nEvery model emits one number per future date, so something decides what that number is. For a\nlong time this project decided by accident: ten of sixteen models built their band from\nresidual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped\nforecast was silently ``prediction + median(in-sample residual)`` \u2014 un-named, un-configurable,\nand applied to some models and not others. Measurement said the correction was worth keeping\n(it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an\nopinion into a default: the alternative is now sayable.\n\n``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never\ndestructive and the two arms can always be compared after the fact. Physical constraints\n(``floor``, ``cap``, ``floor_col``, ``cap_col``, and ``integer_rounding``) are applied\npost-calibration so ``calibrate_from_oof`` estimates empirical residuals on unclamped raw\nmodel outputs while ``yhat``, ``yhat_lower``, ``yhat_upper``, ``quantiles``, and scored OOF\npredictions respect physical reality. See `calibration.py`.",
       "properties": {
+        "cap": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cap"
+        },
+        "cap_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cap Col"
+        },
+        "floor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Floor"
+        },
+        "floor_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Floor Col"
+        },
+        "integer_rounding": {
+          "default": "none",
+          "enum": [
+            "none",
+            "round",
+            "ceil",
+            "floor",
+            "cumulative_round"
+          ],
+          "title": "Integer Rounding",
+          "type": "string"
+        },
         "point_forecast": {
           "anyOf": [
             {

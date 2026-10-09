@@ -170,6 +170,13 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("compute", "gke_namespace"): "default",
     ("compute", "ray_mode"): "vertex",
     ("compute", "automl_mode"): "tabular_workflow",
+    ("output", "floor"): None,
+    ("output", "cap"): None,
+    ("output", "floor_col"): None,
+    ("output", "cap_col"): None,
+    ("output", "integer_rounding"): "none",
+    ("ensemble", "top_k"): None,
+    ("ensemble", "parsimony_margin"): 0.0,
 }
 
 
@@ -277,8 +284,16 @@ def make_ensemble_id(ensemble: EnsembleConfig) -> str:
     identical config. Independent of the parent ``run_id`` — the same ensemble config keys
     identically across runs, which is what lets the standalone entrypoint re-ensemble any run.
     """
+    raw_payload: dict[str, object] = {
+        "strategies": sorted(ensemble.strategies),
+        "prune_threshold": ensemble.prune_threshold,
+    }
+    if ensemble.top_k is not None:
+        raw_payload["top_k"] = ensemble.top_k
+    if ensemble.parsimony_margin != 0.0:
+        raw_payload["parsimony_margin"] = ensemble.parsimony_margin
     payload = json.dumps(
-        {"strategies": sorted(ensemble.strategies), "prune_threshold": ensemble.prune_threshold},
+        raw_payload,
         sort_keys=True,
         separators=(",", ":"),
     )

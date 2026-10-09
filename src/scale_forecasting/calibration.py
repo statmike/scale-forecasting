@@ -50,7 +50,8 @@ the literature carries separate adaptive variants for time series. What this is:
 empirical quantile calibration. Much better than in-sample, and honest about what it claims.
 
 Public surface: ``Calibration``, ``StepCalibration``, ``calibrate_from_oof``,
-``apply_calibration``, ``compare_arms``, ``coverage_by_step``, ``select_arm``, ``resolve_arm``,
+``apply_calibration``, ``apply_output_constraints``, ``has_output_constraints``,
+``compare_arms``, ``coverage_by_step``, ``select_arm``, ``resolve_arm``,
 ``POINT_FORECAST_ARMS``.
 """
 
@@ -66,6 +67,8 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .config import OutputConfig
 
 # Which functional `yhat` carries. "raw" is the model's own output untouched; "median" and "mean"
 # add the corresponding residual statistic. Config defaults this from `decision_metric` rather than
@@ -353,6 +356,211 @@ def apply_calibration(
     out["yhat"] = raw if arm == "raw" else out["yhat_adjusted"].to_numpy(dtype=float)
     out["quantiles"] = pd.array(qjson, dtype="string")
     return out[list(CALIBRATED_COLUMNS)], cal.source
+
+
+def has_output_constraints(output_cfg: OutputConfig | None) -> bool:
+    """Return True when ``output_cfg`` configures any physical bound or discrete rounding rule."""
+    if output_cfg is None:
+        return False
+    return (
+        output_cfg.floor is not None
+        or output_cfg.cap is not None
+        or output_cfg.floor_col is not None
+        or output_cfg.cap_col is not None
+        or output_cfg.integer_rounding != "none"
+    )
+
+
+def _cumulative_round(arr: np.ndarray) -> np.ndarray:
+    """Error-diffusion (Bresenham) cumulative rounding across the forecast horizon.
+
+    Rounds the running cumulative sum ``round(cumsum(arr))`` and takes first differences so a
+    fractional series (for example ``0.2`` units/day over 5 days) emits discrete integer units
+    (``[0, 0, 1, 0, 0]``) whose horizon total matches the unrounded cumulative demand instead of
+    collapsing to all zeros under step-by-step ``round()``. Preserves ``NaN`` entries in place.
+    """
+    out = np.asarray(arr, dtype=float).copy()
+    finite_mask = np.isfinite(out)
+    if not finite_mask.any():
+        return out
+    finite_vals = out[finite_mask]
+    cum_rounded = np.rint(np.cumsum(finite_vals))
+    out[finite_mask] = np.diff(cum_rounded, prepend=0.0)
+    return out
+
+
+def _resolve_bound_array(
+    n: int,
+    scalar_bound: float | None,
+    col_name: str | None,
+    df: pd.DataFrame,
+    bounds_df: pd.DataFrame | None,
+    *,
+    default: float,
+    combine_fn: Any,
+) -> np.ndarray:
+    """Resolve a per-step lower or upper bound array of length ``n``."""
+    bound = np.full(n, float(scalar_bound) if scalar_bound is not None else default, dtype=float)
+    if not col_name:
+        return bound
+
+    col_vals: np.ndarray | None = None
+    if col_name in df.columns:
+        col_vals = pd.to_numeric(df[col_name], errors="coerce").to_numpy(dtype=float)
+    elif bounds_df is not None and not bounds_df.empty and col_name in bounds_df.columns:
+        # Align by date column when both frames carry dates, else positional / carry-last.
+        df_date_col = (
+            "ds"
+            if "ds" in df.columns
+            else ("forecast_date" if "forecast_date" in df.columns else None)
+        )
+        b_date_col = (
+            "ds"
+            if "ds" in bounds_df.columns
+            else ("forecast_date" if "forecast_date" in bounds_df.columns else None)
+        )
+        if df_date_col is not None and b_date_col is not None:
+            b_map = (
+                bounds_df[[b_date_col, col_name]]
+                .assign(_dt=pd.to_datetime(bounds_df[b_date_col]))
+                .drop_duplicates(subset=["_dt"], keep="last")
+                .set_index("_dt")[col_name]
+            )
+            aligned = pd.to_numeric(
+                pd.to_datetime(df[df_date_col]).map(b_map), errors="coerce"
+            ).to_numpy(dtype=float)
+            if np.isfinite(aligned).any():
+                # Fill any unmatched future dates with the last finite observation in bounds_df.
+                raw_b = pd.to_numeric(bounds_df[col_name], errors="coerce").dropna()
+                fallback_val = float(raw_b.iloc[-1]) if not raw_b.empty else np.nan
+                col_vals = np.where(np.isfinite(aligned), aligned, fallback_val)
+        if col_vals is None:
+            raw_b_arr = pd.to_numeric(bounds_df[col_name], errors="coerce").to_numpy(dtype=float)
+            if len(raw_b_arr) == n:
+                col_vals = raw_b_arr
+            else:
+                finite_b = raw_b_arr[np.isfinite(raw_b_arr)]
+                if finite_b.size:
+                    col_vals = np.full(n, float(finite_b[-1]), dtype=float)
+
+    if col_vals is not None and len(col_vals) == n:
+        finite = np.isfinite(col_vals)
+        bound = np.where(finite, combine_fn(bound, col_vals), bound)
+    return bound
+
+
+def _round_array(arr: np.ndarray, mode: str) -> np.ndarray:
+    if mode == "round":
+        return np.rint(arr)
+    if mode == "ceil":
+        return np.ceil(arr)
+    if mode == "floor":
+        return np.floor(arr)
+    if mode == "cumulative_round":
+        return _cumulative_round(arr)
+    return arr
+
+
+def apply_output_constraints(
+    df: pd.DataFrame,
+    output_cfg: OutputConfig | None,
+    bounds_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Apply physical bounds (``floor``, ``cap``, ``floor_col``, ``cap_col``) and discrete
+    ``integer_rounding`` post-calibration (pure).
+
+    Crucially, ``yhat_raw`` is **never** modified: `calibrate_from_oof` estimates empirical
+    residuals from ``y_true - yhat_raw``, so leaving ``yhat_raw`` unclamped prevents one-sided
+    truncation bias in the learned residual distribution while guaranteeing that ``yhat``,
+    ``yhat_adjusted``, ``yhat_lower``, ``yhat_upper``, `` yhat_stale``, and ``quantiles`` obey
+    physical constraints before metrics or registry rows are emitted.
+    """
+    if df is None or df.empty or not has_output_constraints(output_cfg):
+        return df
+    assert output_cfg is not None
+
+    out = df.copy()
+    n = len(out)
+    lo = _resolve_bound_array(
+        n,
+        output_cfg.floor,
+        output_cfg.floor_col,
+        out,
+        bounds_df,
+        default=-np.inf,
+        combine_fn=np.maximum,
+    )
+    hi = _resolve_bound_array(
+        n,
+        output_cfg.cap,
+        output_cfg.cap_col,
+        out,
+        bounds_df,
+        default=np.inf,
+        combine_fn=np.minimum,
+    )
+    # Ensure hi >= lo if dynamic columns cross.
+    hi = np.maximum(lo, hi)
+    mode = output_cfg.integer_rounding
+
+    for col in ("yhat", "yhat_adjusted", "yhat_stale"):
+        if col in out.columns:
+            vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+            finite = np.isfinite(vals)
+            if finite.any():
+                clamped = np.where(finite, np.clip(vals, lo, hi), np.nan)
+                rounded = _round_array(clamped, mode)
+                out[col] = np.where(finite, np.clip(rounded, lo, hi), np.nan)
+
+    for bcol, bmode in (("yhat_lower", "floor"), ("yhat_upper", "ceil")):
+        if bcol in out.columns:
+            vals = pd.to_numeric(out[bcol], errors="coerce").to_numpy(dtype=float)
+            finite = np.isfinite(vals)
+            if finite.any():
+                clamped = np.where(finite, np.clip(vals, lo, hi), np.nan)
+                eff_mode = bmode if mode == "cumulative_round" else mode
+                rounded = _round_array(clamped, eff_mode)
+                out[bcol] = np.where(finite, np.clip(rounded, lo, hi), np.nan)
+
+    # Guarantee yhat_lower <= yhat <= yhat_upper after rounding.
+    if {"yhat", "yhat_lower", "yhat_upper"}.issubset(out.columns):
+        yh = pd.to_numeric(out["yhat"], errors="coerce").to_numpy(dtype=float)
+        yl = pd.to_numeric(out["yhat_lower"], errors="coerce").to_numpy(dtype=float)
+        yu = pd.to_numeric(out["yhat_upper"], errors="coerce").to_numpy(dtype=float)
+        both_lo = np.isfinite(yh) & np.isfinite(yl)
+        both_hi = np.isfinite(yh) & np.isfinite(yu)
+        if both_lo.any():
+            out["yhat_lower"] = np.where(both_lo, np.minimum(yl, yh), yl)
+        if both_hi.any():
+            out["yhat_upper"] = np.where(both_hi, np.maximum(yu, yh), yu)
+
+    if "quantiles" in out.columns:
+        q_mode = "round" if mode == "cumulative_round" else mode
+        new_q: list[str | None] = []
+        for idx, raw_q in enumerate(out["quantiles"]):
+            if raw_q is None or pd.isna(raw_q) or not isinstance(raw_q, str) or not raw_q.strip():
+                new_q.append(None if raw_q is None or pd.isna(raw_q) else str(raw_q))
+                continue
+            try:
+                parsed = json.loads(raw_q)
+            except (TypeError, ValueError):
+                new_q.append(raw_q)
+                continue
+            if not isinstance(parsed, dict):
+                new_q.append(raw_q)
+                continue
+            updated: dict[str, float] = {}
+            for k, v in parsed.items():
+                if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                    val = float(np.clip(float(v), lo[idx], hi[idx]))
+                    if q_mode != "none":
+                        val = float(_round_array(np.array([val], dtype=float), q_mode)[0])
+                        val = float(np.clip(val, lo[idx], hi[idx]))
+                    updated[str(k)] = val
+            new_q.append(json.dumps(updated, sort_keys=True))
+        out["quantiles"] = pd.array(new_q, dtype="string")
+
+    return out
 
 
 def coverage_by_step(oof: pd.DataFrame) -> pd.DataFrame:
