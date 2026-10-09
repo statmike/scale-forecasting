@@ -468,6 +468,13 @@ class McpServer:
                                 "Optional price column name for revenue impact simulation."
                             ),
                         },
+                        "export_report_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.html) to export a self-contained "
+                                "interactive HTML report."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -600,6 +607,20 @@ class McpServer:
                             "default": False,
                             "description": (
                                 "When true, include directional bias & Tracking Signal audit."
+                            ),
+                        },
+                        "include_exceptions": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include Top-N operational exception triage queue."
+                            ),
+                        },
+                        "export_report_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.html) to export a self-contained "
+                                "interactive HTML report."
                             ),
                         },
                     },
@@ -867,6 +888,10 @@ class McpServer:
                     price_col=str(price_col) if price_col else None,
                 )
                 out_pg["scenario_summary"] = summarize_scenarios(sim_df).to_dict(orient="records")
+            rep_path = args.get("export_report_path")
+            if rep_path:
+                written = run.export_report(str(rep_path))
+                out_pg["report_path"] = str(written)
             return out_pg
 
         if name == "plan_execution":
@@ -1057,15 +1082,19 @@ class McpServer:
             want_fva = bool(args.get("include_fva", False))
             want_decay = bool(args.get("include_horizon_decay", False))
             want_bias = bool(args.get("include_bias_report", False))
-            if want_fva or want_decay or want_bias:
+            want_exc = bool(args.get("include_exceptions", False))
+            rep_path_rev = args.get("export_report_path")
+            if want_fva or want_decay or want_bias or want_exc or rep_path_rev:
                 import pandas as pd
 
                 from .diagnostics import (
                     compute_bias_report,
+                    compute_exceptions_queue,
                     compute_fva,
                     compute_horizon_decay,
                 )
-                from .registry.reads import read_oof
+                from .registry.reads import read_oof, read_predictions
+                from .report import export_report
 
                 oof_rows = read_oof(run_id, limit=20000, settings=settings)
                 oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1078,6 +1107,19 @@ class McpServer:
                     )
                 if want_bias:
                     out["bias_report"] = compute_bias_report(oof_df).to_dict(orient="records")
+                if want_exc:
+                    out["exceptions"] = compute_exceptions_queue(
+                        oof_df=oof_df, metric=metric
+                    ).to_dict(orient="records")
+                if rep_path_rev:
+                    pred_rows = read_predictions(run_id, limit=20000, settings=settings)
+                    pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                    written_r = export_report(
+                        {"run_id": run_id, "oof_df": oof_df, "predictions_df": pred_df},
+                        str(rep_path_rev),
+                        metric=metric,
+                    )
+                    out["report_path"] = str(written_r)
             return out
 
         if name == "launch_or_repair_run":

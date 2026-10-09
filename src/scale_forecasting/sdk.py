@@ -1286,6 +1286,120 @@ class Forecaster:
             title=title,
         )
 
+    def score_realized(
+        self,
+        actuals_df: pd.DataFrame,
+        *,
+        run_id: str | None = None,
+        metric: str | None = None,
+        drift_threshold: float = 1.5,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Score published forward predictions for ``run_id`` against newly arrived ``actuals_df``
+        and flag series whose live error exceeds ``drift_threshold`` times backtest expectation.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_realized_accuracy
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_realized_accuracy(
+            pred_df,
+            actuals_df,
+            oof_df=oof_df,
+            metric=eff_metric,
+            drift_threshold=drift_threshold,
+        )
+
+    def revision_stability_df(
+        self,
+        run_ids: Sequence[str],
+        *,
+        jump_threshold_pct: float = 0.30,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Measure cross-run forecast revision stability ("whipsaw") across ``run_ids``."""
+        return self.registry().revision_stability_df(
+            run_ids, jump_threshold_pct=jump_threshold_pct, limit=limit
+        )
+
+    def exceptions_df(
+        self,
+        run_id: str | None = None,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        prior_run_ids: Sequence[str] | None = None,
+        top_n: int = 50,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Build the Top-N operational exception triage queue for ``run_id``."""
+        import pandas as pd
+
+        from .diagnostics import compute_exceptions_queue
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+
+        real_df = (
+            self.score_realized(actuals_df, run_id=rid, limit=limit)
+            if actuals_df is not None and not actuals_df.empty
+            else None
+        )
+        stab_df = (
+            self.revision_stability_df([*prior_run_ids, rid], limit=limit)
+            if prior_run_ids
+            else None
+        )
+        return compute_exceptions_queue(
+            oof_df=oof_df,
+            predictions_df=pred_df,
+            realized_df=real_df,
+            stability_df=stab_df,
+            floor=self._config.output.floor,
+            cap=self._config.output.cap,
+            metric=self._config.backtest.decision_metric,
+            top_n=top_n,
+        )
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        run_id: str | None = None,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained `.html` report for ``run_id``."""
+        from .report import export_report
+
+        rid = run_id or self.run_id
+        payload_dict = {
+            "run_id": rid,
+            "leaderboard_df": self.leaderboard_df(rid),
+            "fva_df": self.fva_df(rid),
+            "horizon_decay_df": self.horizon_decay_df(rid),
+            "bias_df": self.bias_report_df(rid),
+            "exceptions_df": self.exceptions_df(rid),
+            "predictions_df": self.predictions_df(rid),
+        }
+        return export_report(
+            payload_dict,
+            out_path,
+            title=title,
+            metric=self._config.backtest.decision_metric,
+            write_json=write_json,
+        )
+
     def reensemble(
         self,
         strategies: list[str] | None = None,
@@ -1539,6 +1653,52 @@ class Registry:
             target_run_id=target_run_id,
             settings=self._settings,
         )
+
+    def score_realized(
+        self,
+        run_id: str,
+        actuals_df: pd.DataFrame,
+        *,
+        metric: str = "wape",
+        drift_threshold: float = 1.5,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Join ``run_id`` predictions against ``actuals_df`` and compute realized accuracy."""
+        import pandas as pd
+
+        from .diagnostics import compute_realized_accuracy
+        from .registry.reads import read_oof, read_predictions
+
+        pred_rows = read_predictions(run_id, limit=limit, settings=self._settings)
+        oof_rows = read_oof(run_id, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        return compute_realized_accuracy(
+            pred_df,
+            actuals_df,
+            oof_df=oof_df,
+            metric=metric,
+            drift_threshold=drift_threshold,
+        )
+
+    def revision_stability_df(
+        self,
+        run_ids: Sequence[str],
+        *,
+        jump_threshold_pct: float = 0.30,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Measure cross-run forecast revision stability ("whipsaw") across ``run_ids``."""
+        import pandas as pd
+
+        from .diagnostics import compute_revision_stability
+        from .registry.reads import read_predictions
+
+        by_run: dict[str, pd.DataFrame] = {}
+        for rid in run_ids:
+            rows = read_predictions(rid, limit=limit, settings=self._settings)
+            by_run[str(rid)] = pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
+        return compute_revision_stability(by_run, jump_threshold_pct=jump_threshold_pct)
 
 
 def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:

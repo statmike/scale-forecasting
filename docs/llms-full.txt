@@ -23,6 +23,7 @@
 ## Reference & Operations
 
 - [Configuration Reference (`RunConfig`)](https://statmike.github.io/scale-forecasting/configuration_reference/): Complete JSON configuration guide.
+- [Forecaster's Workbench](https://statmike.github.io/scale-forecasting/forecaster_workbench/): Physical bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, scenarios, lifecycle governance, and executive HTML/JSON reports.
 - [Models Reference (34 Models)](https://statmike.github.io/scale-forecasting/models_reference/): All 34 models, covariate support, explainability, and granular extras.
 - [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
 - [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
@@ -705,6 +706,8 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Submit surgical cell repair** | `python -m scale_forecasting.main --run-id <run_id> --retry --force --reason "..."` | `Forecaster(cfg).retry(confirm=True, reason="...")` |
 | **Full data-science run review** | — | `review_run(run_id)` / `Forecaster(cfg).review()` |
 | **Interval & arm calibration** | — | `calibration_report(run_id)` |
+| **Forecaster's Workbench diagnostics** | — | `Forecaster(cfg).fva()` / `.horizon_decay()` / `.bias_report()` / `.exceptions_queue()` |
+| **Executive HTML + JSON report** | `python -m scale_forecasting.report --model holtwinters --output-dir ./report` | `Forecaster(cfg).export_report()` / `export_report(bench, './report')` |
 
 ---
 

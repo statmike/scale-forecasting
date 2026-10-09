@@ -23,8 +23,9 @@ accuracy decay, directional bias, and temporal/lead-time aggregation:
 
 from __future__ import annotations
 
+import itertools
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -36,8 +37,11 @@ from .metrics import compute_metrics, loss_of
 __all__ = [
     "BASELINE_CANDIDATES",
     "compute_bias_report",
+    "compute_exceptions_queue",
     "compute_fva",
     "compute_horizon_decay",
+    "compute_realized_accuracy",
+    "compute_revision_stability",
     "diebold_mariano_test",
     "plot_fva",
     "plot_horizon_decay",
@@ -867,3 +871,460 @@ def plot_horizon_decay(
     ax.legend(loc="best", frameon=True)
     ax.grid(alpha=0.25)
     return ax
+
+
+def compute_realized_accuracy(
+    predictions_df: pd.DataFrame,
+    actuals_df: pd.DataFrame,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    metric: str = "wape",
+    drift_threshold: float = 1.5,
+) -> pd.DataFrame:
+    """Join published forward forecasts with newly arrived actuals on ``(ts_id, date)`` and score
+    realized accuracy, interval coverage, and accuracy drift relative to backtest expectations.
+
+    Args:
+        predictions_df: Forward predictions frame containing ``ts_id``, ``model_type``,
+            ``forecast_date`` (or ``ds``), ``yhat`` (or ``forecast``), and optional ``yhat_lower``
+            / ``yhat_upper`` (or ``lower_bound`` / ``upper_bound``).
+        actuals_df: Newly arrived actuals containing ``ts_id``, ``ds`` (or ``forecast_date``), and
+            ``y`` (or ``y_true`` / ``actual``).
+        oof_df: Optional backtest OOF frame from the same run to compare realized error against
+            expected backtest error (`drift_ratio = realized_metric / backtest_metric`).
+        metric: Primary accuracy metric (default ``"wape"``).
+        drift_threshold: Ratio threshold above which ``drift_flagged`` is set True (default 1.5).
+    """
+    cols = [
+        "ts_id",
+        "model_type",
+        "n_realized",
+        "metric",
+        "realized_metric",
+        "realized_mae",
+        "realized_rmse",
+        "realized_bias",
+        "realized_coverage_80",
+        "backtest_metric",
+        "drift_ratio",
+        "drift_flagged",
+    ]
+    if predictions_df is None or predictions_df.empty or actuals_df is None or actuals_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    pred = predictions_df.copy()
+    if "segment" in pred.columns and (pred["segment"] == "forecast").any():
+        pred = pred[pred["segment"] == "forecast"].copy()
+    p_date = "forecast_date" if "forecast_date" in pred.columns else "ds"
+    p_yhat = "yhat" if "yhat" in pred.columns else "forecast"
+    p_lo = (
+        "yhat_lower"
+        if "yhat_lower" in pred.columns
+        else ("lower_bound" if "lower_bound" in pred.columns else None)
+    )
+    p_hi = (
+        "yhat_upper"
+        if "yhat_upper" in pred.columns
+        else ("upper_bound" if "upper_bound" in pred.columns else None)
+    )
+    if "ts_id" not in pred.columns:
+        pred["ts_id"] = "series_0"
+    if "model_type" not in pred.columns:
+        pred["model_type"] = "model"
+
+    act = actuals_df.copy()
+    a_date = "ds" if "ds" in act.columns else "forecast_date"
+    a_y = "y" if "y" in act.columns else ("y_true" if "y_true" in act.columns else "actual")
+    if "ts_id" not in act.columns:
+        act["ts_id"] = "series_0"
+
+    pred["_dt"] = pd.to_datetime(pred[p_date])
+    act["_dt"] = pd.to_datetime(act[a_date])
+    act_dedup = (
+        act[["ts_id", "_dt", a_y]]
+        .drop_duplicates(subset=["ts_id", "_dt"], keep="last")
+        .rename(columns={a_y: "_y_actual"})
+    )
+    merged = pred.merge(act_dedup, on=["ts_id", "_dt"], how="inner")
+    if merged.empty:
+        return pd.DataFrame(columns=cols)
+
+    bt_loss_map: dict[tuple[str, str], float] = {}
+    if oof_df is not None and not oof_df.empty:
+        oof_norm = _ensure_oof_columns(oof_df)
+        for (tid, mtype), grp in oof_norm.groupby(["ts_id", "model_type"], sort=False):
+            bt_loss_map[(str(tid), str(mtype))] = _cell_metric_loss(grp, metric)
+
+    records: list[dict[str, Any]] = []
+    for (tid, mtype), grp in merged.groupby(["ts_id", "model_type"], sort=True):
+        yt = pd.to_numeric(grp["_y_actual"], errors="coerce").to_numpy(dtype=float)
+        yh = pd.to_numeric(grp[p_yhat], errors="coerce").to_numpy(dtype=float)
+        keep = np.isfinite(yt) & np.isfinite(yh)
+        n_real = int(keep.sum())
+        if n_real == 0:
+            continue
+        yt_k, yh_k = yt[keep], yh[keep]
+        lo_k = (
+            pd.to_numeric(grp[p_lo], errors="coerce").to_numpy(dtype=float)[keep]
+            if p_lo is not None
+            else None
+        )
+        hi_k = (
+            pd.to_numeric(grp[p_hi], errors="coerce").to_numpy(dtype=float)[keep]
+            if p_hi is not None
+            else None
+        )
+        m_panel = compute_metrics(
+            yt_k,
+            yh_k,
+            lower=lo_k if lo_k is not None and np.isfinite(lo_k).any() else None,
+            upper=hi_k if hi_k is not None and np.isfinite(hi_k).any() else None,
+        )
+        real_loss = float(loss_of(metric, m_panel.get(metric, float("nan"))))
+        bt_loss = bt_loss_map.get((str(tid), str(mtype)), float("nan"))
+        drift = (
+            float(real_loss / bt_loss)
+            if math.isfinite(real_loss) and math.isfinite(bt_loss) and bt_loss > 1e-12
+            else float("nan")
+        )
+        flagged = bool(math.isfinite(drift) and drift >= float(drift_threshold))
+        records.append(
+            {
+                "ts_id": str(tid),
+                "model_type": str(mtype),
+                "n_realized": n_real,
+                "metric": metric,
+                "realized_metric": real_loss,
+                "realized_mae": float(m_panel.get("mae", float("nan"))),
+                "realized_rmse": float(m_panel.get("rmse", float("nan"))),
+                "realized_bias": float(m_panel.get("bias", float("nan"))),
+                "realized_coverage_80": float(m_panel.get("coverage", float("nan"))),
+                "backtest_metric": bt_loss,
+                "drift_ratio": drift,
+                "drift_flagged": flagged,
+            }
+        )
+
+    out = pd.DataFrame.from_records(records, columns=cols)
+    return out.sort_values(
+        ["drift_flagged", "realized_metric"], ascending=[False, False], ignore_index=True
+    )
+
+
+def compute_revision_stability(
+    predictions_by_run: Mapping[str, pd.DataFrame] | pd.DataFrame,
+    *,
+    jump_threshold_pct: float = 0.30,
+) -> pd.DataFrame:
+    """Measure cross-run forecast revision stability ("whipsaw") across overlapping target dates.
+
+    Accepts either a mapping ``{run_id: predictions_df}`` (ordered oldest-to-newest) or a single
+    concatenated DataFrame containing a ``run_id`` column. Computes per ``(ts_id, model_type)``:
+
+    - ``n_runs`` / ``n_overlapping_dates``
+    - ``mean_forecast``: average forecast magnitude across overlapping dates
+    - ``mar``: Mean Absolute Revision $|\\hat{y}^{(r)}_t - \\hat{y}^{(r-1)}_t|$
+    - ``revision_cov``: Coefficient of Variation of revisions ($\\text{std}(\\Delta \\hat{y}) /
+      |\\overline{\\hat{y}}|$)
+    - ``max_single_step_jump_pct``: largest single-date percentage jump between consecutive runs
+    - ``whipsaw_flagged``: True when ``max_single_step_jump_pct >= jump_threshold_pct``
+    """
+    cols = [
+        "ts_id",
+        "model_type",
+        "n_runs",
+        "n_overlapping_dates",
+        "mean_forecast",
+        "mar",
+        "revision_cov",
+        "max_single_step_jump_pct",
+        "whipsaw_flagged",
+    ]
+    frames: list[pd.DataFrame] = []
+    run_order: list[str] = []
+    if isinstance(predictions_by_run, Mapping):
+        for idx, (rid, f_df) in enumerate(predictions_by_run.items()):
+            if f_df is None or f_df.empty:
+                continue
+            sub = f_df.copy()
+            sub["_run_order"] = idx
+            sub["run_id"] = str(rid)
+            frames.append(sub)
+            run_order.append(str(rid))
+    elif isinstance(predictions_by_run, pd.DataFrame) and not predictions_by_run.empty:
+        raw_df = predictions_by_run.copy()
+        if "run_id" not in raw_df.columns:
+            return pd.DataFrame(columns=cols)
+        for idx, rid in enumerate(dict.fromkeys(raw_df["run_id"].astype(str))):
+            sub = raw_df[raw_df["run_id"].astype(str) == rid].copy()
+            sub["_run_order"] = idx
+            frames.append(sub)
+            run_order.append(rid)
+
+    if len(frames) < 2:
+        return pd.DataFrame(columns=cols)
+
+    combined = pd.concat(frames, ignore_index=True)
+    if "segment" in combined.columns and (combined["segment"] == "forecast").any():
+        combined = combined[combined["segment"] == "forecast"].copy()
+    date_col = "forecast_date" if "forecast_date" in combined.columns else "ds"
+    yhat_col = "yhat" if "yhat" in combined.columns else "forecast"
+    if "ts_id" not in combined.columns:
+        combined["ts_id"] = "series_0"
+    if "model_type" not in combined.columns:
+        combined["model_type"] = "model"
+
+    combined["_dt"] = pd.to_datetime(combined[date_col])
+    combined["_yh"] = pd.to_numeric(combined[yhat_col], errors="coerce")
+
+    records: list[dict[str, Any]] = []
+    for (tid, mtype), grp in combined.groupby(["ts_id", "model_type"], sort=True):
+        piv = grp.pivot_table(index="_dt", columns="_run_order", values="_yh", aggfunc="mean")
+        if piv.shape[1] < 2:
+            continue
+        diffs: list[float] = []
+        pct_jumps: list[float] = []
+        overlap_dates: set[Any] = set()
+        run_cols = sorted(piv.columns)
+        for c_prev, c_curr in itertools.pairwise(run_cols):
+            pair = piv[[c_prev, c_curr]].dropna()
+            if pair.empty:
+                continue
+            overlap_dates.update(pair.index.tolist())
+            prev_v = pair[c_prev].to_numpy(dtype=float)
+            curr_v = pair[c_curr].to_numpy(dtype=float)
+            delta = curr_v - prev_v
+            diffs.extend(np.abs(delta).tolist())
+            denom = np.maximum(np.abs(prev_v), 1e-6)
+            pct_jumps.extend((np.abs(delta) / denom).tolist())
+
+        if not diffs:
+            continue
+        mean_fc = float(np.nanmean(piv.to_numpy(dtype=float)))
+        mar = float(np.mean(diffs))
+        rev_std = float(np.std(diffs))
+        rev_cov = rev_std / max(abs(mean_fc), 1e-6)
+        max_jump = float(np.max(pct_jumps))
+        flagged = bool(max_jump >= float(jump_threshold_pct))
+        records.append(
+            {
+                "ts_id": str(tid),
+                "model_type": str(mtype),
+                "n_runs": int(piv.shape[1]),
+                "n_overlapping_dates": len(overlap_dates),
+                "mean_forecast": mean_fc,
+                "mar": mar,
+                "revision_cov": rev_cov,
+                "max_single_step_jump_pct": max_jump,
+                "whipsaw_flagged": flagged,
+            }
+        )
+
+    out = pd.DataFrame.from_records(records, columns=cols)
+    return out.sort_values(
+        ["whipsaw_flagged", "max_single_step_jump_pct"],
+        ascending=[False, False],
+        ignore_index=True,
+    )
+
+
+def compute_exceptions_queue(
+    *,
+    oof_df: pd.DataFrame | None = None,
+    predictions_df: pd.DataFrame | None = None,
+    realized_df: pd.DataFrame | None = None,
+    stability_df: pd.DataFrame | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    metric: str = "wape",
+    baseline: str | None = None,
+    top_n: int = 50,
+) -> pd.DataFrame:
+    """Build the Top-$N$ Exception Triage Queue across 5 operational forecasting rules.
+
+    Evaluates each ``(ts_id, model_type)`` cell and assigns a composite ``severity_score`` and
+    plain-English ``exception_reasons`` across:
+
+    1. ``worse_than_naive``: Model's held-out backtest loss exceeds the naive benchmark on this
+       series.
+    2. ``chronic_bias``: Trigg Tracking Signal $|\\text{TS}| \\ge 4.0$ or $\\ge 2$ consecutive
+       biased folds (chronic over- or under-forecasting).
+    3. ``realized_drift``: Realized live error exceeds $1.5\\times$ expected backtest error.
+    4. ``whipsaw_jump``: Cross-run forecast revision jump $\\ge 30\\%$ on an overlapping date.
+    5. ``capacity_ceiling_hit``: Forward forecast hits or clips against physical ``floor`` / ``cap``
+       bounds on $\\ge 20\\%$ of horizon steps.
+    """
+    cols = [
+        "ts_id",
+        "model_type",
+        "severity_score",
+        "n_flags",
+        "exception_flags",
+        "exception_reasons",
+        "metric_loss",
+        "baseline_loss",
+        "bias_pct",
+        "tracking_signal",
+        "drift_ratio",
+        "max_jump_pct",
+    ]
+    cell_flags: dict[tuple[str, str], list[str]] = {}
+    cell_reasons: dict[tuple[str, str], list[str]] = {}
+    cell_sev: dict[tuple[str, str], float] = {}
+    cell_meta: dict[tuple[str, str], dict[str, float]] = {}
+
+    def _touch(key: tuple[str, str]) -> None:
+        if key not in cell_flags:
+            cell_flags[key] = []
+            cell_reasons[key] = []
+            cell_sev[key] = 0.0
+            cell_meta[key] = {
+                "metric_loss": float("nan"),
+                "baseline_loss": float("nan"),
+                "bias_pct": float("nan"),
+                "tracking_signal": float("nan"),
+                "drift_ratio": float("nan"),
+                "max_jump_pct": float("nan"),
+            }
+
+    # 1 & 2. Backtest OOF checks: worse_than_naive + chronic_bias
+    if oof_df is not None and not oof_df.empty:
+        oof_norm = _ensure_oof_columns(oof_df)
+        all_models = list(dict.fromkeys(oof_norm["model_type"].astype(str)))
+        base_m = _resolve_baseline_model(all_models, baseline)
+
+        losses: dict[tuple[str, str], float] = {}
+        for (tid, mtype), grp in oof_norm.groupby(["ts_id", "model_type"], sort=False):
+            losses[(str(tid), str(mtype))] = _cell_metric_loss(grp, metric)
+
+        for (tid_s, mtype_s), m_loss in losses.items():
+            b_loss = losses.get((tid_s, base_m), float("nan"))
+            key = (tid_s, mtype_s)
+            _touch(key)
+            cell_meta[key]["metric_loss"] = m_loss
+            cell_meta[key]["baseline_loss"] = b_loss
+            if (
+                mtype_s != base_m
+                and math.isfinite(m_loss)
+                and math.isfinite(b_loss)
+                and m_loss > b_loss * 1.02
+            ):
+                ratio = m_loss / max(b_loss, 1e-6)
+                cell_flags[key].append("worse_than_naive")
+                cell_reasons[key].append(
+                    f"Backtest {metric.upper()} ({m_loss:.3f}) is worse than {base_m} "
+                    f"({b_loss:.3f}, {ratio:.2f}x)."
+                )
+                cell_sev[key] += min(40.0, 15.0 * ratio)
+
+        bias_df = compute_bias_report(oof_norm)
+        for b_row in bias_df.to_dict(orient="records"):
+            key = (str(b_row["ts_id"]), str(b_row["model_type"]))
+            _touch(key)
+            b_pct = float(b_row["bias_pct"])
+            t_sig = float(b_row["tracking_signal"])
+            cell_meta[key]["bias_pct"] = b_pct
+            cell_meta[key]["tracking_signal"] = t_sig
+            if str(b_row["bias_status"]) != "unbiased":
+                direction = (
+                    "over-forecasting"
+                    if b_row["bias_status"] == "over_forecasting"
+                    else "under-forecasting"
+                )
+                cell_flags[key].append("chronic_bias")
+                cell_reasons[key].append(
+                    f"Chronic {direction}: bias={b_pct * 100:+.1f}%, Trigg TS={t_sig:+.1f}."
+                )
+                cell_sev[key] += min(35.0, 5.0 * abs(t_sig))
+
+    # 3. Realized drift check
+    if realized_df is not None and not realized_df.empty:
+        for row in realized_df.itertuples(index=False):
+            key = (str(row.ts_id), str(row.model_type))
+            _touch(key)
+            d_ratio = float(getattr(row, "drift_ratio", float("nan")))
+            cell_meta[key]["drift_ratio"] = d_ratio
+            if bool(getattr(row, "drift_flagged", False)):
+                cell_flags[key].append("realized_drift")
+                cell_reasons[key].append(
+                    f"Live accuracy drift: realized loss is {d_ratio:.2f}x backtest expectation."
+                )
+                cell_sev[key] += min(45.0, 20.0 * d_ratio)
+
+    # 4. Whipsaw revision stability check
+    if stability_df is not None and not stability_df.empty:
+        for row in stability_df.itertuples(index=False):
+            key = (str(row.ts_id), str(row.model_type))
+            _touch(key)
+            jump = float(getattr(row, "max_single_step_jump_pct", float("nan")))
+            cell_meta[key]["max_jump_pct"] = jump
+            if bool(getattr(row, "whipsaw_flagged", False)):
+                cell_flags[key].append("whipsaw_jump")
+                cell_reasons[key].append(
+                    f"Forecast whipsaw: {jump * 100:.1f}% single-step jump across consecutive runs."
+                )
+                cell_sev[key] += min(30.0, 40.0 * jump)
+
+    # 5. Physical capacity ceiling / floor hit check
+    if (
+        predictions_df is not None
+        and not predictions_df.empty
+        and (floor is not None or cap is not None)
+    ):
+        pred = predictions_df.copy()
+        if "segment" in pred.columns and (pred["segment"] == "forecast").any():
+            pred = pred[pred["segment"] == "forecast"].copy()
+        yhat_col = "yhat" if "yhat" in pred.columns else "forecast"
+        if "ts_id" not in pred.columns:
+            pred["ts_id"] = "series_0"
+        if "model_type" not in pred.columns:
+            pred["model_type"] = "model"
+        for (tid, mtype), grp in pred.groupby(["ts_id", "model_type"], sort=False):
+            yh = pd.to_numeric(grp[yhat_col], errors="coerce").dropna().to_numpy(dtype=float)
+            if yh.size == 0:
+                continue
+            hit_mask = np.zeros(yh.size, dtype=bool)
+            if cap is not None:
+                hit_mask |= yh >= (float(cap) - 1e-6)
+            if floor is not None and float(floor) > 0.0:
+                hit_mask |= yh <= (float(floor) + 1e-6)
+            hit_share = float(np.mean(hit_mask))
+            if hit_share >= 0.20:
+                key = (str(tid), str(mtype))
+                _touch(key)
+                cell_flags[key].append("capacity_ceiling_hit")
+                cell_reasons[key].append(
+                    f"Capacity bound reached on {hit_share * 100:.0f}% of horizon steps."
+                )
+                cell_sev[key] += 25.0 * hit_share
+
+    records: list[dict[str, Any]] = []
+    for key, flags in cell_flags.items():
+        if not flags:
+            continue
+        tid, mtype = key
+        meta = cell_meta[key]
+        records.append(
+            {
+                "ts_id": tid,
+                "model_type": mtype,
+                "severity_score": round(cell_sev[key], 2),
+                "n_flags": len(flags),
+                "exception_flags": ",".join(flags),
+                "exception_reasons": " ".join(cell_reasons[key]),
+                "metric_loss": meta["metric_loss"],
+                "baseline_loss": meta["baseline_loss"],
+                "bias_pct": meta["bias_pct"],
+                "tracking_signal": meta["tracking_signal"],
+                "drift_ratio": meta["drift_ratio"],
+                "max_jump_pct": meta["max_jump_pct"],
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(columns=cols)
+    out = pd.DataFrame.from_records(records, columns=cols)
+    out = out.sort_values(
+        ["severity_score", "n_flags"], ascending=[False, False], ignore_index=True
+    )
+    return out.head(max(1, int(top_n)))

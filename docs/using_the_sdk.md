@@ -157,6 +157,15 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.attributions_df(ts_id=..., model=...)` | `pd.DataFrame` | Returns **Tier 1 (`fit_diagnostics.feature_attributions`)** and **Tier 2 (`forecast_predictions.explanations`)** feature attributions across `automl` (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) and `ml` (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`) models |
 | `forecaster.plot_attributions(ts_id, model)` | `matplotlib.figure.Figure` | 2-panel visualization of Tier 1 overall feature importance and Tier 2 per-horizon-step local attribution over `forecast_date` |
 | `forecaster.plot_series(ts_id, models=[...])` | `matplotlib.figure.Figure` | Overlay historical actuals, prediction intervals, and multi-model forecast trajectories |
+| `forecaster.fva_df()` / `plot_fva()` | `pd.DataFrame` / `Figure` | Forecast Value Added (FVA) waterfall with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano & Wilcoxon $p$-values |
+| `forecaster.horizon_decay_df()` / `plot_horizon_decay()` | `pd.DataFrame` / `Figure` | Step-by-step error decay ($h = 1 \dots H$) and crossover horizon $h^*$ vs. baseline |
+| `forecaster.bias_df()` | `pd.DataFrame` | Directional percentage bias, Trigg Tracking Signal ($\text{TS}$), and chronic over/under-forecasting streaks |
+| `forecaster.rollup_time(freq="W")` | `pd.DataFrame` | Autocorrelation-aware temporal or $L$-day lead-time aggregation of point and interval forecasts |
+| `forecaster.simulate_scenarios(scenarios={...})` | `pd.DataFrame` | Counterfactual future covariate shocks (promo/price elasticity) with delta units and revenue impact |
+| `forecaster.score_realized(actuals_df)` | `pd.DataFrame` | Joins published predictions against newly arrived actuals and flags live accuracy drift (`drift_flagged`) |
+| `forecaster.revision_stability_df([run_1, ...])` | `pd.DataFrame` | Cross-run forecast revision stability (`mar`, `revision_cov`, `whipsaw_flagged`) across overlapping target dates |
+| `forecaster.exceptions_df()` | `pd.DataFrame` | Ranked Top-$N$ operational exception triage queue across 5 failure modes (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) |
+| `forecaster.export_report("report.html")` | `pathlib.Path` | Exports a self-contained, single-file interactive HTML (and optional `.json`) executive report |
 
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
 top level of `scale_forecasting` (`explain_forecast_frame`, `plot_forecast_explanation`,

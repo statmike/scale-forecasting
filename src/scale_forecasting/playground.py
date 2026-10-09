@@ -160,6 +160,10 @@ def build_config(
     static_covariates: list[str] | None = None,
     future_covariates: list[str] | None = None,
     past_covariates: list[str] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> RunConfig:
     """A minimal `RunConfig` for running ``model`` on `sample_data`.
 
@@ -181,6 +185,13 @@ def build_config(
         if backtest
         else {"enabled": False}
     )
+    output_cfg: dict[str, Any] = {"integer_rounding": integer_rounding}
+    if floor is not None:
+        output_cfg["floor"] = floor
+    if cap is not None:
+        output_cfg["cap"] = cap
+    if quantiles:
+        output_cfg["quantiles"] = list(quantiles)
     # Built as a plain dict and validated, mirroring config.load_config — pydantic coerces
     # the nested blocks and applies the same normalization a file-loaded config gets.
     raw: dict[str, Any] = {
@@ -189,6 +200,7 @@ def build_config(
         "models": [model],
         "features": features_cfg,
         "backtest": backtest_cfg,
+        "output": output_cfg,
     }
     return RunConfig.model_validate(raw)
 
@@ -219,6 +231,10 @@ class PlaygroundRun:
         oof = self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
         return compute_bias_report(oof)
 
+    def bias_df(self) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching ``Forecaster.bias_df()``."""
+        return self.bias_report_df()
+
     def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
         """Aggregate this run's future predictions to coarser calendar buckets with AR(1) bounds."""
         from .diagnostics import rollup_time
@@ -232,6 +248,58 @@ class PlaygroundRun:
             else None
         )
         return rollup_time(preds, freq=freq, oof_df=oof, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: dict[str, dict[str, Any]],
+        *,
+        price_col: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual future covariate scenarios on this single-series run."""
+        from .scenarios import simulate_scenarios
+
+        fut_covs = [
+            c for c in ("promo_flag", "price_index", "is_holiday") if c in self.series.columns
+        ]
+        cfg = build_config(
+            self.result.model_type,
+            horizon=len(self.result.predictions) or 14,
+            backtest=self.backtest,
+            future_covariates=fut_covs or None,
+        )
+        return simulate_scenarios(
+            self.series,
+            cfg,
+            scenarios,
+            models=[self.result.model_type],
+            price_col=price_col,
+        )
+
+    def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
+        """Return the exception triage queue for this playground run."""
+        from .diagnostics import compute_exceptions_queue
+
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        return compute_exceptions_queue(oof_df=oof, predictions_df=preds, top_n=top_n)
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained `.html` report for this playground run."""
+        from .report import export_report
+
+        return export_report(self, out_path, title=title, write_json=write_json)
 
 
 @dataclass(frozen=True)
@@ -290,6 +358,10 @@ class BakeOff:
 
         return compute_bias_report(self.oof if self.oof is not None else pd.DataFrame())
 
+    def bias_df(self) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching ``Forecaster.bias_df()``."""
+        return self.bias_report_df()
+
     def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
         """Aggregate bake-off future predictions to coarser calendar periods with AR(1) bounds."""
         from .diagnostics import rollup_time
@@ -314,6 +386,31 @@ class BakeOff:
             price_col=price_col,
         )
 
+    def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
+        """Build the Top-N exception triage queue across all models in this bake-off."""
+        from .diagnostics import compute_exceptions_queue
+
+        return compute_exceptions_queue(
+            oof_df=self.oof,
+            predictions_df=self.predictions,
+            floor=self.config.output.floor,
+            cap=self.config.output.cap,
+            metric=self.config.backtest.decision_metric,
+            top_n=top_n,
+        )
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained interactive `.html` report for this bake-off."""
+        from .report import export_report
+
+        return export_report(self, out_path, title=title, write_json=write_json)
+
 
 def bakeoff(
     data: pd.DataFrame | None = None,
@@ -326,6 +423,11 @@ def bakeoff(
     calculated: str = "inverse_error",
     learned: str = "nnls",
     with_exog: bool = False,
+    future_covariates: list[str] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> BakeOff:
     """Run several models head-to-head on one series and add two ensembles — via the framework.
 
@@ -363,17 +465,32 @@ def bakeoff(
         # Fast, dependency-light defaults so the bake-off runs anywhere the repo imports.
         models = ["theta", "holtwinters", "stl_bagging", "xgboost"]
     if data is None:
-        data = sample_data(n_series=3, freq=freq, with_exog=with_exog)
+        data = sample_data(
+            n_series=3,
+            freq=freq,
+            with_exog=with_exog or bool(future_covariates),
+        )
 
     # One config for the whole bake-off: all base models, backtest on (ensembles need OOF), and
     # both an ensemble strategy from each family. Built + validated exactly like a file config.
     exog = ["price_index"] if with_exog else []
+    features_cfg: dict[str, Any] = {"exog": exog}
+    if future_covariates:
+        features_cfg["future_covariates"] = list(future_covariates)
+    output_cfg: dict[str, Any] = {"integer_rounding": integer_rounding}
+    if floor is not None:
+        output_cfg["floor"] = floor
+    if cap is not None:
+        output_cfg["cap"] = cap
+    if quantiles:
+        output_cfg["quantiles"] = list(quantiles)
     raw: dict[str, Any] = {
         "run_name": "playground-bakeoff",
         "data": {"source_table": "playground", "freq": freq, "horizon": horizon},
         "models": models,
-        "features": {"exog": exog},
+        "features": features_cfg,
         "backtest": {"enabled": True, "n_folds": n_folds, "horizon": horizon, "step": horizon},
+        "output": output_cfg,
         "ensemble": {"enabled": True, "strategies": [calculated, learned]},
     }
     cfg = RunConfig.model_validate(raw)
@@ -504,6 +621,11 @@ def run_model(
     horizon: int = 28,
     backtest: bool = False,
     with_exog: bool = False,
+    future_covariates: list[str] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> PlaygroundRun:
     """Run one model on one series and return the result (validates first).
 
@@ -514,9 +636,24 @@ def run_model(
     engine would. ``run_cell`` never raises: a model failure comes back as an error cell.
     """
     if data is None:
-        data = sample_data(n_series=3, freq=freq, with_exog=with_exog)
+        data = sample_data(
+            n_series=3,
+            freq=freq,
+            with_exog=with_exog or bool(future_covariates),
+        )
 
-    cfg = build_config(model, freq=freq, horizon=horizon, backtest=backtest, with_exog=with_exog)
+    cfg = build_config(
+        model,
+        freq=freq,
+        horizon=horizon,
+        backtest=backtest,
+        with_exog=with_exog,
+        future_covariates=future_covariates,
+        floor=floor,
+        cap=cap,
+        integer_rounding=integer_rounding,
+        quantiles=quantiles,
+    )
     validate_panel(data, cfg)
 
     ts_col = cfg.data.ts_id_col

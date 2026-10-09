@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Phase G.1 — Physical Bounds, Non-Negative Hierarchies & Smart Ensembles:** Declarative physical bounds (`output.floor`, `output.cap`, `output.floor_col`, `output.cap_col`) and coherent integer rounding (`output.integer_rounding = "round" | "ceil" | "floor" | "cumulative_round"`), active-set non-negative Minimum Trace hierarchical reconciliation (`"mint_nonneg"`), `"champion"` (per-series OOF winner) and `"horizon_specialist"` (per-series, per-step OOF winner) ensemble strategies, `ensemble.top_k` and `ensemble.parsimony_margin` pruning, and calibrated prediction intervals + all 5 interval metrics for every ensemble strategy.
+- **Phase G.2 — Multi-Quantile Fans, Newsvendor Targets, SBC Regime Routing & Pre-Fit Hygiene:** Arbitrary empirical quantile fans (`output.quantiles`) with Chernozhukov et al. (2010) monotone rearrangement, Newsvendor critical-fractile point targets (`output.underage_cost`, `output.overage_cost`, `output.target_quantile`), Syntetos–Boylan–Croston (SBC) demand regime classification (`compute_demand_profile`: `smooth`, `erratic`, `intermittent`, `lumpy`) with opt-in `features.regime_routing`, and fold-safe pre-fit data hygiene (`data.grid_policy`, `data.trim_leading_zeros`, `features.trading_days`, `features.censored_col`, `features.outlier_policy`, `features.outlier_sigma`).
+- **Phase G.3 — Econometric Diagnostics, AR(1) Time Rollups & Promo/Price Scenario Simulator:** Forecast Value Added (`compute_fva`) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano (`diebold_mariano_test`) and paired Wilcoxon (`wilcoxon_pvalue`) significance tests, lead-time horizon accuracy decay (`compute_horizon_decay` & crossover horizon $h^*$), directional bias & Trigg Tracking Signal audits (`compute_bias_report`), autocorrelation-aware temporal and lead-time window rollups (`rollup_time`), and counterfactual future covariate scenario simulation with revenue impact (`simulate_scenarios`, `summarize_scenarios`, `plot_scenarios`).
+- **Phase G.4 — Realized Drift, Revision Stability, Exception Triage & Self-Contained HTML Reports:** Post-publication realized accuracy and drift detection (`compute_realized_accuracy`, `Forecaster.score_realized`), cross-run forecast revision stability / "whipsaw" auditing (`compute_revision_stability`, `Forecaster.revision_stability_df`), composite Top-$N$ exception triage queues (`compute_exceptions_queue`, `exceptions_df`), and zero-server interactive HTML & JSON executive reports (`export_report`, `render_html_report`, `python -m scale_forecasting.report`).
+
 ---
 
 ## [1.0.0] - 2026-10-08

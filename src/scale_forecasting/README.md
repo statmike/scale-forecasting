@@ -7,7 +7,7 @@ The package root ([`__init__.py`](./__init__.py)) uses a PEP 562 lazy `__getattr
 ```mermaid
 flowchart TB
     subgraph entry["Entry Surfaces"]
-        sdk["Python SDK<br/>sdk.py (Forecaster · Registry)<br/>review.py · playground.py"]
+        sdk["Python SDK<br/>sdk.py (Forecaster · Registry)<br/>review.py · playground.py · report.py"]
         cli["CLI & Orchestrator<br/>main.py · dag.py · router.py<br/>airflow_emit.py · airflow_tasks.py"]
         direct["Direct Worker & Runners<br/>worker.py (run_cell)<br/>engines/spark_io.py · engines/ray_io.py · engines/vertex_engine.py"]
     end
@@ -27,7 +27,7 @@ flowchart TB
 
     subgraph core["Per-Series & Panel Forecasting Core"]
         eng["Execution Engines<br/>engines/ (Spark · Ray · Vertex/GCE/GKE · Vertex AutoML · BigQuery)"]
-        wf["Feature, Backtest, Reconciliation & Ensemble Core<br/>features.py · backtest.py · calibration.py · reconciliation.py<br/>hpo.py · ensembler.py · ensemble_run.py"]
+        wf["Feature, Backtest, Reconciliation, Ensemble & Diagnostics Core<br/>features.py · backtest.py · calibration.py · reconciliation.py<br/>hpo.py · ensembler.py · ensemble_run.py · diagnostics.py · scenarios.py"]
         mod["Models & Metrics<br/>models/ (34 models) · metrics/ (21 metrics)"]
     end
 
@@ -63,10 +63,11 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 ## Top-Level Modules by Role
 
 ### 1. User & Orchestration Entrypoints
-- **[`sdk.py`](./sdk.py):** The Python SDK (`Forecaster` for planning, running, monitoring, probing, cancelling, settling, retrying runs, and inspecting feature attributions; `Registry` for dataset maintenance).
+- **[`sdk.py`](./sdk.py):** The Python SDK (`Forecaster` for planning, running, monitoring, probing, cancelling, settling, retrying runs, inspecting feature attributions, running econometric diagnostics/scenarios, and exporting executive reports; `Registry` for dataset maintenance).
 - **[`main.py`](./main.py):** Primary CLI and orchestration entrypoint (`python -m scale_forecasting.main --config ...`).
 - **[`review.py`](./review.py):** Live run progress monitoring (`monitor_run`), post-run evaluation (`review_run`), two-tier feature attribution analytics (`build_attributions_frame`, `plot_attributions`), and matplotlib visualization helpers.
-- **[`playground.py`](./playground.py):** Offline single-series sandbox (`python -m scale_forecasting.playground`) for testing models and backtests without cloud infrastructure.
+- **[`diagnostics.py`](./diagnostics.py), [`scenarios.py`](./scenarios.py) & [`report.py`](./report.py):** Econometric Forecast Value Added (`compute_fva`) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano & Wilcoxon significance tests, lead-time horizon decay (`compute_horizon_decay`), Trigg tracking-signal bias audits (`compute_bias_report`), AR(1)-aware temporal/lead-time rollups (`rollup_time`), realized accuracy & drift scoring (`compute_realized_accuracy`), cross-run revision stability (`compute_revision_stability`), Top-$N$ exception triage (`compute_exceptions_queue`), counterfactual promo/price scenario simulation (`simulate_scenarios`), and self-contained interactive HTML/JSON reports (`export_report`, `python -m scale_forecasting.report`).
+- **[`playground.py`](./playground.py):** Offline single-series and panel bake-off sandbox (`python -m scale_forecasting.playground`) for testing models, backtests, diagnostics, scenarios, and HTML reports without cloud infrastructure.
 - **[`agent_surfaces.py`](./agent_surfaces.py) & [`mcp.py`](./mcp.py):** Single-source generator/drift-checker for JSON Schema, `llms.txt`, `llms-full.txt`, and `skills/scale-forecasting/references/*.md`, local environment readiness probe (`probe_environment`), and built-in `stdio` Model Context Protocol server (`python -m scale_forecasting.mcp`).
 - **[`airflow_emit.py`](./airflow_emit.py) & [`airflow_tasks.py`](./airflow_tasks.py):** Renders any `RunConfig` into a standalone Cloud Composer / Airflow Python DAG (`dag_<run_id>.py`) and provides the task callables it executes.
 

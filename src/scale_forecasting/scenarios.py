@@ -49,6 +49,15 @@ __all__ = [
 
 def _parse_single_shock(spec: Any) -> list[dict[str, Any]]:
     """Normalize a user shock specification into a list of ``{op, value, start_date, end_date}``."""
+    if (
+        isinstance(spec, tuple)
+        and len(spec) == 2
+        and isinstance(spec[0], str)
+        and spec[0].strip().lower()
+        in ("=", "*", "+", "-", "%", "set", "mul", "multiply", "add", "delta", "pct", "percent")
+    ):
+        return _parse_single_shock({"op": spec[0], "value": spec[1]})
+
     if isinstance(spec, Sequence) and not isinstance(spec, (str, bytes, Mapping)):
         out: list[dict[str, Any]] = []
         for item in spec:
