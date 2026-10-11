@@ -424,6 +424,8 @@ def _read_worker_source_series(
     settings: Settings,
     topology: WorkerTopology,
     assigned_models: Sequence[str],
+    *,
+    all_models: Sequence[str] | None = None,
 ) -> tuple[pd.DataFrame, set[str] | None, int]:  # pragma: no cover - live GCP I/O
     """Read only ``topology.rank``'s contiguous ``ts_id`` slice via BigQuery Storage Read API.
 
@@ -434,9 +436,11 @@ def _read_worker_source_series(
     from BigQuery Storage Read API.
     """
     id_col = cfg.data.ts_id_col
+    job_models = all_models if all_models is not None else assigned_models
     needs_full_panel = (
         topology.world_size <= 1
-        or models_sharded_across_workers(cfg, assigned_models)
+        or models_sharded_across_workers(cfg, job_models)
+        or _is_dedicated_vm_model_set(cfg, assigned_models)
         or any(is_panel_model(m, cfg) for m in assigned_models)
         or cfg.compute.ray_read_mode == "ray_data"
         or _read_source_series is not _RAY_READ_SOURCE_SERIES
@@ -496,10 +500,14 @@ def order_chunks_lpt(
     `auto_arima`, `prophet`, `xgboost`) and longer series histories start first in
     `ThreadPoolExecutor`, while fast chunks (`theta`, `naive_mean`) backfill around them.
     """
+    from ..models import base_model_name
+
     if len(chunks) <= 1:
         return list(chunks)
 
-    default_model_weight = sum(_MODEL_LPT_WEIGHTS.get(m, 2.0) for m in models) or 2.0
+    default_model_weight = (
+        sum(_MODEL_LPT_WEIGHTS.get(base_model_name(m), 2.0) for m in models) or 2.0
+    )
 
     def _chunk_weight(item: tuple[int, pd.DataFrame]) -> tuple[float, int]:
         idx, ch = item
@@ -508,7 +516,8 @@ def order_chunks_lpt(
         if ray_io._MODEL_COL in ch.columns:
             counts = ch[ray_io._MODEL_COL].astype(str).value_counts()
             score = sum(
-                float(cnt) * _MODEL_LPT_WEIGHTS.get(str(m), 2.0) for m, cnt in counts.items()
+                float(cnt) * _MODEL_LPT_WEIGHTS.get(base_model_name(str(m)), 2.0)
+                for m, cnt in counts.items()
             )
         else:
             score = float(len(ch)) * default_model_weight
@@ -945,7 +954,7 @@ def run(
                 return outcome
 
             source, worker_ids, n_series_total = _read_worker_source_series(
-                cfg, settings, topology, assigned_models
+                cfg, settings, topology, assigned_models, all_models=executed
             )
             _assert_source_supports_folds(source, cfg)
 

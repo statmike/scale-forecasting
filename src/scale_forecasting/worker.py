@@ -38,6 +38,7 @@ from .errors import ConfigError, get_logger
 from .features import (
     build_features,
     build_future_features,
+    clean_model_params,
     clean_training_target,
     compute_demand_profile,
     effective_config_for_model,
@@ -45,11 +46,14 @@ from .features import (
     fit_transform_lambda,
     holiday_frame,
     regularize_series_grid,
+    resolve_model_variant,
     select_models_for_series,
+    should_stamp_variant_diagnostics,
+    variant_diagnostics_for,
 )
 from .hardware import provisioned_hardware, visible_device
 from .metrics import METRIC_NAMES
-from .models import get_model
+from .models import base_model_name, get_model
 from .models.base_model import (
     PREDICTION_COLUMNS,
     BaseModel,
@@ -424,7 +428,11 @@ def _resolve_params(
     forecast, and adding them to ``n_fits`` would make ``fit_seconds / n_fits`` mean nothing. The
     fleetwide branch passes nothing — that pre-pass ran on the driver before this cell existed.
     """
-    authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
+    base = base_model_name(model_name)
+    if "@" in model_name or model_name in cfg.model_params or base in cfg.model_params:
+        authored: dict[str, Any] = dict(resolve_model_variant(cfg, model_name).clean_params)
+    else:
+        authored = {}
     if params is not None:
         return {**authored, **params}
     if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
@@ -656,7 +664,7 @@ def run_cell(
             if compat and model_name not in compat:
                 fit_model_name = compat[0]
                 model_cls = get_model(fit_model_name)
-        model_cfg = effective_config_for_model(cfg, model_cls)
+        model_cfg = effective_config_for_model(cfg, model_cls, fit_model_name)
         raw_target_series = _target(series, model_cfg)
         demand_prof = compute_demand_profile(raw_target_series.to_numpy(dtype=float))
         # Fit the transform's stateful λ once per cell (None for none/log1p), on the cleaned target.
@@ -793,6 +801,8 @@ def run_cell(
                 _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
 
         diag = _collect_diagnostics(model, ts_id, model_name)
+        if should_stamp_variant_diagnostics(model_name, cfg):
+            diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
         if cfg.features.regime_routing:
             diag["demand_profile"] = demand_prof
             if fit_model_name != model_name:
@@ -875,10 +885,19 @@ def run_cell(
 
 def is_panel_model(model_name: str, cfg: RunConfig, params: dict[str, Any] | None = None) -> bool:
     """Whether ``model_name`` is configured for panel training (`global` or `hybrid`)."""
-    authored = dict(cfg.model_params.get(model_name, {}))
+    base_name = base_model_name(model_name)
+    authored: dict[str, Any] = {}
+    if base_name in cfg.model_params:
+        authored.update(cfg.model_params[base_name])
+    if model_name in cfg.model_params:
+        authored.update(cfg.model_params[model_name])
     if params is not None:
         authored.update(params)
-    return str(authored.get("training_mode", "local")) in ("global", "hybrid")
+    if "training_mode" in authored:
+        return str(authored["training_mode"]) in ("global", "hybrid")
+    if "@" in model_name:
+        return resolve_model_variant(cfg, model_name).training_mode in ("global", "hybrid")
+    return False
 
 
 def run_panel(
@@ -953,11 +972,13 @@ def run_panel(
     train_rows_total = 0
 
     try:
-        model_cfg = effective_config_for_model(cfg, model_cls)
+        model_cfg = effective_config_for_model(cfg, model_cls, model_name)
         ctx = _model_context(model_cfg, family=model_cls.family)
         _require_device(ctx.device, model_cls.family, engine)
-        authored: dict[str, Any] = dict(model_cfg.model_params.get(model_name, {}))
-        resolved = {**authored, **params} if params is not None else authored
+        variant_spec = resolve_model_variant(cfg, model_name, model_cls=model_cls)
+        authored: dict[str, Any] = dict(variant_spec.clean_params)
+        clean_override = clean_model_params(params) if params is not None else {}
+        resolved = {**authored, **clean_override} if params is not None else authored
 
         lams: dict[str, float | None] = {
             uid: fit_transform_lambda(
@@ -1185,6 +1206,8 @@ def run_panel(
                 _target(series_frames[uid], model_cfg).to_numpy(dtype=float)
             )
             uid_diag = _collect_diagnostics(model, uid, model_name)
+            if should_stamp_variant_diagnostics(model_name, cfg):
+                uid_diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
             if cfg.features.regime_routing:
                 uid_diag["demand_profile"] = uid_demand_prof
 

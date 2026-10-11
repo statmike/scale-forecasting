@@ -542,6 +542,23 @@
           "title": "Read Max Streams",
           "type": "integer"
         },
+        "reuse_from_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse From Run Id"
+        },
+        "reuse_prior_runs": {
+          "default": false,
+          "title": "Reuse Prior Runs",
+          "type": "boolean"
+        },
         "spark_deps": {
           "default": "packed_venv",
           "enum": [
@@ -610,6 +627,19 @@
           ],
           "default": null,
           "title": "Series Limit"
+        },
+        "snapshot_millis": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Millis"
         },
         "source_table": {
           "title": "Source Table",
@@ -713,6 +743,16 @@
           ],
           "default": null,
           "title": "Top K"
+        },
+        "variant_policy": {
+          "default": "all",
+          "enum": [
+            "all",
+            "best_per_base_model",
+            "primary_only"
+          ],
+          "title": "Variant Policy",
+          "type": "string"
         }
       },
       "title": "EnsembleConfig",
@@ -936,6 +976,55 @@
       "additionalProperties": false,
       "description": "Optional feature engineering for the Python models.\n\nDefaults are conservative/generic (no transform, no holidays); the shipped\n``example_config.json`` turns on holidays + log1p.\n\n**There is no ``lags`` field, and the reason is a design rule rather than an omission.**\n\"Lag\" means two different things, and only one of them can be built out here:\n\n- A lag of the **target** is only honest at predict time if the model rolls its own\n  forecasts forward one step at a time. That is recursion, it belongs to the model, and\n  the models that need it already own it \u2014 `_lag_forecaster` does it for ``lightgbm`` /\n  ``xgboost`` / ``regression_lags``, and NeuralProphet does it behind ``n_lags``. A\n  config cannot supply one, because nobody knows the future target; the removed field\n  filled the horizon with a flat line at the last observation and handed the result to\n  models that had fitted coefficients against real history.\n- A lag of a **covariate** is honest, because a covariate's future is as knowable as the\n  covariate itself. No model in the suite lags one internally, so this is the gap that\n  ``exog_lags`` fills.\n\n``exog_lags`` maps an ``exog`` column to the lags to build from it: ``{\"promo\": [1, 7]}``\nadds ``promo_lag_1`` and ``promo_lag_7``. They are ordinary columns by the time any model\nsees them, so every ``supports_exog`` model can use them.\n\nPrecedence, when the two rules ever meet: **the model wins.** A model that lags covariates\ninternally sets ``lags_covariates_internally`` and is handed the unlagged columns only, so\na covariate is never lagged twice. Every shipped model leaves that flag False today.",
       "properties": {
+        "ablation_models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ablation Models",
+          "type": "array"
+        },
+        "ablation_modes": {
+          "items": {
+            "enum": [
+              "univariate",
+              "cov_none",
+              "cov_future_only",
+              "cov_past_only",
+              "cov_static_only",
+              "cov_dynamic",
+              "cov_future_static",
+              "cov_past_static",
+              "cov_all",
+              "local",
+              "global",
+              "hybrid",
+              "local_univariate",
+              "local_cov_none",
+              "local_cov_future_only",
+              "local_cov_past_only",
+              "local_cov_static_only",
+              "local_cov_dynamic",
+              "local_cov_future_static",
+              "local_cov_past_static",
+              "local_cov_all",
+              "global_univariate",
+              "global_cov_none",
+              "global_cov_future_only",
+              "global_cov_past_only",
+              "global_cov_static_only",
+              "global_cov_dynamic",
+              "global_cov_future_static",
+              "global_cov_past_static",
+              "global_cov_all",
+              "hybrid_univariate",
+              "hybrid_cov_none",
+              "hybrid_cov_all"
+            ],
+            "type": "string"
+          },
+          "title": "Ablation Modes",
+          "type": "array"
+        },
         "censored_col": {
           "anyOf": [
             {
@@ -983,6 +1072,11 @@
           },
           "title": "Holidays",
           "type": "array"
+        },
+        "include_univariate_baselines": {
+          "default": false,
+          "title": "Include Univariate Baselines",
+          "type": "boolean"
         },
         "level_shift": {
           "default": false,
@@ -1442,6 +1536,15 @@
                 ]
               },
               "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "type": "object"
             },
             {
               "type": "null"

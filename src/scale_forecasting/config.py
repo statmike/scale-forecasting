@@ -137,7 +137,8 @@ Hardware = Literal["cpu", "gpu"]
 # depending on who serialises it. Scalars and flat lists cover every per-model knob we have
 # (``n_lags``, ``batch_size``, a SARIMAX ``order`` triple); a nested structure would fit the digest
 # fine but is not needed, and leaving it out keeps the error message useful.
-ModelParam = bool | int | float | str | None | list[bool | int | float | str | None]
+ModelParamScalar = bool | int | float | str | None
+ModelParam = ModelParamScalar | list[ModelParamScalar] | dict[str, list[int]]
 
 
 def _is_non_finite(value: Any) -> bool:
@@ -176,6 +177,41 @@ _RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$")
 
 GridPolicy = Literal["strict", "fill_zero", "zero_fill", "ffill", "linear"]
 OutlierPolicy = Literal["none", "winsorize", "interpolate", "flag", "stl_resid"]
+AblationMode = Literal[
+    "univariate",
+    "cov_none",
+    "cov_future_only",
+    "cov_past_only",
+    "cov_static_only",
+    "cov_dynamic",
+    "cov_future_static",
+    "cov_past_static",
+    "cov_all",
+    "local",
+    "global",
+    "hybrid",
+    "local_univariate",
+    "local_cov_none",
+    "local_cov_future_only",
+    "local_cov_past_only",
+    "local_cov_static_only",
+    "local_cov_dynamic",
+    "local_cov_future_static",
+    "local_cov_past_static",
+    "local_cov_all",
+    "global_univariate",
+    "global_cov_none",
+    "global_cov_future_only",
+    "global_cov_past_only",
+    "global_cov_static_only",
+    "global_cov_dynamic",
+    "global_cov_future_static",
+    "global_cov_past_static",
+    "global_cov_all",
+    "hybrid_univariate",
+    "hybrid_cov_none",
+    "hybrid_cov_all",
+]
 
 
 class DataConfig(BaseModel):
@@ -194,6 +230,9 @@ class DataConfig(BaseModel):
     series_limit: int | None = Field(default=None, gt=0)
     grid_policy: GridPolicy = "strict"
     trim_leading_zeros: bool = False
+    # Optional explicit BigQuery table snapshot timestamp (epoch milliseconds) for time-travel
+    # reproducibility and cross-run cell borrowing against a pinned table version.
+    snapshot_millis: int | None = Field(default=None, gt=0)
 
 
 class FeaturesConfig(BaseModel):
@@ -242,6 +281,9 @@ class FeaturesConfig(BaseModel):
     outlier_policy: OutlierPolicy = "none"
     outlier_sigma: float = Field(default=3.5, gt=0.0)
     regime_routing: bool = False
+    include_univariate_baselines: bool = False
+    ablation_modes: list[AblationMode] = Field(default_factory=list)
+    ablation_models: list[str] = Field(default_factory=list)
 
     @property
     def dynamic_covariates(self) -> list[str]:
@@ -308,6 +350,12 @@ class FeaturesConfig(BaseModel):
                         f"features.exog_lags would build '{built}', which is already a "
                         f"declared exog column; rename one of them"
                     )
+        if len(set(self.ablation_modes)) != len(self.ablation_modes):
+            raise ValueError(f"features.ablation_modes contains duplicates: {self.ablation_modes}")
+        if len(set(self.ablation_models)) != len(self.ablation_models):
+            raise ValueError(
+                f"features.ablation_models contains duplicates: {self.ablation_models}"
+            )
         return self
 
 
@@ -584,6 +632,9 @@ class HpoConfig(BaseModel):
     sample_size: int = Field(default=20, gt=0)
 
 
+VariantPolicy = Literal["all", "best_per_base_model", "primary_only"]
+
+
 class EnsembleConfig(BaseModel):
     """Consensus across base models.
 
@@ -599,6 +650,7 @@ class EnsembleConfig(BaseModel):
     prune_threshold: float = Field(default=0.0, ge=0.0)
     top_k: int | None = Field(default=None, gt=0)
     parsimony_margin: float = Field(default=0.0, ge=0.0)
+    variant_policy: VariantPolicy = "all"
 
     @model_validator(mode="before")
     @classmethod
@@ -1536,6 +1588,22 @@ class ComputeConfig(BaseModel):
     # RunConfig.resolve_family_compute.
     families: dict[ComputeFamily, FamilyCompute] = Field(default_factory=dict)
     ensemble: EnsembleCompute = Field(default_factory=EnsembleCompute)
+    # Cross-run cell borrowing: reuse completed model variants from a prior run on the identical
+    # BigQuery table snapshot, series universe, horizon, and model_spec_hash. Excluded from run_id.
+    reuse_prior_runs: bool = False
+    reuse_from_run_id: str | None = None
+
+    @field_validator("reuse_from_run_id")
+    @classmethod
+    def _check_reuse_from_run_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _RUN_ID_RE.match(value):
+            return value
+        raise ValueError(
+            "compute.reuse_from_run_id must be a valid run_id "
+            f"(<name-slug>-<12 hex>); got {value!r}"
+        )
 
     @model_validator(mode="after")
     def _check_families(self) -> ComputeConfig:
@@ -1712,7 +1780,14 @@ class RunConfig(BaseModel):
         """
         for model, params in value.items():
             for key, val in params.items():
-                bad = [v for v in (val if isinstance(val, list) else [val]) if _is_non_finite(v)]
+                flat: list[Any]
+                if isinstance(val, list):
+                    flat = list(val)
+                elif isinstance(val, dict):
+                    flat = [item for sublist in val.values() for item in sublist]
+                else:
+                    flat = [val]
+                bad = [v for v in flat if _is_non_finite(v)]
                 if bad:
                     raise ValueError(
                         f"model_params.{model}.{key} contains {bad[0]!r}, which is not JSON. "
@@ -1729,6 +1804,28 @@ class RunConfig(BaseModel):
         # 1. Duplicate models are almost certainly a mistake — fail clearly.
         if len(set(self.models)) != len(self.models):
             raise ValueError(f"models contains duplicates: {self.models}")
+        for m in self.models:
+            if "@" in m:
+                base, _, tag = m.partition("@")
+                if not base.strip() or not tag.strip() or "@" in tag:
+                    raise ValueError(
+                        f"malformed model variant {m!r}; expected '<base_model>@<tag>'"
+                    )
+
+        # 1b. Expand config-driven univariate baselines and ablation ladders when requested.
+        if (
+            self.features.include_univariate_baselines
+            or self.features.ablation_modes
+            or self.features.ablation_models
+        ):
+            from .features import expand_model_variants
+
+            try:
+                exp_models, exp_params = expand_model_variants(self)
+            except ConfigError as e:
+                raise ValueError(str(e)) from e
+            object.__setattr__(self, "models", exp_models)
+            object.__setattr__(self, "model_params", exp_params)
 
         # 2. HPO tunes on the backtest folds (decision_metric), so it needs backtesting ON.
         #    Fail fast at load rather than deep in an engine (a run with nothing to optimize).

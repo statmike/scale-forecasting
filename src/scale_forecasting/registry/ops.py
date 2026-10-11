@@ -1173,6 +1173,406 @@ def export(
     return out
 
 
+# --- cross-run cell borrowing (Phase G.5) ------------------------------------------
+
+
+@dataclass(frozen=True)
+class BorrowedModelSource:
+    """Provenance record for a model specification borrowed from a completed prior run."""
+
+    target_model_type: str
+    source_run_id: str
+    source_model_type: str
+    model_spec_hash: str
+    snapshot_millis: int | None
+
+
+def match_reusable_models(
+    cfg: object,
+    run_id: str,
+    snapshot_millis: int | None,
+    prior_headers: Sequence[dict[str, object]],
+    available_models_by_run: dict[str, set[str]],
+    *,
+    source_last_modified_millis: int | None = None,
+) -> dict[str, BorrowedModelSource]:
+    """Match requested models against candidate prior runs by ``make_model_spec_hash`` (pure).
+
+    Returns ``{target_model_type: BorrowedModelSource}`` for every model in ``cfg.models`` whose
+    exact ``model_spec_hash`` (and matching ``source_table`` + ``series_limit`` + verified
+    ``snapshot_millis``) is already present with completed cells in a candidate prior run.
+    """
+    from ..config import RunConfig
+    from .ids import make_model_spec_hash
+
+    assert isinstance(cfg, RunConfig)
+    explicit_source = cfg.compute.reuse_from_run_id
+    if not cfg.compute.reuse_prior_runs and explicit_source is None:
+        return {}
+    if explicit_source is None and snapshot_millis is None and source_last_modified_millis is None:
+        return {}
+
+    matched: dict[str, BorrowedModelSource] = {}
+    want_hashes = {m: make_model_spec_hash(m, cfg) for m in cfg.models}
+
+    for hdr in prior_headers:
+        cand_run_id = str(hdr.get("run_id") or "")
+        if not cand_run_id or cand_run_id == run_id:
+            continue
+        if explicit_source is not None and cand_run_id != explicit_source:
+            continue
+        if str(hdr.get("status") or "") != "COMPLETED":
+            continue
+        cand_snap_raw = hdr.get("snapshot_millis")
+        cand_snap = int(str(cand_snap_raw)) if cand_snap_raw is not None else None
+        if explicit_source is None:
+            if snapshot_millis is not None:
+                if cand_snap != snapshot_millis:
+                    continue
+            else:
+                if (
+                    cand_snap is None
+                    or source_last_modified_millis is None
+                    or cand_snap < source_last_modified_millis
+                ):
+                    continue
+
+        raw_cfg = hdr.get("raw_config")
+        if isinstance(raw_cfg, str):
+            try:
+                raw_cfg = json.loads(raw_cfg)
+            except Exception:  # noqa: BLE001 - skip malformed prior config
+                continue
+        if not isinstance(raw_cfg, dict):
+            continue
+        try:
+            prior_cfg = RunConfig.model_validate(raw_cfg)
+        except Exception:  # noqa: BLE001 - skip prior config that no longer validates
+            continue
+
+        if (
+            prior_cfg.data.source_table != cfg.data.source_table
+            or prior_cfg.data.series_limit != cfg.data.series_limit
+        ):
+            continue
+
+        avail = available_models_by_run.get(cand_run_id, set())
+        if not avail:
+            continue
+
+        prior_by_hash: dict[str, str] = {}
+        for pm in prior_cfg.models:
+            if pm in avail:
+                h = make_model_spec_hash(pm, prior_cfg)
+                prior_by_hash.setdefault(h, pm)
+
+        for target_m, want_h in want_hashes.items():
+            if target_m in matched:
+                continue
+            source_m = prior_by_hash.get(want_h)
+            if source_m is not None:
+                matched[target_m] = BorrowedModelSource(
+                    target_model_type=target_m,
+                    source_run_id=cand_run_id,
+                    source_model_type=source_m,
+                    model_spec_hash=want_h,
+                    snapshot_millis=cand_snap if cand_snap is not None else snapshot_millis,
+                )
+        if len(matched) == len(cfg.models):
+            break
+
+    return matched
+
+
+def render_borrow_model_sql(dataset: str) -> dict[str, str]:
+    """Render parameterized ``INSERT INTO ... SELECT ...`` statements for borrowing one model."""
+    from ..metrics import METRIC_NAMES
+
+    metric_cols = ", ".join(METRIC_NAMES)
+    return {
+        "forecast_predictions": (
+            f"INSERT INTO `{dataset}.forecast_predictions` ("
+            "run_id, ts_id, model_type, compute_engine, ensemble_id, forecast_date, "
+            "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at, "
+            "explanations) "
+            "SELECT @target_run_id AS run_id, ts_id, @target_model_type AS model_type, "
+            "compute_engine, ensemble_id, forecast_date, yhat, yhat_raw, yhat_adjusted, "
+            "yhat_lower, yhat_upper, quantiles, CURRENT_TIMESTAMP() AS created_at, explanations "
+            f"FROM (SELECT * FROM `{dataset}.forecast_predictions` "
+            "WHERE run_id = @source_run_id AND model_type = @source_model_type "
+            "AND ensemble_id IS NULL "
+            "QUALIFY ROW_NUMBER() OVER ("
+            "PARTITION BY ts_id, forecast_date ORDER BY created_at DESC NULLS LAST) = 1)"
+        ),
+        "backtest_oof": (
+            f"INSERT INTO `{dataset}.backtest_oof` ("
+            "run_id, ts_id, model_type, fold_id, forecast_date, y_true, yhat, yhat_raw, "
+            "yhat_adjusted, cutoff_date, horizon_step, yhat_lower, yhat_upper, created_at, "
+            "ensemble_id, yhat_stale) "
+            "SELECT @target_run_id AS run_id, ts_id, @target_model_type AS model_type, "
+            "fold_id, forecast_date, y_true, yhat, yhat_raw, yhat_adjusted, cutoff_date, "
+            "horizon_step, yhat_lower, yhat_upper, CURRENT_TIMESTAMP() AS created_at, "
+            "ensemble_id, yhat_stale "
+            f"FROM (SELECT * FROM `{dataset}.backtest_oof` "
+            "WHERE run_id = @source_run_id AND model_type = @source_model_type "
+            "AND ensemble_id IS NULL "
+            "QUALIFY ROW_NUMBER() OVER ("
+            "PARTITION BY ts_id, fold_id, forecast_date ORDER BY created_at DESC NULLS LAST) = 1)"
+        ),
+        "forecast_metadata": (
+            f"INSERT INTO `{dataset}.forecast_metadata` ("
+            f"run_id, ts_id, model_type, compute_engine, model_hash, ensemble_id, fold_id, "
+            f"{metric_cols}, fit_seconds, best_params, model_artifact, created_at, worker_id, "
+            "cell_started_at, cell_ended_at, cpu_seconds, process_rss_bytes, peak_gpu_bytes, "
+            "intraop_threads, n_obs, cell_status, error_class, error_detail, backtest_status, "
+            "backtest_note, n_folds_achieved, achieved_step, achieved_min_train, first_val_date, "
+            "last_val_date, interval_source, point_forecast_source, point_forecast_decision, "
+            "interval_calibration, point_forecast_margin, ensemble_scoring, hpo_scoring, n_fits, "
+            "train_rows_total, n_hpo_fits, fit_diagnostics, device_requested, device_available, "
+            "device_used, device_name, backtest_refit, staleness_gap) "
+            "SELECT @target_run_id AS run_id, ts_id, @target_model_type AS model_type, "
+            f"compute_engine, @model_spec_hash AS model_hash, ensemble_id, fold_id, {metric_cols}, "
+            "fit_seconds, best_params, model_artifact, CURRENT_TIMESTAMP() AS created_at, "
+            "worker_id, cell_started_at, cell_ended_at, cpu_seconds, process_rss_bytes, "
+            "peak_gpu_bytes, intraop_threads, n_obs, cell_status, error_class, error_detail, "
+            "backtest_status, backtest_note, n_folds_achieved, achieved_step, achieved_min_train, "
+            "first_val_date, last_val_date, interval_source, point_forecast_source, "
+            "point_forecast_decision, interval_calibration, point_forecast_margin, "
+            "ensemble_scoring, hpo_scoring, n_fits, train_rows_total, n_hpo_fits, "
+            "JSON_SET(COALESCE(fit_diagnostics, JSON '{}'), "
+            "'$.borrowed_from_run_id', @source_run_id, "
+            "'$.borrowed_from_model_type', @source_model_type, "
+            "'$.base_model', @base_model, "
+            "'$.scope_capability', @scope_capability, "
+            "'$.training_mode', @training_mode, "
+            "'$.cov_profile', @cov_profile, "
+            "'$.is_univariate', @is_univariate, "
+            "'$.covariates_used', PARSE_JSON(@covariates_used_json), "
+            "'$.model_spec_hash', @model_spec_hash) AS fit_diagnostics, "
+            "device_requested, device_available, device_used, device_name, backtest_refit, "
+            "staleness_gap "
+            f"FROM (SELECT * FROM `{dataset}.forecast_metadata` "
+            "WHERE run_id = @source_run_id AND model_type = @source_model_type "
+            "AND ensemble_id IS NULL "
+            "QUALIFY ROW_NUMBER() OVER ("
+            "PARTITION BY ts_id, COALESCE(fold_id, -1) ORDER BY created_at DESC NULLS LAST) = 1)"
+        ),
+    }
+
+
+def find_reusable_models(
+    cfg: object,
+    run_id: str,
+    snapshot_millis: int | None,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, BorrowedModelSource]:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Discover completed prior runs in ``run_registry`` whose cells can satisfy ``cfg.models``."""
+    from google.cloud import bigquery
+
+    from ..config import RunConfig
+    from ..engines.bigquery_names import source_ref
+
+    assert isinstance(cfg, RunConfig)
+    explicit_source = cfg.compute.reuse_from_run_id
+    if not cfg.compute.reuse_prior_runs and explicit_source is None:
+        return {}
+
+    resolved = _resolved(settings)
+    client = bigquery.Client(project=resolved.project_id)
+    ds = resolved.registry_dataset_ref
+
+    source_last_mod_ms: int | None = None
+    if explicit_source is None and snapshot_millis is None:
+        try:
+            tbl = client.get_table(source_ref(cfg, resolved.dataset_ref))
+            if tbl.modified is not None:
+                source_last_mod_ms = int(tbl.modified.timestamp() * 1000)
+        except Exception as exc:  # noqa: BLE001 - best-effort table metadata check
+            _log.debug("reuse_prior_runs: could not read source table modified time: %s", exc)
+        if source_last_mod_ms is None:
+            return {}
+
+    if explicit_source is not None:
+        where_clause = "WHERE run_id = @explicit_run_id AND status = 'COMPLETED'"
+    elif snapshot_millis is not None:
+        where_clause = (
+            "WHERE run_id != @run_id AND status = 'COMPLETED' "
+            "AND snapshot_millis = @snapshot_millis"
+        )
+    else:
+        where_clause = (
+            "WHERE run_id != @run_id AND status = 'COMPLETED' "
+            "AND snapshot_millis >= @source_last_mod_ms"
+        )
+    sql_headers = (
+        f"SELECT run_id, status, snapshot_millis, TO_JSON_STRING(raw_config) AS raw_config, "
+        f"created_at FROM `{ds}.run_registry` {where_clause} "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1 "
+        "ORDER BY created_at DESC NULLS LAST LIMIT 25"
+    )
+    params = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("explicit_run_id", "STRING", explicit_source),
+        bigquery.ScalarQueryParameter("snapshot_millis", "INT64", snapshot_millis),
+        bigquery.ScalarQueryParameter("source_last_mod_ms", "INT64", source_last_mod_ms),
+    ]
+    try:
+        hdr_rows = [
+            dict(r)
+            for r in client.query(
+                sql_headers, job_config=bigquery.QueryJobConfig(query_parameters=params)
+            ).result()
+        ]
+    except Exception as exc:  # noqa: BLE001 - best-effort reuse discovery; fall back to normal fit
+        _log.warning("reuse_prior_runs: header lookup failed (%s); running all models fresh", exc)
+        return {}
+    if not hdr_rows:
+        return {}
+
+    cand_ids = [str(r["run_id"]) for r in hdr_rows if r.get("run_id")]
+    sql_avail = (
+        "SELECT m.run_id, m.model_type "
+        f"FROM `{ds}.forecast_metadata` AS m "
+        f"JOIN (SELECT DISTINCT run_id, model_type FROM `{ds}.forecast_predictions` "
+        "WHERE run_id IN UNNEST(@cand_ids) AND ensemble_id IS NULL) AS p "
+        "USING (run_id, model_type) "
+        "WHERE m.run_id IN UNNEST(@cand_ids) AND m.fold_id IS NULL AND m.ensemble_id IS NULL "
+        "GROUP BY m.run_id, m.model_type "
+        "HAVING COUNTIF(m.cell_status = 'ok') > 0 AND COUNTIF(m.cell_status = 'error') = 0"
+    )
+    avail_params = [bigquery.ArrayQueryParameter("cand_ids", "STRING", cand_ids)]
+    available_by_run: dict[str, set[str]] = {}
+    try:
+        for r in client.query(
+            sql_avail, job_config=bigquery.QueryJobConfig(query_parameters=avail_params)
+        ).result():
+            available_by_run.setdefault(str(r["run_id"]), set()).add(str(r["model_type"]))
+    except Exception as exc:  # noqa: BLE001 - best-effort availability check
+        _log.warning("reuse_prior_runs: cell availability check failed (%s)", exc)
+        return {}
+
+    return match_reusable_models(
+        cfg,
+        run_id,
+        snapshot_millis,
+        hdr_rows,
+        available_by_run,
+        source_last_modified_millis=source_last_mod_ms,
+    )
+
+
+def borrow_model_results(
+    cfg: object,
+    run_id: str,
+    borrowed: dict[str, BorrowedModelSource],
+    *,
+    settings: Settings | None = None,
+) -> None:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Copy ``forecast_predictions``, ``backtest_oof``, and ``forecast_metadata`` for reuse."""
+    if not borrowed:
+        return
+    from google.cloud import bigquery
+
+    from ..config import RunConfig
+    from ..features import variant_diagnostics_for
+
+    assert isinstance(cfg, RunConfig)
+    resolved = _resolved(settings)
+    client = bigquery.Client(project=resolved.project_id)
+    stmts = render_borrow_model_sql(resolved.registry_dataset_ref)
+
+    for target_m, src in borrowed.items():
+        vdiag = variant_diagnostics_for(target_m, cfg)
+        qparams = [
+            bigquery.ScalarQueryParameter("target_run_id", "STRING", run_id),
+            bigquery.ScalarQueryParameter("target_model_type", "STRING", target_m),
+            bigquery.ScalarQueryParameter("source_run_id", "STRING", src.source_run_id),
+            bigquery.ScalarQueryParameter("source_model_type", "STRING", src.source_model_type),
+            bigquery.ScalarQueryParameter("base_model", "STRING", str(vdiag["base_model"])),
+            bigquery.ScalarQueryParameter(
+                "scope_capability", "STRING", str(vdiag["scope_capability"])
+            ),
+            bigquery.ScalarQueryParameter("training_mode", "STRING", str(vdiag["training_mode"])),
+            bigquery.ScalarQueryParameter("cov_profile", "STRING", str(vdiag["cov_profile"])),
+            bigquery.ScalarQueryParameter("is_univariate", "BOOL", bool(vdiag["is_univariate"])),
+            bigquery.ScalarQueryParameter(
+                "covariates_used_json", "STRING", json.dumps(vdiag["covariates_used"])
+            ),
+            bigquery.ScalarQueryParameter("model_spec_hash", "STRING", src.model_spec_hash),
+        ]
+        job_cfg = bigquery.QueryJobConfig(query_parameters=qparams)
+        for table_name in ("forecast_predictions", "backtest_oof", "forecast_metadata"):
+            client.query(stmts[table_name], job_config=job_cfg).result()
+        _log.info(
+            "run %s: borrowed model '%s' from prior run %s (model '%s', spec_hash=%s)",
+            run_id,
+            target_m,
+            src.source_run_id,
+            src.source_model_type,
+            src.model_spec_hash,
+        )
+
+
+def record_borrowed_family_job(
+    cfg: object,
+    run_id: str,
+    family: str,
+    runtime: str,
+    spark_mode: str | None,
+    hardware: str | None,
+    gpu_type: str | None,
+    borrowed_sources: Sequence[BorrowedModelSource],
+    *,
+    force: bool = False,
+    settings: Settings | None = None,
+) -> None:  # pragma: no cover - GCP I/O, @gcp smoke
+    """Write a COMPLETED ``run_jobs`` row for a family satisfied 100% by borrowed prior cells."""
+    from datetime import UTC, datetime
+
+    from .ids import make_job_key
+    from .jobs import next_job_attempt, update_job, write_job
+    from .rows import assemble_job_row
+
+    attempt, _ = next_job_attempt(run_id, family, force=force, settings=settings)
+    now = datetime.now(UTC)
+    source_ids = ",".join(sorted({s.source_run_id for s in borrowed_sources}))
+    telemetry = {
+        "borrowed": {
+            s.target_model_type: {
+                "source_run_id": s.source_run_id,
+                "source_model_type": s.source_model_type,
+                "model_spec_hash": s.model_spec_hash,
+                "snapshot_millis": s.snapshot_millis,
+            }
+            for s in borrowed_sources
+        }
+    }
+    job_id = make_job_key(run_id, family, attempt)
+    row = assemble_job_row(
+        run_id,
+        family,
+        attempt,
+        now,
+        runtime=runtime,
+        spark_mode=spark_mode,
+        hardware=hardware,
+        gpu_type=gpu_type,
+        system_job_id=f"borrowed:{source_ids}",
+        status="COMPLETED",
+        started_at=now,
+    )
+    write_job(row, settings=settings)
+    update_job(
+        job_id,
+        settings=settings,
+        status="COMPLETED",
+        runtime_seconds=0.0,
+        ended_at=now,
+        merge_telemetry=telemetry,
+    )
+
+
 # --- CLI ---------------------------------------------------------------------------
 
 

@@ -424,6 +424,13 @@ def bakeoff(
     learned: str = "nnls",
     with_exog: bool = False,
     future_covariates: list[str] | None = None,
+    past_covariates: list[str] | None = None,
+    static_covariates: list[str] | None = None,
+    include_univariate_baselines: bool = False,
+    ablation_modes: list[str] | None = None,
+    ablation_models: list[str] | None = None,
+    variant_policy: str = "best_per_base_model",
+    model_params: dict[str, dict[str, Any]] | None = None,
     floor: float | None = None,
     cap: float | None = None,
     integer_rounding: str = "none",
@@ -457,9 +464,10 @@ def bakeoff(
         ensemble_oof_bounds,
         fit_learned,
     )
+    from .features import variant_diagnostics_for
     from .metrics import METRIC_NAMES, compute_metrics
     from .seasonality import seasonal_period
-    from .worker import rollup_metrics
+    from .worker import is_panel_model, rollup_metrics, run_panel
 
     if models is None:
         # Fast, dependency-light defaults so the bake-off runs anywhere the repo imports.
@@ -477,6 +485,16 @@ def bakeoff(
     features_cfg: dict[str, Any] = {"exog": exog}
     if future_covariates:
         features_cfg["future_covariates"] = list(future_covariates)
+    if past_covariates:
+        features_cfg["past_covariates"] = list(past_covariates)
+    if static_covariates:
+        features_cfg["static_covariates"] = list(static_covariates)
+    if include_univariate_baselines:
+        features_cfg["include_univariate_baselines"] = True
+    if ablation_modes:
+        features_cfg["ablation_modes"] = list(ablation_modes)
+    if ablation_models:
+        features_cfg["ablation_models"] = list(ablation_models)
     output_cfg: dict[str, Any] = {"integer_rounding": integer_rounding}
     if floor is not None:
         output_cfg["floor"] = floor
@@ -491,8 +509,14 @@ def bakeoff(
         "features": features_cfg,
         "backtest": {"enabled": True, "n_folds": n_folds, "horizon": horizon, "step": horizon},
         "output": output_cfg,
-        "ensemble": {"enabled": True, "strategies": [calculated, learned]},
+        "ensemble": {
+            "enabled": True,
+            "strategies": [calculated, learned],
+            "variant_policy": variant_policy,
+        },
     }
+    if model_params:
+        raw["model_params"] = dict(model_params)
     cfg = RunConfig.model_validate(raw)
     validate_panel(data, cfg)
 
@@ -512,10 +536,26 @@ def bakeoff(
     oof_long: list[pd.DataFrame] = []  # feeds combine_oof / fit_learned
     metric_long: list[dict[str, Any]] = []  # feeds inverse_error weighting
 
-    for model in models:
-        result = run_cell(series, model, cfg)
+    for model in cfg.models:
+        if is_panel_model(model, cfg):
+            panel_results = run_panel(data, model, cfg)
+            result = next((r for r in panel_results if r.ts_id == chosen), panel_results[0])
+        else:
+            result = run_cell(series, model, cfg)
         status = result.status
-        row: dict[str, Any] = {"model": model, "kind": "base", "status": status}
+        vdiag = variant_diagnostics_for(model, cfg)
+        row: dict[str, Any] = {
+            "model": model,
+            "base_model": vdiag["base_model"],
+            "scope_capability": vdiag["scope_capability"],
+            "training_mode": vdiag["training_mode"],
+            "cov_profile": vdiag["cov_profile"],
+            "is_univariate": vdiag["is_univariate"],
+            "covariates_used": vdiag["covariates_used"],
+            "model_spec_hash": vdiag["model_spec_hash"],
+            "kind": "base",
+            "status": status,
+        }
         row.update({m: result.metrics.get(m, float("nan")) for m in METRIC_NAMES})
         base_rows.append(row)
         if status != "ok":
@@ -593,7 +633,18 @@ def bakeoff(
                 )
             )
         panel = rollup_metrics(fold_panels)
-        row = {"model": str(model_type), "kind": "ensemble", "status": "ok"}
+        row = {
+            "model": str(model_type),
+            "base_model": str(model_type),
+            "scope_capability": "ensemble",
+            "training_mode": "ensemble",
+            "cov_profile": "ensemble",
+            "is_univariate": None,
+            "covariates_used": None,
+            "model_spec_hash": None,
+            "kind": "ensemble",
+            "status": "ok",
+        }
         row.update({m: panel.get(m, float("nan")) for m in METRIC_NAMES})
         base_rows.append(row)
 

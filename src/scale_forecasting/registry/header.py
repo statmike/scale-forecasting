@@ -131,7 +131,11 @@ def write_header(
     from ..identity import resolve_principal
 
     resolved = resolve_settings(settings)
-    snapshot_millis = resolve_snapshot_millis(settings=resolved)
+    snapshot_millis = (
+        int(cfg.data.snapshot_millis)
+        if cfg.data.snapshot_millis is not None
+        else resolve_snapshot_millis(settings=resolved)
+    )
     row = assemble_header_row(
         cfg,
         run_id,

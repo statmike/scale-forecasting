@@ -158,6 +158,7 @@ class TimesFm(_BigQueryNativeModel):
     @classmethod
     def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
         """Validate ``model_params.timesfm`` (version 2.0/2.5/3.0, context_window, horizon)."""
+        super().validate_params(params, max_horizon=max_horizon)
         canonical_model, _ = resolve_timesfm_params(params)
         effective_model = canonical_model or "TimesFM 2.5"
         if effective_model == "TimesFM 3.0" and max_horizon > 1024:

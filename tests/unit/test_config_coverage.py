@@ -78,6 +78,7 @@ from pydantic import BaseModel
 from test_validation_ledger import _NOT_A_RUN_CONFIG, _table_rows
 
 from scale_forecasting.config import RECONCILIATION_METHODS, RunConfig
+from scale_forecasting.features import VALID_ABLATION_MODES
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models import list_models
 
@@ -92,6 +93,7 @@ _CATALOGUES: dict[str, tuple[str, ...]] = {
     "METRIC_NAMES": tuple(METRIC_NAMES),
     "MODEL_NAMES": tuple(sorted(list_models())),
     "RECONCILIATION_METHODS": tuple(RECONCILIATION_METHODS),
+    "VALID_ABLATION_MODES": tuple(sorted(VALID_ABLATION_MODES)),
 }
 
 
@@ -227,6 +229,10 @@ UNPROVEN: dict[str, str] = {
     "compute.ray_read_mode=ray_data": (
         "tests/unit/test_ray_engine.py::test_read_source_series_ray_data_mode_dispatches_and_limits"
     ),
+    "compute.reuse_prior_runs=true": (
+        "tests/unit/test_phase_g5_variants_and_borrowing.py::"
+        "test_match_reusable_models_and_render_borrow_sql"
+    ),
     "compute.spark_deps=container": (
         "reason: this knob has an environment-variable twin, `SF_SERVERLESS_DEPS`, which lives on "
         "the infra object rather than the config precisely so it cannot move the `run_id`. Every "
@@ -264,7 +270,24 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_phase_g1_workbench.py::"
         "test_smart_ensembles_champion_horizon_specialist_topk_and_parsimony"
     ),
+    "ensemble.variant_policy=best_per_base_model": (
+        "tests/unit/test_phase_g5_variants_and_borrowing.py::test_ensemble_variant_policy_filtering"
+    ),
+    "ensemble.variant_policy=primary_only": (
+        "tests/unit/test_phase_g5_variants_and_borrowing.py::test_ensemble_variant_policy_filtering"
+    ),
     # --- features ------------------------------------------------------------------------------
+    **{
+        f"features.ablation_modes={m}": (
+            "tests/unit/test_phase_g5_variants_and_borrowing.py::"
+            "test_all_valid_ablation_modes_accepted (over VALID_ABLATION_MODES)"
+        )
+        for m in sorted(VALID_ABLATION_MODES)
+    },
+    "features.include_univariate_baselines=true": (
+        "tests/unit/test_phase_g5_variants_and_borrowing.py::"
+        "test_include_univariate_baselines_skips_already_univariate_models"
+    ),
     # `fourier=true` and `level_shift=true` sat here until 2026-09-26, pointed at their offline
     # tests, because the only config that set them was smoke 29 and smoke 29 could not finish: the
     # `features.lags` it also carried killed half its cells. Removing that field let the arm run

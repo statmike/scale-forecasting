@@ -464,6 +464,7 @@ def _meta_row(
     scored-geometry columns are only useful in a cross-engine ``GROUP BY``, so an engine that fills
     some of them and not others is worse than one that fills none — the gaps read as differences.
     """
+    from ..features import should_stamp_variant_diagnostics, variant_diagnostics_for
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
     from ..registry.rows import _as_date, _as_float
@@ -479,6 +480,10 @@ def _meta_row(
             # left it out of a fold's evaluation — the reason lives on the BigQuery side.
             status = "reduced" if n_folds_achieved else "unscored"
             note = f"scored on {n_folds_achieved} of {requested} folds"
+
+    fit_diag: str | None = None
+    if should_stamp_variant_diagnostics(model_name, cfg):
+        fit_diag = json.dumps(variant_diagnostics_for(model_name, cfg), sort_keys=True)
 
     return {
         "run_id": run_id,
@@ -538,6 +543,7 @@ def _meta_row(
         "achieved_min_train": cfg.backtest.min_train if n_folds_achieved else None,
         "first_val_date": _as_date(first_val_date),
         "last_val_date": _as_date(last_val_date),
+        "fit_diagnostics": fit_diag,
     }
 
 

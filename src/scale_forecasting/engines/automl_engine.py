@@ -54,8 +54,13 @@ from ..backtest import (
 from ..calibration import apply_calibration, calibrate_from_oof, compare_arms, resolve_arm
 from ..config import corrected_arm_for
 from ..errors import EngineError, get_logger
+from ..features import (
+    effective_config_for_model,
+    should_stamp_variant_diagnostics,
+    variant_diagnostics_for,
+)
 from ..metrics import METRIC_NAMES, compute_metrics
-from ..models import get_model
+from ..models import base_model_name, get_model
 from ..models.base_model import DEFAULT_QUANTILES, PREDICTION_COLUMNS
 from ..registry.ids import make_model_hash, make_run_id, vertex_automl_job_id
 from ..seasonality import seasonal_period
@@ -580,12 +585,13 @@ def plan_automl_model(
         tuner_override = pool_spec
         trainer_override = pool_spec
 
+    eff_cfg = effective_config_for_model(cfg, get_model(model_type), model_type)
     (
         col_specs,
         attr_cols,
         avail_cols,
         unavail_cols,
-    ) = build_automl_column_specs(cfg, panel_df)
+    ) = build_automl_column_specs(eff_cfg, panel_df)
 
     extra: dict[str, Any] = {}
     for k in (
@@ -622,7 +628,8 @@ def plan_automl_model(
     )
 
     clean_root = artifact_root.rstrip("/")
-    root_dir = f"{clean_root}/{run_id}/tabular_workflow/{model_type}"
+    safe_model = model_type.replace("@", "__")
+    root_dir = f"{clean_root}/{run_id}/tabular_workflow/{safe_model}"
 
     return AutoMLModelPlan(
         model_type=model_type,
@@ -681,6 +688,7 @@ def compile_tabular_workflow_spec(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    base_model = base_model_name(plan.model_type)
 
     # Pass {"auto": [...]} so Vertex AI Feature Transform Engine resolves BigQuery native column
     # types (TIMESTAMP, DATETIME, DATE, FLOAT64, STRING) directly from BigQuery table stats.
@@ -769,13 +777,13 @@ def compile_tabular_workflow_spec(
     elif "stage_1_num_parallel_trials" in common_kwargs:
         common_kwargs["stage_2_num_parallel_trials"] = common_kwargs["stage_1_num_parallel_trials"]
 
-    if plan.model_type != "vertex_tft":
+    if base_model != "vertex_tft":
         if "num_selected_trials" in plan.extra_params:
             common_kwargs["num_selected_trials"] = int(plan.extra_params["num_selected_trials"])
         elif plan.max_num_trials < 10:
             common_kwargs["num_selected_trials"] = max(1, int(plan.max_num_trials))
 
-    if plan.model_type in ("vertex_l2l", "vertex_tide"):
+    if base_model in ("vertex_l2l", "vertex_tide"):
         # Per Vertex AI Forecasting docs, enable_probabilistic_inference is incompatible with
         # minimize-quantile-loss; pass quantiles directly when using minimize-quantile-loss.
         if plan.optimization_objective == "minimize-quantile-loss":
@@ -798,17 +806,17 @@ def compile_tabular_workflow_spec(
                 plan.extra_params["hierarchy_group_temporal_total_weight"]
             )
 
-    if plan.model_type == "vertex_tide":
+    if base_model == "vertex_tide":
         src_path, params = (
             gcpc_fc.get_time_series_dense_encoder_forecasting_pipeline_and_parameters(
                 **common_kwargs
             )
         )
-    elif plan.model_type == "vertex_seq2seq":
+    elif base_model == "vertex_seq2seq":
         src_path, params = gcpc_fc.get_sequence_to_sequence_forecasting_pipeline_and_parameters(
             **common_kwargs
         )
-    elif plan.model_type == "vertex_tft":
+    elif base_model == "vertex_tft":
         src_path, params = (
             gcpc_fc.get_temporal_fusion_transformer_forecasting_pipeline_and_parameters(
                 **common_kwargs
@@ -819,7 +827,8 @@ def compile_tabular_workflow_spec(
             **common_kwargs
         )
 
-    dest_path = out_dir / f"{plan.model_type}_pipeline.yaml"
+    safe_model = plan.model_type.replace("@", "__")
+    dest_path = out_dir / f"{safe_model}_pipeline.yaml"
     if Path(src_path).is_file() and Path(src_path).resolve() != dest_path.resolve():
         shutil.copyfile(src_path, dest_path)
         return str(dest_path), params
@@ -845,8 +854,9 @@ def training_job_class(aiplatform_module: Any, model_type: str) -> Any:
     Raises `EngineError` — never substitutes — when the SDK lacks the class: a user who asked for
     ``vertex_seq2seq`` must get seq2seq or an error, not L2L under a seq2seq label.
     """
+    base_model = base_model_name(model_type)
     try:
-        class_name = TRAINING_JOB_CLASSES[model_type]
+        class_name = TRAINING_JOB_CLASSES[base_model]
     except KeyError:
         raise EngineError(
             f"'{model_type}' has no training_job trainer; choose one of "
@@ -1549,7 +1559,7 @@ def _execute_automl_fit_and_predict(
         staging_bucket=plan.root_dir,
     )
 
-    safe_prefix = job_prefix.replace("-", "_")
+    safe_prefix = job_prefix.replace("-", "_").replace("@", "__")
     train_table_id = f"{settings.project_id}.{settings.dataset_id}._sf_automl_train_{safe_prefix}"
     infer_table_id = f"{settings.project_id}.{settings.dataset_id}._sf_automl_infer_{safe_prefix}"
     temp_tables = [train_table_id, infer_table_id]
@@ -1740,11 +1750,12 @@ def execute_automl_model_cells(
     cell_started_at = datetime.now(UTC)
     worker_id = _worker_id()
     dispatch = fit_and_predict_fn or _execute_automl_fit_and_predict
+    eff_cfg = effective_config_for_model(cfg, get_model(model_type), model_type)
     ts_id_col = cfg.data.ts_id_col
     date_col = cfg.data.date_col
     target_col = cfg.data.target_col
     base_prefix = vertex_automl_job_id(job_id) if job_id else f"sf-{run_id[-8:]}"
-    short_model = model_type.removeprefix("vertex_")
+    short_model = model_type.removeprefix("vertex_").replace("@", "-").replace("_", "-")
     m_period = seasonal_period(cfg.data.freq)
 
     df = panel_df.copy()
@@ -1843,11 +1854,11 @@ def execute_automl_model_cells(
                 prior_tuning_uri=prior_tuning_uri,
             )
             fold_train = prepare_training_panel(
-                active_df, cfg, horizon=bt_horizon, train_end_by_series=train_end_map
+                active_df, eff_cfg, horizon=bt_horizon, train_end_by_series=train_end_map
             )
             fold_infer = prepare_inference_panel(
                 active_df,
-                cfg,
+                eff_cfg,
                 context_window=fold_plan.context_window,
                 horizon=bt_horizon,
                 origin_by_series=train_end_map,
@@ -1856,7 +1867,7 @@ def execute_automl_model_cells(
                 fold_plan,
                 fold_train,
                 fold_infer,
-                cfg,
+                eff_cfg,
                 settings=settings,
                 job_prefix=f"{base_prefix}-{short_model}-f{fold_idx + 1}",
                 bq_client=bq_client,
@@ -1952,11 +1963,11 @@ def execute_automl_model_cells(
             prior_tuning_uri=prior_tuning_uri,
         )
 
-    final_train = prepare_training_panel(df, cfg, horizon=cfg.data.horizon)
+    final_train = prepare_training_panel(df, eff_cfg, horizon=cfg.data.horizon)
     train_rows_total += len(final_train)
     final_infer = prepare_inference_panel(
         df,
-        cfg,
+        eff_cfg,
         context_window=plan.context_window,
         horizon=cfg.data.horizon,
         future_df=future_df,
@@ -1965,7 +1976,7 @@ def execute_automl_model_cells(
         plan,
         final_train,
         final_infer,
-        cfg,
+        eff_cfg,
         settings=settings,
         job_prefix=f"{base_prefix}-{short_model}-final",
         bq_client=bq_client,
@@ -2033,6 +2044,8 @@ def execute_automl_model_cells(
             diag["feature_attributions"] = global_attrs_by_s[uid]
         if artifacts_info.get("evaluation_metrics_uri"):
             diag["evaluation_metrics_uri"] = artifacts_info["evaluation_metrics_uri"]
+        if should_stamp_variant_diagnostics(model_type, cfg):
+            diag.update(variant_diagnostics_for(model_type, cfg))
 
         results.append(
             CellResult(

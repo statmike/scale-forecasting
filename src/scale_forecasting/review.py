@@ -256,6 +256,15 @@ class ModelReview:
     cohort: BacktestCohort | None = None
     pooled_wape: float | None = None
     n_comparable_series: int | None = None
+    base_model: str | None = None
+    scope_capability: str | None = None
+    training_mode: str | None = None
+    cov_profile: str | None = None
+    is_univariate: bool | None = None
+    covariates_used: str | None = None
+    model_spec_hash: str | None = None
+    borrowed_from_run_id: str | None = None
+    n_borrowed: int = 0
 
 
 @dataclass(frozen=True)
@@ -841,6 +850,7 @@ def _model_review_from_aggregate(
     p10 = {m: _num(agg.get(f"p10_{m}")) for m in METRIC_COLUMNS}
     p50 = {m: _num(agg.get(f"p50_{m}")) for m in METRIC_COLUMNS}
     p90 = {m: _num(agg.get(f"p90_{m}")) for m in METRIC_COLUMNS}
+    is_uni = lb_row.get("is_univariate")
     return ModelReview(
         model_type=model_type,
         family=family_of(model_type, ensemble_id),
@@ -857,6 +867,15 @@ def _model_review_from_aggregate(
         median_fit_seconds=_num(lb_row.get("median_fit_seconds")),
         no_artifact_rate=_num(lb_row.get("no_artifact_rate")),
         n_predictions=int(prediction_counts.get(model_type, 0)),
+        base_model=lb_row.get("base_model"),
+        scope_capability=lb_row.get("scope_capability"),
+        training_mode=lb_row.get("training_mode"),
+        cov_profile=lb_row.get("cov_profile"),
+        is_univariate=bool(is_uni) if is_uni is not None else None,
+        covariates_used=lb_row.get("covariates_used"),
+        model_spec_hash=lb_row.get("model_spec_hash"),
+        borrowed_from_run_id=lb_row.get("borrowed_from_run_id"),
+        n_borrowed=int(lb_row.get("n_borrowed") or 0),
     )
 
 
@@ -867,6 +886,7 @@ def _model_review_from_leaderboard(
     score, empty metric panel."""
     ensemble_id = row.get("ensemble_id")
     model_type = row["model_type"]
+    is_uni = row.get("is_univariate")
     return ModelReview(
         model_type=model_type,
         family=family_of(model_type, ensemble_id),
@@ -879,6 +899,15 @@ def _model_review_from_leaderboard(
         median_fit_seconds=_num(row.get("median_fit_seconds")),
         no_artifact_rate=_num(row.get("no_artifact_rate")),
         n_predictions=int(prediction_counts.get(model_type, 0)),
+        base_model=row.get("base_model"),
+        scope_capability=row.get("scope_capability"),
+        training_mode=row.get("training_mode"),
+        cov_profile=row.get("cov_profile"),
+        is_univariate=bool(is_uni) if is_uni is not None else None,
+        covariates_used=row.get("covariates_used"),
+        model_spec_hash=row.get("model_spec_hash"),
+        borrowed_from_run_id=row.get("borrowed_from_run_id"),
+        n_borrowed=int(row.get("n_borrowed") or 0),
     )
 
 
@@ -1223,6 +1252,8 @@ def build_leaderboard_frame(review: RunReview, *, all_metrics: bool = False) -> 
     """
     import pandas as pd
 
+    from .models import base_model_name
+
     lift_map = {(e.model_type): e for e in review.ensemble_lift}
     records: list[dict[str, Any]] = []
     for idx, m in enumerate(review.models, start=1):
@@ -1230,7 +1261,17 @@ def build_leaderboard_frame(review: RunReview, *, all_metrics: bool = False) -> 
         row: dict[str, Any] = {
             "rank": idx,
             "model_type": m.model_type,
+            "base_model": m.base_model
+            or (m.model_type if m.is_ensemble else base_model_name(m.model_type)),
             "family": m.family,
+            "scope_capability": m.scope_capability,
+            "training_mode": m.training_mode,
+            "cov_profile": m.cov_profile,
+            "is_univariate": m.is_univariate,
+            "covariates_used": m.covariates_used,
+            "model_spec_hash": m.model_spec_hash,
+            "borrowed_from_run_id": m.borrowed_from_run_id,
+            "n_borrowed": m.n_borrowed,
             "is_ensemble": m.is_ensemble,
             "ensemble_id": m.ensemble_id,
             "compute_engine": m.compute_engine,
@@ -1264,7 +1305,16 @@ def build_leaderboard_frame(review: RunReview, *, all_metrics: bool = False) -> 
             columns=[
                 "rank",
                 "model_type",
+                "base_model",
                 "family",
+                "scope_capability",
+                "training_mode",
+                "cov_profile",
+                "is_univariate",
+                "covariates_used",
+                "model_spec_hash",
+                "borrowed_from_run_id",
+                "n_borrowed",
                 "is_ensemble",
                 "ensemble_id",
                 "compute_engine",

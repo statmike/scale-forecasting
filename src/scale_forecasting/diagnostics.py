@@ -73,17 +73,114 @@ _STAGE_ORDER: dict[str, tuple[int, str]] = {
 
 def _classify_model_stage(model_type: str, baseline_model: str) -> tuple[int, str]:
     """Map ``model_type`` to ``(stage_rank, stage_label)`` on the FVA ladder."""
-    if model_type == baseline_model or model_type.startswith("naive_"):
+    from .models import base_model_name, get_model
+
+    root = base_model_name(model_type)
+    if model_type == baseline_model or root.startswith("naive_"):
         return _STAGE_ORDER["baseline"]
     if model_type.startswith("ensemble_"):
         return _STAGE_ORDER["ensemble"]
     try:
-        from .models import get_model
-
         fam = get_model(model_type).family
         return _STAGE_ORDER.get(fam, (2, "Statistical"))
     except Exception:  # noqa: BLE001 - unknown/custom model names default to Statistical tier
         return _STAGE_ORDER["statistical"]
+
+
+def _match_sibling_baselines(
+    model_type: str, all_models: Sequence[str]
+) -> tuple[str | None, str | None]:
+    """Find matched same-model univariate and local baselines for ``model_type`` in ``all_models``.
+
+    Returns ``(univariate_baseline, local_baseline)``.
+    """
+    from .models import base_model_name
+
+    if model_type.startswith("ensemble_"):
+        return None, None
+    bname = base_model_name(model_type)
+    siblings = [m for m in all_models if base_model_name(m) == bname and m != model_type]
+    if not siblings:
+        return None, None
+
+    tag = model_type.split("@", 1)[1] if "@" in model_type else ""
+    is_univariate = tag in ("univariate", "cov_none") or tag.endswith(("_univariate", "_cov_none"))
+    has_global_uni_sibling = any(
+        s in siblings for s in (f"{bname}@global_univariate", f"{bname}@global_cov_none")
+    )
+    has_local_override_sibling = any(s.startswith(f"{bname}@local") for s in siblings)
+    inherits_primary_scope = not tag or not tag.startswith(("local", "global", "hybrid"))
+    inferred_global_primary = (
+        inherits_primary_scope
+        and (has_global_uni_sibling or has_local_override_sibling)
+        and f"{bname}@global_cov_all" not in siblings
+        and f"{bname}@global" not in siblings
+    )
+    is_global = tag == "global" or tag.startswith("global_") or inferred_global_primary
+    is_hybrid = tag == "hybrid" or tag.startswith("hybrid_")
+
+    uni_base: str | None = None
+    if not is_univariate:
+        if is_global:
+            cands = [
+                f"{bname}@global_univariate",
+                f"{bname}@global_cov_none",
+                f"{bname}@univariate",
+                f"{bname}@cov_none",
+                f"{bname}@local_univariate",
+                f"{bname}@local_cov_none",
+            ]
+        elif is_hybrid:
+            cands = [
+                f"{bname}@hybrid_univariate",
+                f"{bname}@hybrid_cov_none",
+                f"{bname}@univariate",
+                f"{bname}@cov_none",
+                f"{bname}@local_univariate",
+                f"{bname}@local_cov_none",
+            ]
+        else:
+            cands = [
+                f"{bname}@local_univariate",
+                f"{bname}@local_cov_none",
+                f"{bname}@univariate",
+                f"{bname}@cov_none",
+            ]
+        uni_base = next((c for c in cands if c in siblings), None)
+
+    local_base: str | None = None
+    if is_global or is_hybrid:
+        prefix = "global_" if is_global else "hybrid_"
+        if tag.startswith(prefix):
+            cov_suffix = tag[len(prefix) :]
+        elif tag in ("univariate", "cov_none"):
+            cov_suffix = "univariate"
+        elif tag.startswith("cov_"):
+            cov_suffix = tag
+        else:
+            cov_suffix = "cov_all"
+        cands_local = [f"{bname}@local_{cov_suffix}", f"{bname}@{cov_suffix}"]
+        if cov_suffix in ("cov_none", "univariate"):
+            cands_local.extend(
+                [
+                    f"{bname}@local_univariate",
+                    f"{bname}@local_cov_none",
+                    f"{bname}@univariate",
+                    f"{bname}@cov_none",
+                ]
+            )
+        elif cov_suffix == "cov_all":
+            cands_local.extend(
+                [
+                    bname,
+                    f"{bname}@local",
+                    f"{bname}@local_univariate",
+                    f"{bname}@local_cov_none",
+                ]
+            )
+        local_base = next((c for c in cands_local if c in siblings and c != model_type), None)
+
+    return uni_base, local_base
 
 
 def _resolve_baseline_model(models: Sequence[str], baseline: str | None) -> str:
@@ -192,7 +289,12 @@ def _ensure_oof_columns(oof_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _cell_metric_loss(group: pd.DataFrame, metric: str) -> float:
+def _cell_metric_loss(
+    group: pd.DataFrame,
+    metric: str,
+    *,
+    y_train: np.ndarray | None = None,
+) -> float:
     """Compute scalar loss for ``metric`` on one ``(ts_id, model_type)`` or fold slice."""
     y_true = pd.to_numeric(group["y_true"], errors="coerce").to_numpy(dtype=float)
     yhat = pd.to_numeric(group["yhat"], errors="coerce").to_numpy(dtype=float)
@@ -209,9 +311,15 @@ def _cell_metric_loss(group: pd.DataFrame, metric: str) -> float:
         if "yhat_upper" in group.columns
         else None
     )
+    eff_y_train = (
+        y_train
+        if (y_train is not None and len(y_train) >= 2)
+        else (y_true[keep] if len(y_true[keep]) >= 2 else None)
+    )
     m_dict = compute_metrics(
         y_true[keep],
         yhat[keep],
+        y_train=eff_y_train,
         lower=lower if lower is not None and np.isfinite(lower).any() else None,
         upper=upper if upper is not None and np.isfinite(upper).any() else None,
     )
@@ -244,10 +352,13 @@ def compute_fva(
       Newbold (1997) modified Diebold–Mariano statistic/p-value and paired Wilcoxon signed-rank
       p-value testing whether the accuracy gain over ``baseline`` is statistically significant.
     """
+    from .models import base_model_name
+
     cols = [
         "fva_stage_rank",
         "fva_stage",
         "model_type",
+        "base_model",
         "demand_class",
         "n_series",
         "n_points",
@@ -264,6 +375,16 @@ def compute_fva(
         "p_value_dm",
         "p_value_wilcoxon",
         "significant_at_05",
+        "univariate_baseline_model",
+        "covariate_fva_abs",
+        "covariate_fva_pct",
+        "covariate_p_value_dm",
+        "covariate_significant_at_05",
+        "local_baseline_model",
+        "pooling_fva_abs",
+        "pooling_fva_pct",
+        "pooling_p_value_dm",
+        "pooling_significant_at_05",
     ]
     if oof_df is None or oof_df.empty:
         return pd.DataFrame(columns=cols)
@@ -308,12 +429,85 @@ def compute_fva(
     all_ts = sorted({str(t) for t in df["ts_id"].unique()})
     all_folds = sorted({(str(t), int(f)) for t, f in zip(df["ts_id"], df["fold_id"], strict=False)})
 
-    base_series_vec = np.array(
-        [series_losses.get((tid, base_model), float("nan")) for tid in all_ts], dtype=float
-    )
-    base_mean_metric = (
-        float(np.nanmean(base_series_vec)) if np.isfinite(base_series_vec).any() else float("nan")
-    )
+    def _compare_pair(
+        cand_model: str,
+        ref_model: str | None,
+        cand_series_vec: np.ndarray,
+        cand_mean: float,
+        max_h: int,
+    ) -> tuple[float, float, float, float, float, float, float, bool]:
+        if ref_model is None:
+            return (
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                float("nan"),
+                False,
+            )
+        ref_series_vec = np.array(
+            [series_losses.get((tid, ref_model), float("nan")) for tid in all_ts], dtype=float
+        )
+        ref_mean = (
+            float(np.nanmean(ref_series_vec)) if np.isfinite(ref_series_vec).any() else float("nan")
+        )
+        both_series = np.isfinite(cand_series_vec) & np.isfinite(ref_series_vec)
+        if cand_model == ref_model:
+            win_rate = 0.5
+            dm_stat, p_dm, p_wilcox = 0.0, 1.0, 1.0
+        else:
+            win_rate = (
+                float(np.mean(cand_series_vec[both_series] < ref_series_vec[both_series]))
+                if both_series.any()
+                else float("nan")
+            )
+            if int(both_series.sum()) >= 5:
+                dm_stat, p_dm = diebold_mariano_test(cand_series_vec, ref_series_vec, h=1)
+                p_wilcox = wilcoxon_pvalue(cand_series_vec, ref_series_vec)
+            else:
+                m_fold_vec = np.array(
+                    [
+                        fold_losses.get((tid, fid, cand_model), float("nan"))
+                        for tid, fid in all_folds
+                    ],
+                    dtype=float,
+                )
+                b_fold_vec = np.array(
+                    [
+                        fold_losses.get((tid, fid, ref_model), float("nan"))
+                        for tid, fid in all_folds
+                    ],
+                    dtype=float,
+                )
+                both_folds = np.isfinite(m_fold_vec) & np.isfinite(b_fold_vec)
+                if int(both_folds.sum()) >= 5:
+                    dm_stat, p_dm = diebold_mariano_test(m_fold_vec, b_fold_vec, h=1)
+                    p_wilcox = wilcoxon_pvalue(m_fold_vec, b_fold_vec)
+                elif cand_model in point_pivot.columns and ref_model in point_pivot.columns:
+                    mp = point_pivot[cand_model].to_numpy(dtype=float)
+                    bp = point_pivot[ref_model].to_numpy(dtype=float)
+                    dm_stat, p_dm = diebold_mariano_test(mp, bp, h=max(1, min(max_h, 7)))
+                    p_wilcox = wilcoxon_pvalue(mp, bp)
+                else:
+                    dm_stat, p_dm, p_wilcox = float("nan"), float("nan"), float("nan")
+        fva_abs = (
+            float(ref_mean - cand_mean)
+            if math.isfinite(ref_mean) and math.isfinite(cand_mean)
+            else float("nan")
+        )
+        fva_pct = (
+            float(fva_abs / ref_mean) if math.isfinite(fva_abs) and ref_mean > 0 else float("nan")
+        )
+        sig_05 = bool(
+            cand_model != ref_model
+            and math.isfinite(fva_abs)
+            and fva_abs > 0.0
+            and math.isfinite(p_dm)
+            and p_dm < 0.05
+        )
+        return ref_mean, fva_abs, fva_pct, win_rate, dm_stat, p_dm, p_wilcox, sig_05
 
     records: list[dict[str, Any]] = []
     for mtype in all_models:
@@ -337,66 +531,41 @@ def compute_fva(
         mean_metric = (
             float(np.nanmean(m_series_vec)) if np.isfinite(m_series_vec).any() else float("nan")
         )
+        max_h = int(pd.to_numeric(m_df["horizon_step"], errors="coerce").max() or 1)
 
-        both_series = np.isfinite(m_series_vec) & np.isfinite(base_series_vec)
-        if mtype == base_model:
-            win_rate = 0.5
-            dm_stat, p_dm, p_wilcox = 0.0, 1.0, 1.0
-        else:
-            win_rate = (
-                float(np.mean(m_series_vec[both_series] < base_series_vec[both_series]))
-                if both_series.any()
-                else float("nan")
-            )
-            # Choose the finest-grained paired sample with >= 5 observations:
-            # 1) per-series losses when panel has >= 5 series;
-            # 2) per-(series, fold) losses when >= 5 folds;
-            # 3) pointwise absolute errors across (ts_id, fold_id, forecast_date).
-            if int(both_series.sum()) >= 5:
-                dm_stat, p_dm = diebold_mariano_test(m_series_vec, base_series_vec, h=1)
-                p_wilcox = wilcoxon_pvalue(m_series_vec, base_series_vec)
-            else:
-                m_fold_vec = np.array(
-                    [fold_losses.get((tid, fid, mtype), float("nan")) for tid, fid in all_folds],
-                    dtype=float,
-                )
-                b_fold_vec = np.array(
-                    [
-                        fold_losses.get((tid, fid, base_model), float("nan"))
-                        for tid, fid in all_folds
-                    ],
-                    dtype=float,
-                )
-                both_folds = np.isfinite(m_fold_vec) & np.isfinite(b_fold_vec)
-                if int(both_folds.sum()) >= 5:
-                    dm_stat, p_dm = diebold_mariano_test(m_fold_vec, b_fold_vec, h=1)
-                    p_wilcox = wilcoxon_pvalue(m_fold_vec, b_fold_vec)
-                elif mtype in point_pivot.columns and base_model in point_pivot.columns:
-                    max_h = int(pd.to_numeric(m_df["horizon_step"], errors="coerce").max() or 1)
-                    mp = point_pivot[mtype].to_numpy(dtype=float)
-                    bp = point_pivot[base_model].to_numpy(dtype=float)
-                    dm_stat, p_dm = diebold_mariano_test(mp, bp, h=max(1, min(max_h, 7)))
-                    p_wilcox = wilcoxon_pvalue(mp, bp)
-                else:
-                    dm_stat, p_dm, p_wilcox = float("nan"), float("nan"), float("nan")
+        (
+            base_mean_metric,
+            fva_abs,
+            fva_pct,
+            win_rate,
+            dm_stat,
+            p_dm,
+            p_wilcox,
+            sig_05,
+        ) = _compare_pair(mtype, base_model, m_series_vec, mean_metric, max_h)
 
-        fva_abs = (
-            float(base_mean_metric - mean_metric)
-            if math.isfinite(base_mean_metric) and math.isfinite(mean_metric)
-            else float("nan")
-        )
-        fva_pct = (
-            float(fva_abs / base_mean_metric)
-            if math.isfinite(fva_abs) and base_mean_metric > 0
-            else float("nan")
-        )
-        sig_05 = bool(
-            mtype != base_model
-            and math.isfinite(fva_abs)
-            and fva_abs > 0.0
-            and math.isfinite(p_dm)
-            and p_dm < 0.05
-        )
+        uni_base, local_base = _match_sibling_baselines(mtype, all_models)
+        (
+            _,
+            cov_fva_abs,
+            cov_fva_pct,
+            _,
+            _,
+            cov_p_dm,
+            _,
+            cov_sig_05,
+        ) = _compare_pair(mtype, uni_base, m_series_vec, mean_metric, max_h)
+        (
+            _,
+            pool_fva_abs,
+            pool_fva_pct,
+            _,
+            _,
+            pool_p_dm,
+            _,
+            pool_sig_05,
+        ) = _compare_pair(mtype, local_base, m_series_vec, mean_metric, max_h)
+
         dom_regime = (
             str(m_df["demand_class"].mode().iloc[0])
             if not m_df["demand_class"].dropna().empty
@@ -407,6 +576,7 @@ def compute_fva(
                 "fva_stage_rank": stage_rank,
                 "fva_stage": stage_label,
                 "model_type": mtype,
+                "base_model": base_model_name(mtype),
                 "demand_class": dom_regime,
                 "n_series": n_series,
                 "n_points": n_points,
@@ -423,6 +593,16 @@ def compute_fva(
                 "p_value_dm": p_dm,
                 "p_value_wilcoxon": p_wilcox,
                 "significant_at_05": sig_05,
+                "univariate_baseline_model": uni_base,
+                "covariate_fva_abs": cov_fva_abs,
+                "covariate_fva_pct": cov_fva_pct,
+                "covariate_p_value_dm": cov_p_dm,
+                "covariate_significant_at_05": cov_sig_05,
+                "local_baseline_model": local_base,
+                "pooling_fva_abs": pool_fva_abs,
+                "pooling_fva_pct": pool_fva_pct,
+                "pooling_p_value_dm": pool_p_dm,
+                "pooling_significant_at_05": pool_sig_05,
             }
         )
 

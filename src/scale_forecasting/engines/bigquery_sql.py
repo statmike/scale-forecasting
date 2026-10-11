@@ -181,10 +181,15 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
     """
     freq, _ = _freq(cfg)
     horizon = trained_horizon(cfg, fold=fold)
-    if model_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
+    from ..features import resolve_model_variant
+    from ..models import base_model_name
+
+    base_name = base_model_name(model_name)
+    if base_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
         from ..models.bigquery_native import resolve_timesfm_params
 
-        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        spec = resolve_model_variant(cfg, model_name)
+        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
         tf_opts: dict[str, Any] = {
             "model_type": "TimesFM (AI.FORECAST)",
             "id_cols": [cfg.data.ts_id_col],
@@ -199,7 +204,7 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
             tf_opts["context_window"] = tf_ctx
         return tf_opts
     opts: dict[str, Any] = {
-        "model_type": _MODEL_TYPE[model_name],
+        "model_type": _MODEL_TYPE[base_name],
         "time_series_id_col": cfg.data.ts_id_col,
         "time_series_timestamp_col": cfg.data.date_col,
         "time_series_data_col": cfg.data.target_col,
@@ -316,13 +321,17 @@ def build_create_model_sql(
     The model object goes to ``registry_dataset`` (default: ``dataset``) while the training data is
     read from ``dataset`` — see `registry_of`.
     """
+    from ..features import effective_config_for_model
+    from ..models import get_model
+
+    model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = source_ref(cfg, dataset)
     # A fold model is trained for the fold's request (which reaches across the embargo), the final
     # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
     options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
     training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
-    holiday_cte = build_custom_holiday_cte(cfg)
+    holiday_cte = build_custom_holiday_cte(model_cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
         as_clause = f"AS (\n{body}\n)"
@@ -356,13 +365,17 @@ def _forecast_source(
     `backtest._forecast_validation` does on the Python side. At the default ``gap`` of 0 the two
     expressions are identical to what they were.
     """
+    from ..features import resolve_model_variant
+    from ..models import base_model_name
+
     source = source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     # The same function the CREATE MODEL reads, so a model is never asked for more than it was
     # trained to emit. Two expressions that happened to agree is how they came to disagree.
     h = horizon if horizon is not None else trained_horizon(cfg, fold=back_steps is not None)
+    base_name = base_model_name(model_name)
 
-    if model_name == "timesfm":
+    if base_name == "timesfm":
         from ..models.bigquery_native import resolve_timesfm_params
 
         where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
@@ -372,7 +385,8 @@ def _forecast_source(
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         snap = _snapshot_clause(snapshot_millis)
         inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{clause}"
-        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        spec = resolve_model_variant(cfg, model_name)
+        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
         extra = ""
         if tf_model is not None:
             extra += f",\n    model => '{tf_model}'"
@@ -602,8 +616,10 @@ def build_setup_statements(
     ``back_steps``) and the read-back eval (`build_eval_query`) are *not* here — this renders
     only the always-run true-future path.
     """
+    from ..models import base_model_name
+
     statements: list[str] = []
-    if model_name in _MODEL_TYPE:
+    if base_model_name(model_name) in _MODEL_TYPE:
         statements.append(
             build_create_model_sql(
                 cfg,
@@ -640,7 +656,9 @@ def build_fold_create_statements(
     TimesFM needs no model object — its fold forecast reads the ``ds <= cutoff`` history directly in
     `build_eval_query` — so it has no fold-training statement.
     """
-    if model_name in _MODEL_TYPE:
+    from ..models import base_model_name
+
+    if base_model_name(model_name) in _MODEL_TYPE:
         return [
             build_create_model_sql(
                 cfg,
@@ -673,7 +691,9 @@ def build_fold_drop_statements(
     ``IF EXISTS`` keeps the drop safe if a fold's CREATE failed. TimesFM trains no object, so
     nothing to drop.
     """
-    if model_name in _MODEL_TYPE:
+    from ..models import base_model_name
+
+    if base_model_name(model_name) in _MODEL_TYPE:
         ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
         return [f"DROP MODEL IF EXISTS {ref};"]
     return []

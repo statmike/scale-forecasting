@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .errors import ConfigError, get_logger
-from .models import get_model, list_models
+from .features import VALID_COVARIATE_MODES, resolve_model_variant
+from .models import base_model_name, get_model, list_models
 from .registry.ids import base_family, make_run_id, repair_family
 
 if TYPE_CHECKING:
@@ -189,6 +190,13 @@ def planned_families(cfg: RunConfig) -> tuple[str, ...]:
     return (*families, "ensemble") if cfg.ensemble.enabled else families
 
 
+def _variant_intended_features(cfg: RunConfig, name: str):
+    """Resolve the covariate tiers a model variant intended to use before capability fallback."""
+    return (
+        resolve_model_variant(cfg, name, allow_unsupported=True).intended_features or cfg.features
+    )
+
+
 def check_model_params(cfg: RunConfig) -> None:
     """Validate ``cfg.model_params`` against the model registry. Raises `errors.ConfigError`.
 
@@ -204,13 +212,20 @@ def check_model_params(cfg: RunConfig) -> None:
     Deliberately **not** called from `plan_dag`, which stays total so pure inspection — the SDK's
     ``dag``, a dry run, a test — never raises. Called from the paths that are about to spend.
     """
-    known = list_models()
-    unknown = sorted(set(cfg.model_params) - set(known))
+    known = set(list_models())
+    unknown = sorted(k for k in cfg.model_params if base_model_name(k) not in known)
     if unknown:
         raise ConfigError(
-            f"model_params names {unknown}, which are not registered models. Registered: {known}."
+            f"model_params names {unknown}, which are not registered models. "
+            f"Registered: {sorted(known)}."
         )
-    unselected = sorted(set(cfg.model_params) - set(cfg.models))
+    selected_set = set(cfg.models)
+    selected_bases = {base_model_name(m) for m in cfg.models}
+    unselected = sorted(
+        k
+        for k in cfg.model_params
+        if k not in selected_set and ("@" in k or k not in selected_bases)
+    )
     if unselected:
         _log.warning(
             "model_params carries entries for %s, which this run does not select in models; "
@@ -226,21 +241,25 @@ def check_model_params(cfg: RunConfig) -> None:
                 f"reconciliation execute on Python runtimes (Spark, Ray, or Vertex)."
             )
     for name in cfg.models:
-        authored = dict(cfg.model_params.get(name, {}))
+        base_name = base_model_name(name)
+        authored: dict[str, object] = {}
+        if base_name in cfg.model_params:
+            authored.update(cfg.model_params[base_name])
+        if name in cfg.model_params:
+            authored.update(cfg.model_params[name])
         model_cls = get_model(name)
-        model_cls.validate_params(authored, max_horizon=cfg.max_horizon)
-        default_mode = "global" if model_cls.family == "automl" else "local"
-        mode = str(authored.get("training_mode", default_mode))
+        if (
+            "covariate_mode" in authored
+            and str(authored["covariate_mode"]) not in VALID_COVARIATE_MODES
+        ):
+            raise ConfigError(
+                f"model_params.{name}.covariate_mode={authored['covariate_mode']!r} is invalid; "
+                f"must be one of {sorted(VALID_COVARIATE_MODES)}."
+            )
+        spec = resolve_model_variant(cfg, name, model_cls=model_cls, allow_unsupported=True)
+        mode = spec.training_mode
+        model_cls.validate_params(spec.clean_params, max_horizon=cfg.max_horizon)
         if mode in ("global", "hybrid"):
-            if mode == "global" and not model_cls.supports_global:
-                raise ConfigError(
-                    f"model_params.{name}.training_mode='global' is not supported by '{name}'; "
-                    "only local per-series training is supported."
-                )
-            if mode == "hybrid" and not model_cls.supports_hybrid:
-                raise ConfigError(
-                    f"model_params.{name}.training_mode='hybrid' is not supported by '{name}'."
-                )
             if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
                 raise ConfigError(
                     f"model_params.{name} sets training_mode={mode!r}, which fits a single shared "
@@ -261,10 +280,10 @@ def check_model_params(cfg: RunConfig) -> None:
 
 def covariate_support_report(cfg: RunConfig) -> list[str]:
     """Report any selected models that do not support configured covariate tiers (pure)."""
-    f = cfg.features
     lines: list[str] = []
     for name in cfg.models:
         cls = get_model(name)
+        f = _variant_intended_features(cfg, name)
         unsupported = cls.unsupported_covariate_tiers(f)
         if not unsupported:
             continue
@@ -288,12 +307,12 @@ def covariate_support_report(cfg: RunConfig) -> list[str]:
 
 def check_covariate_support(cfg: RunConfig) -> None:
     """Enforce ``features.on_unsupported_covariates`` across ``cfg.models`` (pure)."""
-    f = cfg.features
-    if f.on_unsupported_covariates != "error":
+    if cfg.features.on_unsupported_covariates != "error":
         return
     offenders: list[str] = []
     for name in cfg.models:
         cls = get_model(name)
+        f = _variant_intended_features(cfg, name)
         unsupported = cls.unsupported_covariate_tiers(f)
         if unsupported:
             offenders.append(f"{name} (unsupported: {', '.join(unsupported)})")
@@ -390,7 +409,11 @@ def gpu_usefulness_report(cfg: RunConfig, jobs: tuple[FamilyJob, ...]) -> list[s
                 f"{incapable} cannot use a device at all — those cells will run on the host CPU "
                 f"while the accelerator is billed."
             )
-        idle = [m for m in capable if not get_model(m).gpu_useful(cfg.model_params.get(m, {}))]
+        idle = [
+            m
+            for m in capable
+            if not get_model(m).gpu_useful(resolve_model_variant(cfg, m).clean_params)
+        ]
         if idle:
             lines.append(
                 f"family '{job.family}' has a {compute.gpu_type} attached and {idle} can use "

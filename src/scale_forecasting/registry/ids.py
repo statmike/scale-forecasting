@@ -95,6 +95,8 @@ def _slug(text: str) -> str:
 _NOT_IDENTITY: tuple[tuple[str, ...], ...] = (
     ("compute", "profile", "source"),
     ("compute", "capacity"),
+    ("compute", "reuse_prior_runs"),
+    ("compute", "reuse_from_run_id"),
 )
 
 # Fields that have been *removed* from the config models but are pinned back into the digest at the
@@ -181,13 +183,18 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("output", "target_quantile"): None,
     ("ensemble", "top_k"): None,
     ("ensemble", "parsimony_margin"): 0.0,
+    ("ensemble", "variant_policy"): "all",
     ("data", "grid_policy"): "strict",
     ("data", "trim_leading_zeros"): False,
+    ("data", "snapshot_millis"): None,
     ("features", "trading_days"): False,
     ("features", "censored_col"): None,
     ("features", "outlier_policy"): "none",
     ("features", "outlier_sigma"): 3.5,
     ("features", "regime_routing"): False,
+    ("features", "include_univariate_baselines"): False,
+    ("features", "ablation_modes"): [],
+    ("features", "ablation_models"): [],
 }
 
 
@@ -284,6 +291,63 @@ def make_model_hash(run_id: str, ts_id: str, model_type: str, cfg: RunConfig) ->
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
+    """Return a deterministic 16-hex digest of one model variant's resolved specification.
+
+    Insensitive to ``run_name``, sibling models in ``cfg.models``, variant tag spelling (so
+    ``lightgbm`` in a univariate run and ``lightgbm@univariate`` in a covariate run share the exact
+    same digest), ``ensemble``, and ``compute``. Changes whenever the model's ``base_model``,
+    ``training_mode``, ``cov_profile``, ``covariates_used``, ``clean_params``, active feature
+    transforms/flags, ``data`` contract, ``backtest``, ``output``, or ``hpo`` configuration change.
+    """
+    from scale_forecasting.features import resolve_model_variant
+
+    spec = resolve_model_variant(cfg, model_name)
+    eff_f = spec.effective_cfg.features
+    uses_calendar = bool(
+        spec.model_cls.supports_future_covariates or spec.base_model in ("prophet", "arima_plus")
+    )
+    clean_no_tm = {k: v for k, v in spec.clean_params.items() if k != "training_mode"}
+    spec_payload: dict[str, Any] = {
+        "base_model": spec.base_model,
+        "training_mode": spec.training_mode,
+        "cov_profile": spec.cov_profile,
+        "covariates_used": list(spec.covariates_used),
+        "clean_params": clean_no_tm,
+        "features": {
+            "transform": eff_f.transform,
+            "holidays": sorted(eff_f.holidays) if uses_calendar else [],
+            "fourier": bool(eff_f.fourier) if spec.model_cls.supports_future_covariates else False,
+            "level_shift": (
+                bool(eff_f.level_shift) if spec.model_cls.supports_future_covariates else False
+            ),
+            "trading_days": (
+                bool(eff_f.trading_days) if spec.model_cls.supports_future_covariates else False
+            ),
+            "exog_lags": eff_f.exog_lags,
+            "censored_col": eff_f.censored_col,
+            "outlier_policy": eff_f.outlier_policy,
+            "outlier_sigma": eff_f.outlier_sigma if eff_f.outlier_policy != "none" else 3.5,
+            "regime_routing": eff_f.regime_routing,
+        },
+        "data": {
+            "source_table": cfg.data.source_table,
+            "ts_id_col": cfg.data.ts_id_col,
+            "date_col": cfg.data.date_col,
+            "target_col": cfg.data.target_col,
+            "freq": cfg.data.freq,
+            "horizon": cfg.data.horizon,
+            "grid_policy": cfg.data.grid_policy,
+            "trim_leading_zeros": cfg.data.trim_leading_zeros,
+        },
+        "backtest": cfg.backtest.model_dump(mode="json"),
+        "output": cfg.output.model_dump(mode="json"),
+        "hpo": cfg.hpo.model_dump(mode="json"),
+    }
+    raw = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def make_ensemble_id(ensemble: EnsembleConfig) -> str:
     """Return a deterministic 12-hex id for one ``EnsembleConfig``.
 
@@ -303,6 +367,8 @@ def make_ensemble_id(ensemble: EnsembleConfig) -> str:
         raw_payload["top_k"] = ensemble.top_k
     if ensemble.parsimony_margin != 0.0:
         raw_payload["parsimony_margin"] = ensemble.parsimony_margin
+    if ensemble.variant_policy != "all":
+        raw_payload["variant_policy"] = ensemble.variant_policy
     payload = json.dumps(
         raw_payload,
         sort_keys=True,

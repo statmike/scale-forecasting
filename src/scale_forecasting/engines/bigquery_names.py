@@ -96,5 +96,6 @@ def model_ref(
     """
     run_id = make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
-    stem = f"{_MODEL_PREFIX}{model_name}_{sanitize_identifier(run_id)}{suffix}"
+    safe_model = model_name.replace("@", "__") if "@" in model_name else model_name
+    stem = f"{_MODEL_PREFIX}{safe_model}_{sanitize_identifier(run_id)}{suffix}"
     return f"`{registry_dataset}.{stem}`"

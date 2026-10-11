@@ -107,6 +107,7 @@ class LaunchPlan:
     idempotency: Idempotency
     force: bool
     nodes: tuple[DagNode, ...]
+    variant_plan: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -793,6 +794,9 @@ def plan_run(
         _log.info("plan: registry verdict and launch commands skipped — %s", exc)
         config_uri = None
         commands = None
+    from .features import variant_diagnostics_for
+
+    variant_plan = tuple({"model_type": m, **variant_diagnostics_for(m, cfg)} for m in cfg.models)
     result = LaunchPlan(
         run_id=plan.run_id,
         python_runtime=cfg.python_runtime,
@@ -805,6 +809,7 @@ def plan_run(
         idempotency=idempotency,
         force=force,
         nodes=nodes,
+        variant_plan=variant_plan,
     )
     _emit_plan(result)
     return result
@@ -1064,6 +1069,9 @@ def stage_run(
         package_uri=package_uri,
         launcher_uri=launcher_uri,
     )
+    from .features import variant_diagnostics_for
+
+    variant_plan = tuple({"model_type": m, **variant_diagnostics_for(m, cfg)} for m in cfg.models)
     result = LaunchPlan(
         run_id=plan.run_id,
         python_runtime=cfg.python_runtime,
@@ -1076,6 +1084,7 @@ def stage_run(
         idempotency=idempotency,
         force=force,
         nodes=nodes,
+        variant_plan=variant_plan,
     )
     manifest_uri = stage_manifest(
         _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket

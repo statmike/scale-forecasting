@@ -43,6 +43,7 @@ from .calibration import (
 from .config import CALCULATED_STRATEGIES, LEARNED_STRATEGIES
 from .errors import ConfigError, get_logger
 from .metrics import loss_of
+from .models import base_model_name
 
 if TYPE_CHECKING:
     from .config import RunConfig
@@ -98,14 +99,98 @@ _ML_MODELS: frozenset[str] = frozenset({"ridge_lags", "xgboost", "lightgbm", "ca
 
 def _model_simplicity_rank(model_name: str, order_idx: int) -> tuple[int, int]:
     """Return ``(complexity_tier, config_order_idx)`` for Occam's-razor parsimony tie-breaking."""
-    base = model_name.split("_")[0] if model_name not in _BASELINE_MODELS else model_name
-    if model_name in _BASELINE_MODELS or base in _BASELINE_MODELS:
+    root = base_model_name(model_name)
+    base = root.split("_")[0] if root not in _BASELINE_MODELS else root
+    if root in _BASELINE_MODELS or base in _BASELINE_MODELS:
         return (0, order_idx)
-    if model_name in _STATISTICAL_MODELS:
+    if root in _STATISTICAL_MODELS:
         return (1, order_idx)
-    if model_name in _ML_MODELS:
+    if root in _ML_MODELS:
         return (2, order_idx)
     return (3, order_idx)
+
+
+def filter_variants_for_ensemble(
+    models: list[str],
+    cfg: RunConfig,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    metric_df: pd.DataFrame | None = None,
+) -> list[str]:
+    """Select the ensemble candidate pool across `<base_model>@<tag>` variants (pure).
+
+    Controlled by ``cfg.ensemble.variant_policy``:
+    - ``"all"``: keep all configured model variants.
+    - ``"primary_only"``: keep at most one variant per ``base_model_name(m)`` — preferring the
+      untagged base model if present, else the first variant of that base model in config order.
+    - ``"best_per_base_model"`` (default): when multiple variants of the same ``base_model`` exist,
+      keep the variant with the lowest inner-fold OOF loss (or mean ``decision_metric`` loss in
+      ``metric_df`` when ``oof_df`` is absent), preventing collinear multi-variant dilution.
+    """
+    policy = cfg.ensemble.variant_policy
+    if policy == "all" or len(models) <= 1:
+        return list(models)
+
+    groups: dict[str, list[str]] = {}
+    for m in models:
+        groups.setdefault(base_model_name(m), []).append(m)
+    if all(len(g) == 1 for g in groups.values()):
+        return list(models)
+
+    if policy == "primary_only":
+        chosen_primary = {(base if base in g else g[0]) for base, g in groups.items()}
+        return [m for m in models if m in chosen_primary]
+
+    # policy == "best_per_base_model"
+    losses: dict[str, float] = {}
+    metric = cfg.backtest.decision_metric
+    if (
+        oof_df is not None
+        and not oof_df.empty
+        and {"model_type", "y_true", "yhat"}.issubset(oof_df.columns)
+    ):
+        inner, _ = inner_fold_mask(oof_df, cfg)
+        ref_oof = oof_df[inner] if inner.any() else oof_df
+        for m in models:
+            sub = ref_oof[ref_oof["model_type"] == m]
+            if sub.empty:
+                losses[m] = float("nan")
+                continue
+            yt = sub["y_true"].to_numpy(dtype=float)
+            yh = sub["yhat"].to_numpy(dtype=float)
+            valid = np.isfinite(yt) & np.isfinite(yh)
+            if not valid.any():
+                losses[m] = float("nan")
+                continue
+            denom = float(np.sum(np.abs(yt[valid])))
+            err = float(np.sum(np.abs(yh[valid] - yt[valid])))
+            losses[m] = err / denom if denom > 0.0 else err
+    elif metric_df is not None and not metric_df.empty and metric in metric_df.columns:
+        mean_by_model = metric_df.groupby("model_type")[metric].mean()
+        for m in models:
+            val = float(mean_by_model.get(m, float("nan")))
+            losses[m] = loss_of(metric, val)
+
+    order_map = {m: idx for idx, m in enumerate(models)}
+    chosen_best: set[str] = set()
+    for base, g in groups.items():
+        if len(g) == 1:
+            chosen_best.add(g[0])
+            continue
+        finite_candidates = [m for m in g if m in losses and np.isfinite(losses[m])]
+        if not finite_candidates:
+            chosen_best.add(base if base in g else g[0])
+        else:
+            winner = min(
+                finite_candidates,
+                key=lambda m: (
+                    losses[m],
+                    0 if "@" in m and "univariate" in m else (0 if "cov_none" in m else 1),
+                    order_map[m],
+                ),
+            )
+            chosen_best.add(winner)
+    return [m for m in models if m in chosen_best]
 
 
 # --- pure combine helpers (calculated) -----------------------------------------
@@ -357,7 +442,7 @@ def combine_oof(
     empty = pd.DataFrame(columns=list(_OOF_BLEND_COLS))
     if oof_df.empty:
         return empty
-    models = list(cfg.models)
+    models = filter_variants_for_ensemble(list(cfg.models), cfg, oof_df=oof_df)
     keys = _fold_key(oof_df)
     wide = oof_df.pivot_table(index=keys, columns="model_type", values="yhat", aggfunc="first")
     present_models = [m for m in models if m in wide.columns]
@@ -695,7 +780,7 @@ def fit_learned(
     if oof_df.empty:
         raise ConfigError("cannot fit a learned ensemble: backtest_oof is empty")
 
-    models = list(cfg.models)
+    models = filter_variants_for_ensemble(list(cfg.models), cfg, oof_df=oof_df)
     inner, basis = inner_fold_mask(oof_df, cfg)
     X, y = _pivot_oof(oof_df[inner], models) if basis == "holdout" else (_EMPTY_X, _EMPTY_Y)
     if X.shape[0] == 0:
@@ -731,7 +816,11 @@ def fit_learned(
 _PRED_OUT_COLS = ("ts_id", "model_type", "forecast_date", "yhat", "yhat_lower", "yhat_upper")
 
 
-def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
+def _pruned_models(
+    cfg: RunConfig,
+    metric_df: pd.DataFrame | None,
+    oof_df: pd.DataFrame | None = None,
+) -> list[str]:
     """The base models a calculated ensemble should blend, after optional pruning (pure).
 
     Pruning (``ensemble.prune_threshold`` > 0) drops any model whose mean backtest decision metric
@@ -740,7 +829,7 @@ def _pruned_models(cfg: RunConfig, metric_df: pd.DataFrame | None) -> list[str]:
     on its run-level metric is dropped from every series' blend). Threshold 0.0, or no metric
     frame, means no pruning. Order follows ``cfg.models`` (stable).
     """
-    models = list(cfg.models)
+    models = filter_variants_for_ensemble(list(cfg.models), cfg, oof_df=oof_df, metric_df=metric_df)
     threshold = cfg.ensemble.prune_threshold
     if threshold <= 0.0 or metric_df is None or metric_df.empty:
         return models
@@ -793,7 +882,7 @@ def combine_calculated(
     calculated = [s for s in cfg.ensemble.strategies if s in CALCULATED_STRATEGIES]
     if not calculated or base_df.empty:
         return []
-    models = _pruned_models(cfg, metric_df)
+    models = _pruned_models(cfg, metric_df, oof_df=oof_df)
     present = [m for m in models if m in set(base_df["model_type"].unique())]
     if not present:
         return []

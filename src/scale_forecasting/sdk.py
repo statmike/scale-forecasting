@@ -614,6 +614,16 @@ class Forecaster:
         _ = validate_data
         return build_explain_frame(self._config)
 
+    def variant_matrix(self) -> pd.DataFrame:
+        """Return the resolved model-variant taxonomy and spec-hash matrix ``DataFrame`` (offline).
+
+        One row per model entry in ``config.models`` (including auto-expanded univariate baselines
+        and ablation-ladder variants), detailing ``model_type``, ``base_model``, ``variant_tag``,
+        ``family``, ``scope_capability``, ``training_mode``, ``cov_profile``, ``is_univariate``,
+        ``covariates_used``, and ``model_spec_hash``.
+        """
+        return build_variant_matrix_frame(self._config)
+
     def run_live(
         self,
         *,
@@ -1803,6 +1813,45 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
             }
         )
     return pd.DataFrame.from_records(records)
+
+
+def build_variant_matrix_frame(cfg: RunConfig) -> pd.DataFrame:
+    """Build a per-variant taxonomy and spec-hash ``DataFrame`` for ``cfg`` — pure, offline."""
+    import pandas as pd
+
+    from .features import resolve_model_variant
+    from .registry.ids import make_model_spec_hash
+
+    cols = [
+        "model_type",
+        "base_model",
+        "variant_tag",
+        "family",
+        "scope_capability",
+        "training_mode",
+        "cov_profile",
+        "is_univariate",
+        "covariates_used",
+        "model_spec_hash",
+    ]
+    records: list[dict[str, Any]] = []
+    for m in cfg.models:
+        spec = resolve_model_variant(cfg, m)
+        records.append(
+            {
+                "model_type": m,
+                "base_model": spec.base_model,
+                "variant_tag": spec.variant_tag,
+                "family": str(spec.model_cls.family),
+                "scope_capability": spec.scope_capability,
+                "training_mode": spec.training_mode,
+                "cov_profile": spec.cov_profile,
+                "is_univariate": spec.is_univariate,
+                "covariates_used": ", ".join(spec.covariates_used),
+                "model_spec_hash": make_model_spec_hash(m, cfg),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=cols)
 
 
 def build_best_params_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
