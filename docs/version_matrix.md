@@ -20,7 +20,7 @@ so that's fine — the patch pin is about reproducibility where we build the env
 
 ```mermaid
 flowchart TD
-    Pin[".python-version (3.11.15)<br/>pyproject.toml (>=3.11,<3.12)"]
+    Pin[".python-version (3.11.15)<br/>pyproject.toml (>=3.11,<3.13 — package)"]
     Pin --> Kernel["Local uv Kernel &<br/>Colab Enterprise sf-main (py311)"]
     Pin --> Container["Custom Container (/opt/venv)<br/>& Packed Venv Archive (3.11.15)"]
     Kernel <-->|"1. applyInPandas Pickle Parity"| Connect["Dataproc Spark Connect 2.3<br/>(Python 3.11 Workers)"]
@@ -32,7 +32,7 @@ flowchart TD
 
 | Surface | Where it runs | Runtime version | Base runtime Python | **Effective Python** | Spark / Ray | How Python is set |
 |---------|---------------|-----------------|---------------------|----------------------|-------------|-------------------|
-| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | Ray >=2.52 (client) | `.python-version` (3.11.15) + `pyproject.toml` `requires-python = ">=3.11,<3.12"`; Colab template PATCHed to `py311` |
+| **Project / kernel** | local `uv`, Colab `sf-main` | — | — | **3.11.15** | Ray >=2.52 (client) | `.python-version` (3.11.15); Colab template PATCHed to `py311`. (`pyproject.toml` `requires-python = ">=3.11,<3.13"` is the *package's* install range, see below) |
 | **Custom container** | attached to batch, Spark Connect, Vertex, GCE & GKE | — | — | **3.11.15** | Spark 3.5.x / Ray 2.59.0 | `docker/Dockerfile` — `uv` installs 3.11.15 (from `.python-version`) into `/opt/venv` on `debian:12-slim` |
 | **Dataproc batch** (`explode`) | Serverless | **2.2** (default) | 3.12 | **3.11** ← *container wins* | Spark 3.5.3 | container image attached on **every** submit (`submit.py`), overriding base |
 | **Vertex CustomJob · GCE Single-VM · GKE (`job` & `ray`)** | Vertex AI, GCE COS, GKE Autopilot/Standard | — | — | **3.11.15** | Ray 2.59.0 (when `gke_mode="ray"`) | runs `/opt/venv/bin/python` directly inside the shared runtime container image |
@@ -67,9 +67,23 @@ share a Python **minor** version (3.11 ≠ 3.12 for pickle/`applyInPandas`/cloud
    remediation) and submits jobs via the HTTP REST `JobSubmissionClient` over PSC-I (with `ray`
    excluded from the on-cluster `uv` `runtime_env` via `code_delivery._CLUSTER_PROVIDED`).
 
-4. **Same code locally and under Composer.** The `uv` project itself is `>=3.11,<3.12`, so a developer's
-   local kernel, the CI kernel, and the Composer runner all resolve the same interpreter — the code
-   that runs locally is byte-identical to what runs in the cloud.
+4. **Same code locally and under Composer.** `.python-version` pins the `uv` project to 3.11.15, so a
+   developer's local kernel, the CI kernel, and the Composer runner all resolve the same interpreter —
+   the code that runs locally is byte-identical to what runs in the cloud.
+
+## The package installs on 3.11–3.12; the cloud stack runs 3.11
+
+These are two different contracts, kept apart on purpose. `requires-python = ">=3.11,<3.13"` says
+what **the package** installs on: the pure layer (models, metrics, backtests, the playground) and the
+client libraries all run on 3.11 and 3.12, every dependency in `uv.lock` resolves for both, and the CI
+`core-install` job proves the bare install on each. (3.13 waits on the `numpy<2` pin `neuralprophet`
+still needs — numpy 1.26 ships no cp313 wheel — and widens the day that pin lifts.) That is what lets
+a 3.12
+notebook `pip install scale-forecasting` and run the playground, or build a `RunConfig` and call
+`--dry-run`, without a second toolchain. `.python-version` says what **the cloud stack** runs on, and
+the four parity boundaries above are why that stays 3.11: a driver that *submits* to Spark Connect or
+Ray on Vertex must match the workers, and the runtime container and packed-venv are built from the
+3.11.15 lock. Run those submit paths from a 3.11 interpreter; run everything else from either.
 
 ## The Spark Connect 2.x vs 3.x decision (the "Connect 2 / Connect 3" question)
 
@@ -97,7 +111,7 @@ Revisit only if Vertex Ray ships a Python 3.12 cluster image; until then 3.11 is
 
 | Value | File |
 |-------|------|
-| `requires-python = ">=3.11,<3.12"` | `pyproject.toml` |
+| `requires-python = ">=3.11,<3.13"` (the package's install range) | `pyproject.toml` |
 | exact interpreter `3.11.15` (uv installs it) | `.python-version` |
 | `uv`-installed 3.11.15 into `/opt/venv`, `debian:12-slim` | `docker/Dockerfile` |
 | Batch default runtime `"2.2"` | `src/scale_forecasting/batch_infra.py` |

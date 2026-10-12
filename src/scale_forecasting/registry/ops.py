@@ -82,6 +82,7 @@ from . import artifacts
 from .artifacts import ArtifactPrefix
 from .ddl import REGISTRY_TABLE_NAMES
 from .rows import STAGED
+from .tables import bigquery_client
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -540,12 +541,11 @@ def _resolved(settings: Settings | None) -> Settings:
 
 def _known_run_ids(settings: Settings) -> set[str]:  # pragma: no cover - GCP I/O, @gcp smoke
     """Every ``run_id`` in this registry's ``run_registry`` (one query)."""
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
     sql = f"SELECT DISTINCT run_id FROM `{settings.registry_table_ref('run_registry')}`"
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         return {str(row["run_id"]) for row in client.query(sql).result()}
     except Exception as exc:  # re-raised with registry context
@@ -570,7 +570,7 @@ def _statuses(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", list(run_ids))]
     )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         found = {str(r["run_id"]): r["status"] for r in client.query(sql, job_config).result()}
     except Exception as exc:  # re-raised with registry context
@@ -592,7 +592,6 @@ def all_header_statuses(
     code against this map instead. One header row per run makes it a small read even on a busy
     registry.
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
@@ -600,7 +599,7 @@ def all_header_statuses(
         "SELECT run_id, ARRAY_AGG(status ORDER BY created_at DESC LIMIT 1)[OFFSET(0)] AS status\n"
         f"FROM `{settings.registry_table_ref('run_registry')}`\nGROUP BY run_id"
     )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         return {str(r["run_id"]): r["status"] for r in client.query(sql).result()}
     except Exception as exc:  # re-raised with registry context
@@ -617,11 +616,10 @@ def _run_models(
     Nothing records these names, so the only way to find them is to list the dataset's models and
     match each back to a run (`bigquery_names.model_object_matches_run`).
     """
-    from google.cloud import bigquery
 
     from ..engines.bigquery_names import model_object_matches_run
 
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         listed = [m.model_id for m in client.list_models(settings.registry_dataset_ref)]
     except Exception as exc:  # noqa: BLE001 - a dataset with no models is fine; a real error is not
@@ -647,14 +645,13 @@ def init(
     registry outside the Terraform state — convenient, and it means the dataset's location and
     labels are not what Terraform would have given it. Returns the registry ref.
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
     from .ddl import render_create_tables, render_migrations
     from .tables import ensure_views
 
     resolved = _resolved(settings)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     if create_dataset:
         _log.warning(
             "creating dataset %s outside Terraform — its location/labels will not match the "
@@ -692,12 +689,11 @@ def doctor(*, settings: Settings | None = None) -> DoctorReport:  # pragma: no c
     one is the state every pre-isolation reset left behind, and it is only answerable now that the
     artifact path carries the registry key.
     """
-    from google.cloud import bigquery
 
     from .views import render_create_views
 
     resolved = _resolved(settings)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     notes: list[str] = []
 
     stats: list[TableStat] = []
@@ -811,7 +807,7 @@ def drop_run(
     _log.warning("deleted %d artifact objects", deleted)
 
     # 3a. BQML model objects (invisible to the registry — matched by name).
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     for model_id in plan.models:
         ref = f"{resolved.registry_dataset_ref}.{model_id}"
         try:
@@ -842,7 +838,6 @@ def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover -
     Latest-per-run, not any-row: the header table is append-only with dedupe-on-read, so a run that
     was written ``RUNNING`` and later ``COMPLETED`` has both rows and only the newest one counts.
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
@@ -856,7 +851,7 @@ def _stuck_run_ids(settings: Settings) -> tuple[str, ...]:  # pragma: no cover -
         "  GROUP BY run_id\n"
         f") WHERE UPPER(status) IN ({statuses})\nORDER BY first_seen"
     )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         return tuple(str(r["run_id"]) for r in client.query(sql).result())
     except Exception as exc:  # re-raised with registry context
@@ -900,7 +895,7 @@ def _job_rows(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", list(run_ids))]
     )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         rows = client.query(sql, job_config).result()
     except Exception as exc:  # re-raised with registry context
@@ -943,7 +938,7 @@ def _run_plans(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("run_ids", "STRING", list(run_ids))]
     )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         rows = list(client.query(sql, job_config).result())
     except Exception as exc:  # re-raised with registry context
@@ -1124,7 +1119,6 @@ def snapshot(
     ``into`` redirects to another dataset so the registry itself stays uncluttered;
     ``expiration_days`` sets a TTL so a habit of snapshotting does not become a storage bill.
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
@@ -1133,7 +1127,7 @@ def snapshot(
     statements = render_snapshot_sql(
         resolved.registry_dataset_ref, target, suffix, expiration_days=expiration_days
     )
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     out: dict[str, str] = {}
     for name, statement in statements.items():
         try:
@@ -1154,13 +1148,12 @@ def export(
     makes re-exporting to a stable path idempotent. Use a run-stamped ``destination_root`` if you
     want a history of exports rather than a current one.
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
     resolved = _resolved(settings)
     statements = render_export_sql(resolved.registry_dataset_ref, destination_root, fmt=fmt)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     root = destination_root.rstrip("/")
     out: dict[str, str] = {}
     for name, statement in statements.items():
@@ -1379,7 +1372,7 @@ def find_reusable_models(
         return {}
 
     resolved = _resolved(settings)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     ds = resolved.registry_dataset_ref
 
     source_last_mod_ms: int | None = None
@@ -1479,7 +1472,7 @@ def borrow_model_results(
 
     assert isinstance(cfg, RunConfig)
     resolved = _resolved(settings)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     stmts = render_borrow_model_sql(resolved.registry_dataset_ref)
 
     for target_m, src in borrowed.items():

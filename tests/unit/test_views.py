@@ -187,10 +187,18 @@ def test_run_jobs_view_exposes_job_timing_for_the_trace() -> None:
     # the wall-clock bracket the SDK trace() reads to place each job on a timeline
     assert "started_at" in stmt
     assert "ended_at" in stmt
-    # The platform's own wall and DCU land on the header, not the job row (batch_telemetry and
-    # ray_telemetry merge into run_registry), so a column unpacking them here read NULL on every
-    # job. Neither may be projected until a writer puts them on the row.
-    assert "total_wall_s" not in stmt
+    # The platform's own split of that bracket — how long it took to stand the job up versus how
+    # long the work ran — is stamped per job under $.platform (job_launch._platform_phases) and
+    # projected as two scalar seconds columns; NULL on a runtime whose probe carries no timings.
+    assert (
+        "JSON_VALUE(job_telemetry, '$.platform.provision_s') AS FLOAT64) AS provision_seconds"
+        in stmt
+    )
+    assert (
+        "JSON_VALUE(job_telemetry, '$.platform.execute_s') AS FLOAT64) AS execute_seconds" in stmt
+    )
+    # The DCU figure still lands on the header only (batch_telemetry merges into run_registry), so
+    # a column unpacking it here would read NULL on every job and is not projected.
     assert "dcu_milli_seconds" not in stmt
 
 

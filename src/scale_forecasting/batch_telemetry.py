@@ -54,6 +54,49 @@ def _rfc3339_seconds(a: object, b: object) -> float | None:
         return None
 
 
+def _running_start(batch: object) -> object | None:
+    """When the batch entered ``RUNNING``, from ``state_history``; None if it never did.
+
+    Dataproc keeps the *previous* states on ``state_history`` (``state`` / ``state_time`` hold the
+    current one), each with a ``state_start_time``. A batch that failed in ``PENDING`` has no
+    ``RUNNING`` entry, and then there is no provisioning figure to report — None, not zero.
+    """
+    for entry in getattr(batch, "state_history", None) or ():
+        state = getattr(entry, "state", None)
+        if (getattr(state, "name", None) or str(state)) == "RUNNING":
+            return getattr(entry, "state_start_time", None)
+    return None
+
+
+def platform_phases(
+    create_time: object, start_time: object, end_time: object
+) -> dict[str, float | None]:
+    """The provision / execute split of one platform job, from its three timestamps.
+
+    ``provision_s`` is ``start_time − create_time`` — what the platform spent finding and
+    starting capacity before any of our code ran; ``execute_s`` is ``end_time − start_time`` — the
+    part the forecasting work itself took. Together they explain ``total_wall_s``, which is the
+    figure the ``run_jobs`` bracket already had; the split is what turns "this job took 11 minutes"
+    into "8 of them were waiting for a GPU", which is the question that decides whether a family
+    should move runtime, region, or machine shape. Each figure is None when its timestamps are
+    missing, so a job that never started reports no execute time rather than a negative one.
+
+    Pure, and shared by every runtime that exposes the three moments: a Dataproc ``Batch``
+    (``create_time`` / the ``RUNNING`` ``state_history`` entry / ``state_time``) and a Vertex
+    ``CustomJob`` (``create_time`` / ``start_time`` / ``end_time``). Stamped per job under
+    ``run_jobs.job_telemetry.$.platform`` by `job_launch.launch_family_job` and read back as
+    ``provision_seconds`` / ``execute_seconds`` on ``v_run_jobs``.
+    """
+    return {
+        "provision_s": _rfc3339_seconds(create_time, start_time),
+        "execute_s": _rfc3339_seconds(start_time, end_time),
+        "total_wall_s": _rfc3339_seconds(create_time, end_time),
+    }
+
+
+PLATFORM_PHASE_KEYS = ("provision_s", "execute_s", "total_wall_s")
+
+
 def extract_job_telemetry(batch: object) -> dict[str, Any]:
     """Flatten a Dataproc ``Batch`` into the JSON-able telemetry dict stamped on the run header.
 
@@ -66,6 +109,9 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
       (last batch to finish wins), so it is a per-batch fact, not a run-level one; the run's
       overhead is derived from the ``run_jobs`` brackets in ``v_run_summary`` instead
       (`registry.views`).
+    - ``provision_s`` / ``execute_s`` — the same wall split at the ``RUNNING`` transition
+      (`platform_phases`): how long Dataproc took to stand the batch up, and how long the work ran
+      once it had. None when the batch never reached ``RUNNING``.
     - ``dcu_milli_seconds`` / ``shuffle_storage_gb_seconds`` — approximate usage (billing proxy +
       shuffle pressure).
     - ``driver_cores`` / ``executor_cores`` / ``task_cpus`` / ``executor_instances`` /
@@ -88,8 +134,14 @@ def extract_job_telemetry(batch: object) -> dict[str, Any]:
     """
     tel: dict[str, Any] = {}
 
-    tel["total_wall_s"] = _rfc3339_seconds(
-        getattr(batch, "create_time", None), getattr(batch, "state_time", None)
+    # `total_wall_s` is create→terminal whether or not the batch ever ran; the split beside it is
+    # None on a batch that failed in PENDING.
+    tel.update(
+        platform_phases(
+            getattr(batch, "create_time", None),
+            _running_start(batch),
+            getattr(batch, "state_time", None),
+        )
     )
 
     runtime_info = getattr(batch, "runtime_info", None)

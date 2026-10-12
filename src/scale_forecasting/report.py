@@ -371,6 +371,17 @@ def build_report_payload(
     }
 
 
+def _script_safe_json(obj: Any) -> str:
+    """`json.dumps` whose output can sit inside an inline ``<script>`` block.
+
+    ``<``, ``>``, and ``&`` are emitted as ``\\u003c`` / ``\\u003e`` / ``\\u0026`` — still valid
+    JSON, but a ``ts_id`` or label that contains ``</script>`` can no longer close the block early.
+    Paired with ``escHtml`` on the JavaScript side, which handles the same strings when they are
+    written back into the DOM through ``innerHTML``.
+    """
+    return json.dumps(obj).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+
+
 def _html_table(records: list[dict[str, Any]], *, table_id: str = "", empty_msg: str = "") -> str:
     """Render a clean HTML table from a list of flat dictionaries."""
     if not records:
@@ -448,7 +459,7 @@ def render_html_report(
     bias_html = _html_table(payload["bias_report"], empty_msg="No bias report rows.")
 
     fva_kpi_str = f"{kpis['best_fva_pct']:+.1f}%" if kpis["best_fva_pct"] is not None else "n/a"
-    explorer_json = json.dumps(payload["explorer"])
+    explorer_json = _script_safe_json(payload["explorer"])
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -648,6 +659,12 @@ def render_html_report(
 <script>
 const EXPLORER_DATA = {explorer_json};
 
+function escHtml(s) {{
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}}
+
 function switchTab(panelId, btn) {{
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -744,7 +761,8 @@ function renderFanChart() {{
   const fcLine = fcPts
     ? `<polyline fill="none" stroke="#2563eb" stroke-width="2.4" points="${{fcPts}}" />`
     : '';
-  const lblTxt = `${{tid}} · ${{mtype}} (min=${{minY.toFixed(1)}}, max=${{maxY.toFixed(1)}})`;
+  const lblRange = `min=${{minY.toFixed(1)}}, max=${{maxY.toFixed(1)}}`;
+  const lblTxt = escHtml(`${{tid}} · ${{mtype}} (${{lblRange}})`);
 
   box.innerHTML = `
     <svg viewBox="0 0 ${{W}} ${{H}}" class="chart-svg">

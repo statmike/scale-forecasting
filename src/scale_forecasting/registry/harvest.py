@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from .reads import read_run_config
-from .tables import resolve_settings
+from .tables import bigquery_client, resolve_settings
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -79,7 +79,7 @@ def read_compute_harvest(
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = [
             dict(r)
@@ -239,7 +239,7 @@ def discover_harvest_run(
         bigquery.ScalarQueryParameter("freq", "STRING", freq),
         bigquery.ScalarQueryParameter("candidates", "INT64", _MAX_HARVEST_CANDIDATES),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = [
             dict(r)

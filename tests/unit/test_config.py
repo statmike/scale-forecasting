@@ -1078,3 +1078,35 @@ def test_tiered_covariate_overlaps_rejected_at_load(
 ) -> None:
     with pytest.raises(ValidationError, match=expected):
         RunConfig(**_minimal_dict(features=features))
+
+
+# --- SQL identifier guard on DataConfig --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ts_id_col", "ts`id"),  # a backtick would close the quoted identifier early
+        ("ts_id_col", "ts id"),
+        ("date_col", "1ds"),
+        ("target_col", ""),
+        ("target_col", "y;DROP TABLE t"),
+    ],
+)
+def test_column_names_must_be_bigquery_identifiers(field: str, value: str) -> None:
+    """The three column names are written into backticked SQL by the probes, the SDK, and the
+    native engines; they are validated once here so no call site can be reached with a name that
+    could end the quoted identifier."""
+    with pytest.raises(ValidationError, match=rf"data\.{field} .* is not a BigQuery column name"):
+        RunConfig(**_minimal_dict(data={"source_table": "t", field: value}))
+
+
+@pytest.mark.parametrize("value", ["t", "ds.t", "my-proj.ds.t", "p.d.source_series_native"])
+def test_source_table_accepts_the_three_quotable_shapes(value: str) -> None:
+    assert RunConfig(**_minimal_dict(data={"source_table": value})).data.source_table == value
+
+
+@pytest.mark.parametrize("value", ["p.d.t`", "p d.t", "a.b.c.d", "", "p.d.t;--"])
+def test_source_table_rejects_unquotable_paths(value: str) -> None:
+    with pytest.raises(ValidationError, match=r"data\.source_table .* must be"):
+        RunConfig(**_minimal_dict(data={"source_table": value}))

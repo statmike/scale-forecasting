@@ -7,9 +7,10 @@ Terraform ships.
 
 ## The one load-bearing fact: the project targets Python 3.11 everywhere
 
-`pyproject.toml` pins `requires-python = ">=3.11,<3.12"` — **3.11 is the single tested, supported
-version on every surface**: the `uv` kernel, the runtime image, every cluster, and every Colab
-template. For *why* 3.11 (Vertex Ray client↔cluster parity and the Dataproc packed-venv), see
+`.python-version` pins the interpreter at **3.11.15** — **3.11 is the single tested, supported
+version on every cloud surface**: the `uv` kernel, the runtime image, every cluster, and every Colab
+template. (The *package* itself installs on 3.11–3.12, `requires-python = ">=3.11,<3.13"`, for
+local and client-side use; the cloud surfaces are a stricter contract.) For *why* 3.11 (Vertex Ray client↔cluster parity and the Dataproc packed-venv), see
 [version_matrix.md](./version_matrix.md) — the single source of truth for the version of each
 surface. The two notebooks that touch a live client↔cluster boundary (`04_ray_on_vertex_gpu` and
 `03_spark_serverless_and_connect`) are where that pin earns its keep; the [per-notebook mapping](#per-notebook-mapping)

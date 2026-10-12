@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from ..errors import ConfigError
+from ..registry.tables import bigquery_client
 from .vocabulary import (
     NATIVE_FAILED,
     NATIVE_NOT_FOUND,
@@ -412,9 +413,7 @@ class BigQueryProbe:
 
     def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
         try:
-            from google.cloud import bigquery
-
-            client = bigquery.Client(project=settings.project_id, location=handle.region)
+            client = bigquery_client(settings.project_id, location=handle.region)
             # all_users=True so a probe run by a different principal than the submitter (e.g. a
             # laptop reattaching to a run the Composer runner SA launched) still sees the jobs.
             # Bounded by the job's start time (when we have it) and a hard ceiling, so a busy
@@ -445,9 +444,7 @@ class BigQueryProbe:
         # cancel), so resolve the live ones by prefix and cancel each. cancel_job is idempotent on a
         # job that already finished, so cancelling a just-completed statement is harmless.
         try:
-            from google.cloud import bigquery
-
-            client = bigquery.Client(project=settings.project_id, location=handle.region)
+            client = bigquery_client(settings.project_id, location=handle.region)
             started = _parse_ts(handle.created_at)
             min_creation_time = (started - _BQ_SCAN_SKEW) if started is not None else None
             live = [
@@ -527,6 +524,7 @@ class VertexProbe:
         try:
             from google.api_core.exceptions import NotFound
 
+            from ..batch_telemetry import platform_phases
             from ..vertex_submit import _job_client
 
             region = handle.region or settings.region
@@ -542,7 +540,14 @@ class VertexProbe:
             native = _VERTEX_CUSTOM_JOB_STATES.get(state_name, NATIVE_UNKNOWN)
             error = getattr(job, "error", None)
             detail = getattr(error, "message", "") or "" if error else ""
-            return ProbeResult(native, exists=True, detail=detail)
+            # The same provision / execute split the Spark probe carries, from the CustomJob's own
+            # three moments; `start_time` is unset until Vertex has placed the workers.
+            phases = platform_phases(
+                getattr(job, "create_time", None),
+                getattr(job, "start_time", None),
+                getattr(job, "end_time", None),
+            )
+            return ProbeResult(native, exists=True, detail=detail, telemetry=phases)
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 

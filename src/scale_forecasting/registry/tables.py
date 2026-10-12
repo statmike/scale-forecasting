@@ -1,10 +1,11 @@
-"""Reaching the deployment — resolve the target dataset, and make sure it exists.
+"""Reaching the deployment — resolve the target dataset, make a client, and make sure it exists.
 
 The infra identity (project / dataset / connection / warehouse) is not on ``RunConfig`` — it is
 resolved from the environment via `Settings`, so the identical writer code runs locally under ADC
 and on Composer under the runner SA. Every writer and reader in this package takes an optional
 ``settings=`` for callers that already hold one and otherwise resolves from ``SF_*`` env vars
-through `resolve_settings` here. `ensure_tables` / `ensure_views` render and execute the
+through `resolve_settings` here. `bigquery_client` is the one place a ``bigquery.Client`` is built,
+so the ``[gcp]`` guard is applied uniformly. `ensure_tables` / `ensure_views` render and execute the
 deployment DDL; both are idempotent, so setup can run on every deploy.
 """
 
@@ -13,6 +14,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from google.cloud import bigquery
+
     from ..config import RunConfig
     from ..settings import Settings
 
@@ -24,6 +27,38 @@ def resolve_settings(settings: Settings | None) -> Settings:
     from ..settings import Settings as _Settings
 
     return _Settings.resolve()
+
+
+def bigquery_client(
+    project_id: str,
+    *,
+    location: str | None = None,
+    purpose: str = "Reaching the BigQuery registry",
+) -> bigquery.Client:
+    """A ``bigquery.Client`` for ``project_id``, behind a BigQuery-client guard.
+
+    Every BigQuery call in the package comes through here rather than constructing the client
+    inline. The one behavioural difference from a bare ``bigquery.Client(project=...)`` is the
+    failure mode on a core-only install: `errors.require_modules` raises `MissingExtraError` naming
+    ``purpose`` and the ``pip install "scale-forecasting[gcp]"`` line, instead of a
+    ``ModuleNotFoundError`` from six frames below the registry. ``location`` is forwarded for the
+    callers that scope a client to a region (the job-history probes).
+
+    The guard asks for ``google.cloud.bigquery`` alone, not the whole ``[gcp]`` extra, because this
+    is called from inside running jobs as well as from the launcher: a Dataproc or Vertex worker
+    writes the registry without ever holding the launch clients (``dataproc_v1``, ``aiplatform``)
+    the launcher's environment carries. The first version probed the whole extra and failed a
+    healthy Serverless batch for a missing Dataproc client it never imported.
+
+    The client class is looked up on the module at call time, so tests that
+    ``monkeypatch.setattr(bigquery, "Client", ...)`` see the fake here too.
+    """
+    from ..errors import require_modules
+
+    require_modules(("google.cloud.bigquery",), extra="gcp", purpose=purpose)
+    from google.cloud import bigquery as _bigquery
+
+    return _bigquery.Client(project=project_id, location=location)
 
 
 def ensure_tables(

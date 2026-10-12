@@ -175,3 +175,94 @@ def test_composed_extras_probe_their_gcp_base_too() -> None:
     # BigQuery client as well — which is only true if the probe checks the base's modules.
     for extra in ("spark", "ray", "submit", "models-automl"):
         assert set(EXTRA_MODULES["gcp"]) <= set(EXTRA_MODULES[extra]), extra
+
+
+# --- the one BigQuery client factory --------------------------------------------------------------
+
+
+def test_bigquery_client_is_the_single_construction_site() -> None:
+    """Every ``bigquery.Client`` in the package is built by `registry.tables.bigquery_client`, so
+    the ``[gcp]`` guard is applied uniformly. A new inline construction is the drift this guards."""
+    import re
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parents[2] / "src" / "scale_forecasting"
+    pattern = re.compile(r"bigquery\.Client\(")
+    offenders = sorted(
+        str(p.relative_to(pkg))
+        for p in pkg.rglob("*.py")
+        if p.name != "tables.py"
+        and any(
+            pattern.search(line) and not line.lstrip().startswith("#") and "``" not in line
+            for line in p.read_text().splitlines()
+        )
+    )
+    assert offenders == [], f"construct BigQuery clients via bigquery_client(): {offenders}"
+
+
+def test_bigquery_client_names_the_purpose_when_the_gcp_extra_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.registry.tables import bigquery_client
+
+    monkeypatch.setattr(errors, "is_importable", lambda module: False)
+    with pytest.raises(MissingExtraError, match="Reading the leaderboard needs the 'gcp' extra"):
+        bigquery_client("proj-x", purpose="Reading the leaderboard")
+
+
+def test_bigquery_client_forwards_project_and_location_through_the_module_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The class is looked up on ``google.cloud.bigquery`` at call time, so a test's
+    ``monkeypatch.setattr(bigquery, "Client", ...)`` reaches it — the seam the probe tests use."""
+    from google.cloud import bigquery
+
+    from scale_forecasting.registry.tables import bigquery_client
+
+    seen: dict[str, object] = {}
+
+    def _fake(*, project: str, location: str | None) -> str:
+        seen.update(project=project, location=location)
+        return "client"
+
+    monkeypatch.setattr(bigquery, "Client", _fake)
+    assert bigquery_client("proj-x") == "client"
+    assert seen == {"project": "proj-x", "location": None}
+    assert bigquery_client("proj-x", location="us-west1") == "client"
+    assert seen == {"project": "proj-x", "location": "us-west1"}
+
+
+def test_bigquery_client_needs_only_the_bigquery_module_not_the_whole_gcp_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Dataproc or Vertex worker writes the registry with only the BigQuery client installed —
+    never the launch clients the same extra carries on the launcher. The factory must hand such a
+    worker a client (the first version probed the whole extra and failed a live batch for a
+    Dataproc client it never imported), and a worker with no BigQuery client at all must be told
+    which module is missing, not the whole list."""
+    from google.cloud import bigquery
+
+    from scale_forecasting.registry.tables import bigquery_client
+
+    monkeypatch.setattr(errors, "is_importable", lambda module: module == "google.cloud.bigquery")
+    monkeypatch.setattr(bigquery, "Client", lambda *, project, location: ("ok", project))
+    assert bigquery_client("proj-x") == ("ok", "proj-x")
+
+    monkeypatch.setattr(errors, "is_importable", lambda module: False)
+    with pytest.raises(MissingExtraError, match=r"\(missing: google\.cloud\.bigquery\)"):
+        bigquery_client("proj-x")
+
+
+def test_require_modules_is_the_narrow_form_of_require_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.errors import require_modules
+
+    monkeypatch.setattr(errors, "is_importable", lambda module: module != "google.cloud.storage")
+    # Asking for a module that is present passes even though a sibling of its extra is missing.
+    assert require_modules(("google.cloud.bigquery",), extra="gcp", purpose="A test") is None
+    # Asking for the missing one names it, with the same install line `require_extra` gives.
+    with pytest.raises(MissingExtraError) as info:
+        require_modules(("google.cloud.storage",), extra="gcp", purpose="Staging code")
+    assert str(info.value).startswith("Staging code needs the 'gcp' extra")
+    assert 'pip install "scale-forecasting[gcp]"' in str(info.value)

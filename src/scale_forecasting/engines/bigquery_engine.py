@@ -41,6 +41,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..registry.tables import bigquery_client
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -133,7 +135,7 @@ def run(
     # `registry_dataset`. Identical strings unless the deployment split them (`registry_of`).
     dataset = settings.dataset_ref
     registry_dataset = settings.registry_dataset_ref
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     log.info(
         "bigquery run start: run_id=%s models=%s manage_header=%s backtest=%s",
         run_id,

@@ -16,7 +16,7 @@ from .params import (
     render_telemetry_merge,
     telemetry_merge_params,
 )
-from .tables import resolve_settings
+from .tables import bigquery_client, resolve_settings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -44,7 +44,7 @@ def write_job(
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     params = [_job_param(col, row[col]) for col in columns]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # re-raised with context
@@ -111,7 +111,7 @@ def update_job(
     params.append(_job_param("job_id", job_id))
     if unless_status_in:
         params.append(_status_guard_param(unless_status_in))
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # re-raised with context
@@ -137,7 +137,7 @@ def latest_job_attempt(
         "WHERE run_id=@run_id AND family=@family"
     )
     params = [_job_param("run_id", run_id), _job_param("family", family)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -181,7 +181,7 @@ def read_run_jobs(
         "WHERE run_id=@run_id ORDER BY family"
     )
     params = [_job_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()

@@ -585,7 +585,7 @@
     },
     "DataConfig": {
       "additionalProperties": false,
-      "description": "Where the series come from and their shape.",
+      "description": "Where the series come from and their shape.\n\n``source_table`` and the three column names are written into BigQuery SQL inside backticks\n(``SELECT `{ts_id_col}` ... FROM `{source_table}```) by the sizing probes, the SDK, and the\nnative engines. They are validated here, once, at config-load time rather than at each of\nthose sites: a column must be a BigQuery column name (letter or underscore, then letters,\ndigits, or underscores, at most 300 characters) and a table path may be ``table``,\n``dataset.table``, or ``project.dataset.table`` (project ids may carry hyphens) \u2014 but neither\nmay contain a backtick, whitespace, or a control character, which are the characters that could\nend the quoted identifier early. Validation adds no field, so it moves no ``run_id``.",
       "properties": {
         "date_col": {
           "default": "ds",

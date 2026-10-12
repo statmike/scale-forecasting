@@ -14,7 +14,7 @@ flowchart LR
 
 ## 1. Choose your starting point and install
 
-`scale-forecasting` separates its pure offline forecasting layer from Google Cloud clients and optional third-party model libraries so you can install only what you need (requires **Python 3.11**):
+`scale-forecasting` separates its pure offline forecasting layer from Google Cloud clients and optional third-party model libraries so you can install only what you need (requires **Python 3.11–3.12**; the cloud runtimes themselves run 3.11 — see [version_matrix.md](./version_matrix.md)):
 
 | Goal | Install command (`uv` or `pip`) | What you get |
 | :--- | :--- | :--- |

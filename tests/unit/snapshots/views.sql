@@ -76,6 +76,8 @@ SELECT
   started_at,
   ended_at,
   runtime_seconds,
+  CAST(JSON_VALUE(job_telemetry, '$.platform.provision_s') AS FLOAT64) AS provision_seconds,
+  CAST(JSON_VALUE(job_telemetry, '$.platform.execute_s') AS FLOAT64) AS execute_seconds,
   failure_reason,
   JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
   JSON_QUERY(job_telemetry, '$.device_use') AS device_use,

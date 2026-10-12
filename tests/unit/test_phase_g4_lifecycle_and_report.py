@@ -303,3 +303,31 @@ def test_html_and_json_report_export_and_cli(tmp_path: Path) -> None:
     res = json.loads(resp["result"]["content"][0]["text"])
     assert res["report_path"] == str(mcp_html)
     assert mcp_html.is_file()
+
+
+def test_html_report_cannot_be_broken_out_of_by_a_hostile_series_id() -> None:
+    """Series ids and model names are data from the source table, and the report inlines them into
+    a ``<script>`` block and (via ``innerHTML``) the SVG label. A ``</script>`` in a ``ts_id`` must
+    not terminate the block, and a ``<img onerror>`` must reach the DOM only as text."""
+    hostile_id = "</script><img src=x onerror=alert(1)>&amp;"
+    preds = pd.DataFrame(
+        {
+            "ts_id": [hostile_id] * 2,
+            "model_type": ["theta"] * 2,
+            "ds": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "yhat": [1.0, 2.0],
+            "yhat_lower": [0.5, 1.5],
+            "yhat_upper": [1.5, 2.5],
+        }
+    )
+    html_text = render_html_report(title="Hostile", predictions_df=preds)
+    # The id reaches the browser (round-trips as JSON) ...
+    body = html_text.split("const EXPLORER_DATA = ", 1)[1].split(";\n", 1)[0]
+    assert hostile_id in json.loads(body)["ts_ids"]
+    # ... but never as raw markup inside the script block: no `<`, `>` or `&` survive escaping,
+    # so the only `</script>` on the page is the one that closes the report's own block.
+    assert "<" not in body and ">" not in body and "&" not in body
+    assert html_text.count("</script>") == 1
+    # And the DOM side escapes before `innerHTML`.
+    assert "function escHtml" in html_text
+    assert "escHtml(`${tid}" in html_text

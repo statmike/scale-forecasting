@@ -180,7 +180,7 @@ def executions_console_url(project_id: str) -> str:
 # serviceAccount mode → v1 endpoint (v1beta1 is for executionUser + OAuth consent, which hangs in
 # PENDING on v1). Token refreshed on every request so a long poll (NB04 > 60 min) never 401s.
 
-_TERMINAL_STATES = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"}
+_TERMINAL_STATES = frozenset({"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"})
 
 # Synthetic (non-API) state: the job FAILED because GCP couldn't provision capacity — the Colab
 # runtime VM, or a Dataproc/Ray pool the notebook asked for. This is transient infra, not a defect

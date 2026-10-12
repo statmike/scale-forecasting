@@ -63,17 +63,24 @@ Five views, matched to the questions a run prompts:
   resolved ``runtime`` / ``spark_mode`` / ``hardware`` / ``gpu_type``, the platform's own
   ``system_job_id``, the per-job ``status``, its ``started_at`` / ``ended_at`` bracket and
   ``runtime_seconds`` — the launcher's wall around the platform job, from submit to terminal,
-  which is what ``v_run_summary``'s ledger is built from. ``failure_reason`` says *why* a FAILED
-  row failed
+  which is what ``v_run_summary``'s ledger is built from. ``provision_seconds`` and
+  ``execute_seconds`` split that wall the way the platform saw it: how long it took to find and
+  start capacity before any of our code ran, and how long the work ran once it had
+  (``job_telemetry.$.platform``, stamped by `job_launch.launch_family_job` from one probe read of
+  the finished job — see `batch_telemetry.platform_phases`). They are populated for Dataproc
+  Serverless and Vertex ``CustomJob`` families, whose APIs expose the start transition, and NULL
+  for the rest; a long ``provision_seconds`` next to a short ``execute_seconds`` is the signature
+  of a family that should move runtime, region, or machine shape. ``failure_reason`` says *why* a
+  FAILED row failed
   (``CAPACITY_EXHAUSTED`` is the first token) and ``capacity`` carries the whole attempt ledger —
   every candidate tried, its verdict, and the cloud's verbatim message. Both are NULL for a job
   that never had to wait, which is nearly all of them. ``device_verdict`` is the one word that says
   whether the accelerator on this row's ``hardware`` did any work (`device_audit`) — NULL for every
   CPU family, so ``WHERE device_verdict != 'ENGAGED_UTILISED'`` is the "what did I pay for and not
   use" query — and ``device_use`` beside it carries the counts and the peak byte figure the word was
-  decided from. The platform's own wall and DCU figures are *not* on this row: the batch telemetry
-  lands on the header (above), and a column that unpacked it from here would read NULL on every
-  job. A ``--force`` re-run appends a
+  decided from. The platform's DCU and cluster-shape figures are *not* on this row: the batch
+  telemetry lands on the header (above), and a column that unpacked it from here would read NULL
+  on every job. A ``--force`` re-run appends a
   higher-``attempt`` job under the same ``(run_id, family)``; the view keeps only the current one
   (``QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1``), so the forward ``run_id → current job``
   map is one row per family.
@@ -249,6 +256,8 @@ SELECT
   started_at,
   ended_at,
   runtime_seconds,
+  CAST(JSON_VALUE(job_telemetry, '$.platform.provision_s') AS FLOAT64) AS provision_seconds,
+  CAST(JSON_VALUE(job_telemetry, '$.platform.execute_s') AS FLOAT64) AS execute_seconds,
   failure_reason,
   JSON_VALUE(job_telemetry, '$.device_use.verdict') AS device_verdict,
   JSON_QUERY(job_telemetry, '$.device_use') AS device_use,

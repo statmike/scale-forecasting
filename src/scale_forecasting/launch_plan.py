@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from .errors import ConfigError, MissingExtraError, get_logger, require_extra
 from .registry.ids import make_run_id
+from .registry.tables import bigquery_client
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
@@ -828,7 +829,6 @@ def read_series_lengths(
     creates lag columns but does no ``dropna``, so nothing shrinks the panel between here and the
     model. No lag-warmup correction is needed and applying one would understate every series.
     """
-    from google.cloud import bigquery
 
     from .engines.bigquery_names import source_ref
     from .settings import Settings as _Settings
@@ -842,7 +842,7 @@ def read_series_lengths(
         f"GROUP BY ts_id\n"
         f"ORDER BY ts_id{limit}"
     )
-    rows = bigquery.Client(project=settings.project_id).query(sql).result()
+    rows = bigquery_client(settings.project_id).query(sql).result()
     return [int(r["n_obs"]) for r in rows]
 
 

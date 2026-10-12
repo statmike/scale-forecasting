@@ -77,10 +77,10 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
-| `source_table` | `str` | *required* | — | Source table for series (e.g. `source_series_iceberg` / `source_series_native`). |
-| `ts_id_col` | `str` | `"ts_id"` | — | Series-id column. |
-| `date_col` | `str` | `"ds"` | — | Date column. |
-| `target_col` | `str` | `"y"` | — | Target column. |
+| `source_table` | `str` | *required* | `table`, `dataset.table`, or `project.dataset.table`; no backticks, whitespace, or control characters | Source table for series (e.g. `source_series_iceberg` / `source_series_native`). Written into backticked SQL, so the shape is checked at load. |
+| `ts_id_col` | `str` | `"ts_id"` | BigQuery column name (`[A-Za-z_][A-Za-z0-9_]*`, ≤ 300 chars) | Series-id column. |
+| `date_col` | `str` | `"ds"` | BigQuery column name | Date column. |
+| `target_col` | `str` | `"y"` | BigQuery column name | Target column. |
 | `freq` | `str` | `"D"` | one of `D W MS ME h` | Series frequency (pandas ≥2.2 spellings). Sets the seasonal period used by the models — `D`=daily (period 7), `W`=weekly (52), `MS`/`ME`=month start/end (12), `h`=hourly (24). An unsupported freq is rejected at validation. |
 | `horizon` | `int` | `28` | `> 0` | Forecast horizon (steps). |
 | `series_limit` | `int` \| `null` | `null` | `> 0` when set | `null` = all series; an int subsets the shipped data (demo small → scale large). |

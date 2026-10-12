@@ -28,6 +28,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -36,6 +37,10 @@ from .capacity import DEFAULT_POLICIES, CapacityPolicy
 from .errors import ConfigError, get_logger
 
 _log = get_logger(__name__)
+
+# What `DataConfig` lets into a backticked BigQuery identifier (see its docstring).
+_BQ_COLUMN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,299}")
+_BQ_TABLE_PATH_RE = re.compile(r"[A-Za-z0-9_\-]+(\.[A-Za-z0-9_\-]+){0,2}")
 
 # --- shared vocabularies -------------------------------------------------------
 
@@ -215,7 +220,17 @@ AblationMode = Literal[
 
 
 class DataConfig(BaseModel):
-    """Where the series come from and their shape."""
+    """Where the series come from and their shape.
+
+    ``source_table`` and the three column names are written into BigQuery SQL inside backticks
+    (``SELECT `{ts_id_col}` ... FROM `{source_table}```) by the sizing probes, the SDK, and the
+    native engines. They are validated here, once, at config-load time rather than at each of
+    those sites: a column must be a BigQuery column name (letter or underscore, then letters,
+    digits, or underscores, at most 300 characters) and a table path may be ``table``,
+    ``dataset.table``, or ``project.dataset.table`` (project ids may carry hyphens) — but neither
+    may contain a backtick, whitespace, or a control character, which are the characters that could
+    end the quoted identifier early. Validation adds no field, so it moves no ``run_id``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -233,6 +248,26 @@ class DataConfig(BaseModel):
     # Optional explicit BigQuery table snapshot timestamp (epoch milliseconds) for time-travel
     # reproducibility and cross-run cell borrowing against a pinned table version.
     snapshot_millis: int | None = Field(default=None, gt=0)
+
+    @field_validator("ts_id_col", "date_col", "target_col")
+    @classmethod
+    def _column_is_a_sql_identifier(cls, value: str, info: ValidationInfo) -> str:
+        if not _BQ_COLUMN_RE.fullmatch(value):
+            raise ValueError(
+                f"data.{info.field_name} {value!r} is not a BigQuery column name "
+                "(letter or underscore, then letters, digits, or underscores; <= 300 chars)"
+            )
+        return value
+
+    @field_validator("source_table")
+    @classmethod
+    def _table_is_quotable(cls, value: str) -> str:
+        if not _BQ_TABLE_PATH_RE.fullmatch(value):
+            raise ValueError(
+                f"data.source_table {value!r} must be `table`, `dataset.table`, or "
+                "`project.dataset.table` with no backticks, whitespace, or control characters"
+            )
+        return value
 
 
 class FeaturesConfig(BaseModel):

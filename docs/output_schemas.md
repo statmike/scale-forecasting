@@ -100,7 +100,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, family`.
 | `started_at`, `ended_at` | `TIMESTAMP` | The job's wall-clock bracket: `started_at` is stamped when the launcher writes the row and starts the job, `ended_at` by `lifecycle.run_job` at exit. Every term of `v_run_summary`'s time ledger is measured on this bracket. |
 | `runtime_seconds` | `FLOAT64` | The launcher's wall around this job, submit → terminal, cluster stand-up included (`lifecycle.run_job`'s monotonic clock). It differs from the bracket only by the row-write latency. |
 | `failure_reason` | `STRING` | Why a `FAILED` row failed, as a token: `CAPACITY_EXHAUSTED` when a family ran out of regions to try ([capacity](./quota_and_scale.md)), `JOB_ID_TAKEN` when the platform already held the job id, `LAUNCHER_EXCEPTION` for anything else that raised — with its type and message under `job_telemetry.$.failure`. NULL on a job that ended well. |
-| `job_telemetry` | `JSON` | Per-job overlay: the family's own `capacity` region walk, the platform handle (`vertex_custom_job` / `gce_instance` / `gke_job`), `cells`, `settle`, `retry`, `cancel`, `failure`, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's batch wall and DCU figures are *not* here; they land on the header. Unpacked by `v_run_jobs`. |
+| `job_telemetry` | `JSON` | Per-job overlay: the family's own `capacity` region walk, the platform handle (`vertex_custom_job` / `gce_instance` / `gke_job`), `platform` (`provision_s` / `execute_s` / `total_wall_s` — the platform's own provision→execute split of the job, from one probe read once it is terminal; Dataproc Serverless and Vertex `CustomJob` families today), `cells`, `settle`, `retry`, `cancel`, `failure`, and — for a GPU family — `device_use`, the verdict on whether the accelerator did anything ([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's DCU and cluster-shape figures are *not* here; they land on the header. Unpacked by `v_run_jobs`. |
 
 ## `forecast_metadata` — one row per (run, series, model) cell
 
@@ -592,13 +592,19 @@ One row per `(run_id, family)` = the run's DAG as executed: the deterministic `j
 `attempt`, the resolved `runtime` / `spark_mode` / `hardware` / `gpu_type`, the platform's own
 `system_job_id`, the per-job `status`, its `started_at` / `ended_at` bracket and `runtime_seconds`
 (the launcher's wall around the platform job, submit to terminal — the bracket is what
-`v_run_summary`'s ledger is built from), and `failure_reason` for a row that failed. Out of the
-per-job `job_telemetry` it unpacks `probe_handle` (the platform handle the launcher kept) and
+`v_run_summary`'s ledger is built from), `provision_seconds` / `execute_seconds` (the platform's own
+split of that wall: how long it took to find and start capacity before any of our code ran, and how
+long the work ran once it had — populated for Dataproc Serverless and Vertex `CustomJob` families,
+whose APIs expose the start transition, NULL for the rest; a long `provision_seconds` beside a short
+`execute_seconds` is the signature of a family that should move runtime, region, or machine shape),
+and `failure_reason` for a row that failed. Out of the
+per-job `job_telemetry` it unpacks `platform` (the three timings above, from one probe read of the
+finished job), `probe_handle` (the platform handle the launcher kept) and
 `capacity` (this family's own region walk, NULL for a job that never had to wait — nearly all of
 them). `device_verdict` is the one word saying whether this row's accelerator did any work, with the
 counts behind it in `device_use` beside it — both NULL for a CPU family, so `WHERE device_verdict
 != 'ENGAGED_UTILISED'` is the "what did I pay for and not use" query
-([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's own batch wall and DCU
+([below](#was-the-accelerator-you-paid-for-actually-used)). The platform's DCU and cluster-shape
 figures are not on this row: Serverless telemetry lands on the header, so they read from
 `v_run_summary`. A `--force` re-run appends a higher-`attempt` job under the same `(run_id,
 family)`; the view keeps only the current one (`QUALIFY ROW_NUMBER() … ORDER BY attempt DESC = 1`),
