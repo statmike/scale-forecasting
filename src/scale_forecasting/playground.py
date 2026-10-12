@@ -160,6 +160,10 @@ def build_config(
     static_covariates: list[str] | None = None,
     future_covariates: list[str] | None = None,
     past_covariates: list[str] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> RunConfig:
     """A minimal `RunConfig` for running ``model`` on `sample_data`.
 
@@ -181,6 +185,13 @@ def build_config(
         if backtest
         else {"enabled": False}
     )
+    output_cfg: dict[str, Any] = {"integer_rounding": integer_rounding}
+    if floor is not None:
+        output_cfg["floor"] = floor
+    if cap is not None:
+        output_cfg["cap"] = cap
+    if quantiles:
+        output_cfg["quantiles"] = list(quantiles)
     # Built as a plain dict and validated, mirroring config.load_config — pydantic coerces
     # the nested blocks and applies the same normalization a file-loaded config gets.
     raw: dict[str, Any] = {
@@ -189,6 +200,7 @@ def build_config(
         "models": [model],
         "features": features_cfg,
         "backtest": backtest_cfg,
+        "output": output_cfg,
     }
     return RunConfig.model_validate(raw)
 
@@ -201,6 +213,94 @@ class PlaygroundRun:
     series: pd.DataFrame
     backtest: bool
 
+    def horizon_decay_df(self, *, metric: str = "wape") -> pd.DataFrame:
+        """Compute lead-time error decay across horizon steps for this run's backtest OOF."""
+        from .diagnostics import compute_horizon_decay
+
+        if self.result.oof is None or self.result.oof.empty:
+            return compute_horizon_decay(pd.DataFrame(), metric=metric)
+        oof = self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+        return compute_horizon_decay(oof, metric=metric)
+
+    def bias_report_df(self) -> pd.DataFrame:
+        """Compute directional bias and Trigg Tracking Signal for this run's backtest OOF."""
+        from .diagnostics import compute_bias_report
+
+        if self.result.oof is None or self.result.oof.empty:
+            return compute_bias_report(pd.DataFrame())
+        oof = self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+        return compute_bias_report(oof)
+
+    def bias_df(self) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching ``Forecaster.bias_df()``."""
+        return self.bias_report_df()
+
+    def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
+        """Aggregate this run's future predictions to coarser calendar buckets with AR(1) bounds."""
+        from .diagnostics import rollup_time
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        return rollup_time(preds, freq=freq, oof_df=oof, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: dict[str, dict[str, Any]],
+        *,
+        price_col: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual future covariate scenarios on this single-series run."""
+        from .scenarios import simulate_scenarios
+
+        fut_covs = [
+            c for c in ("promo_flag", "price_index", "is_holiday") if c in self.series.columns
+        ]
+        cfg = build_config(
+            self.result.model_type,
+            horizon=len(self.result.predictions) or 14,
+            backtest=self.backtest,
+            future_covariates=fut_covs or None,
+        )
+        return simulate_scenarios(
+            self.series,
+            cfg,
+            scenarios,
+            models=[self.result.model_type],
+            price_col=price_col,
+        )
+
+    def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
+        """Return the exception triage queue for this playground run."""
+        from .diagnostics import compute_exceptions_queue
+
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        return compute_exceptions_queue(oof_df=oof, predictions_df=preds, top_n=top_n)
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained `.html` report for this playground run."""
+        from .report import export_report
+
+        return export_report(self, out_path, title=title, write_json=write_json)
+
 
 @dataclass(frozen=True)
 class BakeOff:
@@ -209,13 +309,107 @@ class BakeOff:
     ``leaderboard`` is one row per model — base models *and* the ensemble pseudo-models —
     ranked by the decision metric. ``predictions`` is the long-format future forecast for
     every model (base + ensemble) so the notebook can overlay them. ``series`` is the history
-    they were fit on; ``config`` is the frozen `RunConfig` that drove the whole thing.
+    they were fit on; ``config`` is the frozen `RunConfig` that drove the whole thing; ``oof``
+    holds the combined base + ensemble out-of-fold rows for FVA, horizon-decay, and bias audits.
     """
 
     leaderboard: pd.DataFrame
     predictions: pd.DataFrame
     series: pd.DataFrame
     config: RunConfig
+    oof: pd.DataFrame | None = None
+
+    def fva_df(
+        self,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+    ) -> pd.DataFrame:
+        """Compute Forecast Value Added (FVA) and Diebold–Mariano p-values across models."""
+        from .diagnostics import compute_fva
+
+        eff_metric = metric or self.config.backtest.decision_metric
+        return compute_fva(
+            self.oof if self.oof is not None else pd.DataFrame(),
+            baseline=baseline,
+            metric=eff_metric,
+            series_df=self.series,
+        )
+
+    def horizon_decay_df(
+        self,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+    ) -> pd.DataFrame:
+        """Compute lead-time accuracy decay by horizon step across all bake-off models."""
+        from .diagnostics import compute_horizon_decay
+
+        eff_metric = metric or self.config.backtest.decision_metric
+        return compute_horizon_decay(
+            self.oof if self.oof is not None else pd.DataFrame(),
+            metric=eff_metric,
+            baseline=baseline,
+        )
+
+    def bias_report_df(self) -> pd.DataFrame:
+        """Audit each bake-off model for directional bias and Trigg Tracking Signal."""
+        from .diagnostics import compute_bias_report
+
+        return compute_bias_report(self.oof if self.oof is not None else pd.DataFrame())
+
+    def bias_df(self) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching ``Forecaster.bias_df()``."""
+        return self.bias_report_df()
+
+    def rollup_time(self, freq: str = "W", *, level: float = 0.80) -> pd.DataFrame:
+        """Aggregate bake-off future predictions to coarser calendar periods with AR(1) bounds."""
+        from .diagnostics import rollup_time
+
+        return rollup_time(self.predictions, freq=freq, oof_df=self.oof, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: dict[str, dict[str, Any]],
+        *,
+        models: list[str] | None = None,
+        price_col: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual covariate scenarios across this bake-off's series and models."""
+        from .scenarios import simulate_scenarios
+
+        return simulate_scenarios(
+            self.series,
+            self.config,
+            scenarios,
+            models=models,
+            price_col=price_col,
+        )
+
+    def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
+        """Build the Top-N exception triage queue across all models in this bake-off."""
+        from .diagnostics import compute_exceptions_queue
+
+        return compute_exceptions_queue(
+            oof_df=self.oof,
+            predictions_df=self.predictions,
+            floor=self.config.output.floor,
+            cap=self.config.output.cap,
+            metric=self.config.backtest.decision_metric,
+            top_n=top_n,
+        )
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained interactive `.html` report for this bake-off."""
+        from .report import export_report
+
+        return export_report(self, out_path, title=title, write_json=write_json)
 
 
 def bakeoff(
@@ -229,6 +423,18 @@ def bakeoff(
     calculated: str = "inverse_error",
     learned: str = "nnls",
     with_exog: bool = False,
+    future_covariates: list[str] | None = None,
+    past_covariates: list[str] | None = None,
+    static_covariates: list[str] | None = None,
+    include_univariate_baselines: bool = False,
+    ablation_modes: list[str] | None = None,
+    ablation_models: list[str] | None = None,
+    variant_policy: str = "best_per_base_model",
+    model_params: dict[str, dict[str, Any]] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> BakeOff:
     """Run several models head-to-head on one series and add two ensembles — via the framework.
 
@@ -251,28 +457,66 @@ def bakeoff(
     """
     from .backtest import training_window
     from .ensemble_run import _apply_weights
-    from .ensembler import combine_calculated, combine_oof, fit_learned
+    from .ensembler import (
+        calibrate_ensemble_predictions,
+        combine_calculated,
+        combine_oof,
+        ensemble_oof_bounds,
+        fit_learned,
+    )
+    from .features import variant_diagnostics_for
     from .metrics import METRIC_NAMES, compute_metrics
     from .seasonality import seasonal_period
-    from .worker import rollup_metrics
+    from .worker import is_panel_model, rollup_metrics, run_panel
 
     if models is None:
         # Fast, dependency-light defaults so the bake-off runs anywhere the repo imports.
         models = ["theta", "holtwinters", "stl_bagging", "xgboost"]
     if data is None:
-        data = sample_data(n_series=3, freq=freq, with_exog=with_exog)
+        data = sample_data(
+            n_series=3,
+            freq=freq,
+            with_exog=with_exog or bool(future_covariates),
+        )
 
     # One config for the whole bake-off: all base models, backtest on (ensembles need OOF), and
     # both an ensemble strategy from each family. Built + validated exactly like a file config.
     exog = ["price_index"] if with_exog else []
+    features_cfg: dict[str, Any] = {"exog": exog}
+    if future_covariates:
+        features_cfg["future_covariates"] = list(future_covariates)
+    if past_covariates:
+        features_cfg["past_covariates"] = list(past_covariates)
+    if static_covariates:
+        features_cfg["static_covariates"] = list(static_covariates)
+    if include_univariate_baselines:
+        features_cfg["include_univariate_baselines"] = True
+    if ablation_modes:
+        features_cfg["ablation_modes"] = list(ablation_modes)
+    if ablation_models:
+        features_cfg["ablation_models"] = list(ablation_models)
+    output_cfg: dict[str, Any] = {"integer_rounding": integer_rounding}
+    if floor is not None:
+        output_cfg["floor"] = floor
+    if cap is not None:
+        output_cfg["cap"] = cap
+    if quantiles:
+        output_cfg["quantiles"] = list(quantiles)
     raw: dict[str, Any] = {
         "run_name": "playground-bakeoff",
         "data": {"source_table": "playground", "freq": freq, "horizon": horizon},
         "models": models,
-        "features": {"exog": exog},
+        "features": features_cfg,
         "backtest": {"enabled": True, "n_folds": n_folds, "horizon": horizon, "step": horizon},
-        "ensemble": {"enabled": True, "strategies": [calculated, learned]},
+        "output": output_cfg,
+        "ensemble": {
+            "enabled": True,
+            "strategies": [calculated, learned],
+            "variant_policy": variant_policy,
+        },
     }
+    if model_params:
+        raw["model_params"] = dict(model_params)
     cfg = RunConfig.model_validate(raw)
     validate_panel(data, cfg)
 
@@ -292,10 +536,26 @@ def bakeoff(
     oof_long: list[pd.DataFrame] = []  # feeds combine_oof / fit_learned
     metric_long: list[dict[str, Any]] = []  # feeds inverse_error weighting
 
-    for model in models:
-        result = run_cell(series, model, cfg)
+    for model in cfg.models:
+        if is_panel_model(model, cfg):
+            panel_results = run_panel(data, model, cfg)
+            result = next((r for r in panel_results if r.ts_id == chosen), panel_results[0])
+        else:
+            result = run_cell(series, model, cfg)
         status = result.status
-        row: dict[str, Any] = {"model": model, "kind": "base", "status": status}
+        vdiag = variant_diagnostics_for(model, cfg)
+        row: dict[str, Any] = {
+            "model": model,
+            "base_model": vdiag["base_model"],
+            "scope_capability": vdiag["scope_capability"],
+            "training_mode": vdiag["training_mode"],
+            "cov_profile": vdiag["cov_profile"],
+            "is_univariate": vdiag["is_univariate"],
+            "covariates_used": vdiag["covariates_used"],
+            "model_spec_hash": vdiag["model_spec_hash"],
+            "kind": "base",
+            "status": status,
+        }
         row.update({m: result.metrics.get(m, float("nan")) for m in METRIC_NAMES})
         base_rows.append(row)
         if status != "ok":
@@ -323,10 +583,13 @@ def bakeoff(
     metric_df = pd.DataFrame(metric_long)
 
     # --- ensembles: calculated + learned, both via the framework's pure functions ------------
-    ens_pred_rows: list[dict[str, Any]] = list(combine_calculated(base_df, cfg, metric_df))
+    ens_pred_rows: list[dict[str, Any]] = list(combine_calculated(base_df, cfg, metric_df, oof_df))
     learned_weights, _artifacts, _basis = fit_learned(oof_df, cfg)
     for strategy, wmap in learned_weights.items():
         ens_pred_rows.extend(_apply_weights(base_df, wmap, cfg.run_name, strategy))
+
+    ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
+    ens_pred_rows = calibrate_ensemble_predictions(ens_pred_rows, ens_oof, cfg)
 
     for r in ens_pred_rows:
         pred_parts.append(
@@ -347,31 +610,41 @@ def bakeoff(
         )
 
     # --- score the ensembles on the OOF window (identical to ensemble_run) --------------------
-    # The MASE/RMSSE denominator is the *fold's* training window, cut at its cutoff — the same rule
-    # `backtest_cell` applies to the base models above, so the two halves of this leaderboard are
-    # scaled by the same thing. Handing over the whole series would scale the ensembles by a history
-    # that includes the window they are being judged on.
     hist = series.sort_values(cfg.data.date_col)
     hist_ds = pd.to_datetime(hist[cfg.data.date_col]).to_numpy()
     hist_y = hist[cfg.data.target_col].to_numpy()
-    ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
     for model_type, g in ens_oof.groupby("model_type"):
-        fold_panels = [
-            compute_metrics(
-                fg["y_true"].to_numpy(),
-                fg["yhat"].to_numpy(),
-                y_train=training_window(
-                    hist_ds,
-                    hist_y,
-                    fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None,
-                    cfg,
-                ),
-                seasonal_period=seasonal_period(cfg.data.freq),
+        fold_panels: list[dict[str, float]] = []
+        for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
+            lo, hi = ensemble_oof_bounds(g, _fold, cfg)
+            fold_panels.append(
+                compute_metrics(
+                    fg["y_true"].to_numpy(),
+                    fg["yhat"].to_numpy(),
+                    lower=lo,
+                    upper=hi,
+                    y_train=training_window(
+                        hist_ds,
+                        hist_y,
+                        fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None,
+                        cfg,
+                    ),
+                    seasonal_period=seasonal_period(cfg.data.freq),
+                )
             )
-            for _fold, fg in g.sort_values("forecast_date").groupby("fold_id")
-        ]
         panel = rollup_metrics(fold_panels)
-        row = {"model": str(model_type), "kind": "ensemble", "status": "ok"}
+        row = {
+            "model": str(model_type),
+            "base_model": str(model_type),
+            "scope_capability": "ensemble",
+            "training_mode": "ensemble",
+            "cov_profile": "ensemble",
+            "is_univariate": None,
+            "covariates_used": None,
+            "model_spec_hash": None,
+            "kind": "ensemble",
+            "status": "ok",
+        }
         row.update({m: panel.get(m, float("nan")) for m in METRIC_NAMES})
         base_rows.append(row)
 
@@ -379,7 +652,15 @@ def bakeoff(
         pd.DataFrame(base_rows).sort_values(decision, na_position="last").reset_index(drop=True)
     )
     predictions = pd.concat(pred_parts, ignore_index=True) if pred_parts else pd.DataFrame()
-    return BakeOff(leaderboard=leaderboard, predictions=predictions, series=series, config=cfg)
+    all_oof_parts = [p for p in (oof_df, ens_oof) if not p.empty]
+    all_oof = pd.concat(all_oof_parts, ignore_index=True) if all_oof_parts else pd.DataFrame()
+    return BakeOff(
+        leaderboard=leaderboard,
+        predictions=predictions,
+        series=series,
+        config=cfg,
+        oof=all_oof,
+    )
 
 
 def run_model(
@@ -391,6 +672,11 @@ def run_model(
     horizon: int = 28,
     backtest: bool = False,
     with_exog: bool = False,
+    future_covariates: list[str] | None = None,
+    floor: float | None = None,
+    cap: float | None = None,
+    integer_rounding: str = "none",
+    quantiles: list[float] | None = None,
 ) -> PlaygroundRun:
     """Run one model on one series and return the result (validates first).
 
@@ -401,9 +687,24 @@ def run_model(
     engine would. ``run_cell`` never raises: a model failure comes back as an error cell.
     """
     if data is None:
-        data = sample_data(n_series=3, freq=freq, with_exog=with_exog)
+        data = sample_data(
+            n_series=3,
+            freq=freq,
+            with_exog=with_exog or bool(future_covariates),
+        )
 
-    cfg = build_config(model, freq=freq, horizon=horizon, backtest=backtest, with_exog=with_exog)
+    cfg = build_config(
+        model,
+        freq=freq,
+        horizon=horizon,
+        backtest=backtest,
+        with_exog=with_exog,
+        future_covariates=future_covariates,
+        floor=floor,
+        cap=cap,
+        integer_rounding=integer_rounding,
+        quantiles=quantiles,
+    )
     validate_panel(data, cfg)
 
     ts_col = cfg.data.ts_id_col

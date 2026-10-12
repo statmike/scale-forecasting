@@ -253,15 +253,20 @@ def _score_params(
 
     from .backtest import backtest_cell, holdout_fold_id
     from .features import (
+        clean_model_params,
         effective_config_for_model,
         extract_static_covariates,
         fit_transform_lambda,
+        resolve_model_variant,
     )
 
     model_cls = get_model(model_name)
-    model_cfg = effective_config_for_model(cfg, model_cls)
-    if str(params.get("training_mode", "local")) in ("global", "hybrid"):
-        return _score_panel_params(model_cls, params, sample, model_cfg, ctx, tally)
+    model_cfg = effective_config_for_model(cfg, model_cls, model_name)
+    spec = resolve_model_variant(cfg, model_name, model_cls=model_cls)
+    clean_trial_params = clean_model_params(params)
+    mode = str(params.get("training_mode", spec.training_mode))
+    if mode in ("global", "hybrid"):
+        return _score_panel_params(model_cls, clean_trial_params, sample, model_cfg, ctx, tally)
 
     metric = model_cfg.backtest.decision_metric
     per_series: list[float] = []
@@ -291,7 +296,7 @@ def _score_params(
             # choice of hyperparameter changes.
             _, fold_metrics, _ = backtest_cell(
                 series,
-                partial(model_cls, params, series_ctx),
+                partial(model_cls, clean_trial_params, series_ctx),
                 model_cfg,
                 lam,
                 tally,
@@ -343,8 +348,16 @@ def tune_model(
     it runs on the driver before any cell exists, so its fits belong to the run rather than to any
     one row, and there is nowhere honest to put them.
     """
+    from .features import clean_model_params, resolve_model_variant
+
     model_cls = get_model(model_name)
-    authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
+    spec = resolve_model_variant(cfg, model_name, model_cls=model_cls)
+    authored: dict[str, Any] = dict(spec.clean_params)
+    variant_pins: dict[str, Any] = (
+        dict(clean_model_params(cfg.model_params[model_name]))
+        if "@" in model_name and model_name in cfg.model_params
+        else {}
+    )
     if not _has_search_space(model_cls):
         return {}
 
@@ -359,7 +372,17 @@ def tune_model(
 
     def objective(trial: optuna.Trial) -> float:
         return _score_params(
-            model_name, {**authored, **model_cls.search_space(trial)}, sample, cfg, ctx, tally
+            model_name,
+            {
+                "training_mode": spec.training_mode,
+                **authored,
+                **model_cls.search_space(trial),
+                **variant_pins,
+            },
+            sample,
+            cfg,
+            ctx,
+            tally,
         )
 
     study.optimize(objective, n_trials=cfg.hpo.n_trials)
@@ -371,7 +394,7 @@ def tune_model(
         study.best_value,
         cfg.hpo.n_trials,
     )
-    return {**authored, **study.best_params}
+    return {**authored, **study.best_params, **variant_pins}
 
 
 def resolve_fleetwide(

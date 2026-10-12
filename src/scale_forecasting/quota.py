@@ -1601,7 +1601,7 @@ def _report_gke_node(
         run_id=run_id,
         gke_mode=fc.gke_mode,
         cluster_name=fc.gke_cluster_name,
-        namespace=fc.gke_namespace,
+        namespace=getattr(fc, "gke_namespace", None) or cfg.compute.gke_namespace,
         hardware=fc.hardware,
         gpu_type=fc.gpu_type,
         machine_type=fc.machine_type,

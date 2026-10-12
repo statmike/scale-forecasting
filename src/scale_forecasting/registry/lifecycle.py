@@ -86,6 +86,7 @@ class HeaderFinalizer:
     def __init__(self) -> None:
         self.status: str = "COMPLETED"
         self.extra: dict[str, Any] = {}
+        self.snapshot_millis: int | None = None
 
     def finalize(self, *, status: str | None = None, **fields: Any) -> None:
         """Set the terminal ``status`` (if given) and merge extra columns for the success write."""
@@ -125,6 +126,7 @@ def run_header(
     if manage:
         ensure_tables(cfg, settings=settings)
         write_header(cfg, run_id, settings=settings)
+        fin.snapshot_millis = cfg.data.snapshot_millis
     started = time.perf_counter()
     try:
         yield fin

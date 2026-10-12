@@ -24,22 +24,37 @@ import numpy as np
 import pandas as pd
 
 from .backtest import FitTally, achievable_folds, backtest_cell, resolve_geometry
-from .calibration import apply_calibration, calibrate_from_oof, compare_arms, resolve_arm
+from .calibration import (
+    apply_calibration,
+    apply_output_constraints,
+    apply_quantile_and_cost_rules,
+    calibrate_from_oof,
+    compare_arms,
+    has_output_constraints,
+    resolve_arm,
+)
 from .config import corrected_arm_for
 from .errors import ConfigError, get_logger
 from .features import (
     build_features,
     build_future_features,
+    clean_model_params,
+    clean_training_target,
+    compute_demand_profile,
     effective_config_for_model,
     extract_static_covariates,
     fit_transform_lambda,
     holiday_frame,
+    regularize_series_grid,
+    resolve_model_variant,
+    select_models_for_series,
+    should_stamp_variant_diagnostics,
+    variant_diagnostics_for,
 )
 from .hardware import provisioned_hardware, visible_device
 from .metrics import METRIC_NAMES
-from .models import get_model
+from .models import base_model_name, get_model
 from .models.base_model import (
-    DEFAULT_QUANTILES,
     PREDICTION_COLUMNS,
     BaseModel,
     ModelContext,
@@ -180,6 +195,9 @@ class CellResult:
     # `models.base_model.BaseModel.diagnostics` for the distinction and `_collect_diagnostics` for
     # how a misbehaving one is contained.
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # Syntetos-Boylan-Croston (SBC) demand regime profile (`demand_class`, `adi`, `cv2`,
+    # `zero_share`, `n_obs`), computed on every `ok` cell.
+    demand_profile: dict[str, Any] | None = None
     # Per-horizon-step local feature attributions (`{"baseline_score": float, ...}`),
     # or None when the model does not emit per-step explanations. Written to
     # `forecast_predictions.explanations` (`JSON`). Kept as a field on `CellResult` alongside
@@ -410,13 +428,22 @@ def _resolve_params(
     forecast, and adding them to ``n_fits`` would make ``fit_seconds / n_fits`` mean nothing. The
     fleetwide branch passes nothing — that pre-pass ran on the driver before this cell existed.
     """
-    authored: dict[str, Any] = dict(cfg.model_params.get(model_name, {}))
+    base = base_model_name(model_name)
+    if "@" in model_name or model_name in cfg.model_params or base in cfg.model_params:
+        authored: dict[str, Any] = dict(resolve_model_variant(cfg, model_name).clean_params)
+    else:
+        authored = {}
+    variant_pins: dict[str, Any] = (
+        dict(clean_model_params(cfg.model_params[model_name]))
+        if "@" in model_name and model_name in cfg.model_params
+        else {}
+    )
     if params is not None:
-        return {**authored, **params}
+        return {**authored, **params, **variant_pins}
     if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
         from .hpo import tune_model
 
-        return {**authored, **tune_model(model_name, [series], cfg, ctx, tally)}
+        return {**authored, **tune_model(model_name, [series], cfg, ctx, tally), **variant_pins}
     return authored
 
 
@@ -635,11 +662,20 @@ def run_cell(
     cpu_started = time.process_time()
     started = time.perf_counter()
     try:
-        model_cfg = effective_config_for_model(cfg, model_cls)
-        # Fit the transform's stateful λ once per cell (None for none/log1p), on the raw target.
+        series = regularize_series_grid(series, cfg)
+        fit_model_name = model_name
+        if cfg.features.regime_routing:
+            compat = select_models_for_series(series, cfg)
+            if compat and model_name not in compat:
+                fit_model_name = compat[0]
+                model_cls = get_model(fit_model_name)
+        model_cfg = effective_config_for_model(cfg, model_cls, fit_model_name)
+        raw_target_series = _target(series, model_cfg)
+        demand_prof = compute_demand_profile(raw_target_series.to_numpy(dtype=float))
+        # Fit the transform's stateful λ once per cell (None for none/log1p), on the cleaned target.
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
         # predict (the whole point of carrying it on the cell).
-        lam = fit_transform_lambda(_target(series, model_cfg), model_cfg.features.transform)
+        lam = fit_transform_lambda(raw_target_series, model_cfg.features.transform)
         static_covs = extract_static_covariates(series, model_cfg) or None
         ctx = _model_context(
             model_cfg,
@@ -648,7 +684,7 @@ def run_cell(
             static_covariates=static_covs,
         )
         _require_device(ctx.device, model_cls.family, engine)
-        resolved = _resolve_params(series, model_name, model_cfg, ctx, params, hpo_fits)
+        resolved = _resolve_params(series, fit_model_name, model_cfg, ctx, params, hpo_fits)
 
         # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
         #
@@ -716,7 +752,8 @@ def run_cell(
         # column, and only user-supplied exog falls back to a recency stand-in because it is
         # genuinely unknown.
         future_exog = build_future_features(y, X, model_cfg)
-        predictions = model.predict(model_cfg.data.horizon, future_exog)
+        eff_qs = cfg.output.effective_quantiles
+        predictions = model.predict(model_cfg.data.horizon, future_exog, quantiles=eff_qs)
         explanations = _collect_explanations(
             model, model_cfg.data.horizon, future_exog, ts_id, model_name
         )
@@ -740,8 +777,17 @@ def run_cell(
         metric = cfg.backtest.decision_metric
         corrected = corrected_arm_for(metric)
         arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
-        cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
+        cal = calibrate_from_oof(oof, eff_qs) if oof is not None else None
         predictions, interval_calibration = apply_calibration(predictions, cal, arm)
+        predictions, arm_override = apply_quantile_and_cost_rules(predictions, cfg.output)
+        if arm_override is not None:
+            arm = arm_override
+            arm_decision = "configured"
+        if has_output_constraints(cfg.output):
+            bounds_src = (
+                future_exog if future_exog is not None and not future_exog.empty else series
+            )
+            predictions = apply_output_constraints(predictions, cfg.output, bounds_df=bounds_src)
         # `corrected`, not `arm`: the margin has to mean the same thing on every row for a
         # fleet-wide GROUP BY to be worth reading, so the comparison is always
         # corrected-vs-raw under the metric's own functional. Passing the selected arm would
@@ -758,6 +804,17 @@ def run_cell(
                 artifact_bytes = model.serialize()
             except Exception as e:  # noqa: BLE001 - persistence is best-effort, never fatal
                 _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
+
+        diag = _collect_diagnostics(model, ts_id, model_name)
+        if should_stamp_variant_diagnostics(model_name, cfg):
+            diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
+        if cfg.features.regime_routing:
+            diag["demand_profile"] = demand_prof
+            if fit_model_name != model_name:
+                diag["regime_routing"] = {
+                    "demand_class": demand_prof["demand_class"],
+                    "routed_to": fit_model_name,
+                }
 
         fit_seconds = time.perf_counter() - started
         cpu_seconds = time.process_time() - cpu_started
@@ -820,7 +877,8 @@ def run_cell(
             # keep *for this series*, rather than asking anyone to trust a fleetwide average.
             point_forecast_margin=arm_comparison.get("margin"),
             hpo_scoring=hpo_scoring_basis(len(series), cfg, params),
-            diagnostics=_collect_diagnostics(model, ts_id, model_name),
+            diagnostics=diag,
+            demand_profile=demand_prof,
             explanations=explanations,
             n_fits=fits.n_fits,
             train_rows_total=fits.train_rows,
@@ -832,10 +890,19 @@ def run_cell(
 
 def is_panel_model(model_name: str, cfg: RunConfig, params: dict[str, Any] | None = None) -> bool:
     """Whether ``model_name`` is configured for panel training (`global` or `hybrid`)."""
-    authored = dict(cfg.model_params.get(model_name, {}))
+    base_name = base_model_name(model_name)
+    authored: dict[str, Any] = {}
+    if base_name in cfg.model_params:
+        authored.update(cfg.model_params[base_name])
+    if model_name in cfg.model_params:
+        authored.update(cfg.model_params[model_name])
     if params is not None:
         authored.update(params)
-    return str(authored.get("training_mode", "local")) in ("global", "hybrid")
+    if "training_mode" in authored:
+        return str(authored["training_mode"]) in ("global", "hybrid")
+    if "@" in model_name:
+        return resolve_model_variant(cfg, model_name).training_mode in ("global", "hybrid")
+    return False
 
 
 def run_panel(
@@ -863,7 +930,8 @@ def run_panel(
     available, device_name = visible_device()
     series_frames: dict[str, pd.DataFrame] = {}
     for raw_uid, sub in panel.groupby(id_col, sort=True):
-        series_frames[str(raw_uid)] = sub.sort_values(date_col).reset_index(drop=True)
+        reg_sub = regularize_series_grid(sub, cfg)
+        series_frames[str(raw_uid)] = reg_sub.sort_values(date_col).reset_index(drop=True)
     uids = sorted(series_frames.keys())
     if not uids:
         return []
@@ -909,11 +977,13 @@ def run_panel(
     train_rows_total = 0
 
     try:
-        model_cfg = effective_config_for_model(cfg, model_cls)
+        model_cfg = effective_config_for_model(cfg, model_cls, model_name)
         ctx = _model_context(model_cfg, family=model_cls.family)
         _require_device(ctx.device, model_cls.family, engine)
-        authored: dict[str, Any] = dict(model_cfg.model_params.get(model_name, {}))
-        resolved = {**authored, **params} if params is not None else authored
+        variant_spec = resolve_model_variant(cfg, model_name, model_cls=model_cls)
+        authored: dict[str, Any] = dict(variant_spec.clean_params)
+        clean_override = clean_model_params(params) if params is not None else {}
+        resolved = {**authored, **clean_override} if params is not None else authored
 
         lams: dict[str, float | None] = {
             uid: fit_transform_lambda(
@@ -1010,6 +1080,30 @@ def run_panel(
                         )
                         lower = pred["yhat_lower"].to_numpy(dtype=float)
                         upper = pred["yhat_upper"].to_numpy(dtype=float)
+                        cutoff = pd.Timestamp(train_slice[date_col].iloc[-1]).normalize()
+                        fold_oof = pd.DataFrame(
+                            {
+                                "ds": pd.to_datetime(val_slice[date_col]).to_numpy(),
+                                "fold_id": fold.fold_id,
+                                "y_true": y_val,
+                                "yhat": yhat,
+                                "yhat_raw": yhat_raw,
+                                "yhat_adjusted": yhat_adjusted,
+                                "yhat_lower": lower,
+                                "yhat_upper": upper,
+                                "cutoff_date": cutoff,
+                                "horizon_step": np.arange(1, len(y_val) + 1),
+                                "yhat_stale": np.full(len(y_val), np.nan),
+                            },
+                            columns=list(OOF_COLUMNS),
+                        )
+                        if has_output_constraints(model_cfg.output):
+                            fold_oof = apply_output_constraints(
+                                fold_oof, model_cfg.output, bounds_df=val_slice
+                            )
+                            yhat = fold_oof["yhat"].to_numpy(dtype=float)
+                            lower = fold_oof["yhat_lower"].to_numpy(dtype=float)
+                            upper = fold_oof["yhat_upper"].to_numpy(dtype=float)
                         fmetrics_by_uid[uid].append(
                             compute_metrics(
                                 y_val,
@@ -1020,25 +1114,7 @@ def run_panel(
                                 seasonal_period=m_period,
                             )
                         )
-                        cutoff = pd.Timestamp(train_slice[date_col].iloc[-1]).normalize()
-                        oof_chunks_by_uid[uid].append(
-                            pd.DataFrame(
-                                {
-                                    "ds": pd.to_datetime(val_slice[date_col]).to_numpy(),
-                                    "fold_id": fold.fold_id,
-                                    "y_true": y_val,
-                                    "yhat": yhat,
-                                    "yhat_raw": yhat_raw,
-                                    "yhat_adjusted": yhat_adjusted,
-                                    "yhat_lower": lower,
-                                    "yhat_upper": upper,
-                                    "cutoff_date": cutoff,
-                                    "horizon_step": np.arange(1, len(y_val) + 1),
-                                    "yhat_stale": np.full(len(y_val), np.nan),
-                                },
-                                columns=list(OOF_COLUMNS),
-                            )
-                        )
+                        oof_chunks_by_uid[uid].append(fold_oof)
 
                 for uid in uids:
                     sub = series_frames[uid]
@@ -1083,9 +1159,11 @@ def run_panel(
         model = model_cls(resolved, ctx)
         model.fit_panel(full_series_map, static_map=static_map if static_map else None)
         n_fits += 1
+        eff_qs = cfg.output.effective_quantiles
         raw_preds_map = model.predict_panel(
             model_cfg.data.horizon,
             full_futr_map,
+            quantiles=eff_qs,
             transform_lambdas=lams,
         )
 
@@ -1106,8 +1184,20 @@ def run_panel(
         for idx, uid in enumerate(uids):
             oof = oof_by_uid[uid]
             arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
-            cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
+            cal = calibrate_from_oof(oof, eff_qs) if oof is not None else None
             predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
+            predictions, arm_override = apply_quantile_and_cost_rules(predictions, cfg.output)
+            if arm_override is not None:
+                arm = arm_override
+                arm_decision = "configured"
+            if has_output_constraints(cfg.output):
+                fut_df = full_futr_map.get(uid)
+                bounds_src = (
+                    fut_df if fut_df is not None and not fut_df.empty else series_frames[uid]
+                )
+                predictions = apply_output_constraints(
+                    predictions, cfg.output, bounds_df=bounds_src
+                )
             arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
 
             artifact_bytes: bytes | None = None
@@ -1116,6 +1206,15 @@ def run_panel(
                     artifact_bytes = model.serialize()
                 except Exception as e:  # noqa: BLE001
                     _log.warning("serialize failed for %s/%s: %r", uid, model_name, e)
+
+            uid_demand_prof = compute_demand_profile(
+                _target(series_frames[uid], model_cfg).to_numpy(dtype=float)
+            )
+            uid_diag = _collect_diagnostics(model, uid, model_name)
+            if should_stamp_variant_diagnostics(model_name, cfg):
+                uid_diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
+            if cfg.features.regime_routing:
+                uid_diag["demand_profile"] = uid_demand_prof
 
             results.append(
                 CellResult(
@@ -1159,7 +1258,8 @@ def run_panel(
                     interval_calibration=interval_calibration,
                     point_forecast_margin=arm_comparison.get("margin"),
                     hpo_scoring=hpo_scoring_basis(len(series_frames[uid]), cfg, params),
-                    diagnostics=_collect_diagnostics(model, uid, model_name),
+                    diagnostics=uid_diag,
+                    demand_profile=uid_demand_prof,
                     n_fits=n_fits if idx == 0 else 0,
                     train_rows_total=train_rows_total if idx == 0 else 0,
                     n_hpo_fits=0,
@@ -1326,4 +1426,7 @@ def _target(series: pd.DataFrame, cfg: RunConfig) -> pd.Series:
         raise ConfigError(
             f"series missing required target column '{col}'; has {list(series.columns)}"
         )
-    return series[col].astype(float)
+    raw = series[col].astype(float)
+    if cfg.features.censored_col or cfg.features.outlier_policy != "none":
+        raw, _ = clean_training_target(raw, series, cfg)
+    return raw

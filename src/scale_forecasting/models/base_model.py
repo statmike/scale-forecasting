@@ -187,6 +187,28 @@ class BaseModel(ABC):
             )
 
     @classmethod
+    def supported_training_modes(cls) -> tuple[str, ...]:
+        """Allowed ``training_mode`` values (``"local"``, ``"global"``, ``"hybrid"``)."""
+        if cls.runtime == "vertex_automl":
+            return ("global",)
+        modes: list[str] = ["local"]
+        if cls.supports_global:
+            modes.append("global")
+        if cls.supports_hybrid:
+            modes.append("hybrid")
+        return tuple(modes)
+
+    @classmethod
+    def scope_capability(cls) -> Literal["local_only", "multi_scope", "global_only"]:
+        """Classify this model's cross-series training scope capability."""
+        modes = cls.supported_training_modes()
+        if modes == ("global",):
+            return "global_only"
+        if "global" in modes or "hybrid" in modes:
+            return "multi_scope"
+        return "local_only"
+
+    @classmethod
     def unsupported_covariate_tiers(cls, features: Any) -> tuple[str, ...]:
         """Which covariate tiers configured in ``features`` this model does not support."""
         unsupported: list[str] = []
@@ -410,7 +432,16 @@ class BaseModel(ABC):
         horizon and the backtest horizon, whichever is greater. Raise `ConfigError`, not
         `ModelError` — nothing has been fitted, the config is what is wrong.
         """
-        return  # accept: a model with no library-level constraint has nothing to refuse
+        mode = params.get("training_mode")
+        if mode is not None:
+            from ..errors import ConfigError
+
+            allowed = list(cls.supported_training_modes())
+            if mode not in allowed:
+                raise ConfigError(
+                    f"model_params.{cls.name}.training_mode={mode!r} is not supported by "
+                    f"'{cls.name}'; supported modes: {allowed}."
+                )
 
     @classmethod
     def gpu_useful(cls, params: Mapping[str, Any]) -> bool:

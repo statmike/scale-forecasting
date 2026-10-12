@@ -389,7 +389,11 @@ def _ensemble_batch(
     from .backtest import training_window
     from .engines import bigquery_engine
     from .engines.bigquery_sql import build_history_query
-    from .ensembler import combine_oof
+    from .ensembler import (
+        calibrate_ensemble_predictions,
+        combine_oof,
+        ensemble_oof_bounds,
+    )
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
     from .registry.header import merge_header_telemetry
@@ -459,7 +463,7 @@ def _ensemble_batch(
 
     # 1. Calculated ensembles — blend the base predictions in pandas (Write API, not DML).
     pred_rows.extend(
-        {**row, "quantiles": None} for row in combine_calculated(base_df, cfg, metric_df)
+        {**row, "quantiles": None} for row in combine_calculated(base_df, cfg, metric_df, oof_df)
     )
 
     # 2. Learned ensembles — fit on the OOF, apply the weights in pandas, append prediction rows.
@@ -474,6 +478,9 @@ def _ensemble_batch(
             settings.artifact_root,
         )
 
+    ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
+    pred_rows = calibrate_ensemble_predictions(pred_rows, ens_oof, cfg)
+
     stamp_ensemble_prediction_rows(
         pred_rows, run_id=run_id, ensemble_id=ensemble_id, created_at=created_at
     )
@@ -487,15 +494,10 @@ def _ensemble_batch(
         cfg.ensemble.strategies,
     )
 
-    # 3. Score every ensemble_* pseudo-model into forecast_metadata (fold_id=NULL). The base
-    #    predictions are a true beyond-data forecast (no actuals to join), so ensembles earn their
-    #    metric on the backtest OOF window — the same window the base models are scored on. We blend
-    #    the base OOF with the same consensus rules, then compute_metrics per (model, ts_id) and
-    #    roll the folds up exactly as worker.py does for the base models.
+    # 3. Score every ensemble_* pseudo-model into forecast_metadata (fold_id=NULL).
     if oof_df.empty:
         log.warning("ensemble scoring: backtest_oof empty for run_id=%s — nothing to score", run_id)
         return
-    ens_oof = combine_oof(oof_df, cfg, learned_weights)
     if ens_oof.empty:
         log.warning("ensemble scoring: no ensemble OOF produced for run_id=%s", run_id)
         return
@@ -548,14 +550,14 @@ def _ensemble_batch(
         hist = hist_by_id.get(ts_id)
         fold_panels: list[dict[str, float]] = []
         for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
-            # `combine_oof` joins base models on the cutoff, so it is constant within a fold; `min`
-            # only matters on the ordinal fallback, where taking the earliest cutoff is the choice
-            # that cannot let a later fold's data into an earlier fold's denominator.
             cutoff = fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None
+            lo, hi = ensemble_oof_bounds(g, _fold, cfg)
             fold_panels.append(
                 compute_metrics(
                     fg["y_true"].to_numpy(),
                     fg["yhat"].to_numpy(),
+                    lower=lo,
+                    upper=hi,
                     y_train=None
                     if hist is None
                     else training_window(hist[0], hist[1], cutoff, cfg),
@@ -613,19 +615,7 @@ def run_ensemble_scoring(bases: Iterable[str | None]) -> str | None:
 
 
 def ensemble_refit_mode(modes: Iterable[str | None]) -> str | None:
-    """How this ensemble's *members* were scored, rolled up into one answer (pure).
-
-    A blend inherits its members' backtest — an ``ensemble_mean`` over three frozen models is a
-    frozen result, and over two frozen models and one that refit at every origin it is neither.
-    So: unanimous members give the ensemble their mode, disagreement gives ``"mixed"``, and no
-    member rows at all give ``None``.
-
-    ``"mixed"`` is a fifth value that only ensemble rows can carry, and it is the point of the
-    exercise. NULL already means "no backtest happened here", so reusing it for disagreement would
-    hide the one case a reader most needs to see: a row on an ``expanding_frozen`` leaderboard
-    whose members were not all frozen. Saying so is the same instinct as `run_ensemble_scoring`
-    refusing to report the best case.
-    """
+    """How this ensemble's *members* were scored, rolled up into one answer (pure)."""
     seen = {m for m in modes if m is not None}
     if not seen:
         return None
@@ -635,23 +625,15 @@ def ensemble_refit_mode(modes: Iterable[str | None]) -> str | None:
 def ensemble_scoring_basis(
     strategy: str, oof_df: pd.DataFrame, cfg: RunConfig, learned_basis: str
 ) -> str | None:
-    """Whether this strategy's metrics were earned with the newest fold held out of its fit (pure).
-
-    ``None`` for ``mean`` and ``median``: they fit nothing, so there is no fold to reserve and no
-    honesty question to answer. Writing ``"holdout"`` there would be a claim about a split that
-    played no part in the number.
-
-    ``inverse_error`` fits per-series weights inside `ensembler.combine_oof`, so it takes the OOF
-    frame's own verdict. The learned strategies take ``learned_basis``, which
-    `ensembler.fit_learned` already resolved — including the case where the inner folds existed
-    but produced no complete training row.
-    """
+    """Whether this strategy's metrics were earned with the newest fold held out (pure)."""
     from .config import LEARNED_STRATEGIES
     from .ensembler import inner_fold_mask
 
     if strategy in LEARNED_STRATEGIES:
         return learned_basis
-    if strategy == "inverse_error":
+    if strategy in ("inverse_error", "champion", "horizon_specialist"):
+        return inner_fold_mask(oof_df, cfg)[1]
+    if cfg.ensemble.top_k is not None or cfg.ensemble.parsimony_margin > 0.0:
         return inner_fold_mask(oof_df, cfg)[1]
     return None
 

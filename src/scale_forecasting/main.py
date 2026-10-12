@@ -203,7 +203,8 @@ def run(
     # cells all errored on a remote driver that reported the *submission* as fine), and the run
     # header has to hear about it. See `job_outcome`.
     job_statuses: dict[str, str | None] = {}
-    native = run_dag.native_job
+    orig_native = run_dag.native_job
+    native = orig_native
     python_jobs = run_dag.python_jobs
 
     # Microbatch ensemble overlaps the base jobs: it drains series as each one's full base set lands
@@ -221,6 +222,82 @@ def run(
     # nothing else touches this row. Per-family errors are captured (not raised through the block)
     # so the finalize records the right status; the first is re-raised after, for a non-zero exit.
     with run_header(cfg, run_id, settings=settings, manage=True) as hdr:
+        if not force and (
+            cfg.compute.reuse_prior_runs or cfg.compute.reuse_from_run_id is not None
+        ):
+            from dataclasses import replace
+
+            from .registry.ops import (
+                borrow_model_results,
+                find_reusable_models,
+                record_borrowed_family_job,
+            )
+
+            borrowed = find_reusable_models(cfg, run_id, hdr.snapshot_millis, settings=settings)
+            if borrowed:
+                borrow_model_results(cfg, run_id, borrowed, settings=settings)
+                try:
+                    merge_header_telemetry(
+                        run_id,
+                        {
+                            "borrowed_models": {
+                                k: {
+                                    "source_run_id": v.source_run_id,
+                                    "source_model_type": v.source_model_type,
+                                    "model_spec_hash": v.model_spec_hash,
+                                    "snapshot_millis": v.snapshot_millis,
+                                }
+                                for k, v in borrowed.items()
+                            }
+                        },
+                        settings=settings,
+                    )
+                except Exception as exc:  # noqa: BLE001 - telemetry is best-effort
+                    _log.warning("borrowed_models telemetry not recorded for %s: %s", run_id, exc)
+                if native is not None:
+                    rem_native = tuple(m for m in native.models if m not in borrowed)
+                    if not rem_native:
+                        record_borrowed_family_job(
+                            cfg,
+                            run_id,
+                            "native",
+                            "bigquery",
+                            None,
+                            None,
+                            None,
+                            [borrowed[m] for m in native.models],
+                            force=force,
+                            settings=settings,
+                        )
+                        job_statuses["native"] = "COMPLETED"
+                        native = None
+                    elif len(rem_native) < len(native.models):
+                        native = replace(native, models=rem_native)
+                remaining_py = []
+                for job in python_jobs:
+                    rem_py = tuple(m for m in job.models if m not in borrowed)
+                    if not rem_py:
+                        record_borrowed_family_job(
+                            cfg,
+                            run_id,
+                            job.family,
+                            job.runtime,
+                            None if job.compute is None else job.compute.spark_mode,
+                            None if job.compute is None else job.compute.hardware,
+                            None if job.compute is None else job.compute.gpu_type,
+                            [borrowed[m] for m in job.models],
+                            force=force,
+                            settings=settings,
+                        )
+                        job_statuses[job.family] = "COMPLETED"
+                    elif len(rem_py) < len(job.models):
+                        remaining_py.append(replace(job, models=rem_py))
+                    else:
+                        remaining_py.append(job)
+                python_jobs = remaining_py
+                new_jobs = [*remaining_py, *([native] if native is not None else [])]
+                run_dag = replace(run_dag, jobs=tuple(new_jobs))
+
         # Launch each Python family on its own worker thread, and run the BigQuery-native family
         # inline on the main thread, so all families overlap. Each family carries the same
         # contributor-mode contract (its model subset + shared header owned here) and its own
@@ -319,7 +396,7 @@ def run(
         # ensemble failure on top of all-green families fails the run: full output undelivered.
         # The same roll-up the Airflow `finalize_run` task applies, over the same statuses.
         status = combined_run_status(job_statuses, ensemble_enabled=run_dag.ensemble_enabled)
-        fields: dict[str, object] = {"bq_models": list(native.models) if native else []}
+        fields: dict[str, object] = {"bq_models": list(orig_native.models) if orig_native else []}
         if bq_outcome is not None:
             fields["n_series"] = bq_outcome.n_series
         # The run-level honesty claim, alongside the per-cell `hpo_scoring` / `ensemble_scoring`

@@ -275,6 +275,8 @@ def test_build_gke_cluster_spec_and_quota_demands() -> None:
     assert cluster["name"] == plan_gpu.cluster_name
     assert cluster["initialNodeCount"] == 2
     assert cluster["nodeConfig"]["accelerators"][0]["acceleratorType"] == "nvidia-l4"
+    assert "nodePools" not in cluster
+    assert "deletionProtection" not in cluster
 
     demands = gke_demands(plan_gpu, "us-central1")
     metrics = {d.metric.metric: d.amount(d.max_units) for d in demands}

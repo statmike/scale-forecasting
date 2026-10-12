@@ -496,6 +496,8 @@ def _snapshot_millis(cfg: RunConfig, settings: Settings) -> int | None:
     (`registry.header.snapshot_millis_for`), so all family jobs time-travel to the identical
     instant. Best-effort — a missing/NULL snapshot returns ``None`` and the read stays unpinned.
     """
+    if cfg.data.snapshot_millis is not None:
+        return int(cfg.data.snapshot_millis)
     from ..registry.header import snapshot_millis_for
     from ..registry.ids import make_run_id
 

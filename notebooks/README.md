@@ -2,13 +2,13 @@
 
 <p align="center">
   <b>A Complete Interactive Curriculum for Enterprise Scale Forecasting on Google Cloud</b><br>
-  <i>From local zero-GCP prototyping across all 34 models and 21 metrics to distributed execution across BigQuery ML, GCE, Vertex AI, GKE (Indexed Jobs & Ray on GKE), Vertex AI AutoML Tabular Workflows, Spark, and Ray — plus 3-tier covariates, two-tier explainability, 7-method FPP3 reconciliation, cross-run ensembling, custom 1-file plugins, and 100,000-series operations.</i>
+  <i>From local zero-GCP prototyping across all 34 models and 21 metrics to distributed execution across BigQuery ML, GCE, Vertex AI, GKE (Indexed Jobs & Ray on GKE), Vertex AI AutoML Tabular Workflows, Spark, and Ray — plus 3-tier covariates, two-tier explainability, 8-method FPP3 reconciliation, cross-run ensembling, custom 1-file plugins, and 100,000-series operations.</i>
 </p>
 
 ```mermaid
 flowchart TD
     subgraph Track1["Track 1: Local Sandbox & Custom Plugins (Zero GCP Required)"]
-        NB00["00_model_playground.ipynb<br/>34 Models · 21 Metrics · Local/Global/Hybrid<br/>3-Tier Covariates · 7 FPP3 Reconciliation"]
+        NB00["00_model_playground.ipynb<br/>34 Models · 21 Metrics · Local/Global/Hybrid<br/>3-Tier Covariates · 8 FPP3 Reconciliation"]
         NB09["09_custom_models_and_metrics.ipynb<br/>1-File BaseModel & BaseMetric Plugins<br/>+ Zero-Rebuild Dynamic Code Shipping"]
     end
 
@@ -48,7 +48,7 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 ### Track 1: Foundations, Local Prototyping & Extensibility (Zero GCP Setup)
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`00_model_playground.ipynb`](./00_model_playground.ipynb) | Local Python (Offline) | Explore the full 34-model (5-family) and 21-metric catalogs (`model_catalog()`, `metric_catalog()`), generate synthetic panels (`sample_data()`), run 3-fold rolling-origin backtesting and conformal interval calibration (`run_model()`, `bakeoff()`), decompose forecasts into trend, regime level shift, seasonality, and exogenous covariate attribution (`explain_forecast_frame()`, `plot_forecast_explanation()`), inspect Two-Tier Feature Attributions (`build_attributions_frame()`, `plot_attributions()`), compare `local` vs. `global` vs. `hybrid` training modes, and run all 7 FPP3 hierarchical reconciliation methods with zero cloud credentials. |
+| [`00_model_playground.ipynb`](./00_model_playground.ipynb) | Local Python (Offline) | Explore the full 34-model (5-family) and 21-metric catalogs (`model_catalog()`, `metric_catalog()`), generate synthetic panels (`sample_data()`), run 3-fold rolling-origin backtesting and conformal interval calibration (`run_model()`, `bakeoff()`), decompose forecasts into trend, regime level shift, seasonality, and exogenous covariate attribution (`explain_forecast_frame()`, `plot_forecast_explanation()`), inspect Two-Tier Feature Attributions (`build_attributions_frame()`, `plot_attributions()`), compare `local` vs. `global` vs. `hybrid` training modes, and run all 8 FPP3 hierarchical reconciliation methods with zero cloud credentials. |
 | [`09_custom_models_and_metrics.ipynb`](./09_custom_models_and_metrics.ipynb) | Local Python (Offline) | Author a custom 1-file `BaseModel` subclass (`@register`) and custom `BaseMetric` subclass, test them immediately in `run_model()` and `bakeoff()`, and inspect automatic BigQuery schema migration (`render_migrations`) and zero-rebuild `src.zip` shipping. |
 
 ---

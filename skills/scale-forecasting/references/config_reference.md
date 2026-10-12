@@ -28,7 +28,7 @@ Root run configuration object.
 | `ensemble` | `EnsembleConfig` | `EnsembleConfig()` | — |
 | `hierarchy` | `HierarchyConfig` | `HierarchyConfig()` | — |
 | `compute` | `ComputeConfig` | `ComputeConfig()` | — |
-| `model_params` | `dict[str, dict[str, bool \| int \| float \| str \| None \| list[bool \| int \| float \| str \| None]]]` | `{}` | — |
+| `model_params` | `dict[str, dict[str, bool \| int \| float \| str \| None \| list[bool \| int \| float \| str \| None] \| dict[str, list[int]]]]` | `{}` | — |
 
 ### `data (DataConfig)`
 
@@ -43,6 +43,9 @@ Source BigQuery table, column names, frequency, and horizon.
 | `freq` | `str` | `"D"` | — |
 | `horizon` | `int` | `28` | `> 0` |
 | `series_limit` | `int \| None` | `null` | `> 0` |
+| `grid_policy` | `'strict' \| 'fill_zero' \| 'zero_fill' \| 'ffill' \| 'linear'` | `"strict"` | — |
+| `trim_leading_zeros` | `bool` | `false` | — |
+| `snapshot_millis` | `int \| None` | `null` | `> 0` |
 
 ### `features (FeaturesConfig)`
 
@@ -60,6 +63,14 @@ Target transforms, country holidays, covariates (future/past/static), lags, and 
 | `on_unsupported_covariates` | `'fallback' \| 'error'` | `"fallback"` | — |
 | `fourier` | `bool` | `false` | — |
 | `level_shift` | `bool` | `false` | — |
+| `trading_days` | `bool` | `false` | — |
+| `censored_col` | `str \| None` | `null` | — |
+| `outlier_policy` | `'none' \| 'winsorize' \| 'interpolate' \| 'flag' \| 'stl_resid'` | `"none"` | — |
+| `outlier_sigma` | `float` | `3.5` | `> 0.0` |
+| `regime_routing` | `bool` | `false` | — |
+| `include_univariate_baselines` | `bool` | `false` | — |
+| `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
+| `ablation_models` | `list[str]` | `[]` | — |
 
 ### `backtest (BacktestConfig)`
 
@@ -88,6 +99,15 @@ Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
 | `point_forecast` | `'raw' \| 'median' \| 'mean' \| 'auto' \| None` | `null` | — |
+| `floor` | `float \| None` | `null` | — |
+| `cap` | `float \| None` | `null` | — |
+| `floor_col` | `str \| None` | `null` | — |
+| `cap_col` | `str \| None` | `null` | — |
+| `integer_rounding` | `'none' \| 'round' \| 'ceil' \| 'floor' \| 'cumulative_round'` | `"none"` | — |
+| `quantiles` | `list[float] \| None` | `null` | — |
+| `underage_cost` | `float \| None` | `null` | `> 0.0` |
+| `overage_cost` | `float \| None` | `null` | `> 0.0` |
+| `target_quantile` | `float \| None` | `null` | `> 0.0`, `< 1.0` |
 
 ### `hpo (HpoConfig)`
 
@@ -108,8 +128,11 @@ Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xg
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `bool` | `false` | — |
-| `strategies` | `list['mean' \| 'median' \| 'inverse_error' \| 'nnls' \| 'ridge' \| 'xgb']` | `["median"]` | — |
+| `strategies` | `list['mean' \| 'median' \| 'inverse_error' \| 'champion' \| 'horizon_specialist' \| 'nnls' \| 'ridge' \| 'xgb']` | `["median"]` | — |
 | `prune_threshold` | `float` | `0.0` | `>= 0.0` |
+| `top_k` | `int \| None` | `null` | `> 0` |
+| `parsimony_margin` | `float` | `0.0` | `>= 0.0` |
+| `variant_policy` | `'all' \| 'best_per_base_model' \| 'primary_only'` | `"all"` | — |
 
 ### `hierarchy (HierarchyConfig)`
 
@@ -119,7 +142,7 @@ Cross-sectional aggregation levels and FPP3 reconciliation (`bottom_up`, `mint_s
 | :--- | :--- | :--- | :--- |
 | `enabled` | `bool` | `false` | — |
 | `levels` | `list[list[str]]` | `[]` | — |
-| `reconciliation_methods` | `list['bottom_up' \| 'top_down' \| 'middle_out' \| 'ols' \| 'wls_struct' \| 'wls_var' \| 'mint_shrink']` | `["bottom_up", "wls_struct", "mint_shrink"]` | — |
+| `reconciliation_methods` | `list['bottom_up' \| 'top_down' \| 'middle_out' \| 'ols' \| 'wls_struct' \| 'wls_var' \| 'mint_shrink' \| 'mint_nonneg']` | `["bottom_up", "wls_struct", "mint_shrink"]` | — |
 | `middle_level` | `list[str] \| None` | `null` | — |
 
 ### `compute (ComputeConfig)`
@@ -168,6 +191,8 @@ Default runtime, GPU/VM shape, autoscaling bounds, profiling, capacity, and fami
 | `read_max_streams` | `int` | `0` | `>= 0` |
 | `families` | `dict['statistical' \| 'ml' \| 'deep_learning' \| 'automl', FamilyCompute]` | `{}` | — |
 | `ensemble` | `EnsembleCompute` | `EnsembleCompute()` | — |
+| `reuse_prior_runs` | `bool` | `false` | — |
+| `reuse_from_run_id` | `str \| None` | `null` | — |
 
 ### `compute.families.<family> (FamilyCompute)`
 
@@ -260,7 +285,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `models` | Non-empty list of registered model names (`34` available; see [`catalog_reference.md`](./catalog_reference.md)). No duplicates allowed. |
 | `backtest.decision_metric` | Any of the `21` registered metrics: `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball`, `mase_seasonal`, `maape`, `interval_score`, `interval_width`, `ope`, `rmsle`, `msse`, `msis`, `r2`, `cv`. |
 | `ensemble.strategies` | Calculated: `mean`, `median`, `inverse_error` (work with or without backtest). Learned stackers: `nnls`, `ridge`, `xgb` (require `backtest.enabled=true`). Singular shorthand `strategy` is also accepted. |
-| `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `middle_out`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |
+| `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `middle_out`, `mint_nonneg`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |
 | `compute.families` | Keys must be in `statistical`, `ml`, `deep_learning`, `automl`. `native` models always run in BigQuery and never take a `compute.families` entry. |
 | `compute.profile.source` | One of `none`, `auto`, `baseline` or an existing `<slug>-<12hex>` `run_id`. |
 | `model_params` | Dict mapping `<model_name>` to `<param_dict>` of JSON-safe scalars or flat lists (`bool`, `int`, `float`, `str`, `None`). Non-finite floats (`NaN`, `Infinity`) are rejected. |

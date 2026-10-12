@@ -692,3 +692,50 @@ def test_import_does_not_pull_heavy_modules_until_needed() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ok"
+
+
+def test_forecaster_convenience_aliases_delegate_cleanly(monkeypatch) -> None:
+    import pandas as pd
+
+    f = sf.Forecaster.from_dict(_cfg_dict(), settings=_SETTINGS)
+    called: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        f,
+        "leaderboard_df",
+        lambda run_id=None, *, all_metrics=False: (
+            called.update(lb=(run_id, all_metrics)) or pd.DataFrame([{"model_type": "theta"}])
+        ),
+    )
+    monkeypatch.setattr(
+        f,
+        "plot_forecasts",
+        lambda run_id=None, **kw: called.update(pf=(run_id, kw)) or "fig",
+    )
+    monkeypatch.setattr(
+        f,
+        "bias_report_df",
+        lambda run_id=None, **kw: (
+            called.update(br=(run_id, kw)) or pd.DataFrame([{"ts_id": "s_0"}])
+        ),
+    )
+
+    assert len(f.leaderboard("r-1", all_metrics=True)) == 1
+    assert called["lb"] == ("r-1", True)
+    assert f.plot_series("s_0", models=["theta"], run_id="r-1", history_tail=60) == "fig"
+    assert called["pf"] == (
+        "r-1",
+        {
+            "ts_id": "s_0",
+            "models": ["theta"],
+            "max_series": 1,
+            "history_tail": 60,
+            "ax": None,
+            "title": None,
+        },
+    )
+    assert len(f.bias_df("r-1", threshold_pct=0.08, tracking_signal_limit=3.5)) == 1
+    assert called["br"] == (
+        "r-1",
+        {"threshold_pct": 0.08, "tracking_signal_limit": 3.5, "limit": 20000},
+    )

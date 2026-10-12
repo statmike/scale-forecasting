@@ -84,6 +84,9 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | `freq` | `str` | `"D"` | one of `D W MS ME h` | Series frequency (pandas ≥2.2 spellings). Sets the seasonal period used by the models — `D`=daily (period 7), `W`=weekly (52), `MS`/`ME`=month start/end (12), `h`=hourly (24). An unsupported freq is rejected at validation. |
 | `horizon` | `int` | `28` | `> 0` | Forecast horizon (steps). |
 | `series_limit` | `int` \| `null` | `null` | `> 0` when set | `null` = all series; an int subsets the shipped data (demo small → scale large). |
+| `grid_policy` | `"none"` \| `"zero_fill"` \| `"fill_zero"` \| `"ffill"` \| `"linear"` | `"none"` | — | Pre-fit timestamp grid regularization (`"zero_fill"` for missing POS transaction days; `"ffill"` or `"linear"` for sensor/inventory snapshots). Applied strictly within each fold cutoff. |
+| `trim_leading_zeros` | `bool` | `false` | — | Strips pre-launch leading zeros prior to the first non-zero observation in each training fold. |
+| `snapshot_millis` | `int` \| `null` | `null` | `> 0` when set | Explicit BigQuery time-travel snapshot epoch milliseconds (`FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS(...)`) to pin source reads across runs; `null` resolves fresh from the BigQuery clock at run start (`run_registry.snapshot_millis`). |
 
 ## `features` — `FeaturesConfig`
 
@@ -97,8 +100,16 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | `past_covariates` | `list[str]` | `[]` | Historical-only observed regressors (`hist_exog_list`, e.g. `["temperature", "foot_traffic"]`). Strictly masked beyond the forecast origin (`cutoff_date`) during rolling-origin backtesting and HPO to prevent lookahead leakage; consumed natively by `tide`, `tft`, `tsmixer`, and `neuralprophet` (`n_lags >= 1`), or via `exog_lags` / cutoff carry-forward in `ml`, `statistical`, and `arima_plus`. |
 | `exog_lags` | `dict[str, list[int]]` | `{}` | Lagged copies of declared `exog` / `future_covariates` / `past_covariates` columns — `{"promo": [1, 7]}` adds `promo_lag_1` and `promo_lag_7`. Keys must appear in `exog`, `future_covariates`, or `past_covariates`; lags must be positive and distinct. **There is no `lags` field for the target** — see "Why there is no target-lag knob" below. |
 | `on_unsupported_covariates` | `"fallback"` \| `"error"` | `"fallback"` | Policy when a selected model does not support one or more configured covariate tiers: `"fallback"` logs a warning and strips the unsupported tier(s) (and their `exog_lags`) for that model; `"error"` fails fast in preflight with a `ConfigError`. |
+| `include_univariate_baselines` | `bool` | `false` | Automatically appends `<model>@univariate` alongside every covariate-capable model in `models` (or scoped by `ablation_models` when `ablation_modes` is empty) so the run measures covariate lift directly in one submission. |
+| `ablation_modes` | `list[AblationMode]` | `[]` | Declarative covariate and training-scope ablation ladder (`"univariate"`, `"cov_future_only"`, `"cov_past_only"`, `"cov_static_only"`, `"cov_all"`, `"local_cov_all"`, `"local_univariate"`, `"global_cov_all"`, `"global_univariate"`). Expands `<model>@<mode>` variants for each capable model and automatically skips no-op duplicates that resolve to the same effective `(training_mode, cov_profile)` spec. |
+| `ablation_models` | `list[str]` \| `null` | `null` | Optional subset of base models in `models` to expand `ablation_modes` on (`null` expands across all capable models in `models`). |
 | `fourier` | `bool` | `false` | Fourier seasonality terms. |
 | `level_shift` | `bool` | `false` | Detect one abrupt regime change and add it as a `level_shift` step dummy. |
+| `trading_days` | `bool` | `false` | Adds calendar business-day counts (`trading_days_in_period`) for monthly/weekly series. |
+| `censored_col` | `str` \| `null` | `null` | Source column flagging stockout or capacity-censored observations (`1`/`True`); treats flagged dates as missing actuals and imputes uncensored demand within each training fold. |
+| `outlier_policy` | `"none"` \| `"winsorize"` \| `"interpolate"` \| `"flag"` \| `"stl_resid"` | `"none"` | Winsorizes (`"winsorize"`), linearly interpolates (`"interpolate"`), or flags (`"flag"`) unflagged historical spikes exceeding `outlier_sigma` seasonal MADs (or STL residuals under `"stl_resid"`) while preserving active `promo_flag` / `is_holiday` rows. |
+| `outlier_sigma` | `float` | `3.5` | Robust seasonal-MAD threshold (`≥ 1.5`) for `outlier_policy`. |
+| `regime_routing` | `bool` | `false` | Classifies each series via the Syntetos–Boylan–Croston (SBC) matrix (`smooth`, `erratic`, `intermittent`, `lumpy`) and skips smooth continuous models on intermittent/lumpy series when intermittent-capable models are present. |
 
 **What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py)):
 
@@ -485,11 +496,20 @@ nominal level, not at 1.0 — a band wide enough to cover everything scores perf
 
 ## `output` — `OutputConfig`
 
-What the number in `yhat` actually *is*. One field.
+Controls point-forecast calibration, physical domain guardrails (`floor`, `cap`, `integer_rounding`), monotone multi-percentile fans (`quantiles`), and Newsvendor asymmetric cost targets (`underage_cost`, `overage_cost`). See [Forecaster workbench (`docs/forecaster_workbench.md`)](./forecaster_workbench.md) for practical supply-chain and finance examples.
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `point_forecast` | `"raw"` \| `"median"` \| `"mean"` \| `"auto"` | `"auto"` with a backtest, `"median"` without | Which arm ships in `yhat`. |
+| `floor` | `float` \| `null` | `null` | Lower physical bound applied to `yhat`, `yhat_lower`, `yhat_upper`, and all `quantiles` (e.g. `0.0` for non-negative demand). |
+| `cap` | `float` \| `null` | `null` | Upper physical ceiling applied to `yhat`, intervals, and quantiles (must be `≥ floor`). |
+| `floor_col` | `str` \| `null` | `null` | Source column supplying dynamic per-series/per-date lower bounds. |
+| `cap_col` | `str` \| `null` | `null` | Source column supplying dynamic per-series/per-date capacity ceilings. |
+| `integer_rounding` | `"none"` \| `"round"` \| `"ceil"` \| `"floor"` \| `"cumulative_round"` | `"none"` | Discrete unit rounding applied after interval calibration (`"cumulative_round"` preserves multi-step horizon totals via error-diffusion rounding). |
+| `quantiles` | `list[float]` | `[]` | Additional empirical percentiles $\tau \in (0, 1)$ (e.g. `[0.1, 0.25, 0.5, 0.75, 0.9, 0.95]`) emitted in `quantiles` with Chernozhukov monotone rearrangement. |
+| `target_quantile` | `float` \| `null` | `null` | Explicit service-level percentile $\tau \in (0, 1)$ to emit as the primary `yhat` point forecast. |
+| `underage_cost` | `float` \| `null` | `null` | Unit stockout / lost-margin cost $c_u > 0$; paired with `overage_cost` to set `yhat` to the Newsvendor critical fractile $\tau^* = c_u / (c_u + c_o)$. |
+| `overage_cost` | `float` \| `null` | `null` | Unit holding / spoilage / markdown cost $c_o > 0$; paired with `underage_cost`. |
 
 Every model emits one number per future date, so something decides what that number is:
 
@@ -614,6 +634,19 @@ emits exactly `n_forecasts` direct steps and does not recurse to fill a longer r
 happens at plan time too, so a config that would return a horizon of `NaN` costs nothing instead of a
 fleet-hour.
 
+### Model variants (`<base_model>@<tag>`) & per-variant covariate overrides
+
+Any registered model can appear multiple times in `models` under distinct `<base_model>@<tag>` identifiers (for example `["xgboost", "xgboost@univariate", "xgboost@promo_only", "tide", "tide@local_cov_all"]`), and each variant can carry its own parameter and covariate overrides in `model_params`:
+
+- **Reserved ablation tags** (`@univariate`, `@cov_future_only`, `@cov_past_only`, `@cov_static_only`, `@cov_all`, `@local_cov_all`, `@local_univariate`, `@global_cov_all`, `@global_univariate`) automatically filter the run's covariate tiers and/or switch a hybrid model's `training_mode` (`"local"` vs. `"global"`) without requiring a `model_params` block.
+- **Custom tags** (`@promo_only`, `@shallow`, `@lag14`, etc.) inherit `model_params["<base_model>"]` merged with `model_params["<base_model>@<tag>"]`. Inside `model_params["<base_model>@<tag>"]`, six reserved covariate/scope keys control the variant's inputs before hyperparameters are passed to the estimator:
+  - `training_mode`: `"local"` \| `"global"` (overrides a hybrid model's training scope for that variant)
+  - `use_covariates`: `false` forces a strict univariate fit (`cov_profile = "univariate"`)
+  - `future_covariates`, `past_covariates`, `static_covariates`: explicit per-variant column lists overriding `features.*_covariates`
+  - `exog_lags`: explicit per-variant lag dictionary (`dict[str, list[int]]`)
+
+Inspect the resolved orthogonal `(scope_capability, training_mode, cov_profile, covariates_used, model_spec_hash)` matrix offline before launching via `Forecaster(cfg).variant_matrix()`.
+
 ## `hpo` — `HpoConfig`
 
 Optional Optuna tuning on the aligned backtest. **Requires `backtest.enabled`.**
@@ -649,12 +682,15 @@ Consensus across the base models (scored onto the same leaderboard). See
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
 | `enabled` | `bool` | `false` | — | Turn ensembling on. |
-| `strategies` | `list` | `["median"]` | each a known strategy | Consensus strategies (run several at once). |
+| `strategies` | `list` | `["median"]` | each a known strategy | Consensus & winner strategies (run several at once). |
 | `prune_threshold` | `float` | `0.0` | `≥ 0.0` | Drop base models weaker than this before blending. |
+| `top_k` | `int` \| `null` | `null` | `≥ 1` when set | Keep only the top-$K$ lowest-error base models per series before blending. |
+| `parsimony_margin` | `float` | `0.0` | `≥ 0.0` | Relative improvement margin (`0.01` = 1%) a complex model must beat the simplest baseline (`naive_seasonal` / `theta`) by under `"champion"`. |
+| `variant_policy` | `"all"` \| `"best_per_base_model"` \| `"primary_only"` | `"all"` | — | Controls how `<base_model>@<tag>` variants enter the ensemble candidate pool: `"all"` includes every variant, `"best_per_base_model"` keeps only the lowest-OOF-error variant per `(ts_id, base_model)` so collinear ablation siblings do not dilute equal-weight blends, and `"primary_only"` restricts blending to untagged primary models. |
 
-`strategies` ∈ **calculated** `mean, median, inverse_error` (no backtest needed) and **learned**
-`nnls, ridge, xgb` (need `backtest.enabled`). A bare `"strategy": "nnls"` is accepted as shorthand
-for `"strategies": ["nnls"]`. Run several at once — each produces its own `ensemble_<strategy>` rows
+`strategies` ∈ **calculated** `mean, median, inverse_error` (no backtest needed) and **backtest-driven / learned**
+`champion, horizon_specialist, nnls, ridge, xgb` (need `backtest.enabled`). A bare `"strategy": "nnls"` is accepted as shorthand
+for `"strategies": ["nnls"]`. Run several at once — each produces its own `ensemble_<strategy>` rows (with calibrated prediction intervals and all 5 interval metrics)
 and earns a line on the leaderboard next to the base models.
 
 **What each strategy does** (implementation in
@@ -665,11 +701,13 @@ and earns a line on the leaderboard next to the base models.
 | `mean` | calculated | Unweighted arithmetic mean of the base forecasts, row by row. Missing models are skipped and weights renormalize over those present. | — |
 | `median` | calculated | Unweighted row-wise **median** — robust to a single wild base forecast. | — |
 | `inverse_error` | calculated | Weighted mean where each model's weight ∝ **1 / its error**, normalized to sum to 1. For the future forecast the error is the mean `decision_metric` from `forecast_metadata`; for the on-fold (OOF) score it's each series' own WAPE. A zero-error model captures the weight; if no error is usable it degrades to `mean`. | (weights sharpen with `backtest`) |
+| `champion` | winner selection | Selects the **single best base model per series** (one-hot weight `1.0`) based on OOF `decision_metric`, subject to `parsimony_margin`. | `backtest.enabled` |
+| `horizon_specialist` | step-wise winner | Selects the **lowest-error base model at each lead-time step $h = 1 \dots H$** per series (e.g., statistical short-horizon + ML/DL long-horizon). | `backtest.enabled` |
 | `nnls` | learned | **Non-negative least squares** meta-learner: solves for weights ≥ 0 that best reconstruct the truth from the base models' out-of-fold predictions. No intercept; weights can't go negative. | `backtest.enabled` |
 | `ridge` | learned | **L2-regularized linear regression** (closed-form, α=1.0) over the same OOF matrix. Weights *may* be negative (a model can be a corrective term). | `backtest.enabled` |
 | `xgb` | learned | **Gradient-boosted** meta-learner (`XGBRegressor`, 200 trees, depth 3) fit on the OOF matrix; captures non-linear interactions between base models. Reported "weights" are its normalized feature importances. | `backtest.enabled`, `xgboost` installed |
 
-The three **learned** strategies train **only** on `backtest_oof` rows (never in-sample), so leakage
+The **learned / winner** strategies train **only** on `backtest_oof` rows (never in-sample), so leakage
 is structurally impossible — which is exactly why they require `backtest.enabled` (without it they're
 dropped at config-load with a warning, not an error). Each fitted meta-learner is pickled to a GCS
 artifact for lineage.
@@ -709,6 +747,7 @@ following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd 
 | `wls_struct` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{struct}}^{-1} S)^{-1} S^\top W_{\text{struct}}^{-1}$ | Structural Weighted Least Squares ($W_{\text{struct}} = \operatorname{diag}(S \mathbf{1})$); requires no historical residuals. |
 | `wls_var` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{var}}^{-1} S)^{-1} S^\top W_{\text{var}}^{-1}$ | Variance-weighted Least Squares using diagonal in-sample / out-of-fold 1-step residual variances. |
 | `mint_shrink` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{shr}}^{-1} S)^{-1} S^\top W_{\text{shr}}^{-1}$ | Minimum Trace with analytical **Schäfer-Strimmer shrinkage** of the residual covariance toward its diagonal variance target, ensuring positive-definiteness even when $n_{\text{nodes}} \gg T$. |
+| `mint_nonneg` | Constrained Optimal ($\text{MinT} \ge 0$) | Active-set projection on $W_{\text{shr}}^{-1}$ | Non-negative Minimum Trace reconciliation: projects negative bottom-level MinT allocations onto the $\tilde{b_t} \ge 0$ simplex and sums upward via $S \tilde{b_t}$. |
 
 ## `compute` — `ComputeConfig`
 
@@ -725,6 +764,8 @@ knobs only matter for a family that runs on Ray.
 | `machine_family` | `"auto"` \| `"n1"` \| `"n2"` \| `"n2d"` \| `"e2"` \| `"c2"` | `"auto"` | — | GCE machine family for a **Dataproc cluster's** master + CPU workers (`"auto"` = `n1`). No-op on Serverless and on GPU workers — see below. |
 | `spark_deps` | `"packed_venv"` \| `"container"` | `"packed_venv"` | — | How a **Dataproc cluster** family gets its dependencies. `"container"` raises: it is a Serverless mechanism. See `cluster_deps._resolve_cluster_deps`. |
 | `persist_models` | `bool` | `false` | — | Persist each fitted model as a GCS artifact (lineage). |
+| `reuse_prior_runs` | `bool` | `false` | — | Snapshot-verified cross-run cell borrowing: before launching compute, queries BigQuery for prior `COMPLETED` cells matching `(source_table, snapshot_millis, ts_id, model_type, model_spec_hash)` and copies matching rows from `forecast_metadata`, `forecast_predictions`, and `backtest_oof` (stamping `borrowed_from_run_id`), narrowing or skipping family compute jobs when all cells are satisfied. Overridden when `--force` is passed. |
+| `reuse_from_run_id` | `str` \| `null` | `null` | — | Optional explicit donor `run_id` to restrict `reuse_prior_runs` borrowing to (`null` searches the most recent matching `COMPLETED` run per `(model_type, model_spec_hash)`). |
 | `use_gpu` | `bool` | `false` | — | **Legacy.** Fleet-wide "put the deep-learning family on GPU", on *every* runtime — Ray, Vertex, GCE, Serverless and a Dataproc cluster alike. Prefer `families.deep_learning.hardware`; see below. |
 | `gpu_type` | `"T4"` \| `"L4"` \| `"A100"` \| `"A100_80GB"` | `"T4"` | — | Accelerator type when `use_gpu=true` or `hardware="gpu"` (prefer `families.<f>.gpu_type`). |
 | `gpu_fraction` | `"auto"` \| `float` | `"auto"` | float ∈ `(0, 1]` | `"auto"` = profile-driven fractional GPU, else a fixed fraction. |

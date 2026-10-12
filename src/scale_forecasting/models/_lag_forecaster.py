@@ -12,6 +12,7 @@ Not a public API: the leading underscore marks it internal to ``models``.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import numpy as np
@@ -27,18 +28,43 @@ class SupportsPredict(Protocol):
     def predict(self, X: Any) -> Any: ...
 
 
-# Lag depths and calendar features used by the tree models. Fixed here (not config-driven)
-# because the recursion depends on knowing them; HPO tunes the estimator, not the lags.
+# Default lag depths and calendar features used by the tree models when `lags` is not overridden.
 LAGS: tuple[int, ...] = (1, 2, 3, 7, 14, 28)
 
-# Every column name `build_design` produces on its own. An exog column that lands on one of
-# these would replace it rather than join it — see `_check_not_reserved`.
-_RESERVED: frozenset[str] = frozenset(
-    [f"lag_{lag}" for lag in LAGS] + ["dow", "dom", "month", "doy"]
-)
+_CALENDAR_COLS: tuple[str, ...] = ("dow", "dom", "month", "doy")
+
+# Every column name `build_design` produces on its own under default lags.
+_RESERVED: frozenset[str] = frozenset([f"lag_{lag}" for lag in LAGS] + list(_CALENDAR_COLS))
 
 
-def _check_not_reserved(exog: pd.DataFrame | None) -> pd.DataFrame | None:
+def resolve_lags(params: Mapping[str, Any] | None = None) -> tuple[int, ...]:
+    """Return sorted positive integer lags from ``params['lags']``, or default `LAGS`."""
+    if not params or params.get("lags") is None:
+        return LAGS
+    raw = params["lags"]
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ModelError(f"lags must be a sequence of positive integers; got {raw!r}")
+    parsed = sorted({int(x) for x in raw})
+    if not parsed or any(x <= 0 for x in parsed):
+        raise ModelError(f"lags must be a non-empty sequence of positive integers; got {raw!r}")
+    return tuple(parsed)
+
+
+def resolve_strategy(params: Mapping[str, Any] | None = None) -> str:
+    """Return ``'recursive'`` (default) or ``'direct'`` from ``params['strategy']``."""
+    if not params or params.get("strategy") is None:
+        return "recursive"
+    strategy = str(params["strategy"]).strip().lower()
+    if strategy not in ("recursive", "direct"):
+        raise ModelError(
+            f"unknown lag forecasting strategy {strategy!r}; expected 'recursive' or 'direct'"
+        )
+    return strategy
+
+
+def _check_not_reserved(
+    exog: pd.DataFrame | None, *, lags: Sequence[int] = LAGS
+) -> pd.DataFrame | None:
     """Refuse an exog frame that would overwrite a feature this model owns.
 
     `build_design` merges exog into the same flat column dict as the target lags and the
@@ -57,10 +83,11 @@ def _check_not_reserved(exog: pd.DataFrame | None) -> pd.DataFrame | None:
     """
     if exog is None:
         return None
-    if clash := sorted(set(exog.columns) & _RESERVED):
+    reserved = frozenset([f"lag_{lag}" for lag in lags] + list(_CALENDAR_COLS))
+    if clash := sorted(set(exog.columns) & reserved):
         raise ModelError(
             f"exog column(s) {clash} collide with features this model builds itself "
-            f"({sorted(_RESERVED)}); rename them in the source table"
+            f"({sorted(reserved)}); rename them in the source table"
         )
     return exog
 
@@ -76,17 +103,25 @@ def _calendar(index: pd.DatetimeIndex) -> dict[str, np.ndarray]:
 
 
 def build_design(
-    y: pd.Series, exog: pd.DataFrame | None
+    y: pd.Series,
+    exog: pd.DataFrame | None,
+    *,
+    lags: Sequence[int] = LAGS,
+    step_offset: int = 0,
 ) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     """Build the training design matrix from lags + calendar (+ exog).
 
-    Returns ``(X, y_aligned, feature_names)`` with the first ``max(LAGS)`` rows dropped
-    (their lags are undefined).
+    Returns ``(X, y_aligned, feature_names)`` with the first ``max(lags) + step_offset`` rows
+    dropped (their lags are undefined). When ``step_offset > 0`` (direct multi-step training for
+    horizon step ``step_offset + 1``), ``lag_k`` is taken at shift ``k + step_offset`` so the
+    feature vector matches the forecast-origin lag buffer ``history.iloc[-k]``.
     """
     idx = pd.DatetimeIndex(y.index)
-    cols: dict[str, np.ndarray] = {f"lag_{lag}": y.shift(lag).to_numpy() for lag in LAGS}
+    cols: dict[str, np.ndarray] = {
+        f"lag_{lag}": y.shift(lag + step_offset).to_numpy() for lag in lags
+    }
     cols.update(_calendar(idx))
-    exog = _check_not_reserved(exog)  # a covariate must not overwrite a feature we build
+    exog = _check_not_reserved(exog, lags=lags)  # a covariate must not overwrite a feature we build
     if exog is not None:
         for c in exog.columns:
             cols[c] = exog[c].to_numpy(dtype=float)
@@ -96,12 +131,39 @@ def build_design(
     return valid, y.loc[valid.index], feature_names
 
 
+def fit_direct_models(
+    make_estimator: Callable[[], Any],
+    base_model: Any,
+    y: pd.Series,
+    exog: pd.DataFrame | None,
+    horizon: int,
+    *,
+    lags: Sequence[int] = LAGS,
+) -> list[Any]:
+    """Fit one direct estimator per horizon step ``h in 0..horizon-1``
+    (step 0 reuses ``base_model``).
+    """
+    models: list[Any] = [base_model]
+    n_steps = max(1, int(horizon))
+    for step_idx in range(1, n_steps):
+        design_h, y_h, _ = build_design(y, exog, lags=lags, step_offset=step_idx)
+        if len(design_h) < 5:
+            models.append(models[-1])
+            continue
+        est_h = make_estimator()
+        est_h.fit(design_h.to_numpy(), y_h.to_numpy())
+        models.append(est_h)
+    return models
+
+
 def recursive_predict(
     estimator: SupportsPredict,
     history: pd.Series,
     future_index: pd.DatetimeIndex,
     feature_names: list[str],
     future_exog: pd.DataFrame | None,
+    *,
+    lags: Sequence[int] = LAGS,
 ) -> np.ndarray:
     """Roll the fitted ``estimator`` forward over ``future_index`` one step at a time.
 
@@ -109,10 +171,10 @@ def recursive_predict(
     exog), predicts, and appends the prediction to the history for the next step.
     """
     series = history.copy()
-    future_exog = _check_not_reserved(future_exog)  # match build_design: same reserved names
+    future_exog = _check_not_reserved(future_exog, lags=lags)
     preds: list[float] = []
     for i, ts in enumerate(future_index):
-        row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in LAGS}
+        row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in lags}
         cal = _calendar(pd.DatetimeIndex([ts]))
         row.update({k: float(v[0]) for k, v in cal.items()})
         if future_exog is not None:
@@ -123,6 +185,36 @@ def recursive_predict(
         yhat = float(np.asarray(raw, dtype=float).ravel()[0])
         preds.append(yhat)
         series = pd.concat([series, pd.Series([yhat], index=[ts])])
+    return np.asarray(preds, dtype=float)
+
+
+def direct_predict(
+    models: Sequence[SupportsPredict],
+    history: pd.Series,
+    future_index: pd.DatetimeIndex,
+    feature_names: list[str],
+    future_exog: pd.DataFrame | None,
+    *,
+    lags: Sequence[int] = LAGS,
+) -> np.ndarray:
+    """Predict each step ``i`` over ``future_index`` directly from the fixed
+    forecast-origin lags.
+    """
+    future_exog = _check_not_reserved(future_exog, lags=lags)
+    origin_lags: dict[str, float] = {f"lag_{lag}": float(history.iloc[-lag]) for lag in lags}
+    preds: list[float] = []
+    for i, ts in enumerate(future_index):
+        est = models[min(i, len(models) - 1)]
+        row: dict[str, float] = dict(origin_lags)
+        cal = _calendar(pd.DatetimeIndex([ts]))
+        row.update({k: float(v[0]) for k, v in cal.items()})
+        if future_exog is not None:
+            for c in future_exog.columns:
+                row[c] = float(future_exog.iloc[i][c])
+        x = np.array([[row[name] for name in feature_names]], dtype=float)
+        raw = est.predict(x)
+        yhat = float(np.asarray(raw, dtype=float).ravel()[0])
+        preds.append(yhat)
     return np.asarray(preds, dtype=float)
 
 
@@ -250,13 +342,14 @@ def recursive_explain(
     *,
     design_mean: np.ndarray | None = None,
     baseline_score: float = 0.0,
+    lags: Sequence[int] = LAGS,
 ) -> list[dict[str, Any] | None]:
     """Roll ``estimator`` forward over ``future_index`` and return per-step local attributions."""
     series = history.copy()
-    future_exog = _check_not_reserved(future_exog)
+    future_exog = _check_not_reserved(future_exog, lags=lags)
     explanations: list[dict[str, Any] | None] = []
     for i, ts in enumerate(future_index):
-        row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in LAGS}
+        row: dict[str, float] = {f"lag_{lag}": float(series.iloc[-lag]) for lag in lags}
         cal = _calendar(pd.DatetimeIndex([ts]))
         row.update({k: float(v[0]) for k, v in cal.items()})
         if future_exog is not None:
@@ -275,4 +368,40 @@ def recursive_explain(
             )
         )
         series = pd.concat([series, pd.Series([yhat], index=[ts])])
+    return explanations
+
+
+def direct_explain(
+    models: Sequence[SupportsPredict],
+    history: pd.Series,
+    future_index: pd.DatetimeIndex,
+    feature_names: list[str],
+    future_exog: pd.DataFrame | None,
+    *,
+    design_mean: np.ndarray | None = None,
+    baseline_score: float = 0.0,
+    lags: Sequence[int] = LAGS,
+) -> list[dict[str, Any] | None]:
+    """Compute per-step local attributions across ``future_index`` using direct step estimators."""
+    future_exog = _check_not_reserved(future_exog, lags=lags)
+    origin_lags: dict[str, float] = {f"lag_{lag}": float(history.iloc[-lag]) for lag in lags}
+    explanations: list[dict[str, Any] | None] = []
+    for i, ts in enumerate(future_index):
+        est = models[min(i, len(models) - 1)]
+        row: dict[str, float] = dict(origin_lags)
+        cal = _calendar(pd.DatetimeIndex([ts]))
+        row.update({k: float(v[0]) for k, v in cal.items()})
+        if future_exog is not None:
+            for c in future_exog.columns:
+                row[c] = float(future_exog.iloc[i][c])
+        x = np.array([[row[name] for name in feature_names]], dtype=float)
+        explanations.append(
+            _step_shap_or_linear_contribs(
+                est,
+                x,
+                feature_names,
+                design_mean=design_mean,
+                baseline_score=baseline_score,
+            )
+        )
     return explanations

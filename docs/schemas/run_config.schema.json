@@ -542,6 +542,23 @@
           "title": "Read Max Streams",
           "type": "integer"
         },
+        "reuse_from_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reuse From Run Id"
+        },
+        "reuse_prior_runs": {
+          "default": false,
+          "title": "Reuse Prior Runs",
+          "type": "boolean"
+        },
         "spark_deps": {
           "default": "packed_venv",
           "enum": [
@@ -580,6 +597,18 @@
           "title": "Freq",
           "type": "string"
         },
+        "grid_policy": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "fill_zero",
+            "zero_fill",
+            "ffill",
+            "linear"
+          ],
+          "title": "Grid Policy",
+          "type": "string"
+        },
         "horizon": {
           "default": 28,
           "exclusiveMinimum": 0,
@@ -599,6 +628,19 @@
           "default": null,
           "title": "Series Limit"
         },
+        "snapshot_millis": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Millis"
+        },
         "source_table": {
           "title": "Source Table",
           "type": "string"
@@ -607,6 +649,11 @@
           "default": "y",
           "title": "Target Col",
           "type": "string"
+        },
+        "trim_leading_zeros": {
+          "default": false,
+          "title": "Trim Leading Zeros",
+          "type": "boolean"
         },
         "ts_id_col": {
           "default": "ts_id",
@@ -652,6 +699,12 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "parsimony_margin": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Parsimony Margin",
+          "type": "number"
+        },
         "prune_threshold": {
           "default": 0.0,
           "minimum": 0.0,
@@ -667,6 +720,8 @@
               "mean",
               "median",
               "inverse_error",
+              "champion",
+              "horizon_specialist",
               "nnls",
               "ridge",
               "xgb"
@@ -675,6 +730,29 @@
           },
           "title": "Strategies",
           "type": "array"
+        },
+        "top_k": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Top K"
+        },
+        "variant_policy": {
+          "default": "all",
+          "enum": [
+            "all",
+            "best_per_base_model",
+            "primary_only"
+          ],
+          "title": "Variant Policy",
+          "type": "string"
         }
       },
       "title": "EnsembleConfig",
@@ -898,6 +976,67 @@
       "additionalProperties": false,
       "description": "Optional feature engineering for the Python models.\n\nDefaults are conservative/generic (no transform, no holidays); the shipped\n``example_config.json`` turns on holidays + log1p.\n\n**There is no ``lags`` field, and the reason is a design rule rather than an omission.**\n\"Lag\" means two different things, and only one of them can be built out here:\n\n- A lag of the **target** is only honest at predict time if the model rolls its own\n  forecasts forward one step at a time. That is recursion, it belongs to the model, and\n  the models that need it already own it \u2014 `_lag_forecaster` does it for ``lightgbm`` /\n  ``xgboost`` / ``regression_lags``, and NeuralProphet does it behind ``n_lags``. A\n  config cannot supply one, because nobody knows the future target; the removed field\n  filled the horizon with a flat line at the last observation and handed the result to\n  models that had fitted coefficients against real history.\n- A lag of a **covariate** is honest, because a covariate's future is as knowable as the\n  covariate itself. No model in the suite lags one internally, so this is the gap that\n  ``exog_lags`` fills.\n\n``exog_lags`` maps an ``exog`` column to the lags to build from it: ``{\"promo\": [1, 7]}``\nadds ``promo_lag_1`` and ``promo_lag_7``. They are ordinary columns by the time any model\nsees them, so every ``supports_exog`` model can use them.\n\nPrecedence, when the two rules ever meet: **the model wins.** A model that lags covariates\ninternally sets ``lags_covariates_internally`` and is handed the unlagged columns only, so\na covariate is never lagged twice. Every shipped model leaves that flag False today.",
       "properties": {
+        "ablation_models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ablation Models",
+          "type": "array"
+        },
+        "ablation_modes": {
+          "items": {
+            "enum": [
+              "univariate",
+              "cov_none",
+              "cov_future_only",
+              "cov_past_only",
+              "cov_static_only",
+              "cov_dynamic",
+              "cov_future_static",
+              "cov_past_static",
+              "cov_all",
+              "local",
+              "global",
+              "hybrid",
+              "local_univariate",
+              "local_cov_none",
+              "local_cov_future_only",
+              "local_cov_past_only",
+              "local_cov_static_only",
+              "local_cov_dynamic",
+              "local_cov_future_static",
+              "local_cov_past_static",
+              "local_cov_all",
+              "global_univariate",
+              "global_cov_none",
+              "global_cov_future_only",
+              "global_cov_past_only",
+              "global_cov_static_only",
+              "global_cov_dynamic",
+              "global_cov_future_static",
+              "global_cov_past_static",
+              "global_cov_all",
+              "hybrid_univariate",
+              "hybrid_cov_none",
+              "hybrid_cov_all"
+            ],
+            "type": "string"
+          },
+          "title": "Ablation Modes",
+          "type": "array"
+        },
+        "censored_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Censored Col"
+        },
         "exog": {
           "items": {
             "type": "string"
@@ -934,6 +1073,11 @@
           "title": "Holidays",
           "type": "array"
         },
+        "include_univariate_baselines": {
+          "default": false,
+          "title": "Include Univariate Baselines",
+          "type": "boolean"
+        },
         "level_shift": {
           "default": false,
           "title": "Level Shift",
@@ -948,6 +1092,24 @@
           "title": "On Unsupported Covariates",
           "type": "string"
         },
+        "outlier_policy": {
+          "default": "none",
+          "enum": [
+            "none",
+            "winsorize",
+            "interpolate",
+            "flag",
+            "stl_resid"
+          ],
+          "title": "Outlier Policy",
+          "type": "string"
+        },
+        "outlier_sigma": {
+          "default": 3.5,
+          "exclusiveMinimum": 0.0,
+          "title": "Outlier Sigma",
+          "type": "number"
+        },
         "past_covariates": {
           "items": {
             "type": "string"
@@ -955,12 +1117,22 @@
           "title": "Past Covariates",
           "type": "array"
         },
+        "regime_routing": {
+          "default": false,
+          "title": "Regime Routing",
+          "type": "boolean"
+        },
         "static_covariates": {
           "items": {
             "type": "string"
           },
           "title": "Static Covariates",
           "type": "array"
+        },
+        "trading_days": {
+          "default": false,
+          "title": "Trading Days",
+          "type": "boolean"
         },
         "transform": {
           "default": "none",
@@ -978,7 +1150,7 @@
     },
     "HierarchyConfig": {
       "additionalProperties": false,
-      "description": "Hierarchical and grouped time-series aggregation and coherent forecast reconciliation.\n\nOff by default (``enabled: false``). When enabled, ``levels`` defines the cross-sectional\naggregation hierarchy from top to bottom (for example ``[[\"region\"], [\"region\", \"category\"]]``),\nwith the total aggregate (``\"__total__\"``) prepended automatically and the bottom-level series\n(``data.ts_id_col``) at the leaves.\n\nImplements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection\n``y_tilde = S @ G @ y_hat`` across seven methods:\n\n* ``bottom_up`` \u2014 sum bottom-level forecasts upward via the summing matrix ``S``.\n* ``top_down`` \u2014 disaggregate the top-level forecast downward by average historical proportions\n  (FPP3 \u00a711.2).\n* ``middle_out`` \u2014 anchor on ``middle_level`` (sum upward above it, disaggregate downward below\n  it by historical proportions within each middle-level node).\n* ``ols`` \u2014 ordinary least squares MinT reconciliation (``W_h = I``).\n* ``wls_struct`` \u2014 structural scaling WLS (``W_h = diag(S @ 1)``), requiring only the hierarchy\n  structure ``S``.\n* ``wls_var`` \u2014 variance scaling WLS (``W_h = diag(W_hat_1)``) weighted by inverse residual\n  variances.\n* ``mint_shrink`` \u2014 Wickramasuriya et al. (2019) Minimum Trace with Sch\u00e4fer-Strimmer shrinkage\n  covariance of residuals, positive-definite even when ``n_series >> T_obs``.",
+      "description": "Hierarchical and grouped time-series aggregation and coherent forecast reconciliation.\n\nOff by default (``enabled: false``). When enabled, ``levels`` defines the cross-sectional\naggregation hierarchy from top to bottom (for example ``[[\"region\"], [\"region\", \"category\"]]``),\nwith the total aggregate (``\"__total__\"``) prepended automatically and the bottom-level series\n(``data.ts_id_col``) at the leaves.\n\nImplements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection\n``y_tilde = S @ G @ y_hat`` across eight methods:\n\n* ``bottom_up`` \u2014 sum bottom-level forecasts upward via the summing matrix ``S``.\n* ``top_down`` \u2014 disaggregate the top-level forecast downward by average historical proportions\n  (FPP3 \u00a711.2).\n* ``middle_out`` \u2014 anchor on ``middle_level`` (sum upward above it, disaggregate downward below\n  it by historical proportions within each middle-level node).\n* ``ols`` \u2014 ordinary least squares MinT reconciliation (``W_h = I``).\n* ``wls_struct`` \u2014 structural scaling WLS (``W_h = diag(S @ 1)``), requiring only the hierarchy\n  structure ``S``.\n* ``wls_var`` \u2014 variance scaling WLS (``W_h = diag(W_hat_1)``) weighted by inverse residual\n  variances.\n* ``mint_shrink`` \u2014 Wickramasuriya et al. (2019) Minimum Trace with Sch\u00e4fer-Strimmer shrinkage\n  covariance of residuals, positive-definite even when ``n_series >> T_obs``.\n* ``mint_nonneg`` \u2014 active-set non-negative Minimum Trace reconciliation guaranteeing\n  bottom-level forecasts ``>= 0`` while preserving exact additive coherence across all levels.",
       "properties": {
         "enabled": {
           "default": false,
@@ -1024,7 +1196,8 @@
               "ols",
               "wls_struct",
               "wls_var",
-              "mint_shrink"
+              "mint_shrink",
+              "mint_nonneg"
             ],
             "type": "string"
           },
@@ -1077,8 +1250,81 @@
     },
     "OutputConfig": {
       "additionalProperties": false,
-      "description": "What the numbers we ship *mean* \u2014 the functional behind ``yhat``.\n\nIts own section rather than a field on `BacktestConfig`, even though both of its rules involve\nthe backtest, because a reader asking \"how do I control the point forecast?\" will not look\nunder `backtest`, and the docs are a product surface here.\n\nEvery model emits one number per future date, so something decides what that number is. For a\nlong time this project decided by accident: ten of sixteen models built their band from\nresidual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped\nforecast was silently ``prediction + median(in-sample residual)`` \u2014 un-named, un-configurable,\nand applied to some models and not others. Measurement said the correction was worth keeping\n(it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an\nopinion into a default: the alternative is now sayable.\n\n``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never\ndestructive and the two arms can always be compared after the fact. See `calibration.py`.",
+      "description": "What the numbers we ship *mean* \u2014 the functional behind ``yhat`` and physical bounds.\n\nIts own section rather than a field on `BacktestConfig`, even though both of its rules involve\nthe backtest, because a reader asking \"how do I control the point forecast?\" will not look\nunder `backtest`, and the docs are a product surface here.\n\nEvery model emits one number per future date, so something decides what that number is. For a\nlong time this project decided by accident: ten of sixteen models built their band from\nresidual quantiles, the frame assembler took the 0.5 quantile as ``yhat``, and the shipped\nforecast was silently ``prediction + median(in-sample residual)`` \u2014 un-named, un-configurable,\nand applied to some models and not others. Measurement said the correction was worth keeping\n(it moved fleet WAPE by 5.7%), so it is the default. This field is what turns it from an\nopinion into a default: the alternative is now sayable.\n\n``yhat_raw`` is written alongside ``yhat`` whatever this is set to, so the choice is never\ndestructive and the two arms can always be compared after the fact. Physical constraints\n(``floor``, ``cap``, ``floor_col``, ``cap_col``, and ``integer_rounding``) are applied\npost-calibration so ``calibrate_from_oof`` estimates empirical residuals on unclamped raw\nmodel outputs while ``yhat``, ``yhat_lower``, ``yhat_upper``, ``quantiles``, and scored OOF\npredictions respect physical reality. See `calibration.py`.",
       "properties": {
+        "cap": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cap"
+        },
+        "cap_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cap Col"
+        },
+        "floor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Floor"
+        },
+        "floor_col": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Floor Col"
+        },
+        "integer_rounding": {
+          "default": "none",
+          "enum": [
+            "none",
+            "round",
+            "ceil",
+            "floor",
+            "cumulative_round"
+          ],
+          "title": "Integer Rounding",
+          "type": "string"
+        },
+        "overage_cost": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overage Cost"
+        },
         "point_forecast": {
           "anyOf": [
             {
@@ -1096,6 +1342,48 @@
           ],
           "default": null,
           "title": "Point Forecast"
+        },
+        "quantiles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quantiles"
+        },
+        "target_quantile": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Quantile"
+        },
+        "underage_cost": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Underage Cost"
         }
       },
       "title": "OutputConfig",
@@ -1248,6 +1536,15 @@
                 ]
               },
               "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              "type": "object"
             },
             {
               "type": "null"

@@ -99,6 +99,19 @@ SELECT
   run_id,
   model_type,
   ensemble_id,
+  COALESCE(
+    JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.base_model'),
+    SPLIT(model_type, '@')[SAFE_OFFSET(0)]
+  ) AS base_model,
+  JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.scope_capability') AS scope_capability,
+  JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.training_mode') AS training_mode,
+  JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.cov_profile') AS cov_profile,
+  CAST(JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.is_univariate') AS BOOL) AS is_univariate,
+  ARRAY_TO_STRING(JSON_VALUE_ARRAY(ANY_VALUE(fit_diagnostics), '$.covariates_used'), ',')
+    AS covariates_used,
+  JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.model_spec_hash') AS model_spec_hash,
+  JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.borrowed_from_run_id') AS borrowed_from_run_id,
+  COUNTIF(JSON_VALUE(fit_diagnostics, '$.borrowed_from_run_id') IS NOT NULL) AS n_borrowed,
   ANY_VALUE(compute_engine) AS compute_engine,
   COUNT(*) AS n_cells,
   COUNTIF(model_artifact IS NULL) AS n_no_artifact,

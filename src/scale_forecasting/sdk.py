@@ -28,7 +28,7 @@ from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     import pandas as pd
@@ -614,6 +614,16 @@ class Forecaster:
         _ = validate_data
         return build_explain_frame(self._config)
 
+    def variant_matrix(self) -> pd.DataFrame:
+        """Return the resolved model-variant taxonomy and spec-hash matrix ``DataFrame`` (offline).
+
+        One row per model entry in ``config.models`` (including auto-expanded univariate baselines
+        and ablation-ladder variants), detailing ``model_type``, ``base_model``, ``variant_tag``,
+        ``family``, ``scope_capability``, ``training_mode``, ``cov_profile``, ``is_univariate``,
+        ``covariates_used``, and ``model_spec_hash``.
+        """
+        return build_variant_matrix_frame(self._config)
+
     def run_live(
         self,
         *,
@@ -723,6 +733,10 @@ class Forecaster:
 
         return build_leaderboard_frame(self.review_run(run_id), all_metrics=all_metrics)
 
+    def leaderboard(self, run_id: str | None = None, *, all_metrics: bool = False) -> pd.DataFrame:
+        """Alias for :meth:`leaderboard_df` matching :meth:`RunResult.leaderboard`."""
+        return self.leaderboard_df(run_id, all_metrics=all_metrics)
+
     def predictions_df(
         self,
         run_id: str | None = None,
@@ -820,6 +834,27 @@ class Forecaster:
             history_tail=history_tail,
             ax=ax,
             title=title or rid,
+        )
+
+    def plot_series(
+        self,
+        ts_id: str | None = None,
+        *,
+        run_id: str | None = None,
+        models: Sequence[str] | None = None,
+        history_tail: int = 120,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Convenience wrapper around :meth:`plot_forecasts` for a single ``ts_id``."""
+        return self.plot_forecasts(
+            run_id,
+            ts_id=ts_id,
+            models=models,
+            max_series=1,
+            history_tail=history_tail,
+            ax=ax,
+            title=title,
         )
 
     def hierarchy_df(self, run_id: str | None = None, *, limit: int = 20000) -> pd.DataFrame:
@@ -1107,6 +1142,335 @@ class Forecaster:
             title=title,
         )
 
+    def fva_df(
+        self,
+        run_id: str | None = None,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute Forecast Value Added (FVA) & Diebold–Mariano statistical significance for
+        ``run_id`` (`diagnostics.compute_fva`).
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_fva
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_fva(oof_df, baseline=baseline, metric=eff_metric)
+
+    def plot_fva(
+        self,
+        run_id: str | None = None,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot the Forecast Value Added (FVA) accuracy waterfall for ``run_id``."""
+        from .diagnostics import plot_fva
+
+        rid = run_id or self.run_id
+        df = self.fva_df(rid, baseline=baseline, metric=metric, limit=limit)
+        return plot_fva(df, ax=ax, title=title or f"{rid} — Forecast Value Added")
+
+    def horizon_decay_df(
+        self,
+        run_id: str | None = None,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute lead-time accuracy decay across horizon steps ($h = 1 \\dots H$)."""
+        import pandas as pd
+
+        from .diagnostics import compute_horizon_decay
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_horizon_decay(oof_df, metric=eff_metric, baseline=baseline)
+
+    def plot_horizon_decay(
+        self,
+        run_id: str | None = None,
+        *,
+        metric: str | None = None,
+        baseline: str | None = None,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot lead-time accuracy decay by horizon step ($h = 1 \\dots H$) for ``run_id``."""
+        from .diagnostics import plot_horizon_decay
+
+        rid = run_id or self.run_id
+        df = self.horizon_decay_df(rid, metric=metric, baseline=baseline, limit=limit)
+        return plot_horizon_decay(df, ax=ax, title=title or f"{rid} — Horizon Accuracy Decay")
+
+    def bias_report_df(
+        self,
+        run_id: str | None = None,
+        *,
+        threshold_pct: float = 0.05,
+        tracking_signal_limit: float = 4.0,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Audit every ``(ts_id, model_type)`` cell for directional bias and Trigg Tracking Signal
+        on ``run_id``.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_bias_report
+        from .registry.reads import read_oof
+
+        rid = run_id or self.run_id
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+        return compute_bias_report(
+            oof_df,
+            threshold_pct=threshold_pct,
+            tracking_signal_limit=tracking_signal_limit,
+        )
+
+    def bias_df(
+        self,
+        run_id: str | None = None,
+        *,
+        threshold_pct: float = 0.05,
+        tracking_signal_limit: float = 4.0,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching :meth:`BakeOff.bias_df`."""
+        return self.bias_report_df(
+            run_id,
+            threshold_pct=threshold_pct,
+            tracking_signal_limit=tracking_signal_limit,
+            limit=limit,
+        )
+
+    def rollup_time(
+        self,
+        freq: str = "W",
+        *,
+        run_id: str | None = None,
+        level: float = 0.80,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Aggregate ``run_id`` future predictions to Weekly (`"W"`), Monthly (`"MS"`/`"M"`), or
+        Quarterly (`"QS"`/`"Q"`) buckets with autocorrelation-aware prediction intervals.
+        """
+        import pandas as pd
+
+        from .diagnostics import rollup_time
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        return rollup_time(pred_df, freq=freq, oof_df=oof_df, level=level)
+
+    def simulate_scenarios(
+        self,
+        scenarios: Mapping[str, Mapping[str, Any]],
+        *,
+        data: pd.DataFrame | None = None,
+        models: Sequence[str] | None = None,
+        future_covariates_df: pd.DataFrame | None = None,
+        price_col: str | None = None,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Run counterfactual covariate shocks (`scenarios.simulate_scenarios`) across ``data``
+        (or BigQuery source series when ``run_id`` is provided, or synthetic sample data when
+        ``data`` is omitted) using this config's settings.
+        """
+        from . import playground
+        from .scenarios import simulate_scenarios
+
+        panel = data
+        if panel is None and run_id is not None:
+            try:
+                from google.cloud import bigquery
+
+                from .engines.bigquery_names import source_ref
+                from .engines.bigquery_sql import series_filter
+                from .registry.reads import resolve_settings
+
+                resolved = resolve_settings(self._settings)
+                source = source_ref(self._config, resolved.registry_dataset_ref)
+                idc, datec = self._config.data.ts_id_col, self._config.data.date_col
+                sfilter = series_filter(self._config, source, idc)
+                where_clause = f" WHERE {sfilter}" if sfilter else ""
+                sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
+                client = bigquery.Client(project=resolved.project_id)
+                df = client.query(sql).to_dataframe()
+                if not df.empty:
+                    panel = df
+            except Exception:  # noqa: BLE001 - fall back to synthetic sample data when offline
+                panel = None
+        if panel is None:
+            panel = playground.sample_data(
+                n_series=min(self._config.data.series_limit or 3, 5),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        return simulate_scenarios(
+            panel,
+            self._config,
+            scenarios,
+            models=models,
+            future_covariates_df=future_covariates_df,
+            price_col=price_col,
+        )
+
+    def plot_scenarios(
+        self,
+        sim_df: pd.DataFrame,
+        *,
+        ts_id: str | None = None,
+        model_type: str | None = None,
+        show_revenue: bool = False,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot baseline vs. counterfactual scenario trajectories from `simulate_scenarios`."""
+        from .scenarios import plot_scenarios
+
+        return plot_scenarios(
+            sim_df,
+            ts_id=ts_id,
+            model_type=model_type,
+            show_revenue=show_revenue,
+            ax=ax,
+            title=title,
+        )
+
+    def score_realized(
+        self,
+        actuals_df: pd.DataFrame,
+        *,
+        run_id: str | None = None,
+        metric: str | None = None,
+        drift_threshold: float = 1.5,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Score published forward predictions for ``run_id`` against newly arrived ``actuals_df``
+        and flag series whose live error exceeds ``drift_threshold`` times backtest expectation.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_realized_accuracy
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        eff_metric = metric or self._config.backtest.decision_metric
+        return compute_realized_accuracy(
+            pred_df,
+            actuals_df,
+            oof_df=oof_df,
+            metric=eff_metric,
+            drift_threshold=drift_threshold,
+        )
+
+    def revision_stability_df(
+        self,
+        run_ids: Sequence[str],
+        *,
+        jump_threshold_pct: float = 0.30,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Measure cross-run forecast revision stability ("whipsaw") across ``run_ids``."""
+        return self.registry().revision_stability_df(
+            run_ids, jump_threshold_pct=jump_threshold_pct, limit=limit
+        )
+
+    def exceptions_df(
+        self,
+        run_id: str | None = None,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        prior_run_ids: Sequence[str] | None = None,
+        top_n: int = 50,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Build the Top-N operational exception triage queue for ``run_id``."""
+        import pandas as pd
+
+        from .diagnostics import compute_exceptions_queue
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+
+        real_df = (
+            self.score_realized(actuals_df, run_id=rid, limit=limit)
+            if actuals_df is not None and not actuals_df.empty
+            else None
+        )
+        stab_df = (
+            self.revision_stability_df([*prior_run_ids, rid], limit=limit)
+            if prior_run_ids
+            else None
+        )
+        return compute_exceptions_queue(
+            oof_df=oof_df,
+            predictions_df=pred_df,
+            realized_df=real_df,
+            stability_df=stab_df,
+            floor=self._config.output.floor,
+            cap=self._config.output.cap,
+            metric=self._config.backtest.decision_metric,
+            top_n=top_n,
+        )
+
+    def export_report(
+        self,
+        out_path: str | Any,
+        *,
+        run_id: str | None = None,
+        title: str | None = None,
+        write_json: bool = False,
+    ) -> Any:
+        """Export a self-contained `.html` report for ``run_id``."""
+        from .report import export_report
+
+        rid = run_id or self.run_id
+        payload_dict = {
+            "run_id": rid,
+            "leaderboard_df": self.leaderboard_df(rid),
+            "fva_df": self.fva_df(rid),
+            "horizon_decay_df": self.horizon_decay_df(rid),
+            "bias_df": self.bias_report_df(rid),
+            "exceptions_df": self.exceptions_df(rid),
+            "predictions_df": self.predictions_df(rid),
+        }
+        return export_report(
+            payload_dict,
+            out_path,
+            title=title,
+            metric=self._config.backtest.decision_metric,
+            write_json=write_json,
+        )
+
     def reensemble(
         self,
         strategies: list[str] | None = None,
@@ -1361,6 +1725,52 @@ class Registry:
             settings=self._settings,
         )
 
+    def score_realized(
+        self,
+        run_id: str,
+        actuals_df: pd.DataFrame,
+        *,
+        metric: str = "wape",
+        drift_threshold: float = 1.5,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Join ``run_id`` predictions against ``actuals_df`` and compute realized accuracy."""
+        import pandas as pd
+
+        from .diagnostics import compute_realized_accuracy
+        from .registry.reads import read_oof, read_predictions
+
+        pred_rows = read_predictions(run_id, limit=limit, settings=self._settings)
+        oof_rows = read_oof(run_id, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        return compute_realized_accuracy(
+            pred_df,
+            actuals_df,
+            oof_df=oof_df,
+            metric=metric,
+            drift_threshold=drift_threshold,
+        )
+
+    def revision_stability_df(
+        self,
+        run_ids: Sequence[str],
+        *,
+        jump_threshold_pct: float = 0.30,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Measure cross-run forecast revision stability ("whipsaw") across ``run_ids``."""
+        import pandas as pd
+
+        from .diagnostics import compute_revision_stability
+        from .registry.reads import read_predictions
+
+        by_run: dict[str, pd.DataFrame] = {}
+        for rid in run_ids:
+            rows = read_predictions(rid, limit=limit, settings=self._settings)
+            by_run[str(rid)] = pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
+        return compute_revision_stability(by_run, jump_threshold_pct=jump_threshold_pct)
+
 
 def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
     """Build a per-family execution plan ``DataFrame`` for ``cfg`` — pure, offline, no GCP.
@@ -1464,6 +1874,45 @@ def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:
             }
         )
     return pd.DataFrame.from_records(records)
+
+
+def build_variant_matrix_frame(cfg: RunConfig) -> pd.DataFrame:
+    """Build a per-variant taxonomy and spec-hash ``DataFrame`` for ``cfg`` — pure, offline."""
+    import pandas as pd
+
+    from .features import resolve_model_variant
+    from .registry.ids import make_model_spec_hash
+
+    cols = [
+        "model_type",
+        "base_model",
+        "variant_tag",
+        "family",
+        "scope_capability",
+        "training_mode",
+        "cov_profile",
+        "is_univariate",
+        "covariates_used",
+        "model_spec_hash",
+    ]
+    records: list[dict[str, Any]] = []
+    for m in cfg.models:
+        spec = resolve_model_variant(cfg, m)
+        records.append(
+            {
+                "model_type": m,
+                "base_model": spec.base_model,
+                "variant_tag": spec.variant_tag,
+                "family": str(spec.model_cls.family),
+                "scope_capability": spec.scope_capability,
+                "training_mode": spec.training_mode,
+                "cov_profile": spec.cov_profile,
+                "is_univariate": spec.is_univariate,
+                "covariates_used": ", ".join(spec.covariates_used),
+                "model_spec_hash": make_model_spec_hash(m, cfg),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=cols)
 
 
 def build_best_params_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:

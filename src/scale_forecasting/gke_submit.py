@@ -806,18 +806,6 @@ def build_gke_cluster_spec(
         "autoscaling": {
             "enableNodeAutoprovisioning": False,
         },
-        "nodePools": [
-            {
-                "name": "default-pool",
-                "initialNodeCount": max(1, plan.worker_count),
-                "config": node_config,
-                "autoscaling": {
-                    "enabled": plan.worker_count > 1,
-                    "minNodeCount": 1,
-                    "maxNodeCount": max(1, plan.worker_count),
-                },
-            }
-        ],
         "ipAllocationPolicy": {"useIpAliases": True},
         "controlPlaneEndpointsConfig": {
             "dnsEndpointConfig": {"allowExternalTraffic": True},
@@ -826,7 +814,6 @@ def build_gke_cluster_spec(
             "managed-by": "scale-forecasting",
             **(labels or {}),
         },
-        "deletionProtection": False,
     }
     if plan.subnetwork_uri:
         cluster["subnetwork"] = plan.subnetwork_uri

@@ -455,6 +455,26 @@ class McpServer:
                             "type": "integer",
                             "default": 3,
                         },
+                        "scenarios": {
+                            "type": "object",
+                            "description": (
+                                "Optional counterfactual covariate shock map "
+                                "(e.g., {'promo_week': {'price_index': '*0.85'}})."
+                            ),
+                        },
+                        "price_col": {
+                            "type": "string",
+                            "description": (
+                                "Optional price column name for revenue impact simulation."
+                            ),
+                        },
+                        "export_report_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.html) to export a self-contained "
+                                "interactive HTML report."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -568,6 +588,40 @@ class McpServer:
                         "include_leaderboard": {
                             "type": "boolean",
                             "default": True,
+                        },
+                        "include_fva": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include Forecast Value Added (FVA) & Diebold-Mariano "
+                                "statistical significance table."
+                            ),
+                        },
+                        "include_horizon_decay": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "When true, include lead-time horizon accuracy decay.",
+                        },
+                        "include_bias_report": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include directional bias & Tracking Signal audit."
+                            ),
+                        },
+                        "include_exceptions": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include Top-N operational exception triage queue."
+                            ),
+                        },
+                        "export_report_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.html) to export a self-contained "
+                                "interactive HTML report."
+                            ),
                         },
                     },
                     "required": ["run_id"],
@@ -784,12 +838,16 @@ class McpServer:
                     f'Install with: pip install "scale-forecasting[{ext}]"'
                 )
 
-            panel = playground.sample_data(n_series=n_series)
+            scenarios_arg = args.get("scenarios")
+            price_col = args.get("price_col")
+            with_exog = bool(scenarios_arg or price_col)
+            panel = playground.sample_data(n_series=n_series, with_exog=with_exog)
             run = playground.run_model(
                 model_name,
                 data=panel,
                 horizon=horizon,
                 backtest=backtest,
+                with_exog=with_exog,
             )
             summary_text = playground.summarize(run)
             res = run.result
@@ -803,7 +861,7 @@ class McpServer:
             metrics_clean = {
                 k: float(v) for k, v in res.metrics.items() if v is not None and v == v
             }
-            return {
+            out_pg: dict[str, Any] = {
                 "model": model_name,
                 "family": mcls.family,
                 "ts_id": res.ts_id,
@@ -811,10 +869,30 @@ class McpServer:
                 "n_series_in_panel": n_series,
                 "horizon": horizon,
                 "backtest": backtest,
+                "demand_profile": res.demand_profile,
                 "metrics": metrics_clean,
                 "summary": summary_text,
                 "sample_predictions": sample_preds,
             }
+            if scenarios_arg and isinstance(scenarios_arg, dict):
+                from .scenarios import simulate_scenarios, summarize_scenarios
+
+                cfg_pg = playground.build_config(
+                    model_name, horizon=horizon, backtest=backtest, with_exog=True
+                )
+                sim_df = simulate_scenarios(
+                    run.series,
+                    cfg_pg,
+                    scenarios_arg,
+                    models=[model_name],
+                    price_col=str(price_col) if price_col else None,
+                )
+                out_pg["scenario_summary"] = summarize_scenarios(sim_df).to_dict(orient="records")
+            rep_path = args.get("export_report_path")
+            if rep_path:
+                written = run.export_report(str(rep_path))
+                out_pg["report_path"] = str(written)
+            return out_pg
 
         if name == "plan_execution":
             from . import airflow_emit, launch_plan
@@ -1001,6 +1079,47 @@ class McpServer:
             if bool(args.get("include_calibration", True)):
                 cal = review.calibration_report(run_id, settings=settings)
                 out["calibration"] = dataclasses.asdict(cal)
+            want_fva = bool(args.get("include_fva", False))
+            want_decay = bool(args.get("include_horizon_decay", False))
+            want_bias = bool(args.get("include_bias_report", False))
+            want_exc = bool(args.get("include_exceptions", False))
+            rep_path_rev = args.get("export_report_path")
+            if want_fva or want_decay or want_bias or want_exc or rep_path_rev:
+                import pandas as pd
+
+                from .diagnostics import (
+                    compute_bias_report,
+                    compute_exceptions_queue,
+                    compute_fva,
+                    compute_horizon_decay,
+                )
+                from .registry.reads import read_oof, read_predictions
+                from .report import export_report
+
+                oof_rows = read_oof(run_id, limit=20000, settings=settings)
+                oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+                metric = rev.decision_metric or "wape"
+                if want_fva:
+                    out["fva"] = compute_fva(oof_df, metric=metric).to_dict(orient="records")
+                if want_decay:
+                    out["horizon_decay"] = compute_horizon_decay(oof_df, metric=metric).to_dict(
+                        orient="records"
+                    )
+                if want_bias:
+                    out["bias_report"] = compute_bias_report(oof_df).to_dict(orient="records")
+                if want_exc:
+                    out["exceptions"] = compute_exceptions_queue(
+                        oof_df=oof_df, metric=metric
+                    ).to_dict(orient="records")
+                if rep_path_rev:
+                    pred_rows = read_predictions(run_id, limit=20000, settings=settings)
+                    pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                    written_r = export_report(
+                        {"run_id": run_id, "oof_df": oof_df, "predictions_df": pred_df},
+                        str(rep_path_rev),
+                        metric=metric,
+                    )
+                    out["report_path"] = str(written_r)
             return out
 
         if name == "launch_or_repair_run":

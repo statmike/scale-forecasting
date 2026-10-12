@@ -2,7 +2,7 @@
 
 `scale-forecasting` computes **21 built-in evaluation metrics** for every `(series, model)` cell during rolling-origin backtesting. Every metric subclasses [`BaseMetric`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/base_metric.py) in its own module under [`src/scale_forecasting/metrics/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/metrics) and is listed in `METRIC_NAMES` in [`src/scale_forecasting/metrics/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/__init__.py).
 
-All five model families (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and all six ensemble strategies are scored through the exact same Python function (`metrics.compute_metrics`), guaranteeing that a metric column in `forecast_metadata` has an identical mathematical definition regardless of which compute engine produced the forecast.
+All five model families (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and all nine ensemble strategies are scored through the exact same Python function (`metrics.compute_metrics`), guaranteeing that a metric column in `forecast_metadata` has an identical mathematical definition regardless of which compute engine produced the forecast.
 
 ```mermaid
 flowchart TD

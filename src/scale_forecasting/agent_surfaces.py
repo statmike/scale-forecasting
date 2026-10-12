@@ -1273,6 +1273,16 @@ def render_skill_execution_paths_reference() -> str:
                 "`review_run(run_id)` / `Forecaster(cfg).review()` |"
             ),
             "| **Interval & arm calibration** | — | `calibration_report(run_id)` |",
+            (
+                "| **Forecaster's Workbench diagnostics** | — | "
+                "`Forecaster(cfg).fva()` / `.horizon_decay()` / `.bias_report()` / "
+                "`.exceptions_queue()` |"
+            ),
+            (
+                "| **Executive HTML + JSON report** | "
+                "`python -m scale_forecasting.report --model holtwinters --output-dir ./report` | "
+                "`Forecaster(cfg).export_report()` / `export_report(bench, './report')` |"
+            ),
             "",
             "---",
             "",
@@ -1408,6 +1418,12 @@ def render_llms_txt() -> str:
             (
                 f"- [Configuration Reference (`RunConfig`)]"
                 f"({_SITE_BASE}/configuration_reference/): Complete JSON configuration guide."
+            ),
+            (
+                f"- [Forecaster's Workbench]({_SITE_BASE}/forecaster_workbench/): Physical "
+                "bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe "
+                "hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, scenarios, "
+                "lifecycle governance, and executive HTML/JSON reports."
             ),
             (
                 f"- [Models Reference (34 Models)]({_SITE_BASE}/models_reference/): All 34 "

@@ -60,13 +60,19 @@ from .base_model import _REGISTRY, BaseModel
 _log = get_logger(__name__)
 
 
+def base_model_name(name: str) -> str:
+    """Return the canonical registered base model name from a ``<base>@<tag>`` variant string."""
+    return name.split("@", 1)[0].strip()
+
+
 def get_model(name: str) -> type[BaseModel]:
-    """Return the registered model class for ``name``.
+    """Return the registered model class for ``name`` (or ``<base>@<tag>`` variant).
 
     Raises ``ModelError`` with the available names when ``name`` is unknown.
     """
+    base = base_model_name(name)
     try:
-        return _REGISTRY[name]
+        return _REGISTRY[base]
     except KeyError:
         known = ", ".join(sorted(_REGISTRY)) or "(none registered)"
         raise ModelError(f"unknown model '{name}'; registered models: {known}") from None

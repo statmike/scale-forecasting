@@ -44,26 +44,39 @@ class CatboostModel(BaseModel):
         except ImportError as e:  # pragma: no cover - exercised only without the extra
             self.require_available()
             raise ModelError("catboost not installed; install the 'models' extra") from e
-        if len(y) <= max(lf.LAGS):
-            raise ModelError(f"catboost requires more than {max(lf.LAGS)} observations")
+        lags = lf.resolve_lags(self.params)
+        strategy = lf.resolve_strategy(self.params)
+        if len(y) <= max(lags):
+            raise ModelError(f"catboost requires more than {max(lags)} observations")
 
-        design, y_aligned, self._features = lf.build_design(y, X)
+        design, y_aligned, self._features = lf.build_design(y, X, lags=lags)
+        self._lags = lags
+        self._strategy = strategy
         self._design_mean = design.to_numpy().mean(axis=0)
         self._baseline_score = float(y_aligned.mean())
         self._history = y.astype(float)
         self._last_date = y.index[-1]
-        self._model = CatBoostRegressor(
-            iterations=int(self.params.get("iterations", self.params.get("n_estimators", 300))),
-            depth=int(self.params.get("depth", 6)),
-            learning_rate=float(self.params.get("learning_rate", 0.05)),
-            random_seed=self.ctx.seed,
-            thread_count=1,
-            verbose=False,
-            allow_writing_files=False,
-        )
+
+        def _make_est() -> Any:
+            return CatBoostRegressor(
+                iterations=int(self.params.get("iterations", self.params.get("n_estimators", 300))),
+                depth=int(self.params.get("depth", 6)),
+                learning_rate=float(self.params.get("learning_rate", 0.05)),
+                random_seed=self.ctx.seed,
+                thread_count=1,
+                verbose=False,
+                allow_writing_files=False,
+            )
+
+        self._model = _make_est()
         self._model.fit(design.to_numpy(), y_aligned.to_numpy())
         fitted = self._model.predict(design.to_numpy())
         self._set_residuals(y_aligned.to_numpy() - np.asarray(fitted, dtype=float))
+        self._direct_models: list[Any] | None = (
+            lf.fit_direct_models(_make_est, self._model, y, X, self.ctx.horizon, lags=lags)
+            if strategy == "direct"
+            else None
+        )
 
     def predict(
         self,
@@ -71,10 +84,27 @@ class CatboostModel(BaseModel):
         X: pd.DataFrame | None = None,
         quantiles: tuple[float, ...] = DEFAULT_QUANTILES,
     ) -> pd.DataFrame:
+        lags = getattr(self, "_lags", lf.LAGS)
         full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
-        mean = lf.recursive_predict(
-            self._model, self._history, full_index, self._features, self._forecast_exog(X)
-        )[-horizon:]
+        direct_models = getattr(self, "_direct_models", None)
+        if getattr(self, "_strategy", "recursive") == "direct" and direct_models:
+            mean = lf.direct_predict(
+                direct_models,
+                self._history,
+                full_index,
+                self._features,
+                self._forecast_exog(X),
+                lags=lags,
+            )[-horizon:]
+        else:
+            mean = lf.recursive_predict(
+                self._model,
+                self._history,
+                full_index,
+                self._features,
+                self._forecast_exog(X),
+                lags=lags,
+            )[-horizon:]
         ds = full_index[-horizon:]
         qmap_t = self.residual_intervals(mean, quantiles)
         t, lam = self.ctx.transform, self.ctx.transform_lambda
@@ -88,7 +118,20 @@ class CatboostModel(BaseModel):
     def explain(
         self, horizon: int, X: pd.DataFrame | None = None
     ) -> list[dict[str, Any] | None] | None:
+        lags = getattr(self, "_lags", lf.LAGS)
         full_index = self._future_index(self._last_date, self._forecast_steps(horizon))
+        direct_models = getattr(self, "_direct_models", None)
+        if getattr(self, "_strategy", "recursive") == "direct" and direct_models:
+            return lf.direct_explain(
+                direct_models,
+                self._history,
+                full_index,
+                self._features,
+                self._forecast_exog(X),
+                design_mean=self._design_mean,
+                baseline_score=self._baseline_score,
+                lags=lags,
+            )[-horizon:]
         return lf.recursive_explain(
             self._model,
             self._history,
@@ -97,6 +140,7 @@ class CatboostModel(BaseModel):
             self._forecast_exog(X),
             design_mean=self._design_mean,
             baseline_score=self._baseline_score,
+            lags=lags,
         )[-horizon:]
 
     def recondition(self, y_new: pd.Series, X_new: pd.DataFrame | None = None) -> None:

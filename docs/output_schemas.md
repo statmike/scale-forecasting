@@ -146,7 +146,7 @@ Partitioned by `DATE(created_at)`, clustered by `run_id, model_type`.
 | `n_fits` | `INT64` | Fits behind the **published forecast**: the backtest arms plus the final full-history fit. Measured, not derived — see [What the cell paid for](#what-the-cell-paid-for-in-fits) for why `n_folds_achieved + 1` is wrong on four of six refit paths. |
 | `train_rows_total` | `INT64` | Training observations those fits saw, summed. Not `n_fits × n_obs`: a fold trains on a prefix. |
 | `n_hpo_fits` | `INT64` | Fits a **per-series** hyperparameter search burned. None of them ship a forecast, so they are counted apart; total paid for is `n_fits + n_hpo_fits`. `0` under a fleetwide search, which runs on the driver and belongs to no row. |
-| `fit_diagnostics` | `JSON` | Whatever the fitting library said about this fit — including **Tier 1 (`feature_attributions`)** normalized global/series-level feature importance (`{"feature_attributions": {"promo_flag": 0.41, ...}}`) populated by `ml` models (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`) and `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`), plus `stage_1_tuning_result_artifact_uri` and `vertex_model_resource_name` on `vertex_automl`. |
+| `fit_diagnostics` | `JSON` | Whatever the fitting library said about this fit — plus the orthogonal model taxonomy and lineage keys (`base_model`, `variant_tag`, `scope_capability`, `training_mode`, `cov_profile`, `is_univariate`, `covariates_used`, `model_spec_hash`, and `borrowed_from_run_id` when borrowed via `compute.reuse_prior_runs`), **Tier 1 (`feature_attributions`)** normalized global/series-level feature importance (`{"feature_attributions": {"promo_flag": 0.41, ...}}`) populated by `ml` models (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`) and `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`), and `stage_1_tuning_result_artifact_uri` / `vertex_model_resource_name` on `vertex_automl`. |
 
 ### Why a cell failed, in a word you can group by
 
@@ -606,11 +606,14 @@ so the `run_id → current job` map is one row per family.
 
 ### `v_model_leaderboard` — which model won, per run?
 
-One row per `(run_id, model_type, ensemble_id)`: `n_cells`, `n_no_artifact` /
-`no_artifact_rate` (a model failing every cell shows as `no_artifact_rate = 1.0`),
-`median_fit_seconds`, and `mean_wape` / `mean_mae` where a backtest populated them. The entry point
-for "is this model worth keeping" before ensembling. Reads only the final rows (`fold_id IS NULL`),
-so per-fold metrics don't double-count.
+One row per `(run_id, model_type, ensemble_id)`: `base_model`, `scope_capability`, `training_mode`,
+`cov_profile`, `is_univariate`, `covariates_used`, `model_spec_hash`, `borrowed_from_run_id`,
+`n_borrowed`, `n_cells`, `n_no_artifact` / `no_artifact_rate` (a model failing every cell shows as
+`no_artifact_rate = 1.0`), `median_fit_seconds`, and `mean_wape` / `mean_mae` (plus every registered
+metric) where a backtest populated them. The entry point for "is this model or `<base_model>@<tag>`
+variant worth keeping" before ensembling, and for auditing which models were borrowed from a prior
+snapshot-verified run (`n_borrowed > 0`). Reads only the final rows (`fold_id IS NULL`), so per-fold
+metrics don't double-count.
 
 ### `v_backtest_coverage` — how much of the panel did each model get scored on?
 
@@ -643,10 +646,12 @@ Second, the error is **pooled, not averaged**: `SUM(|y_true − yhat|) / SUM(|y_
 series at once. That gives one WAPE for the whole panel, instead of the mean of per-series WAPEs
 where a single near-zero series can dominate the average.
 
-Columns: `holdout_fold_id`, `n_series`, `n_points`, `pooled_wape`, `pooled_mae`, and the
-`first_forecast_date` / `last_forecast_date` bounding the window that was scored. Carry `n_series`
-into any comparison you draw — equal `n_series` across the rows is the evidence that the models
-answered the same question, and unequal `n_series` is itself a finding.
+Columns: `base_model`, `scope_capability`, `training_mode`, `cov_profile`, `is_univariate`,
+`covariates_used`, `model_spec_hash`, `borrowed_from_run_id`, `n_borrowed`, `holdout_fold_id`,
+`n_series`, `n_points`, `pooled_wape`, `pooled_mae`, and the `first_forecast_date` /
+`last_forecast_date` bounding the window that was scored. Carry `n_series` into any comparison you
+draw — equal `n_series` across the rows is the evidence that the models answered the same question,
+and unequal `n_series` is itself a finding.
 
 It reads `backtest_oof` rather than `forecast_metadata` because that is the only table holding
 per-fold truth; `forecast_metadata` stores one rolled-up row per cell and cannot be restricted to a

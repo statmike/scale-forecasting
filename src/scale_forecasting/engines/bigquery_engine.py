@@ -358,6 +358,7 @@ def _score_fold(
     list per series across folds and rolls them up exactly as `worker.rollup_metrics` does.
     """
     from ..backtest import training_window
+    from ..calibration import apply_output_constraints, has_output_constraints
     from ..metrics import compute_metrics
     from ..seasonality import seasonal_period
 
@@ -365,7 +366,10 @@ def _score_fold(
     oof_rows: list[dict[str, Any]] = []
     panels: dict[str, dict[str, float]] = {}
     for ts_id, g in eval_df.groupby("ts_id"):
-        g = g.sort_values("forecast_date")
+        g = g.sort_values("forecast_date").copy()
+        if has_output_constraints(cfg.output):
+            g["yhat_raw"] = g["yhat"].copy()
+            g = apply_output_constraints(g, cfg.output)
         for rec in g.to_dict(orient="records"):
             oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, rec, created_at))
         hist = hist_by_id.get(str(ts_id))
@@ -412,7 +416,7 @@ def _oof_row(
         # `yhat_adjusted` are both the forecast it returned. Copying the value rather than leaving
         # the pair NULL keeps `y_true - yhat_raw` a valid residual for every engine, which is what
         # lets a cross-engine calibration diagnostic be one query instead of two.
-        "yhat_raw": row["yhat"],
+        "yhat_raw": row.get("yhat_raw", row["yhat"]),
         "yhat_adjusted": row["yhat"],
         "yhat_lower": row.get("yhat_lower"),
         "yhat_upper": row.get("yhat_upper"),
@@ -464,6 +468,7 @@ def _meta_row(
     scored-geometry columns are only useful in a cross-engine ``GROUP BY``, so an engine that fills
     some of them and not others is worse than one that fills none — the gaps read as differences.
     """
+    from ..features import should_stamp_variant_diagnostics, variant_diagnostics_for
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
     from ..registry.rows import _as_date, _as_float
@@ -479,6 +484,10 @@ def _meta_row(
             # left it out of a fold's evaluation — the reason lives on the BigQuery side.
             status = "reduced" if n_folds_achieved else "unscored"
             note = f"scored on {n_folds_achieved} of {requested} folds"
+
+    fit_diag: str | None = None
+    if should_stamp_variant_diagnostics(model_name, cfg):
+        fit_diag = json.dumps(variant_diagnostics_for(model_name, cfg), sort_keys=True)
 
     return {
         "run_id": run_id,
@@ -538,6 +547,7 @@ def _meta_row(
         "achieved_min_train": cfg.backtest.min_train if n_folds_achieved else None,
         "first_val_date": _as_date(first_val_date),
         "last_val_date": _as_date(last_val_date),
+        "fit_diagnostics": fit_diag,
     }
 
 

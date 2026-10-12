@@ -50,7 +50,8 @@ the literature carries separate adaptive variants for time series. What this is:
 empirical quantile calibration. Much better than in-sample, and honest about what it claims.
 
 Public surface: ``Calibration``, ``StepCalibration``, ``calibrate_from_oof``,
-``apply_calibration``, ``compare_arms``, ``coverage_by_step``, ``select_arm``, ``resolve_arm``,
+``apply_calibration``, ``apply_output_constraints``, ``has_output_constraints``,
+``compare_arms``, ``coverage_by_step``, ``select_arm``, ``resolve_arm``,
 ``POINT_FORECAST_ARMS``.
 """
 
@@ -66,6 +67,8 @@ import pandas as pd
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .config import OutputConfig
 
 # Which functional `yhat` carries. "raw" is the model's own output untouched; "median" and "mean"
 # add the corresponding residual statistic. Config defaults this from `decision_metric` rather than
@@ -334,8 +337,10 @@ def apply_calibration(
     for i in range(len(out)):
         step = cal.for_step(i + 1)
         shift = step.mean if arm == "mean" else step.quantiles.get(0.5, 0.0)
-        lower.append(raw[i] + step.quantiles[lo_q])
-        upper.append(raw[i] + step.quantiles[hi_q])
+        raw_qmap = {q: v for q in qs if math.isfinite(v := raw[i] + step.quantiles[q])}
+        mono_qmap = rearrange_monotone_quantiles(raw_qmap)
+        lower.append(mono_qmap.get(lo_q, raw[i] + step.quantiles[lo_q]))
+        upper.append(mono_qmap.get(hi_q, raw[i] + step.quantiles[hi_q]))
         adjusted.append(raw[i] + shift)
         # The full map is rewritten, not just the two bounds it brackets. Leaving `quantiles`
         # holding the model's own band beside a recalibrated `yhat_lower`/`yhat_upper` would ship
@@ -343,9 +348,7 @@ def apply_calibration(
         # different number than the one in the column named for it. Non-finite values are dropped
         # per step for the same reason `_assemble_frame` drops them: `json.dumps` would otherwise
         # mint bare `NaN`, which BigQuery's JSON parser rejects for the whole append.
-        qjson.append(
-            json.dumps({str(q): v for q in qs if math.isfinite(v := raw[i] + step.quantiles[q])})
-        )
+        qjson.append(json.dumps({str(q): v for q, v in mono_qmap.items()}))
 
     out["yhat_lower"] = np.asarray(lower, dtype=float)
     out["yhat_upper"] = np.asarray(upper, dtype=float)
@@ -353,6 +356,336 @@ def apply_calibration(
     out["yhat"] = raw if arm == "raw" else out["yhat_adjusted"].to_numpy(dtype=float)
     out["quantiles"] = pd.array(qjson, dtype="string")
     return out[list(CALIBRATED_COLUMNS)], cal.source
+
+
+def rearrange_monotone_quantiles(q_map: dict[float, float]) -> dict[float, float]:
+    """Chernozhukov, Fernández-Val & Galichon (2010) monotone quantile rearrangement.
+
+    Sorts the finite quantile levels ``q_1 < q_2 < ... < q_k`` and arranges their values into
+    non-decreasing order ``v_(1) <= v_(2) <= ... <= v_(k)``, eliminating quantile crossing by
+    construction while weakly improving $L_p$ estimation accuracy.
+    """
+    finite_pairs = sorted((float(q), float(v)) for q, v in q_map.items() if math.isfinite(float(v)))
+    if not finite_pairs:
+        return {}
+    qs = [p[0] for p in finite_pairs]
+    sorted_vals = np.sort(np.array([p[1] for p in finite_pairs], dtype=float))
+    return {q: float(v) for q, v in zip(qs, sorted_vals, strict=True)}
+
+
+def format_target_quantile_arm(q_star: float) -> str:
+    """Canonical ``point_forecast_source`` label for a Newsvendor or SLA quantile target."""
+    if round(q_star, 2) == round(q_star, 6):
+        return f"quantile:{q_star:.2f}"
+    formatted = f"{q_star:.4f}".rstrip("0").rstrip(".")
+    return f"quantile:{formatted}"
+
+
+def apply_quantile_and_cost_rules(
+    pred: pd.DataFrame,
+    output_cfg: OutputConfig | None,
+) -> tuple[pd.DataFrame, str | None]:
+    """Apply multi-percentile fan expansion, Chernozhukov monotone rearrangement, and Newsvendor /
+    SLA quantile shifting (`underage_cost` / `overage_cost` / `target_quantile`) to ``pred``.
+
+    Returns ``(updated_df, point_source_override)`` where ``point_source_override`` is
+    ``"quantile:<q*>"`` when a Newsvendor or SLA target quantile is active, else ``None``.
+    """
+    if (
+        pred is None
+        or pred.empty
+        or output_cfg is None
+        or (output_cfg.quantiles is None and output_cfg.effective_target_quantile is None)
+    ):
+        return pred, None
+
+    from scipy.stats import norm
+
+    out = pred.copy()
+    target_qs = output_cfg.effective_quantiles
+    q_star = output_cfg.effective_target_quantile
+    z_90 = float(norm.ppf(0.9))
+
+    yh = pd.to_numeric(out["yhat"], errors="coerce").to_numpy(dtype=float)
+    yl = (
+        pd.to_numeric(out["yhat_lower"], errors="coerce").to_numpy(dtype=float)
+        if "yhat_lower" in out.columns
+        else yh.copy()
+    )
+    yu = (
+        pd.to_numeric(out["yhat_upper"], errors="coerce").to_numpy(dtype=float)
+        if "yhat_upper" in out.columns
+        else yh.copy()
+    )
+    has_qcol = "quantiles" in out.columns
+    raw_q_series = out["quantiles"].tolist() if has_qcol else [None] * len(out)
+
+    new_yh = yh.copy()
+    new_yl = yl.copy()
+    new_yu = yu.copy()
+    new_qjson: list[str] = []
+
+    for i in range(len(out)):
+        parsed_map: dict[float, float] = {}
+        raw_q = raw_q_series[i]
+        if isinstance(raw_q, str) and raw_q.strip():
+            try:
+                loaded = json.loads(raw_q)
+                if isinstance(loaded, dict):
+                    for k, v in loaded.items():
+                        if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                            parsed_map[round(float(k), 6)] = float(v)
+            except (TypeError, ValueError):
+                pass
+
+        # Anchor center and spread for any quantile not yet in parsed_map (e.g. backtest=False).
+        center = parsed_map.get(0.5, float(yh[i]) if math.isfinite(yh[i]) else 0.0)
+        lo_ref = parsed_map.get(0.1, float(yl[i]) if math.isfinite(yl[i]) else center)
+        hi_ref = parsed_map.get(0.9, float(yu[i]) if math.isfinite(yu[i]) else center)
+        sigma = (
+            max((hi_ref - lo_ref) / (2.0 * z_90), 0.0) if math.isfinite(hi_ref - lo_ref) else 0.0
+        )
+
+        for q in target_qs:
+            rq = round(float(q), 6)
+            if rq not in parsed_map and math.isfinite(center):
+                parsed_map[rq] = float(center + float(norm.ppf(rq)) * sigma)
+
+        mono_map = rearrange_monotone_quantiles(parsed_map)
+        if output_cfg.quantiles is not None:
+            keep_set = {round(float(q), 6) for q in output_cfg.quantiles}
+            if q_star is not None:
+                keep_set.add(q_star)
+            emit_map = {q: v for q, v in mono_map.items() if q in keep_set}
+        else:
+            emit_map = mono_map
+
+        if emit_map:
+            emit_qs = sorted(emit_map)
+            if output_cfg.quantiles is not None:
+                new_yl[i] = emit_map[emit_qs[0]]
+                new_yu[i] = emit_map[emit_qs[-1]]
+            if q_star is not None and q_star in mono_map:
+                new_yh[i] = mono_map[q_star]
+            new_yl[i] = min(new_yl[i], new_yh[i])
+            new_yu[i] = max(new_yu[i], new_yh[i])
+        new_qjson.append(json.dumps({str(q): v for q, v in emit_map.items()}))
+
+    out["yhat"] = new_yh
+    if "yhat_lower" in out.columns:
+        out["yhat_lower"] = new_yl
+    if "yhat_upper" in out.columns:
+        out["yhat_upper"] = new_yu
+    if has_qcol or output_cfg.quantiles is not None:
+        out["quantiles"] = pd.array(new_qjson, dtype="string")
+
+    arm_override = format_target_quantile_arm(q_star) if q_star is not None else None
+    return out, arm_override
+
+
+def has_output_constraints(output_cfg: OutputConfig | None) -> bool:
+    """Return True when ``output_cfg`` configures any physical bound or discrete rounding rule."""
+    if output_cfg is None:
+        return False
+    return (
+        output_cfg.floor is not None
+        or output_cfg.cap is not None
+        or output_cfg.floor_col is not None
+        or output_cfg.cap_col is not None
+        or output_cfg.integer_rounding != "none"
+    )
+
+
+def _cumulative_round(arr: np.ndarray) -> np.ndarray:
+    """Error-diffusion (Bresenham) cumulative rounding across the forecast horizon.
+
+    Rounds the running cumulative sum ``round(cumsum(arr))`` and takes first differences so a
+    fractional series (for example ``0.2`` units/day over 5 days) emits discrete integer units
+    (``[0, 0, 1, 0, 0]``) whose horizon total matches the unrounded cumulative demand instead of
+    collapsing to all zeros under step-by-step ``round()``. Preserves ``NaN`` entries in place.
+    """
+    out = np.asarray(arr, dtype=float).copy()
+    finite_mask = np.isfinite(out)
+    if not finite_mask.any():
+        return out
+    finite_vals = out[finite_mask]
+    cum_rounded = np.rint(np.cumsum(finite_vals))
+    out[finite_mask] = np.diff(cum_rounded, prepend=0.0)
+    return out
+
+
+def _resolve_bound_array(
+    n: int,
+    scalar_bound: float | None,
+    col_name: str | None,
+    df: pd.DataFrame,
+    bounds_df: pd.DataFrame | None,
+    *,
+    default: float,
+    combine_fn: Any,
+) -> np.ndarray:
+    """Resolve a per-step lower or upper bound array of length ``n``."""
+    bound = np.full(n, float(scalar_bound) if scalar_bound is not None else default, dtype=float)
+    if not col_name:
+        return bound
+
+    col_vals: np.ndarray | None = None
+    if col_name in df.columns:
+        col_vals = pd.to_numeric(df[col_name], errors="coerce").to_numpy(dtype=float)
+    elif bounds_df is not None and not bounds_df.empty and col_name in bounds_df.columns:
+        # Align by date column when both frames carry dates, else positional / carry-last.
+        df_date_col = (
+            "ds"
+            if "ds" in df.columns
+            else ("forecast_date" if "forecast_date" in df.columns else None)
+        )
+        b_date_col = (
+            "ds"
+            if "ds" in bounds_df.columns
+            else ("forecast_date" if "forecast_date" in bounds_df.columns else None)
+        )
+        if df_date_col is not None and b_date_col is not None:
+            b_map = (
+                bounds_df[[b_date_col, col_name]]
+                .assign(_dt=pd.to_datetime(bounds_df[b_date_col]))
+                .drop_duplicates(subset=["_dt"], keep="last")
+                .set_index("_dt")[col_name]
+            )
+            aligned = pd.to_numeric(
+                pd.to_datetime(df[df_date_col]).map(b_map), errors="coerce"
+            ).to_numpy(dtype=float)
+            if np.isfinite(aligned).any():
+                # Fill any unmatched future dates with the last finite observation in bounds_df.
+                raw_b = pd.to_numeric(bounds_df[col_name], errors="coerce").dropna()
+                fallback_val = float(raw_b.iloc[-1]) if not raw_b.empty else np.nan
+                col_vals = np.where(np.isfinite(aligned), aligned, fallback_val)
+        if col_vals is None:
+            raw_b_arr = pd.to_numeric(bounds_df[col_name], errors="coerce").to_numpy(dtype=float)
+            if len(raw_b_arr) == n:
+                col_vals = raw_b_arr
+            else:
+                finite_b = raw_b_arr[np.isfinite(raw_b_arr)]
+                if finite_b.size:
+                    col_vals = np.full(n, float(finite_b[-1]), dtype=float)
+
+    if col_vals is not None and len(col_vals) == n:
+        finite = np.isfinite(col_vals)
+        bound = np.where(finite, combine_fn(bound, col_vals), bound)
+    return bound
+
+
+def _round_array(arr: np.ndarray, mode: str) -> np.ndarray:
+    if mode == "round":
+        return np.rint(arr)
+    if mode == "ceil":
+        return np.ceil(arr)
+    if mode == "floor":
+        return np.floor(arr)
+    if mode == "cumulative_round":
+        return _cumulative_round(arr)
+    return arr
+
+
+def apply_output_constraints(
+    df: pd.DataFrame,
+    output_cfg: OutputConfig | None,
+    bounds_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Apply physical bounds (``floor``, ``cap``, ``floor_col``, ``cap_col``) and discrete
+    ``integer_rounding`` post-calibration (pure).
+
+    Crucially, ``yhat_raw`` is **never** modified: `calibrate_from_oof` estimates empirical
+    residuals from ``y_true - yhat_raw``, so leaving ``yhat_raw`` unclamped prevents one-sided
+    truncation bias in the learned residual distribution while guaranteeing that ``yhat``,
+    ``yhat_adjusted``, ``yhat_lower``, ``yhat_upper``, `` yhat_stale``, and ``quantiles`` obey
+    physical constraints before metrics or registry rows are emitted.
+    """
+    if df is None or df.empty or not has_output_constraints(output_cfg):
+        return df
+    assert output_cfg is not None
+
+    out = df.copy()
+    n = len(out)
+    lo = _resolve_bound_array(
+        n,
+        output_cfg.floor,
+        output_cfg.floor_col,
+        out,
+        bounds_df,
+        default=-np.inf,
+        combine_fn=np.maximum,
+    )
+    hi = _resolve_bound_array(
+        n,
+        output_cfg.cap,
+        output_cfg.cap_col,
+        out,
+        bounds_df,
+        default=np.inf,
+        combine_fn=np.minimum,
+    )
+    # Ensure hi >= lo if dynamic columns cross.
+    hi = np.maximum(lo, hi)
+    mode = output_cfg.integer_rounding
+
+    for col in ("yhat", "yhat_adjusted", "yhat_stale"):
+        if col in out.columns:
+            vals = pd.to_numeric(out[col], errors="coerce").to_numpy(dtype=float)
+            finite = np.isfinite(vals)
+            if finite.any():
+                clamped = np.where(finite, np.clip(vals, lo, hi), np.nan)
+                rounded = _round_array(clamped, mode)
+                out[col] = np.where(finite, np.clip(rounded, lo, hi), np.nan)
+
+    for bcol, bmode in (("yhat_lower", "floor"), ("yhat_upper", "ceil")):
+        if bcol in out.columns:
+            vals = pd.to_numeric(out[bcol], errors="coerce").to_numpy(dtype=float)
+            finite = np.isfinite(vals)
+            if finite.any():
+                clamped = np.where(finite, np.clip(vals, lo, hi), np.nan)
+                eff_mode = bmode if mode == "cumulative_round" else mode
+                rounded = _round_array(clamped, eff_mode)
+                out[bcol] = np.where(finite, np.clip(rounded, lo, hi), np.nan)
+
+    # Guarantee yhat_lower <= yhat <= yhat_upper after rounding.
+    if {"yhat", "yhat_lower", "yhat_upper"}.issubset(out.columns):
+        yh = pd.to_numeric(out["yhat"], errors="coerce").to_numpy(dtype=float)
+        yl = pd.to_numeric(out["yhat_lower"], errors="coerce").to_numpy(dtype=float)
+        yu = pd.to_numeric(out["yhat_upper"], errors="coerce").to_numpy(dtype=float)
+        both_lo = np.isfinite(yh) & np.isfinite(yl)
+        both_hi = np.isfinite(yh) & np.isfinite(yu)
+        if both_lo.any():
+            out["yhat_lower"] = np.where(both_lo, np.minimum(yl, yh), yl)
+        if both_hi.any():
+            out["yhat_upper"] = np.where(both_hi, np.maximum(yu, yh), yu)
+
+    if "quantiles" in out.columns:
+        q_mode = "round" if mode == "cumulative_round" else mode
+        new_q: list[str | None] = []
+        for idx, raw_q in enumerate(out["quantiles"]):
+            if raw_q is None or pd.isna(raw_q) or not isinstance(raw_q, str) or not raw_q.strip():
+                new_q.append(None if raw_q is None or pd.isna(raw_q) else str(raw_q))
+                continue
+            try:
+                parsed = json.loads(raw_q)
+            except (TypeError, ValueError):
+                new_q.append(raw_q)
+                continue
+            if not isinstance(parsed, dict):
+                new_q.append(raw_q)
+                continue
+            updated: dict[str, float] = {}
+            for k, v in parsed.items():
+                if isinstance(v, (int, float)) and math.isfinite(float(v)):
+                    val = float(np.clip(float(v), lo[idx], hi[idx]))
+                    if q_mode != "none":
+                        val = float(_round_array(np.array([val], dtype=float), q_mode)[0])
+                        val = float(np.clip(val, lo[idx], hi[idx]))
+                    updated[str(k)] = val
+            new_q.append(json.dumps(updated, sort_keys=True))
+        out["quantiles"] = pd.array(new_q, dtype="string")
+
+    return out
 
 
 def coverage_by_step(oof: pd.DataFrame) -> pd.DataFrame:

@@ -82,7 +82,7 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
 
 
-def _series_filter(
+def series_filter(
     cfg: RunConfig, source: str, id_expr: str, *, snapshot_millis: int | None = None
 ) -> str:
     """A ``ts_id IN (...)`` fragment for the deterministic ``series_limit`` subset (``""`` if none).
@@ -100,6 +100,9 @@ def _series_filter(
         f"{id_expr} IN (SELECT {idc} FROM `{source}`{snap} "
         f"GROUP BY {idc} ORDER BY {idc} LIMIT {limit})"
     )
+
+
+_series_filter = series_filter
 
 
 def _cutoff_expr(
@@ -181,10 +184,15 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
     """
     freq, _ = _freq(cfg)
     horizon = trained_horizon(cfg, fold=fold)
-    if model_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
+    from ..features import resolve_model_variant
+    from ..models import base_model_name
+
+    base_name = base_model_name(model_name)
+    if base_name not in _MODEL_TYPE:  # timesfm — serverless AI.FORECAST, no OPTIONS clause
         from ..models.bigquery_native import resolve_timesfm_params
 
-        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        spec = resolve_model_variant(cfg, model_name)
+        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
         tf_opts: dict[str, Any] = {
             "model_type": "TimesFM (AI.FORECAST)",
             "id_cols": [cfg.data.ts_id_col],
@@ -199,7 +207,7 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
             tf_opts["context_window"] = tf_ctx
         return tf_opts
     opts: dict[str, Any] = {
-        "model_type": _MODEL_TYPE[model_name],
+        "model_type": _MODEL_TYPE[base_name],
         "time_series_id_col": cfg.data.ts_id_col,
         "time_series_timestamp_col": cfg.data.date_col,
         "time_series_data_col": cfg.data.target_col,
@@ -316,13 +324,17 @@ def build_create_model_sql(
     The model object goes to ``registry_dataset`` (default: ``dataset``) while the training data is
     read from ``dataset`` — see `registry_of`.
     """
+    from ..features import effective_config_for_model
+    from ..models import get_model
+
+    model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = source_ref(cfg, dataset)
     # A fold model is trained for the fold's request (which reaches across the embargo), the final
     # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
     options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
     training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
-    holiday_cte = build_custom_holiday_cte(cfg)
+    holiday_cte = build_custom_holiday_cte(model_cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
         as_clause = f"AS (\n{body}\n)"
@@ -356,13 +368,17 @@ def _forecast_source(
     `backtest._forecast_validation` does on the Python side. At the default ``gap`` of 0 the two
     expressions are identical to what they were.
     """
+    from ..features import resolve_model_variant
+    from ..models import base_model_name
+
     source = source_ref(cfg, dataset)
     idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
     # The same function the CREATE MODEL reads, so a model is never asked for more than it was
     # trained to emit. Two expressions that happened to agree is how they came to disagree.
     h = horizon if horizon is not None else trained_horizon(cfg, fold=back_steps is not None)
+    base_name = base_model_name(model_name)
 
-    if model_name == "timesfm":
+    if base_name == "timesfm":
         from ..models.bigquery_native import resolve_timesfm_params
 
         where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
@@ -372,7 +388,8 @@ def _forecast_source(
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         snap = _snapshot_clause(snapshot_millis)
         inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{clause}"
-        tf_model, tf_ctx = resolve_timesfm_params(cfg.model_params.get("timesfm", {}))
+        spec = resolve_model_variant(cfg, model_name)
+        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
         extra = ""
         if tf_model is not None:
             extra += f",\n    model => '{tf_model}'"
@@ -398,6 +415,16 @@ _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
     "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at"
 )
+
+
+def _sql_clamp_expr(expr: str, floor_val: float | None, cap_val: float | None) -> str:
+    """Wrap SQL ``expr`` in ``GREATEST`` / ``LEAST`` when physical bounds are configured."""
+    out = expr
+    if cap_val is not None:
+        out = f"LEAST({out}, {float(cap_val)})"
+    if floor_val is not None:
+        out = f"GREATEST({out}, {float(floor_val)})"
+    return out
 
 
 def build_forecast_insert_sql(
@@ -426,7 +453,10 @@ def build_forecast_insert_sql(
     BigQuery ML applies no bias correction, so this engine has one arm and the three columns are
     genuinely the same number — writing it out is what keeps ``yhat_raw`` meaning "the model's own
     output" for every row in the table, rather than "the model's own output, unless a native model
-    wrote the row, in which case NULL".
+    wrote the row, in which case NULL". When ``output.floor``, ``output.cap``, or
+    ``output.integer_rounding`` is configured, ``yhat``, ``yhat_adjusted``, ``yhat_lower``, and
+    ``yhat_upper`` are clamped and rounded in SQL while ``yhat_raw`` preserves the raw
+    ``forecast_value``.
     """
     dataset_q = f"`{registry_of(dataset, registry_dataset)}.forecast_predictions`"
     forecast = _forecast_source(
@@ -436,15 +466,63 @@ def build_forecast_insert_sql(
         registry_dataset=registry_dataset,
         snapshot_millis=snapshot_millis,
     )
+    idc = cfg.data.ts_id_col
+    fl = cfg.output.floor
+    cp = cfg.output.cap
+    rmode = cfg.output.integer_rounding
+    if fl is None and cp is None and rmode == "none":
+        return (
+            f"INSERT INTO {dataset_q}\n"
+            f"  ({_PRED_COLS})\n"
+            f"SELECT\n"
+            f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
+            f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
+            f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+            f"  CURRENT_TIMESTAMP()\n"
+            f"FROM {forecast};"
+        )
+
+    val_c = _sql_clamp_expr("forecast_value", fl, cp)
+    lo_c = _sql_clamp_expr("prediction_interval_lower_bound", fl, cp)
+    hi_c = _sql_clamp_expr("prediction_interval_upper_bound", fl, cp)
+    if rmode == "none":
+        yhat_r, lo_r, hi_r = "_val_c", "_lo_c", "_hi_c"
+    elif rmode in ("round", "ceil", "floor"):
+        fn = rmode.upper()
+        yhat_r, lo_r, hi_r = f"{fn}(_val_c)", f"{fn}(_lo_c)", f"{fn}(_hi_c)"
+    else:
+        yhat_r = _sql_clamp_expr(
+            f"ROUND(SUM(_val_c) OVER (PARTITION BY {idc} ORDER BY forecast_timestamp)) "
+            f"- COALESCE(ROUND(SUM(_val_c) OVER (PARTITION BY {idc} ORDER BY forecast_timestamp "
+            f"ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)), 0.0)",
+            fl,
+            cp,
+        )
+        lo_r, hi_r = "ROUND(_lo_c)", "ROUND(_hi_c)"
+
     return (
         f"INSERT INTO {dataset_q}\n"
         f"  ({_PRED_COLS})\n"
         f"SELECT\n"
-        f"  @run_id, {cfg.data.ts_id_col}, '{model_name}', 'bigquery',\n"
-        f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
-        f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+        f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
+        f"  DATE(forecast_timestamp), _yhat_r, forecast_value, _yhat_r,\n"
+        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,\n"
         f"  CURRENT_TIMESTAMP()\n"
-        f"FROM {forecast};"
+        f"FROM (\n"
+        f"  SELECT\n"
+        f"    {idc}, forecast_timestamp, forecast_value,\n"
+        f"    {yhat_r} AS _yhat_r,\n"
+        f"    {lo_r} AS _lo_r,\n"
+        f"    {hi_r} AS _hi_r\n"
+        f"  FROM (\n"
+        f"    SELECT\n"
+        f"      {idc}, forecast_timestamp, forecast_value,\n"
+        f"      {val_c} AS _val_c,\n"
+        f"      {lo_c} AS _lo_c,\n"
+        f"      {hi_c} AS _hi_c\n"
+        f"    FROM {forecast}\n"
+        f"  )\n"
+        f");"
     )
 
 
@@ -602,8 +680,10 @@ def build_setup_statements(
     ``back_steps``) and the read-back eval (`build_eval_query`) are *not* here — this renders
     only the always-run true-future path.
     """
+    from ..models import base_model_name
+
     statements: list[str] = []
-    if model_name in _MODEL_TYPE:
+    if base_model_name(model_name) in _MODEL_TYPE:
         statements.append(
             build_create_model_sql(
                 cfg,
@@ -640,7 +720,9 @@ def build_fold_create_statements(
     TimesFM needs no model object — its fold forecast reads the ``ds <= cutoff`` history directly in
     `build_eval_query` — so it has no fold-training statement.
     """
-    if model_name in _MODEL_TYPE:
+    from ..models import base_model_name
+
+    if base_model_name(model_name) in _MODEL_TYPE:
         return [
             build_create_model_sql(
                 cfg,
@@ -673,7 +755,9 @@ def build_fold_drop_statements(
     ``IF EXISTS`` keeps the drop safe if a fold's CREATE failed. TimesFM trains no object, so
     nothing to drop.
     """
-    if model_name in _MODEL_TYPE:
+    from ..models import base_model_name
+
+    if base_model_name(model_name) in _MODEL_TYPE:
         ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
         return [f"DROP MODEL IF EXISTS {ref};"]
     return []

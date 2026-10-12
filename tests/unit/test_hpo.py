@@ -311,3 +311,51 @@ def test_score_params_uses_fit_panel_for_global_training_mode() -> None:
 
     assert panel_calls == [2, 2]  # 2 folds, each fitting across the 2-series panel
     assert np.isfinite(score)
+
+
+def test_variant_pins_preserved_under_hpo() -> None:
+    from scale_forecasting.worker import run_cell
+
+    cfg = _cfg(
+        models=["croston@classic", "croston@tsb"],
+        model_params={
+            "croston@classic": {"variant": "classic"},
+            "croston@tsb": {"variant": "tsb"},
+        },
+        backtest={"enabled": True, "n_folds": 2, "horizon": 7, "step": 7, "min_train": 60},
+        hpo={"enabled": True, "n_trials": 2, "granularity": "fleetwide"},
+    )
+    s = _series("s0", n=120)
+    rng = np.random.default_rng(11)
+    s.loc[rng.random(len(s)) < 0.45, "y"] = 0.0
+
+    fleet = resolve_fleetwide([s], cfg)
+    assert fleet["croston@classic"]["variant"] == "classic"
+    assert fleet["croston@tsb"]["variant"] == "tsb"
+
+    r_classic = run_cell(s, "croston@classic", cfg, params=fleet["croston@classic"])
+    r_tsb = run_cell(s, "croston@tsb", cfg, params=fleet["croston@tsb"])
+    assert r_classic.best_params["variant"] == "classic"
+    assert r_tsb.best_params["variant"] == "tsb"
+    assert not np.allclose(r_classic.predictions["yhat_raw"], r_tsb.predictions["yhat_raw"])
+
+
+def test_lag_forecaster_direct_strategy_and_custom_lags() -> None:
+    from scale_forecasting.worker import run_cell
+
+    cfg = _cfg(
+        models=["regression_lags", "regression_lags@direct"],
+        model_params={
+            "regression_lags@direct": {"strategy": "direct", "lags": [1, 2, 7]},
+        },
+        backtest={"enabled": False},
+        hpo={"enabled": False},
+    )
+    s = _series("s0", n=90)
+    r_rec = run_cell(s, "regression_lags", cfg)
+    r_dir = run_cell(s, "regression_lags@direct", cfg)
+    assert r_rec.status == "ok" and r_dir.status == "ok"
+    assert not np.allclose(r_rec.predictions["yhat_raw"], r_dir.predictions["yhat_raw"])
+    assert "lag_7" in r_dir.diagnostics["feature_attributions"]
+    assert "lag_28" not in r_dir.diagnostics["feature_attributions"]
+    assert r_dir.explanations is not None and all(e is not None for e in r_dir.explanations)
