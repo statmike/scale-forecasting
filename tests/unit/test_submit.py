@@ -942,6 +942,58 @@ def test_extract_job_telemetry_full_batch() -> None:
     assert tel["container_image"].endswith("spark-runtime:latest")
     assert tel["service_account"] == "compute@p.iam.gserviceaccount.com"
     assert tel["subnetwork_uri"].endswith("/subnetworks/sf")
+    # No `state_history` on this fake → the batch is not known to have reached RUNNING, so the
+    # split is honest Nones while the create→terminal wall still reads.
+    assert tel["provision_s"] is None
+    assert tel["execute_s"] is None
+
+
+def _state_entry(name: str, epoch: float) -> Any:
+    state = type("S", (), {"name": name})()
+    return type("H", (), {"state": state, "state_start_time": _FakeTs(epoch)})()
+
+
+def test_extract_job_telemetry_splits_the_wall_at_the_running_transition() -> None:
+    """``provision_s`` is create→RUNNING and ``execute_s`` is RUNNING→terminal, read off the
+    batch's ``state_history`` (Dataproc keeps the *previous* states there)."""
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
+
+    class _Ran(_FakeBatch):
+        state_history: ClassVar[list[Any]] = [
+            _state_entry("PENDING", 1_000_000.0),
+            _state_entry("RUNNING", 1_000_200.0),
+        ]
+
+    tel = extract_job_telemetry(_Ran())
+    assert tel["provision_s"] == 200.0
+    assert tel["execute_s"] == 362.0
+    assert tel["total_wall_s"] == 562.0
+
+
+def test_extract_job_telemetry_reports_no_phases_for_a_batch_that_never_ran() -> None:
+    """A batch that failed in PENDING has no RUNNING entry: provision and execute are None rather
+    than a zero that would read as 'instant'."""
+    from scale_forecasting.batch_telemetry import extract_job_telemetry
+
+    class _Stuck(_FakeBatch):
+        state_history: ClassVar[list[Any]] = [_state_entry("PENDING", 1_000_000.0)]
+
+    tel = extract_job_telemetry(_Stuck())
+    assert tel["provision_s"] is None
+    assert tel["execute_s"] is None
+    assert tel["total_wall_s"] == 562.0
+
+
+def test_platform_phases_is_the_shared_three_point_split() -> None:
+    """The pure helper the Vertex probe reuses: each figure independently None on a missing
+    timestamp, so a job that never started reports no execute time rather than a negative one."""
+    from scale_forecasting.batch_telemetry import PLATFORM_PHASE_KEYS, platform_phases
+
+    full = platform_phases(_FakeTs(0.0), _FakeTs(45.0), _FakeTs(145.0))
+    assert full == {"provision_s": 45.0, "execute_s": 100.0, "total_wall_s": 145.0}
+    assert tuple(full) == PLATFORM_PHASE_KEYS
+    never_started = platform_phases(_FakeTs(0.0), None, _FakeTs(30.0))
+    assert never_started == {"provision_s": None, "execute_s": None, "total_wall_s": 30.0}
 
 
 def test_the_batch_echo_does_not_pretend_to_know_the_executed_fan_out() -> None:

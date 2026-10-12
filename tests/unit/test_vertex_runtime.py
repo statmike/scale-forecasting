@@ -450,19 +450,40 @@ def test_vertex_probe_check_and_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cancel_res.stopped is True
     assert fake_client.cancelled == ["projects/p/locations/us-central1/customJobs/999"]
 
-    # 5. Cancel already-succeeded job
+    # A running job has no end_time yet: provision reads, execute is an honest None.
+    class _Ts:
+        def __init__(self, epoch: float) -> None:
+            self._epoch = epoch
+
+        def timestamp(self) -> float:
+            return self._epoch
+
+    fake_job.create_time = _Ts(1_000.0)
+    fake_job.start_time = _Ts(1_075.0)
+    fake_job.end_time = None
+    running_phases = probe.check(
+        ProbeHandle(
+            "vertex",
+            native_id="projects/p/locations/us-central1/customJobs/999",
+            region="us-central1",
+        ),
+        settings=settings,
+    ).telemetry
+    assert running_phases == {"provision_s": 75.0, "execute_s": None, "total_wall_s": None}
+
+    # 5. Cancel already-succeeded job — and a finished job carries the full split.
     fake_job.state = SimpleNamespace(name="JOB_STATE_SUCCEEDED")
-    assert (
-        probe.check(
-            ProbeHandle(
-                "vertex",
-                native_id="projects/p/locations/us-central1/customJobs/999",
-                region="us-central1",
-            ),
-            settings=settings,
-        ).native_state
-        == NATIVE_SUCCEEDED
+    fake_job.end_time = _Ts(1_375.0)
+    done = probe.check(
+        ProbeHandle(
+            "vertex",
+            native_id="projects/p/locations/us-central1/customJobs/999",
+            region="us-central1",
+        ),
+        settings=settings,
     )
+    assert done.native_state == NATIVE_SUCCEEDED
+    assert done.telemetry == {"provision_s": 75.0, "execute_s": 300.0, "total_wall_s": 375.0}
     cancel_done = probe.cancel(
         ProbeHandle(
             "vertex",

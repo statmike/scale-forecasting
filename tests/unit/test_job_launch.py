@@ -20,6 +20,7 @@ import pytest
 
 from scale_forecasting import dag, job_launch
 from scale_forecasting.config import RunConfig
+from scale_forecasting.errors import ConfigError
 from scale_forecasting.settings import Settings
 
 # Model names by runtime: theta is a Python/Spark model; arima_plus / timesfm are the
@@ -71,6 +72,9 @@ def _fake_job_lifecycle(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         yield fin
 
     monkeypatch.setattr(lifecycle, "run_job", _fake_run_job)
+    # The post-launch timing read goes through the runtime probe (a network call); the dispatch
+    # tests are about what is *sent*, so it is pinned silent here and tested on its own below.
+    monkeypatch.setattr(job_launch, "_platform_phases", lambda handle, settings: None)
     return seen
 
 
@@ -165,6 +169,92 @@ def test_launch_family_job_stamps_real_id_when_submitter_returns_one(
             "spark_mode": "cluster",
         }
     }
+
+
+def test_launch_family_job_files_platform_phases_when_the_probe_has_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished job's provision/execute split lands under ``$.platform`` on the row — as a
+    merge beside the probe handle, never replacing it."""
+    import scale_forecasting.submitters as submitters_mod
+    from scale_forecasting.probes.vocabulary import ProbeHandle
+
+    seen = _fake_job_lifecycle(monkeypatch)
+    phases = {"provision_s": 42.0, "execute_s": 118.5, "total_wall_s": 160.5}
+    monkeypatch.setattr(job_launch, "_platform_phases", lambda handle, settings: dict(phases))
+
+    class _Submitter:
+        def launch(self, cfg: RunConfig, **kw: Any) -> ProbeHandle:
+            return ProbeHandle("vertex", native_id=kw["system_job_id"], region="us-central1")
+
+    monkeypatch.setattr(submitters_mod, "get_submitter", lambda runtime: _Submitter())
+    cfg = _cfg(models=[_SPARK], python_runtime="vertex")
+    job = dag.plan_dag(cfg).python_jobs[0]
+    job_launch.launch_family_job(cfg, job, "rid-0", _SETTINGS)
+
+    assert seen["fin"].telemetry["platform"] == phases
+    assert "probe_handle" in seen["fin"].telemetry  # the merge kept the handle
+
+
+def test_platform_phases_reads_the_phase_keys_off_the_runtime_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.probes import runtimes as probes_mod
+    from scale_forecasting.probes.vocabulary import ProbeHandle, ProbeResult
+
+    class _Probe:
+        def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+            return ProbeResult(
+                "SUCCEEDED",
+                exists=True,
+                telemetry={
+                    "provision_s": 30.0,
+                    "execute_s": 90.0,
+                    "total_wall_s": 120.0,
+                    "executor_cores": 4,  # the rest of the Spark overlay is not re-filed here
+                },
+            )
+
+    monkeypatch.setattr(probes_mod, "get_probe", lambda runtime: _Probe())
+    handle = ProbeHandle("spark", native_id="sf-x", region="us-central1")
+    assert job_launch._platform_phases(handle, _SETTINGS) == {
+        "provision_s": 30.0,
+        "execute_s": 90.0,
+        "total_wall_s": 120.0,
+    }
+
+
+def test_platform_phases_files_nothing_when_the_probe_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that degraded (no telemetry), one with only nulls, and an unknown runtime all
+    answer None — so the row never carries an empty ``$.platform`` block."""
+    from scale_forecasting.probes import runtimes as probes_mod
+    from scale_forecasting.probes.vocabulary import ProbeHandle, ProbeResult
+
+    handle = ProbeHandle("ray", native_id="sub-1", region="us-central1")
+
+    class _Silent:
+        def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+            return ProbeResult("UNKNOWN", exists=True)
+
+    monkeypatch.setattr(probes_mod, "get_probe", lambda runtime: _Silent())
+    assert job_launch._platform_phases(handle, _SETTINGS) is None
+
+    class _Nulls:
+        def check(self, handle: ProbeHandle, *, settings: Settings) -> ProbeResult:
+            return ProbeResult(
+                "SUCCEEDED", exists=True, telemetry={"provision_s": None, "execute_s": None}
+            )
+
+    monkeypatch.setattr(probes_mod, "get_probe", lambda runtime: _Nulls())
+    assert job_launch._platform_phases(handle, _SETTINGS) is None
+
+    def _unknown(runtime: str) -> Any:
+        raise ConfigError(f"no probe for {runtime}")
+
+    monkeypatch.setattr(probes_mod, "get_probe", _unknown)
+    assert job_launch._platform_phases(handle, _SETTINGS) is None
 
 
 def test_launch_family_job_dispatches_ray_for_ray_family(

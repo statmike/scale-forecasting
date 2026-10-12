@@ -47,6 +47,7 @@ from .errors import (
 )
 from .hardware import spark_executor_env
 from .job_wait import wait_for_job
+from .registry.tables import bigquery_client
 from .staging import stage_code, stage_config
 
 if TYPE_CHECKING:
@@ -205,14 +206,13 @@ def _estimated_series(
     """
     if cfg.data.series_limit is not None:
         return None
-    from google.cloud import bigquery
 
     from .engines.bigquery_names import source_ref
 
     table = source_ref(cfg, settings.dataset_ref)
     sql = f"SELECT APPROX_COUNT_DISTINCT(`{cfg.data.ts_id_col}`) AS n FROM `{table}`"
     try:
-        rows = list(bigquery.Client(project=settings.project_id).query(sql).result())
+        rows = list(bigquery_client(settings.project_id).query(sql).result())
     except Exception as exc:  # noqa: BLE001 - an estimate is an optimisation, not a precondition
         _log.warning("could not estimate the series count (%s); sizing off max_parallelism", exc)
         return None

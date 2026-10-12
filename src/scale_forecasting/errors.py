@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 
 
 class ScaleForecastError(Exception):
@@ -72,7 +73,7 @@ class MissingExtraError(ScaleForecastError, ImportError):
 
     Both a `ScaleForecastError` and an ``ImportError``, so ``except ScaleForecastError`` and the
     idiomatic ``except ImportError`` each catch it. The message is the fix: the ``pip install``
-    line naming the extra. Raised by `require_extra`.
+    line naming the extra. Raised by `require_extra` and `require_modules`.
     """
 
 
@@ -112,6 +113,26 @@ def is_importable(module: str) -> bool:
         return False
 
 
+def require_modules(modules: Sequence[str], *, extra: str, purpose: str) -> None:
+    """Raise `MissingExtraError` naming ``extra``'s install line unless every module imports.
+
+    The narrow form of `require_extra`: a code path that imports two of an extra's modules asks for
+    those two, not for the whole extra. The distinction matters inside a running job — a Dataproc
+    or Vertex worker reaches BigQuery for the registry without ever holding the *launch* clients
+    (`google.cloud.dataproc_v1`, `google.cloud.aiplatform`) that the same ``[gcp]`` extra installs
+    on the launcher, and a whole-extra probe there would fail a healthy worker for a package it
+    never imports. `registry.tables.bigquery_client` is that caller.
+    """
+    missing = [m for m in modules if not is_importable(m)]
+    if missing:
+        raise MissingExtraError(
+            f"{purpose} needs the '{extra}' extra, which is not installed "
+            f"(missing: {', '.join(missing)}). Install it with:\n"
+            f'    pip install "scale-forecasting[{extra}]"\n'
+            f"or, from a clone, `uv sync --extra {extra}`."
+        )
+
+
 def require_extra(extra: str, *, purpose: str) -> None:
     """Raise `MissingExtraError` naming the install command unless ``extra`` is installed.
 
@@ -121,16 +142,10 @@ def require_extra(extra: str, *, purpose: str) -> None:
     `main.run` would otherwise die on ``ModuleNotFoundError: No module named 'google'`` somewhere
     below the registry. This is called once at each entry point that needs the extra — `main.run`,
     the `Forecaster`, the CLI mains, the plotting helpers — with ``purpose`` saying what the caller
-    was trying to do, so the failure is one sentence with the fix in it.
+    was trying to do, so the failure is one sentence with the fix in it. It probes every module the
+    extra installs; a path that needs only some of them uses `require_modules`.
     """
-    missing = [m for m in EXTRA_MODULES[extra] if not is_importable(m)]
-    if missing:
-        raise MissingExtraError(
-            f"{purpose} needs the '{extra}' extra, which is not installed "
-            f"(missing: {', '.join(missing)}). Install it with:\n"
-            f'    pip install "scale-forecasting[{extra}]"\n'
-            f"or, from a clone, `uv sync --extra {extra}`."
-        )
+    require_modules(EXTRA_MODULES[extra], extra=extra, purpose=purpose)
 
 
 PACKAGE_LOGGER = "scale_forecasting"

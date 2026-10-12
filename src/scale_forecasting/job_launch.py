@@ -128,6 +128,28 @@ def _capacity_publisher(
     return publish
 
 
+def _platform_phases(handle: ProbeHandle, settings: Settings) -> dict[str, float | None] | None:
+    """The finished job's provision / execute split, read through its runtime probe.
+
+    One ``get_probe(handle.runtime).check(handle)`` after the submitter returns — the job is
+    terminal by then, so the probe's telemetry carries the platform's own three timestamps
+    (`batch_telemetry.platform_phases`: a Dataproc batch's ``RUNNING`` transition, a Vertex
+    ``CustomJob``'s ``start_time``). Only the phase keys are kept; the rest of the Spark probe's
+    overlay already lands on the header via `batch_telemetry._stamp_job_telemetry`. ``None`` when
+    the probe degraded or the runtime reports no timings (Ray, GCE, GKE today), so nothing is
+    filed rather than a block of nulls. Advisory like the probe underneath it: never raises.
+    """
+    from .batch_telemetry import PLATFORM_PHASE_KEYS
+    from .probes.runtimes import get_probe
+
+    try:
+        telemetry = get_probe(handle.runtime).check(handle, settings=settings).telemetry or {}
+    except Exception:  # noqa: BLE001 - a timing overlay must never fail a job that already ran
+        return None
+    phases = {k: telemetry.get(k) for k in PLATFORM_PHASE_KEYS}
+    return phases if any(v is not None for v in phases.values()) else None
+
+
 def _entry_handle(
     cfg: RunConfig,
     run_id: str,
@@ -462,6 +484,13 @@ def launch_family_job(
             if handle.native_id != system_job_id:
                 fields["system_job_id"] = handle.native_id
             fin.finalize(telemetry={"probe_handle": handle.to_blob()}, **fields)
+            # How long did the platform take to stand the job up, versus how long did the work
+            # run? One probe read of the finished job (`_platform_phases`), filed under
+            # ``$.platform`` so `v_run_jobs` can show ``provision_seconds`` beside
+            # ``execute_seconds``. A runtime whose probe carries no timings files nothing.
+            phases = _platform_phases(handle, settings)
+            if phases:
+                fin.finalize(telemetry={"platform": phases})
         # Did the accelerator this job paid for do anything? `launch` blocks until the job
         # finishes, so by here the family's cells are written and the question is answerable —
         # from the driver, off one aggregate, for every runtime alike. A CPU family short-circuits

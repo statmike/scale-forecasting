@@ -28,7 +28,7 @@ from .params import (
     telemetry_merge_params,
 )
 from .rows import assemble_header_row
-from .tables import resolve_settings
+from .tables import bigquery_client, resolve_settings
 
 if TYPE_CHECKING:
     from ..config import RunConfig
@@ -59,10 +59,9 @@ def resolve_snapshot_millis(
     Best-effort: on any failure it logs and returns ``None`` (the reads fall back to unpinned rather
     than failing the run). Kept out of the config so it never perturbs the config-derived run_id.
     """
-    from google.cloud import bigquery
 
     resolved = resolve_settings(settings)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(client.query("SELECT UNIX_MILLIS(CURRENT_TIMESTAMP()) AS ms").result())
         return int(rows[0]["ms"]) - _SNAPSHOT_SAFETY_MARGIN_MS
@@ -95,7 +94,7 @@ def snapshot_millis_for(
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -151,7 +150,7 @@ def write_header(
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     params = [header_param(col, row[col]) for col in columns]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # re-raised with context
@@ -250,7 +249,7 @@ def update_header(
     params.append(header_param("run_id", run_id))
     if unless_status_in:
         params.append(_status_guard_param(unless_status_in))
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # re-raised with context
@@ -331,7 +330,7 @@ def merge_header_telemetry(
     resolved = resolve_settings(settings)
     sql = render_header_telemetry_merge(resolved.registry_table_ref("run_registry"), list(patch))
     params.append(header_param("run_id", run_id))
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     except Exception as exc:  # re-raised with context
@@ -359,7 +358,7 @@ def header_status(
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()

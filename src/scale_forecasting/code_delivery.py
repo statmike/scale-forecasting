@@ -77,7 +77,8 @@ def build_package_zip() -> tuple[bytes, str]:
         for path in sorted(_PKG_ROOT.rglob("*.py")):
             zf.write(path, arcname=str(path.relative_to(_SRC_DIR)))
     data = buf.getvalue()
-    code_hash = hashlib.md5(data).hexdigest()[:8]  # non-crypto object-name tag
+    # `usedforsecurity=False`: a content-address tag, not a digest — keeps FIPS-mode hosts happy.
+    code_hash = hashlib.md5(data, usedforsecurity=False).hexdigest()[:8]
     return data, code_hash
 
 

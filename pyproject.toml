@@ -3,11 +3,15 @@ name = "scale-forecasting"
 version = "1.0.0"
 description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
 readme = "README.md"
-# 3.11 is the single tested/supported version everywhere: Vertex Ray client↔cluster parity at 2.47,
-# the Dataproc packed-venv is built against 3.11, and notebook 01's interactive Spark Connect path
-# runs on Dataproc runtime 2.3 — whose workers are ALSO 3.11, so driver↔worker parity holds on the
-# one sf-main (py3.11) template. No Python 3.12 anywhere, so the ceiling is <3.12.
-requires-python = ">=3.11,<3.12"
+# Two different pins, on purpose. `requires-python` is what *the package* installs on: the pure
+# layer (models, metrics, backtests, the playground) and the clients run on 3.11 and 3.12, and the
+# CI `core-install` job proves the bare install on each; 3.13 waits on the numpy<2 pin below (1.26
+# ships no cp313 wheel). `.python-version` (3.11.15) is what *the
+# cloud stack* runs on, and it stays at 3.11 for parity reasons that have nothing to do with the
+# package: the Vertex Ray cluster image is 3.11-only, the Dataproc packed-venv and runtime
+# container are built against it, and notebook 03's Spark Connect path pickles closures from the
+# sf-main (py3.11) kernel onto Dataproc runtime 2.3 workers that are also 3.11 (docs/version_matrix.md).
+requires-python = ">=3.11,<3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "scale-forecasting contributors" }]
 keywords = [
@@ -31,6 +35,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
@@ -254,6 +259,18 @@ environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+
+# The public index, declared explicitly as the default. `uv.lock` records the URL every package
+# was resolved from, and uv lets a user- or system-level `uv.toml` substitute a private mirror as
+# the default index — on such a machine a re-lock would write that mirror's hostname into the
+# committed lock a thousand times over (it did, once; CI could not fetch from it and the hostname
+# had no business in a public repository). A project-level default outranks both config files, so
+# the lock reads the same on every machine. `tests/unit/test_packaging_extras.py` holds every URL
+# in the lock to the public hosts.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
 
 [[tool.uv.index]]
 name = "pytorch-cu126"

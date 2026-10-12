@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 from . import retry_policy
 from .errors import get_logger
 from .registry.ids import base_family, is_repair_family
+from .registry.tables import bigquery_client
 from .retry_policy import (
     CellState,
     FamilyState,
@@ -360,7 +361,6 @@ def _expected_series(
     say why, not fail. Both failure modes return ``(None, <why>)`` and the plan then contains no
     never-ran cells at all.
     """
-    from google.cloud import bigquery
 
     from .engines.bigquery_sql import build_series_count_query
     from .registry.header import snapshot_millis_for
@@ -375,7 +375,7 @@ def _expected_series(
         return None, "run header carries no input snapshot; never-ran cells NOT counted"
     sql = build_series_count_query(cfg, resolved.dataset_ref, snapshot_millis=millis)
     try:
-        rows = list(bigquery.Client(project=resolved.project_id).query(sql).result())
+        rows = list(bigquery_client(resolved.project_id).query(sql).result())
         n = int(rows[0]["n_series"])
     except Exception as exc:  # noqa: BLE001 - as above
         return None, f"source count failed ({exc}); never-ran cells NOT counted"

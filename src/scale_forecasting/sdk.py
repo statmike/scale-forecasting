@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from .config import Fanout, RunConfig, Workload, estimate_workload, load_config
 from .errors import get_logger
 from .registry.ids import make_run_id
+from .registry.tables import bigquery_client
 from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
 
@@ -1302,8 +1303,6 @@ class Forecaster:
         panel = data
         if panel is None and run_id is not None:
             try:
-                from google.cloud import bigquery
-
                 from .engines.bigquery_names import source_ref
                 from .engines.bigquery_sql import series_filter
                 from .registry.reads import resolve_settings
@@ -1314,7 +1313,7 @@ class Forecaster:
                 sfilter = series_filter(self._config, source, idc)
                 where_clause = f" WHERE {sfilter}" if sfilter else ""
                 sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
-                client = bigquery.Client(project=resolved.project_id)
+                client = bigquery_client(resolved.project_id)
                 df = client.query(sql).to_dataframe()
                 if not df.empty:
                     panel = df

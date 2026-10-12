@@ -8,7 +8,7 @@ For the full architectural invariants and co-update rules, read [`AGENTS.md`](./
 
 ## 1. Development setup
 
-`scale-forecasting` targets **Python 3.11** (`>=3.11,<3.12`) and manages dependencies with [`uv`](https://docs.astral.sh/uv/).
+`scale-forecasting` installs on **Python 3.11–3.12** (`requires-python = ">=3.11,<3.13"`; CI proves the bare install on each) and develops on **3.11.15** (`.python-version`, the interpreter the cloud stack is pinned to — see [docs/version_matrix.md](./docs/version_matrix.md)). Dependencies are managed with [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/statmike/scale-forecasting.git

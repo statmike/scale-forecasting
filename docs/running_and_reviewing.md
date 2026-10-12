@@ -235,10 +235,13 @@ Serverless echo, NULL for a run that submitted no Serverless batch. Column by co
 
 For the **per-family** breakdown — which family ran on which runtime/hardware, its platform job id,
 status, and per-job wall-clock — query `v_run_jobs` (one row per `(run_id, family)`, plus the
-ensemble node):
+ensemble node). `provision_seconds` / `execute_seconds` split `runtime_seconds` the way the platform
+saw it (capacity stand-up versus the work itself; Dataproc Serverless and Vertex `CustomJob`
+families), so a family whose provisioning dominates is visible as such:
 
 ```sql
-SELECT family, runtime, hardware, system_job_id, status, runtime_seconds
+SELECT family, runtime, hardware, system_job_id, status,
+       runtime_seconds, provision_seconds, execute_seconds
 FROM `PROJECT.DATASET.v_run_jobs` WHERE run_id = 'YOUR_RUN_ID';
 ```
 

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from .params import header_param
 from .rows import METRIC_COLUMNS
-from .tables import resolve_settings
+from .tables import bigquery_client, resolve_settings
 
 if TYPE_CHECKING:
     from ..settings import Settings
@@ -83,7 +83,7 @@ def read_run_summary(
     resolved = resolve_settings(settings)
     sql = f"SELECT * FROM `{resolved.registry_table_ref('v_run_summary')}` WHERE run_id=@run_id"
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -111,7 +111,7 @@ def read_leaderboard(
         "WHERE run_id=@run_id ORDER BY mean_wape ASC NULLS LAST"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -141,7 +141,7 @@ def read_prediction_counts(
         "WHERE run_id=@run_id GROUP BY model_type"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -197,7 +197,7 @@ def read_cell_groups(
         "GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -240,7 +240,7 @@ def read_cell_timing(
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -273,7 +273,7 @@ def read_run_config(
         "WHERE run_id=@run_id ORDER BY created_at DESC LIMIT 1"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -315,7 +315,7 @@ def read_progress(
         "FROM deduped GROUP BY model_type, ensemble_id"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -363,7 +363,7 @@ def read_metric_aggregates(
         "FROM deduped GROUP BY model_type, ensemble_id"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -403,7 +403,7 @@ def read_cell_metrics(
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -458,7 +458,7 @@ def read_arm_comparison(
         "FROM deduped GROUP BY model_type ORDER BY model_type"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -500,7 +500,7 @@ def read_coverage_by_step(
         "GROUP BY model_type, horizon_step ORDER BY model_type, horizon_step"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -530,7 +530,7 @@ def read_backtest_coverage(
         "ORDER BY model_type, ensemble_id NULLS FIRST, n_folds_achieved DESC NULLS LAST"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -559,7 +559,7 @@ def read_comparable_leaderboard(
         "WHERE run_id=@run_id ORDER BY pooled_wape ASC NULLS LAST"
     )
     params = [header_param("run_id", run_id)]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -611,7 +611,7 @@ def read_predictions(
         "ORDER BY created_at DESC NULLS LAST) = 1 "
         "ORDER BY ts_id, model_type, forecast_date LIMIT @limit"
     )
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -661,7 +661,7 @@ def read_oof(
         "ORDER BY created_at DESC NULLS LAST) = 1 "
         "ORDER BY ts_id, model_type, fold_id, forecast_date LIMIT @limit"
     )
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -698,7 +698,7 @@ def read_series_history(
     resolved = resolve_settings(settings)
     base_sql = build_history_query(cfg, resolved.registry_dataset_ref).rstrip().rstrip(";")
     if cfg.hierarchy.enabled:
-        client = bigquery.Client(project=resolved.project_id)
+        client = bigquery_client(resolved.project_id)
         try:
             df = client.query(base_sql).result().to_dataframe()
         except Exception as exc:  # re-raised with context
@@ -737,7 +737,7 @@ def read_series_history(
         "QUALIFY ROW_NUMBER() OVER (PARTITION BY ts_id ORDER BY ds DESC) <= @tail "
         "ORDER BY ts_id, ds"
     )
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -778,7 +778,7 @@ def read_best_params(
         bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
         bigquery.ScalarQueryParameter("limit", "INT64", limit),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -813,7 +813,7 @@ def read_recent_runs(
     params: list[Any] = [bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit))]
     if status is not None:
         params.append(bigquery.ScalarQueryParameter("status", "STRING", status))
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
@@ -863,7 +863,7 @@ def read_series_covariates(
         bigquery.ScalarQueryParameter("ts_id", "STRING", ts_id),
         bigquery.ScalarQueryParameter("tail", "INT64", max(1, history_tail)),
     ]
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = [
             dict(r)
@@ -961,7 +961,7 @@ def read_feature_attributions(
             "ORDER BY ts_id, model_type LIMIT @limit"
         )
 
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     try:
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()

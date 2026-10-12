@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 
 from .._infra_args import add_infra_args, export_infra_env
 from ..errors import configure_cli_logging, get_logger, require_extra
+from ..registry.tables import bigquery_client
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -239,13 +240,12 @@ def _clear_existing(settings: Settings, table_name: str, *, iceberg: bool) -> No
     DELETE-d during that window (use ``--write-method indirect`` or wait it out). A no-op on the
     first seed (empty table).
     """
-    from google.cloud import bigquery
 
     from ..errors import RegistryError
 
     table = settings.table_ref(table_name)
     stmt = f"DELETE FROM `{table}` WHERE TRUE" if iceberg else f"TRUNCATE TABLE `{table}`"
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     try:
         client.query(stmt).result()
     except Exception as exc:  # re-raised with table context
@@ -282,7 +282,6 @@ def _ensure_covariate_tables(
     targets: tuple[tuple[str, bool], ...],
 ) -> None:
     """Create the 10-column covariate + hierarchy source tables if they do not yet exist."""
-    from google.cloud import bigquery
 
     dataset = f"{settings.project_id}.{settings.dataset_id}"
     body = """\
@@ -299,7 +298,7 @@ CREATE TABLE IF NOT EXISTS `{dataset}.{table}` (
   temperature  FLOAT64
 )
 """
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     for table_name, is_iceberg in targets:
         if is_iceberg:
             storage_uri = f"{settings.warehouse_uri.rstrip('/')}/{table_name}"
@@ -364,7 +363,7 @@ def _driver_load_variants(
                 bigquery.SchemaField("temperature", "FLOAT64"),
             ]
         )
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     job_cfg = bigquery.LoadJobConfig(
         schema=schema,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
@@ -388,9 +387,8 @@ def _empty_baseline_targets(
     ``source_series_iceberg`` work out of the box without overwriting already-seeded baseline
     tables on an existing deployment.
     """
-    from google.cloud import bigquery
 
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     empty: list[tuple[str, bool]] = []
     for name, is_iceberg in _variant_tables(variant, include_covariates=False):
         table_ref = settings.table_ref(name)

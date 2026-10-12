@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .errors import get_logger
+from .registry.tables import bigquery_client
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -162,7 +163,7 @@ def read_device_use(
         bigquery.ScalarQueryParameter("since", "TIMESTAMP", since),
     ]
     try:
-        client = bigquery.Client(project=resolved.project_id)
+        client = bigquery_client(resolved.project_id)
         rows = list(
             client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
         )

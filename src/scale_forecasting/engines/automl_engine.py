@@ -63,6 +63,7 @@ from ..metrics import METRIC_NAMES, compute_metrics
 from ..models import base_model_name, get_model
 from ..models.base_model import DEFAULT_QUANTILES, PREDICTION_COLUMNS
 from ..registry.ids import make_model_hash, make_run_id, vertex_automl_job_id
+from ..registry.tables import bigquery_client
 from ..seasonality import seasonal_period
 from ..worker import (
     CellResult,
@@ -419,7 +420,7 @@ def resolve_prior_tuning_artifact_uri(
     """
     from google.cloud import bigquery
 
-    client = bq_client or bigquery.Client(project=settings.project_id)
+    client = bq_client or bigquery_client(settings.project_id)
     meta_table = settings.registry_table_ref("forecast_metadata")
     sql = (
         f"SELECT model_artifact, TO_JSON_STRING(best_params) AS best_params_json "
@@ -1285,7 +1286,7 @@ def _stage_dataframe_to_bq(
     """Upload a staging DataFrame to BigQuery (`WRITE_TRUNCATE`) and return `bq://...` URI."""
     from google.cloud import bigquery
 
-    client = bq_client or bigquery.Client(project=project_id)
+    client = bq_client or bigquery_client(project_id)
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     load_job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
     load_job.result()
@@ -1294,9 +1295,8 @@ def _stage_dataframe_to_bq(
 
 def _drop_bq_tables(table_ids: list[str], *, project_id: str, bq_client: Any = None) -> None:
     """Best-effort cleanup of temporary BigQuery staging and batch-prediction output tables."""
-    from google.cloud import bigquery
 
-    client = bq_client or bigquery.Client(project=project_id)
+    client = bq_client or bigquery_client(project_id)
     for tid in table_ids:
         clean_id = tid.removeprefix("bq://")
         try:
@@ -1378,9 +1378,9 @@ def _start_stage1_trial_cap_watcher(
                                 )
                                 jclient.cancel_hyperparameter_tuning_job(name=h.name)
                                 return
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - one HPT job's read failing must not stop the watch of the others
                     continue
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - the cap watcher is a best-effort optimization; the pipeline finishes without it
             return
 
     thread = threading.Thread(
@@ -1550,9 +1550,9 @@ def _execute_automl_fit_and_predict(
     dict[str, Any],
 ]:
     """Run one Vertex AI AutoML / Tabular Workflow fit + BatchPredictionJob and parse outputs."""
-    from google.cloud import aiplatform, bigquery
+    from google.cloud import aiplatform
 
-    client = bq_client or bigquery.Client(project=settings.project_id)
+    client = bq_client or bigquery_client(settings.project_id)
     aiplatform.init(
         project=settings.project_id,
         location=settings.region,
@@ -2128,9 +2128,7 @@ def run(
         future_df: pd.DataFrame | None = None
         fut_table = getattr(cfg.data, "future_covariates_table", None)
         if fut_table:
-            from google.cloud import bigquery
-
-            bq_client = bigquery.Client(project=settings.project_id)
+            bq_client = bigquery_client(settings.project_id)
             fut_tbl = fut_table if "." in fut_table else settings.table_ref(fut_table)
             future_df = bq_client.query(f"SELECT * FROM `{fut_tbl}`").to_dataframe()
 

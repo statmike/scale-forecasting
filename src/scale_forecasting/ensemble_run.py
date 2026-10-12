@@ -73,6 +73,7 @@ import numpy as np
 import pandas as pd
 
 from .ensembler import combine_calculated, fit_learned
+from .registry.tables import bigquery_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -174,8 +175,6 @@ def run_ensembles(
     """
     from datetime import UTC, datetime
 
-    from google.cloud import bigquery
-
     from .errors import get_logger
     from .registry.ids import make_ensemble_id
 
@@ -184,7 +183,7 @@ def run_ensembles(
 
     log = get_logger(__name__)
     ensemble_id = make_ensemble_id(cfg.ensemble)
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     created_at = datetime.now(UTC)
     log.info(
         "ensemble run start (barrier): run_id=%s ensemble_id=%s strategies=%s",
@@ -236,8 +235,6 @@ def run_ensembles_microbatch(
     import time
     from datetime import UTC, datetime
 
-    from google.cloud import bigquery
-
     from .errors import get_logger
     from .registry.ids import make_ensemble_id
 
@@ -246,7 +243,7 @@ def run_ensembles_microbatch(
 
     log = get_logger(__name__)
     ensemble_id = make_ensemble_id(cfg.ensemble)
-    client = bigquery.Client(project=settings.project_id)
+    client = bigquery_client(settings.project_id)
     created_at = datetime.now(UTC)
     done = upstream_done or (lambda: True)
     log.info(
@@ -979,7 +976,7 @@ def ensemble_cross_runs(
 
     dataset = resolved.registry_dataset_ref
     model_list = ", ".join(f"'{m}'" for m in merged_cfg.models)
-    client = bigquery.Client(project=resolved.project_id)
+    client = bigquery_client(resolved.project_id)
     copy_params = [
         bigquery.ArrayQueryParameter("source_run_ids", "STRING", run_ids),
         bigquery.ScalarQueryParameter("target_run_id", "STRING", out_run_id),

@@ -304,3 +304,41 @@ def test_models_reference_extras_table_matches_the_models_own_declarations() -> 
     for name in list_models():
         declared.setdefault(get_model(name).optional_extra or "core", set()).add(name)
     assert _models_reference_table() == declared
+
+
+# --- the lock resolves from public indexes only ------------------------------------------------
+
+# Every host a URL in uv.lock or docker/requirements.txt may point at. uv records the index each
+# package came from, and a machine whose user- or system-level uv.toml substitutes a private
+# mirror would otherwise write that mirror into the committed lock (pyproject's `[[tool.uv.index]]`
+# default is the fix; this is the tripwire). PyTorch's index is the one declared explicit source.
+_PUBLIC_HOSTS = frozenset(
+    {
+        "pypi.org",
+        "files.pythonhosted.org",
+        "download.pytorch.org",
+        "download-r2.pytorch.org",
+        "github.com",
+    }
+)
+_URL_HOST = re.compile(r"https?://([^/\"'\s]+)")
+
+
+@pytest.mark.parametrize("rel", ["uv.lock", "docker/requirements.txt"])
+def test_lock_and_export_reference_public_hosts_only(rel: str) -> None:
+    hosts = set(_URL_HOST.findall((ROOT / rel).read_text()))
+    private = sorted(h for h in hosts if h not in _PUBLIC_HOSTS)
+    assert not private, (
+        f"{rel} references non-public hosts {private}; the lock must resolve from the indexes "
+        f"pyproject declares — re-run `make lock` on a machine without a private default index, "
+        f"or with UV_DEFAULT_INDEX=https://pypi.org/simple"
+    )
+
+
+def test_pyproject_declares_public_pypi_as_the_default_index() -> None:
+    indexes = _project()["tool"]["uv"]["index"]
+    defaults = [i for i in indexes if i.get("default")]
+    assert [i["url"] for i in defaults] == ["https://pypi.org/simple"], (
+        "pyproject must declare https://pypi.org/simple as the one default index so a private "
+        "mirror in a user- or system-level uv.toml can never become the lock's source"
+    )
