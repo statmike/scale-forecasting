@@ -290,6 +290,13 @@ build-backend = "hatchling.build"
 packages = ["src/scale_forecasting"]
 exclude = ["src/scale_forecasting/**/README.md"]
 
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/scale_forecasting",
+    "CHANGELOG.md",
+]
+exclude = ["src/scale_forecasting/**/README.md"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

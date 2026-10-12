@@ -328,6 +328,9 @@ def test_markdown_relative_links_and_config_paths_exist(markdown_files: list[Pat
     """Every relative Markdown link, ``#anchor``, and ``configs/*.json`` reference resolves."""
     errors: list[str] = []
     link_re = re.compile(r"\[[^\]]+\]\(([^)#\s]*)(?:#([^)\s]+))?\)")
+    gh_repo_prefix_re = re.compile(
+        r"^https://github\.com/statmike/scale-forecasting/(?:blob|tree)/main/(.+)$"
+    )
     cfg_re = re.compile(r"`((?:configs/)?(?:smokes/)?[0-9a-z_]+\.json)`")
     all_json_names = (
         {p.name for p in (_REPO_ROOT / "configs").rglob("*.json")}
@@ -338,14 +341,24 @@ def test_markdown_relative_links_and_config_paths_exist(markdown_files: list[Pat
     anchor_cache: dict[Path, set[str]] = {}
     for path in markdown_files:
         rel = path.relative_to(_REPO_ROOT)
+        is_root_readme = path == _REPO_ROOT / "README.md"
         for line_no, line in _strip_fenced_code(path.read_text(encoding="utf-8")):
             for match in link_re.finditer(line):
                 target, frag = match.group(1), match.group(2)
-                if target.startswith(
+                if is_root_readme and target and not target.startswith(("http://", "https://")):
+                    errors.append(
+                        f"{rel}:{line_no}: relative link {target!r} in root README.md breaks on "
+                        f"PyPI; use https://github.com/statmike/scale-forecasting/blob/main/..."
+                    )
+                    continue
+                gh_match = gh_repo_prefix_re.match(target)
+                if gh_match:
+                    resolved = (_REPO_ROOT / gh_match.group(1)).resolve()
+                elif target.startswith(
                     ("http://", "https://", "mailto:", "conversation://", "file://")
                 ):
                     continue
-                if not target:
+                elif not target:
                     resolved = path
                 else:
                     resolved = (path.parent / target).resolve()
@@ -355,7 +368,7 @@ def test_markdown_relative_links_and_config_paths_exist(markdown_files: list[Pat
                             os.path.normpath(_REPO_ROOT / "docs" / "notebooks" / target)
                         )
                 if not resolved.exists():
-                    errors.append(f"{rel}:{line_no}: broken relative link {target!r}")
+                    errors.append(f"{rel}:{line_no}: broken link {target!r}")
                     continue
                 if frag and resolved.suffix == ".md":
                     if resolved not in anchor_cache:
@@ -539,9 +552,17 @@ def test_governance_and_release_kit_files_exist() -> None:
     missing = [rel for rel in required_files if not (_REPO_ROOT / rel).is_file()]
     assert not missing, f"Missing governance/release files: {missing}"
 
+    import tomllib
+
+    expected_ver = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["version"]
+
     changelog = (_REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## [1.0.0]" in changelog, "CHANGELOG.md missing ## [1.0.0] section"
+    assert f"## [{expected_ver}]" in changelog, f"CHANGELOG.md missing ## [{expected_ver}] section"
 
     citation = (_REPO_ROOT / "CITATION.cff").read_text(encoding="utf-8")
     assert "cff-version: 1.2.0" in citation, "CITATION.cff missing cff-version: 1.2.0"
-    assert 'version: "1.0.0"' in citation, 'CITATION.cff missing version: "1.0.0"'
+    assert f'version: "{expected_ver}"' in citation, (
+        f'CITATION.cff missing version: "{expected_ver}"'
+    )

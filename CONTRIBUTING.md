@@ -76,6 +76,7 @@ Every pull request must pass all offline gates before merge. CI runs these autom
   tests/unit/test_test_dependencies_declared.py \
   tests/unit/test_notebook_hygiene.py \
   tests/unit/test_packaging_extras.py \
+  tests/unit/test_agent_surfaces.py \
   tests/smokes/test_smoke_configs.py -q
 ```
 
@@ -103,3 +104,37 @@ make ci-offline
 ### Gate 4 — Live cloud verification (when modifying cloud engines or runtimes)
 
 If your change modifies a cloud execution engine (`src/scale_forecasting/engines/`), runtime submitter, or smoke configuration (`configs/smokes/`), execute the affected smoke configuration on Google Cloud, verify zero orphaned compute resources remain, and record the run in [`docs/validation.md`](./docs/validation.md).
+
+---
+
+## 5. Release & versioning process
+
+`scale-forecasting` follows Semantic Versioning (`MAJOR.MINOR.PATCH`) and publishes to PyPI and GitHub Releases from git tags via [`.github/workflows/release.yml`](./.github/workflows/release.yml) using PyPI Trusted Publishing (OIDC + PEP 740 cryptographic attestations).
+
+### Version single-sourcing & synchronized files
+
+`pyproject.toml` (`[project].version`) is the canonical version string read at runtime via `importlib.metadata.version("scale-forecasting")`. When preparing a new release (`X.Y.Z`), update these files in a release-prep pull request:
+
+1. **`pyproject.toml`:** Set `version = "X.Y.Z"`.
+2. **`src/scale_forecasting/__init__.py`:** Update the `except PackageNotFoundError:` fallback string (`__version__ = "X.Y.Z"`, used by zip-staged cloud workers without `.dist-info`; enforced by [`tests/unit/test_smoke.py`](./tests/unit/test_smoke.py)).
+3. **`CHANGELOG.md`:** Add a `## [X.Y.Z] - YYYY-MM-DD` section summarizing user-visible changes (enforced by [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py)).
+4. **`CITATION.cff`:** Update `version: "X.Y.Z"` and `date-released` (enforced by [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py)).
+5. **Lock & agent surfaces:** Run `make lock` and `make agent-surfaces` (`docs/llms-full.txt` embeds the package version header), then verify with `make ci-offline`.
+
+### Publishing via TestPyPI (`vX.Y.Zrc1`) and PyPI (`vX.Y.Z`)
+
+Once the release-prep PR is merged to `main` and CI is green:
+
+```bash
+git checkout main && git pull --ff-only origin main
+
+# 1. Recommended dry-run on TestPyPI (stamps X.Y.Zrc1 in the build runner and publishes to testpypi)
+git tag vX.Y.Zrc1
+git push origin vX.Y.Zrc1
+
+# 2. Official release to PyPI + GitHub Releases (runs under the protected `pypi` GitHub environment)
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Note that root [`README.md`](./README.md) is rendered as the PyPI project description (`readme = "README.md"`): every file link in `README.md` must use an absolute `https://github.com/statmike/scale-forecasting/blob/main/...` URL (enforced by `test_docs_integrity.py`) so links resolve on both PyPI and GitHub.
