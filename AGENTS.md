@@ -87,6 +87,7 @@ Whenever you add or modify a model, metric, compute runtime, `RunConfig` field, 
 | **Smoke & Demo Configs** | [`configs/smokes/*.json`](./configs/smokes/) & [`configs/*.json`](./configs/) | **42 smoke configs** (`01`–`42`) · **20 root demo configs** | [`configs/smokes/README.md`](./configs/smokes/README.md), [`configs/README.md`](./configs/README.md), [`docs/smoke_testing.md`](./docs/smoke_testing.md), [`docs/validation.md`](./docs/validation.md), [`tests/README.md`](./tests/README.md), [`tests/smokes/test_smoke_configs.py`](./tests/smokes/test_smoke_configs.py) |
 | **Dependency Extras** | [`pyproject.toml`](./pyproject.toml) (`[project.optional-dependencies]`) | **12 extras** (`gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl`, `models`, `all`); core `dependencies` are the pure offline layer and `[gcp]` is the single home of every Google client | [`README.md`](./README.md), [`docs/overview.md`](./docs/overview.md), [`docs/getting_started.md`](./docs/getting_started.md), [`docs/runtime_dependencies.md`](./docs/runtime_dependencies.md), [`docs/models_reference.md`](./docs/models_reference.md), [`docs/running_and_reviewing.md`](./docs/running_and_reviewing.md), [`docs/notebook_runtimes.md`](./docs/notebook_runtimes.md), [`docs/troubleshooting.md`](./docs/troubleshooting.md), [`docker/Dockerfile`](./docker/Dockerfile), [`Makefile`](./Makefile) (`EXPORT_ARGS`), [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), the notebooks' bootstrap `EXTRAS` lists, [`errors.py`](./src/scale_forecasting/errors.py) (`EXTRA_MODULES`), then `make lock` (enforced by [`tests/unit/test_packaging_extras.py`](./tests/unit/test_packaging_extras.py) and [`tests/unit/test_core_install.py`](./tests/unit/test_core_install.py)) |
 | **AI Agent Surfaces & MCP** | [`agent_surfaces.py`](./src/scale_forecasting/agent_surfaces.py) & [`mcp.py`](./src/scale_forecasting/mcp.py) | **6 generated agent files** (`docs/schemas/run_config.schema.json`, `docs/llms.txt`, `docs/llms-full.txt`, `skills/scale-forecasting/references/*.md`) · **1 portable skill** (`skills/scale-forecasting/SKILL.md`) · **1 built-in MCP server** (`7` resources, `9` tools) | Run `make agent-surfaces` (`python -m scale_forecasting.agent_surfaces --write`) after changing `RunConfig`, models, metrics, runtimes, views, or docs nav; enforced by [`tests/unit/test_agent_surfaces.py`](./tests/unit/test_agent_surfaces.py) and [`tests/unit/test_mcp_server.py`](./tests/unit/test_mcp_server.py) |
+| **Package Version & Release Metadata** | [`pyproject.toml`](./pyproject.toml) (`[project].version`) | Semantic Versioning (`MAJOR.MINOR.PATCH`) | [`pyproject.toml`](./pyproject.toml), [`src/scale_forecasting/__init__.py`](./src/scale_forecasting/__init__.py) (`__version__` fallback), [`CHANGELOG.md`](./CHANGELOG.md) (`## [X.Y.Z]`), [`CITATION.cff`](./CITATION.cff) (`version: "X.Y.Z"`), `make lock`, and `make agent-surfaces` (enforced by [`tests/unit/test_smoke.py`](./tests/unit/test_smoke.py) and [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py)) |
 | **Public Python Modules** | [`src/scale_forecasting/**/*.py`](./src/scale_forecasting/) | All non-private modules | [`docs/api/*.md`](./docs/api/index.md), [`mkdocs.yml`](./mkdocs.yml) (enforced by [`tests/unit/test_api_docs_coverage.py`](./tests/unit/test_api_docs_coverage.py)) |
 
 ---
@@ -103,6 +104,8 @@ All documentation across `README.md`, `docs/*.md`, and directory `README.md` fil
    - Every `python -m scale_forecasting.<module>` CLI command and `configs/<name>.json` path in documentation must reference a real module and file on disk.
 4. **Symlink-Aware Links in `notebooks/README.md`:**
    - Because `docs/notebooks` is a symlink to `../notebooks` for MkDocs rendering, links from `notebooks/README.md` to pages in `docs/` must use `../<page>.md` (e.g., `../notebook_runtimes.md`) so `mkdocs build --strict` resolves them cleanly.
+5. **PyPI-Safe Absolute Links in Root `README.md`:**
+   - Because `pyproject.toml` sets `readme = "README.md"` for the PyPI project description, every link to a repository file in root [`README.md`](./README.md) must use an absolute `https://github.com/statmike/scale-forecasting/blob/main/<path>` URL rather than a relative `./<path>` link (enforced by [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py), which also resolves those `blob/main/` URLs and `#anchor` fragments against local files on disk).
 
 ### 4.2. Mermaid Diagram Standards
 1. **Supported Diagram Types Only:** Use `flowchart TD`, `flowchart LR`, `sequenceDiagram`, `stateDiagram-v2`, `classDiagram`, or `erDiagram`.
@@ -169,3 +172,36 @@ When validating a runtime or smoke configuration on Google Cloud:
 2. Query BigQuery directly (`run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`, and `v_model_leaderboard`) to verify that every expected `(ts_id, model_type)` cell produced non-null forecasts, finite evaluation metrics, and populated `$.sizing` / `$.sizing_executed` telemetry.
 3. Verify zero orphaned cloud compute resources remain after run completion (`gcloud compute instances list`, `gcloud dataproc batches list`, `gcloud ai custom-jobs list`, `gcloud container clusters list`).
 4. Record the live `run_id`, date, and architecture axes in [`docs/validation.md`](./docs/validation.md) and re-run Gate 1.
+
+---
+
+## 6. Release & Versioning Protocol (`TestPyPI` → `PyPI` & GitHub Releases)
+
+`scale-forecasting` publishes to [TestPyPI](https://test.pypi.org/project/scale-forecasting/), [Production PyPI](https://pypi.org/project/scale-forecasting/), and [GitHub Releases](https://github.com/statmike/scale-forecasting/releases) via [`.github/workflows/release.yml`](./.github/workflows/release.yml) using **OIDC Trusted Publishing** (PEP 740 cryptographic attestations, zero stored secrets) and two GitHub Environments (`testpypi` for automatic RC dry-runs, and `pypi` with `required_reviewers` protection for production releases). See [`CONTRIBUTING.md`](./CONTRIBUTING.md) §5 for contributor-facing details.
+
+### Step 1 — Release-Prep Pull Request (`X.Y.Z`)
+Before tagging a new patch (`1.0.x`) or minor (`1.x.0`) release, open and merge a release-prep PR that updates:
+1. [`pyproject.toml`](./pyproject.toml): `[project].version = "X.Y.Z"`.
+2. [`src/scale_forecasting/__init__.py`](./src/scale_forecasting/__init__.py): `except PackageNotFoundError: __version__ = "X.Y.Z"` (enforced by [`tests/unit/test_smoke.py`](./tests/unit/test_smoke.py)).
+3. [`CHANGELOG.md`](./CHANGELOG.md): `## [X.Y.Z] - YYYY-MM-DD` section (enforced by [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py)).
+4. [`CITATION.cff`](./CITATION.cff): `version: "X.Y.Z"` and `date-released` (enforced by [`tests/unit/test_docs_integrity.py`](./tests/unit/test_docs_integrity.py)).
+5. Run `make lock`, `make agent-surfaces` (`docs/llms-full.txt` embeds the package version header), `uv build && uvx --default-index https://pypi.org/simple twine check --strict dist/* && rm -rf dist/`, and `make ci-offline`.
+
+### Step 2 — Rehearse on TestPyPI (`vX.Y.Zrc1`)
+From the merged `main` commit (where `pyproject.toml` has `version = "X.Y.Z"`), push a release-candidate tag:
+```bash
+git checkout main && git pull --ff-only origin main
+git tag vX.Y.Zrc1
+git push origin vX.Y.Zrc1
+```
+- The `build` job in `release.yml` verifies `^vX.Y.Zrc[0-9]+$`, stamps `X.Y.Zrc1` in the runner before `uv build`, smoke-tests the wheel in a clean Python 3.11 venv, and publishes to `testpypi` (`https://test.pypi.org/project/scale-forecasting/X.Y.Zrc1/`).
+- Verify the TestPyPI install in an isolated venv before proceeding to production PyPI.
+
+### Step 3 — Official Production Release (`vX.Y.Z`)
+From the **exact same `main` commit**, push the final version tag:
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+- After the `build` job passes, the `publish` job pauses at the `pypi` GitHub Environment waiting for `statmike` approval (**Review deployments → `pypi` → Approve and deploy**).
+- Upon approval, `publish` uploads the wheel and lean sdist (`[tool.hatch.build.targets.sdist]`) to `pypi.org` with PEP 740 attestations, and `github-release` creates the official GitHub Release with attached distributions.
