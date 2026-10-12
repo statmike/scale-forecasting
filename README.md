@@ -6,11 +6,11 @@
 [![Colab Enterprise](https://img.shields.io/badge/Colab%20Enterprise-Launch%20Playground-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2F00_model_playground.ipynb)
 [![Open in Cloud Shell](https://img.shields.io/badge/Cloud%20Shell-Open%20Tutorial-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/statmike/scale-forecasting&cloudshell_tutorial=cloudshell_tutorial.md)
 [![Documentation](https://img.shields.io/badge/Docs-Documentation%20Site-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://statmike.github.io/scale-forecasting/)
-[![Getting Started](https://img.shields.io/badge/Start%20Here-Getting%20Started-EA4335?style=for-the-badge&logo=readthedocs&logoColor=white)](./docs/getting_started.md)
-[![AI Agents & MCP](https://img.shields.io/badge/AI%20Agents-Skill%20%26%20MCP%20Server-8E24AA?style=for-the-badge)](./docs/agent_and_mcp_guide.md)
-[![Workshop](https://img.shields.io/badge/Workshop-Hands--On%20Lab-F4B400?style=for-the-badge&logo=google&logoColor=white)](./docs/workshop.md)
-[![Terraform](https://img.shields.io/badge/Terraform-Two--Stage%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](./terraform/README.md)
-[![License](https://img.shields.io/badge/License-Apache%202.0-4E5D6C?style=for-the-badge)](./LICENSE)
+[![Getting Started](https://img.shields.io/badge/Start%20Here-Getting%20Started-EA4335?style=for-the-badge&logo=readthedocs&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md)
+[![AI Agents & MCP](https://img.shields.io/badge/AI%20Agents-Skill%20%26%20MCP%20Server-8E24AA?style=for-the-badge)](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md)
+[![Workshop](https://img.shields.io/badge/Workshop-Hands--On%20Lab-F4B400?style=for-the-badge&logo=google&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
+[![Terraform](https://img.shields.io/badge/Terraform-Two--Stage%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md)
+[![License](https://img.shields.io/badge/License-Apache%202.0-4E5D6C?style=for-the-badge)](https://github.com/statmike/scale-forecasting/blob/main/LICENSE)
 
 `34 models` · `5 families` · `21 evaluation metrics` · `7 Google Cloud runtimes` · `5 Analytical SQL Views` · `validated at 100k series`
 
@@ -84,7 +84,7 @@ plan = sf.Forecaster.from_file("configs/ensemble_demo.json").dry_run()
 print(result.metrics["wape"], plan.run_id)
 ```
 
-Continue in [`notebooks/00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb) or [Getting started (`docs/getting_started.md`)](./docs/getting_started.md).
+Continue in [`notebooks/00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb) or [Getting started (`docs/getting_started.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md).
 
 ### Journey 2 — Deploy to your Google Cloud project in 15 minutes
 
@@ -98,7 +98,7 @@ cd ../main && terraform init
 terraform apply -var="project_id=YOUR_PROJECT_ID"
 ```
 
-> **Estimated cost & ongoing services:** One-time provisioning (Cloud Build image build + Dataproc Serverless 100k seed batch) costs an estimated **~\$0.15–\$0.50**. At rest, datasets, buckets, VPC networking, and service accounts have no running compute cost (only standard Cloud Storage and BigQuery storage rates for stored bytes). Forecast runs bill only while batches, VMs, pods, or queries execute. **Always-on disclosure:** Cloud Composer 3 (`create_composer = false` by default) and standing GKE clusters incur continuous hourly charges while provisioned. See [`docs/deploying_on_gcp.md`](./docs/deploying_on_gcp.md) and [`terraform/README.md`](./terraform/README.md).
+> **Estimated cost & ongoing services:** One-time provisioning (Cloud Build image build + Dataproc Serverless 100k seed batch) costs an estimated **~\$0.15–\$0.50**. At rest, datasets, buckets, VPC networking, and service accounts have no running compute cost (only standard Cloud Storage and BigQuery storage rates for stored bytes). Forecast runs bill only while batches, VMs, pods, or queries execute. **Always-on disclosure:** Cloud Composer 3 (`create_composer = false` by default) and standing GKE clusters incur continuous hourly charges while provisioned. See [`docs/deploying_on_gcp.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/deploying_on_gcp.md) and [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md).
 
 ### Journey 3 — Run 100,000+ series on Google Cloud
 
@@ -110,13 +110,13 @@ python -m scale_forecasting.main --config configs/ensemble_demo.json
 python -m scale_forecasting.main --config configs/spark_serverless_100k.json --emit-airflow dags/sf_100k.py
 ```
 
-Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](./docs/running_and_reviewing.md) and [Platform overview (`docs/overview.md`)](./docs/overview.md).
+Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md) and [Platform overview (`docs/overview.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md).
 
 ---
 
 ## AI agents, portable skills & built-in MCP server
 
-`scale-forecasting` is ready out of the box for **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code Copilot**, and **Windsurf** — shipping a **portable [`SKILL.md`](./skills/scale-forecasting/SKILL.md)** (auto-discovered via [`.agents/skills.json`](./.agents/skills.json)), an **Antigravity [`plugin.json`](./plugin.json) + [`mcp_config.json`](./mcp_config.json)**, a **built-in MCP server (`python -m scale_forecasting.mcp`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](./docs/schemas/run_config.schema.json)**, and **[`llms.txt`](./docs/llms.txt) / [`llms-full.txt`](./docs/llms-full.txt)** compiled directly from code (`make agent-surfaces`):
+`scale-forecasting` is ready out of the box for **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code Copilot**, and **Windsurf** — shipping a **portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md)** (auto-discovered via [`.agents/skills.json`](https://github.com/statmike/scale-forecasting/blob/main/.agents/skills.json)), an **Antigravity [`plugin.json`](https://github.com/statmike/scale-forecasting/blob/main/plugin.json) + [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json)**, a **built-in MCP server (`python -m scale_forecasting.mcp`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](https://github.com/statmike/scale-forecasting/blob/main/docs/schemas/run_config.schema.json)**, and **[`llms.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms.txt) / [`llms-full.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms-full.txt)** compiled directly from code (`make agent-surfaces`):
 
 ```bash
 # Probe installed extras, available models, and SF_* readiness:
@@ -127,13 +127,13 @@ agy
 claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 ```
 
-Full setup and architectural guide: **[AI Agents, Portable Skills & Built-in MCP Server (`docs/agent_and_mcp_guide.md`)](./docs/agent_and_mcp_guide.md)**.
+Full setup and architectural guide: **[AI Agents, Portable Skills & Built-in MCP Server (`docs/agent_and_mcp_guide.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md)**.
 
 ---
 
 ## One configuration, every engine
 
-Every run is a validated [`RunConfig`](./docs/configuration_reference.md) (such as [`configs/ensemble_demo.json`](./configs/ensemble_demo.json)). To move a model family between Dataproc Serverless, Ray, Vertex AI CustomJob, Compute Engine, or GKE, change `compute.families.<family>.runtime` — nothing else:
+Every run is a validated [`RunConfig`](https://github.com/statmike/scale-forecasting/blob/main/docs/configuration_reference.md) (such as [`configs/ensemble_demo.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/ensemble_demo.json)). To move a model family between Dataproc Serverless, Ray, Vertex AI CustomJob, Compute Engine, or GKE, change `compute.families.<family>.runtime` — nothing else:
 
 ```json
 {
@@ -157,12 +157,12 @@ Every run is a validated [`RunConfig`](./docs/configuration_reference.md) (such 
 
 | Pillar | What it means for you | Proof in this repository |
 | :--- | :--- | :--- |
-| **Data stays in BigQuery** | Workers read source tables via the BigQuery Storage Read API with contiguous per-worker `[start_id, end_id]` pushdown and stream results back through the Storage Write API. | [`docs/reading_source_data.md`](./docs/reading_source_data.md) · [`docs/writing_results.md`](./docs/writing_results.md) |
-| **Compute only while it runs** | Active model families launch in parallel (`dag.py`); fast CPU families tear down immediately while GPU families finish; single-VM GCE enforces triple-redundant self-deletion. | [`docs/runtimes_reference.md`](./docs/runtimes_reference.md) · [`docs/architecture.md`](./docs/architecture.md) |
-| **Seven runtimes, one contract** | Run `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery` concurrently under one `run_id` across CPU and NVIDIA `T4`, `L4`, `A100`, `A100_80GB` GPUs. | [`docs/runtimes_reference.md`](./docs/runtimes_reference.md) · [`docs/validation.md`](./docs/validation.md) |
-| **Managed and open models on one leaderboard** | Benchmark BigQuery ML (`ARIMA_PLUS`, `AI.FORECAST` / `TimesFM`) and Vertex AI AutoML alongside 28 open-source statistical, tree, and deep learning models on identical folds. | [`docs/models_reference.md`](./docs/models_reference.md) · [`docs/output_schemas.md`](./docs/output_schemas.md) |
-| **Governed by construction** | Content-addressed `run_id`, snapshot-pinned reads, 5 registry tables, 5 analytical SQL views, surgical cell repair (`retry_run`), and 42 live-validated smoke configurations. | [`docs/output_schemas.md`](./docs/output_schemas.md) · [`docs/operations.md`](./docs/operations.md) · [`docs/validation.md`](./docs/validation.md) |
-| **Modular install & 1-file extensibility** | `pip install scale-forecasting` has zero Google Cloud dependencies; `[gcp]`, `[spark]`, `[ray]`, `[models]`, and `[all]` are opt-in extras; new models ship in 1 file with no image rebuild. | [`docs/runtime_dependencies.md`](./docs/runtime_dependencies.md) · [`docs/adding_a_model.md`](./docs/adding_a_model.md) |
+| **Data stays in BigQuery** | Workers read source tables via the BigQuery Storage Read API with contiguous per-worker `[start_id, end_id]` pushdown and stream results back through the Storage Write API. | [`docs/reading_source_data.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/reading_source_data.md) · [`docs/writing_results.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/writing_results.md) |
+| **Compute only while it runs** | Active model families launch in parallel (`dag.py`); fast CPU families tear down immediately while GPU families finish; single-VM GCE enforces triple-redundant self-deletion. | [`docs/runtimes_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [`docs/architecture.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/architecture.md) |
+| **Seven runtimes, one contract** | Run `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery` concurrently under one `run_id` across CPU and NVIDIA `T4`, `L4`, `A100`, `A100_80GB` GPUs. | [`docs/runtimes_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [`docs/validation.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) |
+| **Managed and open models on one leaderboard** | Benchmark BigQuery ML (`ARIMA_PLUS`, `AI.FORECAST` / `TimesFM`) and Vertex AI AutoML alongside 28 open-source statistical, tree, and deep learning models on identical folds. | [`docs/models_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md) · [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) |
+| **Governed by construction** | Content-addressed `run_id`, snapshot-pinned reads, 5 registry tables, 5 analytical SQL views, surgical cell repair (`retry_run`), and 42 live-validated smoke configurations. | [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) · [`docs/operations.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md) · [`docs/validation.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) |
+| **Modular install & 1-file extensibility** | `pip install scale-forecasting` has zero Google Cloud dependencies; `[gcp]`, `[spark]`, `[ray]`, `[models]`, and `[all]` are opt-in extras; new models ship in 1 file with no image rebuild. | [`docs/runtime_dependencies.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtime_dependencies.md) · [`docs/adding_a_model.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/adding_a_model.md) |
 
 ---
 
@@ -176,32 +176,32 @@ Every run is a validated [`RunConfig`](./docs/configuration_reference.md) (such 
 | **`automl`** (`4`) | `vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` | `vertex_automl` | Managed Vertex AI Tabular Workflows & AutoML training jobs with Stage-1 HPO reuse and baseline attributions. |
 | **`native`** (`2`) | `arima_plus`, `timesfm` (`AI.FORECAST`) | `bigquery` | Pure BigQuery SQL execution with zero cluster provisioning. |
 
-- **Evaluation, quantiles & calibration:** **21 evaluation metrics** (16 point + 5 interval: `wape`, `smape`, `mape`, `maape`, `ope`, `mae`, `rmse`, `mse`, `rmsle`, `bias`, `mase`, `mase_seasonal`, `rmsse`, `msse`, `r2`, `cv`, `coverage`, `pinball`, `interval_score`, `interval_width`, `msis`), empirical conformal prediction intervals, monotone multi-percentile fans (`output.quantiles` with Chernozhukov rearrangement), and Newsvendor asymmetric cost targets (`underage_cost` / `overage_cost`) ([`docs/metrics_reference.md`](./docs/metrics_reference.md)).
+- **Evaluation, quantiles & calibration:** **21 evaluation metrics** (16 point + 5 interval: `wape`, `smape`, `mape`, `maape`, `ope`, `mae`, `rmse`, `mse`, `rmsle`, `bias`, `mase`, `mase_seasonal`, `rmsse`, `msse`, `r2`, `cv`, `coverage`, `pinball`, `interval_score`, `interval_width`, `msis`), empirical conformal prediction intervals, monotone multi-percentile fans (`output.quantiles` with Chernozhukov rearrangement), and Newsvendor asymmetric cost targets (`underage_cost` / `overage_cost`) ([`docs/metrics_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/metrics_reference.md)).
 - **Hierarchy, smart ensembles & explainability:** All 8 Hyndman FPP3 reconciliation methods (including active-set non-negative `"mint_nonneg"` alongside `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, `middle_out`), 8 ensemble strategies (`mean`, `median`, `inverse_error`, `champion`, `horizon_specialist`, `nnls`, `ridge`, `xgb`) with `top_k` & `parsimony_margin` pruning and calibrated ensemble intervals, physical bounds (`floor`, `cap`, `cumulative_round`), and two-tier feature attributions (`attributions_df` / `plot_attributions`).
-- **Forecaster workbench, econometrics & executive reports:** Pre-fit data hygiene & SBC demand regime routing (`smooth`, `erratic`, `intermittent`, `lumpy`), Forecast Value Added (`compute_fva`) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano $p$-values, lead-time horizon decay, Trigg tracking-signal bias audits, AR(1)-aware time rollups (`rollup_time`), counterfactual promo/price scenario simulation (`simulate_scenarios`), live drift & whipsaw stability scoring, Top-$N$ exception triage (`exceptions_df`), and self-contained interactive HTML/JSON reports (`python -m scale_forecasting.report`) ([`docs/forecaster_workbench.md`](./docs/forecaster_workbench.md)).
+- **Forecaster workbench, econometrics & executive reports:** Pre-fit data hygiene & SBC demand regime routing (`smooth`, `erratic`, `intermittent`, `lumpy`), Forecast Value Added (`compute_fva`) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano $p$-values, lead-time horizon decay, Trigg tracking-signal bias audits, AR(1)-aware time rollups (`rollup_time`), counterfactual promo/price scenario simulation (`simulate_scenarios`), live drift & whipsaw stability scoring, Top-$N$ exception triage (`exceptions_df`), and self-contained interactive HTML/JSON reports (`python -m scale_forecasting.report`) ([`docs/forecaster_workbench.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md)).
 
 ---
 
 ## Learn by doing (11 notebooks across 4 tracks)
 
-All notebooks in [`notebooks/`](./notebooks/README.md) include committed outputs and one-click **Colab Enterprise** launch links:
+All notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/README.md) include committed outputs and one-click **Colab Enterprise** launch links:
 
-- **Track 1 — Local sandbox & plugins (no GCP setup):** [`00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb) · [`09_custom_models_and_metrics.ipynb`](./notebooks/09_custom_models_and_metrics.ipynb)
-- **Track 2 — Cloud runtimes:** [`01_bigquery_native_sql.ipynb`](./notebooks/01_bigquery_native_sql.ipynb) · [`02_vertex_and_gce_vms.ipynb`](./notebooks/02_vertex_and_gce_vms.ipynb) · [`03_spark_serverless_and_connect.ipynb`](./notebooks/03_spark_serverless_and_connect.ipynb) · [`04_ray_on_vertex_gpu.ipynb`](./notebooks/04_ray_on_vertex_gpu.ipynb)
-- **Track 3 — Covariates, hierarchy, HPO & ensembles:** [`05_covariates_and_global_models.ipynb`](./notebooks/05_covariates_and_global_models.ipynb) · [`06_hierarchical_reconciliation.ipynb`](./notebooks/06_hierarchical_reconciliation.ipynb) · [`07_hpo_backtesting_and_ensembles.ipynb`](./notebooks/07_hpo_backtesting_and_ensembles.ipynb)
-- **Track 4 — Master multi-engine DAG & operations:** [`08_multi_engine_master_workflow.ipynb`](./notebooks/08_multi_engine_master_workflow.ipynb) · [`10_registry_operations_and_scale.ipynb`](./notebooks/10_registry_operations_and_scale.ipynb)
-- **Team lab:** [Hands-on workshop guide (`docs/workshop.md`)](./docs/workshop.md)
+- **Track 1 — Local sandbox & plugins (no GCP setup):** [`00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb) · [`09_custom_models_and_metrics.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_custom_models_and_metrics.ipynb)
+- **Track 2 — Cloud runtimes:** [`01_bigquery_native_sql.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_bigquery_native_sql.ipynb) · [`02_vertex_and_gce_vms.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_vertex_and_gce_vms.ipynb) · [`03_spark_serverless_and_connect.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_spark_serverless_and_connect.ipynb) · [`04_ray_on_vertex_gpu.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex_gpu.ipynb)
+- **Track 3 — Covariates, hierarchy, HPO & ensembles:** [`05_covariates_and_global_models.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_covariates_and_global_models.ipynb) · [`06_hierarchical_reconciliation.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_hierarchical_reconciliation.ipynb) · [`07_hpo_backtesting_and_ensembles.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_hpo_backtesting_and_ensembles.ipynb)
+- **Track 4 — Master multi-engine DAG & operations:** [`08_multi_engine_master_workflow.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb) · [`10_registry_operations_and_scale.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb)
+- **Team lab:** [Hands-on workshop guide (`docs/workshop.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
 
 ---
 
 ## Where next
 
-- **Start here:** [Getting started](./docs/getting_started.md) · [Platform overview](./docs/overview.md) · [Forecaster workbench](./docs/forecaster_workbench.md) · [AI agents, skills & MCP](./docs/agent_and_mcp_guide.md) · [Choosing a runtime](./docs/choosing_a_runtime.md) · [Cost estimates & controls](./docs/cost_estimates.md) · [Why Google Cloud](./docs/why_google_cloud.md) · [FAQ](./docs/faq.md) · [Glossary](./docs/glossary.md) · [Documentation map](./docs/README.md)
-- **Reference:** [Compute runtimes](./docs/runtimes_reference.md) · [Configuration](./docs/configuration_reference.md) · [Models & ensembles](./docs/models_reference.md) · [Evaluation metrics](./docs/metrics_reference.md) · [Output schemas & views](./docs/output_schemas.md)
-- **Operate & extend:** [Python SDK (`Forecaster`)](./docs/using_the_sdk.md) · [Running & reviewing](./docs/running_and_reviewing.md) · [Operations & repair](./docs/operations.md) · [Quota & 100k scale](./docs/quota_and_scale.md) · [System validation ledger](./docs/validation.md) · [API reference](https://statmike.github.io/scale-forecasting/api/)
+- **Start here:** [Getting started](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md) · [Platform overview](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md) · [Forecaster workbench](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md) · [AI agents, skills & MCP](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md) · [Choosing a runtime](https://github.com/statmike/scale-forecasting/blob/main/docs/choosing_a_runtime.md) · [Cost estimates & controls](https://github.com/statmike/scale-forecasting/blob/main/docs/cost_estimates.md) · [Why Google Cloud](https://github.com/statmike/scale-forecasting/blob/main/docs/why_google_cloud.md) · [FAQ](https://github.com/statmike/scale-forecasting/blob/main/docs/faq.md) · [Glossary](https://github.com/statmike/scale-forecasting/blob/main/docs/glossary.md) · [Documentation map](https://github.com/statmike/scale-forecasting/blob/main/docs/README.md)
+- **Reference:** [Compute runtimes](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [Configuration](https://github.com/statmike/scale-forecasting/blob/main/docs/configuration_reference.md) · [Models & ensembles](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md) · [Evaluation metrics](https://github.com/statmike/scale-forecasting/blob/main/docs/metrics_reference.md) · [Output schemas & views](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md)
+- **Operate & extend:** [Python SDK (`Forecaster`)](https://github.com/statmike/scale-forecasting/blob/main/docs/using_the_sdk.md) · [Running & reviewing](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md) · [Operations & repair](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md) · [Quota & 100k scale](https://github.com/statmike/scale-forecasting/blob/main/docs/quota_and_scale.md) · [System validation ledger](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) · [API reference](https://statmike.github.io/scale-forecasting/api/)
 
 ---
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](./LICENSE).
+Apache-2.0 — see [`LICENSE`](https://github.com/statmike/scale-forecasting/blob/main/LICENSE).

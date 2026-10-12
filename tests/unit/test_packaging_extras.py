@@ -238,14 +238,19 @@ def test_documented_install_lines_name_declared_extras() -> None:
 
 
 def test_pypi_metadata_and_urls_declared() -> None:
-    proj = _project()["project"]
-    assert proj["version"] == "1.0.0"
+    pyproject = _project()
+    proj = pyproject["project"]
+    assert re.match(r"^\d+\.\d+\.\d+", proj["version"])
     assert set(proj["urls"]) >= {"Homepage", "Documentation", "Repository", "Changelog", "Issues"}
     classifiers = set(proj["classifiers"])
     assert "Development Status :: 5 - Production/Stable" in classifiers
     assert "Programming Language :: Python :: 3.11" in classifiers
+    assert "Programming Language :: Python :: 3.12" in classifiers
     assert "Typing :: Typed" in classifiers
     assert {"time-series", "forecasting", "google-cloud", "bigquery"} <= set(proj["keywords"])
+    sdist = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]
+    assert "src/scale_forecasting" in sdist["only-include"]
+    assert "CHANGELOG.md" in sdist["only-include"]
 
 
 def _bootstrap_extras(notebook: Path) -> list[str]:

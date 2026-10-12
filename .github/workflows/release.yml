@@ -25,8 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
-      - name: tag must equal the project version
-        run: test "v$(uv version --short)" = "$GITHUB_REF_NAME"
+      - name: tag must match the project version (exact or rc suffix)
+        run: |
+          BASE_VER="v$(uv version --short)"
+          if [ "$GITHUB_REF_NAME" = "$BASE_VER" ]; then
+            echo "Exact release tag match: $GITHUB_REF_NAME"
+          elif echo "$GITHUB_REF_NAME" | grep -Eq "^${BASE_VER}rc[0-9]+$"; then
+            RC_VER="${GITHUB_REF_NAME#v}"
+            echo "Release-candidate tag $GITHUB_REF_NAME for base $BASE_VER; stamping $RC_VER for build"
+            uv version "$RC_VER" --no-sync
+          else
+            echo "Error: tag $GITHUB_REF_NAME does not match pyproject.toml version $BASE_VER" >&2
+            exit 1
+          fi
       - name: build sdist and wheel
         run: uv build
       - name: install the wheel in a clean venv and smoke-test import + playground

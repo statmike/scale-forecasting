@@ -27,3 +27,10 @@ def test_package_imports_and_has_single_sourced_version() -> None:
         "__version__ in src/scale_forecasting/__init__.py must be derived from importlib.metadata, "
         "not hardcoded"
     )
+    fallback = re.search(
+        r'except PackageNotFoundError:[^\n]*\n\s+__version__\s*=\s*"([^"]+)"', init_src
+    )
+    assert fallback and fallback.group(1) == expected, (
+        f"PackageNotFoundError fallback in src/scale_forecasting/__init__.py must equal "
+        f"pyproject.toml version {expected!r}"
+    )
