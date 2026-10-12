@@ -48,7 +48,7 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
-- [models_reference.md](./models_reference.md) — all 34 built-in models, 6 ensemble strategies,
+- [models_reference.md](./models_reference.md) — all 34 built-in models, 9 ensemble strategies, 8 reconciliation methods,
   Two-Tier Explainability (`attributions_df`, `plot_attributions`), upstream package provenance, hyperparameter search spaces, and optional dependency extras.
 - [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
   definitions, direction/calibration flags, and edge-case rules.

@@ -733,6 +733,10 @@ class Forecaster:
 
         return build_leaderboard_frame(self.review_run(run_id), all_metrics=all_metrics)
 
+    def leaderboard(self, run_id: str | None = None, *, all_metrics: bool = False) -> pd.DataFrame:
+        """Alias for :meth:`leaderboard_df` matching :meth:`RunResult.leaderboard`."""
+        return self.leaderboard_df(run_id, all_metrics=all_metrics)
+
     def predictions_df(
         self,
         run_id: str | None = None,
@@ -830,6 +834,27 @@ class Forecaster:
             history_tail=history_tail,
             ax=ax,
             title=title or rid,
+        )
+
+    def plot_series(
+        self,
+        ts_id: str | None = None,
+        *,
+        run_id: str | None = None,
+        models: Sequence[str] | None = None,
+        history_tail: int = 120,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Convenience wrapper around :meth:`plot_forecasts` for a single ``ts_id``."""
+        return self.plot_forecasts(
+            run_id,
+            ts_id=ts_id,
+            models=models,
+            max_series=1,
+            history_tail=history_tail,
+            ax=ax,
+            title=title,
         )
 
     def hierarchy_df(self, run_id: str | None = None, *, limit: int = 20000) -> pd.DataFrame:
@@ -1216,6 +1241,22 @@ class Forecaster:
             oof_df,
             threshold_pct=threshold_pct,
             tracking_signal_limit=tracking_signal_limit,
+        )
+
+    def bias_df(
+        self,
+        run_id: str | None = None,
+        *,
+        threshold_pct: float = 0.05,
+        tracking_signal_limit: float = 4.0,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Alias for :meth:`bias_report_df` matching :meth:`BakeOff.bias_df`."""
+        return self.bias_report_df(
+            run_id,
+            threshold_pct=threshold_pct,
+            tracking_signal_limit=tracking_signal_limit,
+            limit=limit,
         )
 
     def rollup_time(

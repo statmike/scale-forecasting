@@ -696,7 +696,7 @@ class HierarchyConfig(BaseModel):
     (``data.ts_id_col``) at the leaves.
 
     Implements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection
-    ``y_tilde = S @ G @ y_hat`` across seven methods:
+    ``y_tilde = S @ G @ y_hat`` across eight methods:
 
     * ``bottom_up`` — sum bottom-level forecasts upward via the summing matrix ``S``.
     * ``top_down`` — disaggregate the top-level forecast downward by average historical proportions
@@ -710,6 +710,8 @@ class HierarchyConfig(BaseModel):
       variances.
     * ``mint_shrink`` — Wickramasuriya et al. (2019) Minimum Trace with Schäfer-Strimmer shrinkage
       covariance of residuals, positive-definite even when ``n_series >> T_obs``.
+    * ``mint_nonneg`` — active-set non-negative Minimum Trace reconciliation guaranteeing
+      bottom-level forecasts ``>= 0`` while preserving exact additive coherence across all levels.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
