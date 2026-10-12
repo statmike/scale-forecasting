@@ -82,7 +82,7 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
 
 
-def _series_filter(
+def series_filter(
     cfg: RunConfig, source: str, id_expr: str, *, snapshot_millis: int | None = None
 ) -> str:
     """A ``ts_id IN (...)`` fragment for the deterministic ``series_limit`` subset (``""`` if none).
@@ -100,6 +100,9 @@ def _series_filter(
         f"{id_expr} IN (SELECT {idc} FROM `{source}`{snap} "
         f"GROUP BY {idc} ORDER BY {idc} LIMIT {limit})"
     )
+
+
+_series_filter = series_filter
 
 
 def _cutoff_expr(
@@ -414,6 +417,16 @@ _PRED_COLS = (
 )
 
 
+def _sql_clamp_expr(expr: str, floor_val: float | None, cap_val: float | None) -> str:
+    """Wrap SQL ``expr`` in ``GREATEST`` / ``LEAST`` when physical bounds are configured."""
+    out = expr
+    if cap_val is not None:
+        out = f"LEAST({out}, {float(cap_val)})"
+    if floor_val is not None:
+        out = f"GREATEST({out}, {float(floor_val)})"
+    return out
+
+
 def build_forecast_insert_sql(
     cfg: RunConfig,
     model_name: str,
@@ -440,7 +453,10 @@ def build_forecast_insert_sql(
     BigQuery ML applies no bias correction, so this engine has one arm and the three columns are
     genuinely the same number — writing it out is what keeps ``yhat_raw`` meaning "the model's own
     output" for every row in the table, rather than "the model's own output, unless a native model
-    wrote the row, in which case NULL".
+    wrote the row, in which case NULL". When ``output.floor``, ``output.cap``, or
+    ``output.integer_rounding`` is configured, ``yhat``, ``yhat_adjusted``, ``yhat_lower``, and
+    ``yhat_upper`` are clamped and rounded in SQL while ``yhat_raw`` preserves the raw
+    ``forecast_value``.
     """
     dataset_q = f"`{registry_of(dataset, registry_dataset)}.forecast_predictions`"
     forecast = _forecast_source(
@@ -450,15 +466,63 @@ def build_forecast_insert_sql(
         registry_dataset=registry_dataset,
         snapshot_millis=snapshot_millis,
     )
+    idc = cfg.data.ts_id_col
+    fl = cfg.output.floor
+    cp = cfg.output.cap
+    rmode = cfg.output.integer_rounding
+    if fl is None and cp is None and rmode == "none":
+        return (
+            f"INSERT INTO {dataset_q}\n"
+            f"  ({_PRED_COLS})\n"
+            f"SELECT\n"
+            f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
+            f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
+            f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+            f"  CURRENT_TIMESTAMP()\n"
+            f"FROM {forecast};"
+        )
+
+    val_c = _sql_clamp_expr("forecast_value", fl, cp)
+    lo_c = _sql_clamp_expr("prediction_interval_lower_bound", fl, cp)
+    hi_c = _sql_clamp_expr("prediction_interval_upper_bound", fl, cp)
+    if rmode == "none":
+        yhat_r, lo_r, hi_r = "_val_c", "_lo_c", "_hi_c"
+    elif rmode in ("round", "ceil", "floor"):
+        fn = rmode.upper()
+        yhat_r, lo_r, hi_r = f"{fn}(_val_c)", f"{fn}(_lo_c)", f"{fn}(_hi_c)"
+    else:
+        yhat_r = _sql_clamp_expr(
+            f"ROUND(SUM(_val_c) OVER (PARTITION BY {idc} ORDER BY forecast_timestamp)) "
+            f"- COALESCE(ROUND(SUM(_val_c) OVER (PARTITION BY {idc} ORDER BY forecast_timestamp "
+            f"ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)), 0.0)",
+            fl,
+            cp,
+        )
+        lo_r, hi_r = "ROUND(_lo_c)", "ROUND(_hi_c)"
+
     return (
         f"INSERT INTO {dataset_q}\n"
         f"  ({_PRED_COLS})\n"
         f"SELECT\n"
-        f"  @run_id, {cfg.data.ts_id_col}, '{model_name}', 'bigquery',\n"
-        f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
-        f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+        f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
+        f"  DATE(forecast_timestamp), _yhat_r, forecast_value, _yhat_r,\n"
+        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,\n"
         f"  CURRENT_TIMESTAMP()\n"
-        f"FROM {forecast};"
+        f"FROM (\n"
+        f"  SELECT\n"
+        f"    {idc}, forecast_timestamp, forecast_value,\n"
+        f"    {yhat_r} AS _yhat_r,\n"
+        f"    {lo_r} AS _lo_r,\n"
+        f"    {hi_r} AS _hi_r\n"
+        f"  FROM (\n"
+        f"    SELECT\n"
+        f"      {idc}, forecast_timestamp, forecast_value,\n"
+        f"      {val_c} AS _val_c,\n"
+        f"      {lo_c} AS _lo_c,\n"
+        f"      {hi_c} AS _hi_c\n"
+        f"    FROM {forecast}\n"
+        f"  )\n"
+        f");"
     )
 
 

@@ -493,7 +493,16 @@ def combine_oof(
                 "yhat": yhat,
             }
         )
-        parts.append(part[~part["yhat"].isna()].reset_index(drop=True))
+        part = part[~part["yhat"].isna()].reset_index(drop=True)
+        if has_output_constraints(cfg.output) and not part.empty:
+            constrained_parts: list[pd.DataFrame] = []
+            for (_tid, _fid), fg in part.groupby(["ts_id", "fold_id"], sort=False, dropna=False):
+                fg_sorted = fg.sort_values("forecast_date").copy()
+                fg_c = apply_output_constraints(fg_sorted[["yhat"]].copy(), cfg.output)
+                fg_sorted["yhat"] = fg_c["yhat"].to_numpy(dtype=float)
+                constrained_parts.append(fg_sorted)
+            part = pd.concat(constrained_parts, ignore_index=True)
+        parts.append(part)
     return pd.concat(parts, ignore_index=True)[list(_OOF_BLEND_COLS)] if parts else empty
 
 
@@ -1177,6 +1186,8 @@ def calibrate_ensemble_predictions(
     out_parts: list[pd.DataFrame] = []
     for (tid, mtype), group in df.groupby(["ts_id", "model_type"], sort=False):
         cell_df = group.copy()
+        if (need_constraints or need_q_or_cost) and "yhat_raw" not in cell_df.columns:
+            cell_df["yhat_raw"] = cell_df["yhat"].to_numpy(dtype=float)
         calibrated_this_cell = False
         if need_cal:
             oof_slice = oof_by_cell.get((str(tid), str(mtype)))

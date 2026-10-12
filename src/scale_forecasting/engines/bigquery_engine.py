@@ -358,6 +358,7 @@ def _score_fold(
     list per series across folds and rolls them up exactly as `worker.rollup_metrics` does.
     """
     from ..backtest import training_window
+    from ..calibration import apply_output_constraints, has_output_constraints
     from ..metrics import compute_metrics
     from ..seasonality import seasonal_period
 
@@ -365,7 +366,10 @@ def _score_fold(
     oof_rows: list[dict[str, Any]] = []
     panels: dict[str, dict[str, float]] = {}
     for ts_id, g in eval_df.groupby("ts_id"):
-        g = g.sort_values("forecast_date")
+        g = g.sort_values("forecast_date").copy()
+        if has_output_constraints(cfg.output):
+            g["yhat_raw"] = g["yhat"].copy()
+            g = apply_output_constraints(g, cfg.output)
         for rec in g.to_dict(orient="records"):
             oof_rows.append(_oof_row(run_id, str(ts_id), model_name, fold_id, rec, created_at))
         hist = hist_by_id.get(str(ts_id))
@@ -412,7 +416,7 @@ def _oof_row(
         # `yhat_adjusted` are both the forecast it returned. Copying the value rather than leaving
         # the pair NULL keeps `y_true - yhat_raw` a valid residual for every engine, which is what
         # lets a cross-engine calibration diagnostic be one query instead of two.
-        "yhat_raw": row["yhat"],
+        "yhat_raw": row.get("yhat_raw", row["yhat"]),
         "yhat_adjusted": row["yhat"],
         "yhat_lower": row.get("yhat_lower"),
         "yhat_upper": row.get("yhat_upper"),

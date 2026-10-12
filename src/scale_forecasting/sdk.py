@@ -1249,22 +1249,42 @@ class Forecaster:
         models: Sequence[str] | None = None,
         future_covariates_df: pd.DataFrame | None = None,
         price_col: str | None = None,
+        run_id: str | None = None,
     ) -> pd.DataFrame:
         """Run counterfactual covariate shocks (`scenarios.simulate_scenarios`) across ``data``
-        (or synthetic sample data when ``data`` is omitted) using this config's settings.
+        (or BigQuery source series when ``run_id`` is provided, or synthetic sample data when
+        ``data`` is omitted) using this config's settings.
         """
         from . import playground
         from .scenarios import simulate_scenarios
 
-        panel = (
-            data
-            if data is not None
-            else playground.sample_data(
+        panel = data
+        if panel is None and run_id is not None:
+            try:
+                from google.cloud import bigquery
+
+                from .engines.bigquery_names import source_ref
+                from .engines.bigquery_sql import series_filter
+                from .registry.reads import resolve_settings
+
+                resolved = resolve_settings(self._settings)
+                source = source_ref(self._config, resolved.registry_dataset_ref)
+                idc, datec = self._config.data.ts_id_col, self._config.data.date_col
+                sfilter = series_filter(self._config, source, idc)
+                where_clause = f" WHERE {sfilter}" if sfilter else ""
+                sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
+                client = bigquery.Client(project=resolved.project_id)
+                df = client.query(sql).to_dataframe()
+                if not df.empty:
+                    panel = df
+            except Exception:  # noqa: BLE001 - fall back to synthetic sample data when offline
+                panel = None
+        if panel is None:
+            panel = playground.sample_data(
                 n_series=min(self._config.data.series_limit or 3, 5),
                 freq=self._config.data.freq,
                 with_exog=True,
             )
-        )
         return simulate_scenarios(
             panel,
             self._config,

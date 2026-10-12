@@ -31,6 +31,7 @@ from .features import (
     build_future_features,
     fit_transform_lambda,
     regularize_series_grid,
+    resolve_model_variant,
 )
 from .models import get_model
 from .models.base_model import ModelContext
@@ -302,7 +303,8 @@ def simulate_scenarios(
     panel = data.copy()
     if d.ts_id_col not in panel.columns:
         panel[d.ts_id_col] = "series_0"
-    for c in known_covs:
+    all_covs = list(dict.fromkeys([*work_cfg.features.all_covariates, *known_covs]))
+    for c in all_covs:
         if c not in panel.columns:
             panel[c] = 1.0 if c == eff_price_col else 0.0
 
@@ -328,26 +330,28 @@ def simulate_scenarios(
 
         for mname in py_models:
             m_cls = get_model(mname)
-            m_params: dict[str, Any] = dict(work_cfg.model_params.get(mname, {}))
+            spec = resolve_model_variant(work_cfg, mname, model_cls=m_cls)
+            model_cfg = spec.effective_cfg
+            m_params: dict[str, Any] = dict(spec.clean_params)
             ctx = ModelContext(
                 freq=d.freq,
-                horizon=work_cfg.max_horizon,
-                transform=work_cfg.features.transform,
+                horizon=model_cfg.max_horizon,
+                transform=model_cfg.features.transform,
                 transform_lambda=lam,
             )
             y_hist, X_hist = build_features(
-                s_clean, work_cfg, lam, m_cls.lags_covariates_internally
+                s_clean, model_cfg, lam, m_cls.lags_covariates_internally
             )
             est = m_cls(m_params, ctx)
             est.fit(y_hist, X_hist)
 
             cal: Calibration | None = None
             oof_df: pd.DataFrame | None = None
-            if work_cfg.backtest.enabled:
+            if model_cfg.backtest.enabled:
                 oof_raw, _, _ = backtest_cell(
                     s_clean,
                     partial(m_cls, m_params, ctx),
-                    work_cfg,
+                    model_cfg,
                     lam,
                     None,
                     m_cls.lags_covariates_internally,
@@ -357,9 +361,9 @@ def simulate_scenarios(
                     cal = calibrate_from_oof(oof_df, target_qs)
 
             arm, _ = resolve_arm(
-                work_cfg.output.point_forecast,
+                model_cfg.output.point_forecast,
                 oof_df,
-                work_cfg.backtest.decision_metric,
+                model_cfg.backtest.decision_metric,
                 fallback_arm,
             )
 
@@ -371,16 +375,16 @@ def simulate_scenarios(
                 X_fut = build_future_features(
                     y_hist,
                     X_hist,
-                    work_cfg,
+                    model_cfg,
                     horizon=horizon,
                     future_covariates_df=fut_cov_df,
                 )
                 raw_pred = est.predict(horizon, X_fut, quantiles=target_qs)
                 cal_pred, _ = apply_calibration(raw_pred, cal, arm)
-                cal_pred, _ = apply_quantile_and_cost_rules(cal_pred, work_cfg.output)
-                if has_output_constraints(work_cfg.output):
+                cal_pred, _ = apply_quantile_and_cost_rules(cal_pred, model_cfg.output)
+                if has_output_constraints(model_cfg.output):
                     cal_pred = apply_output_constraints(
-                        cal_pred, work_cfg.output, bounds_df=fut_cov_df
+                        cal_pred, model_cfg.output, bounds_df=fut_cov_df
                     )
                 scen_prices = (
                     pd.to_numeric(fut_cov_df[eff_price_col], errors="coerce").to_numpy(dtype=float)

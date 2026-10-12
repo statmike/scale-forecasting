@@ -433,12 +433,17 @@ def _resolve_params(
         authored: dict[str, Any] = dict(resolve_model_variant(cfg, model_name).clean_params)
     else:
         authored = {}
+    variant_pins: dict[str, Any] = (
+        dict(clean_model_params(cfg.model_params[model_name]))
+        if "@" in model_name and model_name in cfg.model_params
+        else {}
+    )
     if params is not None:
-        return {**authored, **params}
+        return {**authored, **params, **variant_pins}
     if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
         from .hpo import tune_model
 
-        return {**authored, **tune_model(model_name, [series], cfg, ctx, tally)}
+        return {**authored, **tune_model(model_name, [series], cfg, ctx, tally), **variant_pins}
     return authored
 
 

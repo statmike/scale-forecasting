@@ -348,11 +348,16 @@ def tune_model(
     it runs on the driver before any cell exists, so its fits belong to the run rather than to any
     one row, and there is nowhere honest to put them.
     """
-    from .features import resolve_model_variant
+    from .features import clean_model_params, resolve_model_variant
 
     model_cls = get_model(model_name)
     spec = resolve_model_variant(cfg, model_name, model_cls=model_cls)
     authored: dict[str, Any] = dict(spec.clean_params)
+    variant_pins: dict[str, Any] = (
+        dict(clean_model_params(cfg.model_params[model_name]))
+        if "@" in model_name and model_name in cfg.model_params
+        else {}
+    )
     if not _has_search_space(model_cls):
         return {}
 
@@ -368,7 +373,12 @@ def tune_model(
     def objective(trial: optuna.Trial) -> float:
         return _score_params(
             model_name,
-            {"training_mode": spec.training_mode, **authored, **model_cls.search_space(trial)},
+            {
+                "training_mode": spec.training_mode,
+                **authored,
+                **model_cls.search_space(trial),
+                **variant_pins,
+            },
             sample,
             cfg,
             ctx,
@@ -384,7 +394,7 @@ def tune_model(
         study.best_value,
         cfg.hpo.n_trials,
     )
-    return {**authored, **study.best_params}
+    return {**authored, **study.best_params, **variant_pins}
 
 
 def resolve_fleetwide(

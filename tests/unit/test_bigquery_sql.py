@@ -671,3 +671,48 @@ def test_timesfm_version_and_context_window_sql_and_options() -> None:
     )
     with pytest.raises(ConfigError, match="maximum horizon of 1024"):
         check_model_params(bad_hor_30)
+
+
+def test_build_forecast_insert_sql_and_score_fold_apply_output_constraints() -> None:
+    import pandas as pd
+
+    from scale_forecasting.engines.bigquery_engine import _score_fold
+
+    cfg = RunConfig(
+        run_name="bq output constraints test",
+        data={"source_table": "source_series_native", "horizon": 14},
+        models=["arima_plus"],
+        output={
+            "floor": 0.0,
+            "cap": 5000.0,
+            "integer_rounding": "cumulative_round",
+        },
+    )
+    sql = build_forecast_insert_sql(cfg, "arima_plus", _DS)
+    assert "GREATEST(LEAST(forecast_value, 5000.0), 0.0) AS _val_c" in sql
+    assert "ROUND(SUM(_val_c) OVER (PARTITION BY ts_id ORDER BY forecast_timestamp))" in sql
+    assert "LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r)" in sql
+
+    cfg_round = cfg.model_copy(
+        update={"output": cfg.output.model_copy(update={"integer_rounding": "round"})}
+    )
+    sql_round = build_forecast_insert_sql(cfg_round, "arima_plus", _DS)
+    assert "ROUND(_val_c) AS _yhat_r" in sql_round
+
+    eval_df = pd.DataFrame(
+        {
+            "ts_id": ["s0", "s0", "s0"],
+            "forecast_date": pd.date_range("2025-01-01", periods=3, freq="D").date,
+            "y_true": [10.0, 20.0, 30.0],
+            "yhat": [-5.4, 12.4, 5200.6],
+            "yhat_lower": [-28.9, 5.2, 4900.1],
+            "yhat_upper": [4.3, 18.8, 5500.9],
+            "cutoff_date": [pd.Timestamp("2024-12-31").date()] * 3,
+            "horizon_step": [1, 2, 3],
+        }
+    )
+    oof_rows, _ = _score_fold(eval_df, {}, run_id="r1", model_name="arima_plus", fold_id=1, cfg=cfg)
+    assert [r["yhat"] for r in oof_rows] == [0.0, 12.0, 5000.0]
+    assert oof_rows[0]["yhat_raw"] == pytest.approx(-5.4)
+    for r in oof_rows:
+        assert 0.0 <= r["yhat_lower"] <= r["yhat"] <= r["yhat_upper"] <= 5000.0
