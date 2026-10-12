@@ -44,6 +44,8 @@ from typing import TYPE_CHECKING, Any
 from ..registry.tables import bigquery_client
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import pandas as pd
 
     from ..config import RunConfig
@@ -120,12 +122,14 @@ def run(
     from .bigquery_sql import (
         bqml_options,
         build_eval_query,
+        build_explain_forecast_query,
         build_fold_create_statements,
         build_fold_drop_statements,
         build_history_query,
         build_series_ids_query,
         build_setup_statements,
         fold_plan,
+        xreg_cols,
     )
 
     log = get_logger(__name__)
@@ -175,6 +179,7 @@ def run(
         n_series = len(series_ids)
         try:
             # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
+            tier1_by_model: dict[str, dict[str, dict[str, float]]] = {}
             for model_name in models:
                 for stmt in build_setup_statements(
                     cfg,
@@ -184,6 +189,24 @@ def run(
                     snapshot_millis=snapshot_millis,
                 ):
                     _query(stmt)
+                explain_sql = build_explain_forecast_query(
+                    cfg,
+                    model_name,
+                    dataset,
+                    registry_dataset=registry_dataset,
+                    snapshot_millis=snapshot_millis,
+                )
+                if explain_sql is not None:
+                    try:
+                        explain_df = _query(explain_sql).to_dataframe()
+                        t1, _ = extract_bqml_explanations(
+                            explain_df,
+                            ts_id_col=cfg.data.ts_id_col,
+                            xreg_cols=xreg_cols(cfg, model_name),
+                        )
+                        tier1_by_model[model_name] = t1
+                    except Exception as exc:  # noqa: BLE001 - explainability is best-effort
+                        log.warning("ML.EXPLAIN_FORECAST failed for %s: %s", model_name, exc)
 
             # --- Phase 2: scored evaluation ---------------------------------------------------
             oof_rows: list[dict[str, Any]] = []
@@ -279,6 +302,7 @@ def run(
                                 n_folds_achieved=len(panels),
                                 first_val_date=first_val,
                                 last_val_date=last_val,
+                                feature_attributions=tier1_by_model.get(model_name, {}).get(ts_id),
                             )
                         )
             else:
@@ -289,7 +313,14 @@ def run(
                     for ts_id in series_ids:
                         meta_rows.append(
                             _meta_row(
-                                run_id, ts_id, model_name, nan_panel, best_params, created_at, cfg
+                                run_id,
+                                ts_id,
+                                model_name,
+                                nan_panel,
+                                best_params,
+                                created_at,
+                                cfg,
+                                feature_attributions=tier1_by_model.get(model_name, {}).get(ts_id),
                             )
                         )
 
@@ -433,6 +464,97 @@ def _oof_row(
     }
 
 
+_SEASONAL_COLS: tuple[str, ...] = (
+    "seasonal_period_yearly",
+    "seasonal_period_quarterly",
+    "seasonal_period_monthly",
+    "seasonal_period_weekly",
+    "seasonal_period_daily",
+)
+
+
+def extract_bqml_explanations(
+    explain_df: pd.DataFrame,
+    *,
+    ts_id_col: str = "ts_id",
+    xreg_cols: Sequence[str] = (),
+) -> tuple[dict[str, dict[str, float]], dict[tuple[str, str], str]]:
+    """Extract Tier 1 and Tier 2 feature attributions from an ``ML.EXPLAIN_FORECAST`` frame (pure).
+
+    * **Tier 1 (`tier1_by_ts`):** per-series normalized mean absolute attribution across ``trend``,
+      ``seasonal`` (sum of ``seasonal_period_*``), ``holiday_effect``, and each exogenous column in
+      ``xreg_cols`` (``attribution_<col>``). Stored in
+      ``forecast_metadata.fit_diagnostics["feature_attributions"]``.
+    * **Tier 2 (`tier2_by_ts_date`):** per-step JSON string ``{"baseline_score": float,
+      "attributions": {...}}`` keyed by ``(ts_id, forecast_date_iso)`` for
+      ``forecast_predictions.explanations``.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if explain_df.empty or ts_id_col not in explain_df.columns:
+        return {}, {}
+
+    tier1_by_ts: dict[str, dict[str, float]] = {}
+    tier2_by_ts_date: dict[tuple[str, str], str] = {}
+
+    for ts_id_raw, g in explain_df.groupby(ts_id_col):
+        ts_id = str(ts_id_raw)
+        n = len(g)
+        if n == 0:
+            continue
+        trend_arr = (
+            np.nan_to_num(g["trend"].to_numpy(dtype=float), nan=0.0)
+            if "trend" in g.columns
+            else np.zeros(n, dtype=float)
+        )
+        seas_arr = np.zeros(n, dtype=float)
+        for scol in _SEASONAL_COLS:
+            if scol in g.columns:
+                seas_arr = seas_arr + np.nan_to_num(g[scol].to_numpy(dtype=float), nan=0.0)
+        hol_arr = (
+            np.nan_to_num(g["holiday_effect"].to_numpy(dtype=float), nan=0.0)
+            if "holiday_effect" in g.columns
+            else np.zeros(n, dtype=float)
+        )
+        comp_arrays: dict[str, np.ndarray] = {
+            "trend": trend_arr,
+            "seasonal": seas_arr,
+        }
+        if np.any(np.abs(hol_arr) > 0.0) or "holiday_effect" in g.columns:
+            comp_arrays["holiday_effect"] = hol_arr
+        for col in xreg_cols:
+            acol = f"attribution_{col}"
+            if acol in g.columns:
+                comp_arrays[col] = np.nan_to_num(g[acol].to_numpy(dtype=float), nan=0.0)
+            else:
+                comp_arrays[col] = np.zeros(n, dtype=float)
+
+        mean_abs = {k: float(np.mean(np.abs(arr))) for k, arr in comp_arrays.items()}
+        total_abs = sum(mean_abs.values())
+        if total_abs > 0.0:
+            tier1_by_ts[ts_id] = {
+                k: round(v / total_abs, 6) for k, v in mean_abs.items() if v > 0.0 or k in xreg_cols
+            }
+        else:
+            tier1_by_ts[ts_id] = dict.fromkeys(comp_arrays, 0.0)
+
+        if "time_series_timestamp" in g.columns:
+            ts_dates = [
+                d.date().isoformat() if hasattr(d, "date") else str(d)[:10]
+                for d in pd.to_datetime(g["time_series_timestamp"])
+            ]
+            for idx, ds_iso in enumerate(ts_dates):
+                baseline = round(float(trend_arr[idx] + seas_arr[idx]), 6)
+                attrs = {k: round(float(arr[idx]), 6) for k, arr in comp_arrays.items()}
+                tier2_by_ts_date[(ts_id, ds_iso)] = json.dumps(
+                    {"baseline_score": baseline, "attributions": attrs},
+                    sort_keys=True,
+                )
+
+    return tier1_by_ts, tier2_by_ts_date
+
+
 def _meta_row(
     run_id: str,
     ts_id: str,
@@ -444,6 +566,7 @@ def _meta_row(
     n_folds_achieved: int | None = None,
     first_val_date: Any = None,
     last_val_date: Any = None,
+    feature_attributions: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model (pure).
 
@@ -487,9 +610,12 @@ def _meta_row(
             status = "reduced" if n_folds_achieved else "unscored"
             note = f"scored on {n_folds_achieved} of {requested} folds"
 
-    fit_diag: str | None = None
+    diag_dict: dict[str, Any] = {}
     if should_stamp_variant_diagnostics(model_name, cfg):
-        fit_diag = json.dumps(variant_diagnostics_for(model_name, cfg), sort_keys=True)
+        diag_dict.update(variant_diagnostics_for(model_name, cfg))
+    if feature_attributions:
+        diag_dict["feature_attributions"] = dict(feature_attributions)
+    fit_diag: str | None = json.dumps(diag_dict, sort_keys=True) if diag_dict else None
 
     return {
         "run_id": run_id,

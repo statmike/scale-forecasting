@@ -143,10 +143,14 @@ class _BigQueryNativeModel(BaseModel):
 
 
 class ArimaPlus(_BigQueryNativeModel):
-    """BigQuery ML ``ARIMA_PLUS`` (univariate; custom holidays for parity with features.py)."""
+    """BigQuery ML ``ARIMA_PLUS`` / ``ARIMA_PLUS_XREG`` with ``ML.EXPLAIN_FORECAST``."""
 
     name = "arima_plus"
-    supports_exog = False
+    supports_exog = True
+    supports_future_covariates = True
+    supports_past_covariates = False
+    supports_static_covariates = False
+    supports_explainability = True
 
 
 class TimesFm(_BigQueryNativeModel):

@@ -716,3 +716,52 @@ def test_build_forecast_insert_sql_and_score_fold_apply_output_constraints() -> 
     assert oof_rows[0]["yhat_raw"] == pytest.approx(-5.4)
     for r in oof_rows:
         assert 0.0 <= r["yhat_lower"] <= r["yhat"] <= r["yhat_upper"] <= 5000.0
+
+
+def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
+    from scale_forecasting.engines.bigquery_sql import build_explain_forecast_query
+
+    cfg = _cfg(
+        ["arima_plus", "arima_plus@univariate", "timesfm"], exog=["promo_flag", "price_index"]
+    )
+    opts_xreg = bqml_options(cfg, "arima_plus")
+    opts_uni = bqml_options(cfg, "arima_plus@univariate")
+    assert opts_xreg["model_type"] == "ARIMA_PLUS_XREG"
+    assert opts_uni["model_type"] == "ARIMA_PLUS"
+
+    create_xreg = build_create_model_sql(cfg, "arima_plus", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_xreg
+    assert "SELECT ts_id, ds, y, promo_flag, price_index" in create_xreg
+
+    create_uni = build_create_model_sql(cfg, "arima_plus@univariate", _DS)
+    assert "model_type = 'ARIMA_PLUS'" in create_uni
+    assert "promo_flag" not in create_uni
+
+    insert_xreg = build_forecast_insert_sql(cfg, "arima_plus", _DS)
+    assert "explanations, created_at" in insert_xreg
+    assert "ML.FORECAST(MODEL" in insert_xreg
+    assert "ML.EXPLAIN_FORECAST(MODEL" in insert_xreg
+    assert "attribution_promo_flag" in insert_xreg
+    assert "attribution_price_index" in insert_xreg
+    assert "GENERATE_ARRAY(1, 28)" in insert_xreg
+
+    eval_xreg = build_eval_query(cfg, "arima_plus", _DS, back_steps=56, fold_id=0)
+    expected_xreg = (
+        "SELECT ts_id, ds, promo_flag, price_index "
+        "FROM `proj.scale_forecasting.source_series_native`"
+    )
+    assert expected_xreg in eval_xreg
+    assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in eval_xreg
+
+    explain_xreg = build_explain_forecast_query(cfg, "arima_plus", _DS)
+    assert explain_xreg is not None
+    assert "ML.EXPLAIN_FORECAST(MODEL" in explain_xreg
+    assert "WHERE time_series_type = 'forecast'" in explain_xreg
+    assert "promo_flag, price_index" in explain_xreg
+
+    explain_uni = build_explain_forecast_query(cfg, "arima_plus@univariate", _DS)
+    assert explain_uni is not None
+    assert "ML.EXPLAIN_FORECAST(MODEL" in explain_uni
+    assert "promo_flag" not in explain_uni
+
+    assert build_explain_forecast_query(cfg, "timesfm", _DS) is None

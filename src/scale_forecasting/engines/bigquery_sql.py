@@ -32,6 +32,8 @@ from ..features import holiday_frame
 from .bigquery_names import model_ref, registry_of, sanitize_identifier, source_ref
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..config import RunConfig
 
 
@@ -171,11 +173,28 @@ def trained_horizon(cfg: RunConfig, *, fold: bool) -> int:
     return cfg.data.horizon
 
 
+def xreg_cols(cfg: RunConfig, model_name: str) -> list[str]:
+    """Return active known-future exogenous columns for ``model_name`` (``[]`` if univariate)."""
+    from ..features import effective_config_for_model
+    from ..models import base_model_name, get_model
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return []
+    model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
+    return list(model_cfg.features.known_future_covariates)
+
+
+_xreg_cols = xreg_cols
+
+
 def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict[str, Any]:
     """The resolved model parameters, as an ordered dict — one source of truth for two uses.
 
     For the ARIMA models this is the ``CREATE MODEL`` ``OPTIONS(...)`` body *and* the
     ``best_params`` JSON on each ``forecast_metadata`` row — the registry records what trained.
+    When ``features.future_covariates`` (or ``exog``) is configured on ``arima_plus`` (and not
+    stripped by an ``@univariate`` tag), ``model_type`` upgrades from ``ARIMA_PLUS`` to
+    ``ARIMA_PLUS_XREG``.
     TimesFM has no ``CREATE MODEL``; `_render_options` never sees its dict, but ``run`` still
     stamps ``best_params`` for every model, so we return the resolved ``AI.FORECAST`` arguments here
     — keeping the metadata row's provenance non-NULL and meaningful across both native shapes.
@@ -206,8 +225,10 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
         if tf_ctx is not None:
             tf_opts["context_window"] = tf_ctx
         return tf_opts
+    xreg_cols = _xreg_cols(cfg, model_name)
+    bqml_type = "ARIMA_PLUS_XREG" if xreg_cols else _MODEL_TYPE[base_name]
     opts: dict[str, Any] = {
-        "model_type": _MODEL_TYPE[base_name],
+        "model_type": bqml_type,
         "time_series_id_col": cfg.data.ts_id_col,
         "time_series_timestamp_col": cfg.data.date_col,
         "time_series_data_col": cfg.data.target_col,
@@ -283,15 +304,16 @@ def _training_select(
     cfg: RunConfig,
     source: str,
     *,
+    xreg_cols: Sequence[str] = (),
     back_steps: int | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
-    """The ``training_data`` SELECT: id/timestamp/target over the fit's training window.
+    """The ``training_data`` SELECT: id/timestamp/target (+ xreg_cols) over the training window.
 
     ``back_steps=None`` trains on **all** history (the final true-future fit); an int restricts to a
     backtest fold's window (see `_train_window_where`).
     """
-    cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
+    cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col, *xreg_cols]
     where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
     sfilter = _series_filter(cfg, source, cfg.data.ts_id_col, snapshot_millis=snapshot_millis)
     if sfilter:
@@ -299,6 +321,54 @@ def _training_select(
     clause = f"\n  WHERE {' AND '.join(where)}" if where else ""
     snap = _snapshot_clause(snapshot_millis)
     return f"SELECT {', '.join(cols)}\n  FROM `{source}`{snap}{clause}"
+
+
+def _future_xreg_select(
+    cfg: RunConfig,
+    source: str,
+    xreg_cols: Sequence[str],
+    *,
+    horizon: int,
+    back_steps: int | None = None,
+    snapshot_millis: int | None = None,
+) -> str:
+    """Render the future exogenous SELECT for ``ML.FORECAST`` / ``ML.EXPLAIN_FORECAST``.
+
+    * **Backtest fold (`back_steps is not None`):** selects actual post-cutoff rows ``ds > cutoff``
+      (bounded above by ``cutoff + horizon`` when ``back_steps > horizon``) from the source table.
+    * **Final true-future forecast (`back_steps is None`):** projects ``horizon`` future dates past
+      each series' ``MAX(ds)`` using the trailing ``horizon`` rows of that series in chronological
+      order (repeating the earliest row when a series is shorter than ``horizon``), matching the
+      Python worker's recency-window future exogenous stand-in.
+    """
+    idc, datec = cfg.data.ts_id_col, cfg.data.date_col
+    snap = _snapshot_clause(snapshot_millis)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+    if back_steps is not None:
+        cols = [idc, datec, *xreg_cols]
+        cutoff = _cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+        where = [f"{datec} > {cutoff}"]
+        if back_steps > horizon:
+            upper = _cutoff_expr(cfg, source, back_steps - horizon, snapshot_millis=snapshot_millis)
+            where.append(f"{datec} <= {upper}")
+        if sfilter:
+            where.append(sfilter)
+        return f"SELECT {', '.join(cols)} FROM `{source}`{snap} WHERE {' AND '.join(where)}"
+
+    _, unit = _freq(cfg)
+    where_clause = f" WHERE {sfilter}" if sfilter else ""
+    xreg_list = ", ".join(xreg_cols)
+    return (
+        f"SELECT {idc}, DATE_ADD(_max_ds, INTERVAL _step {unit}) AS {datec}, {xreg_list} "
+        f"FROM ("
+        f"SELECT {idc}, {xreg_list}, "
+        f"MAX({datec}) OVER (PARTITION BY {idc}) AS _max_ds, "
+        f"ROW_NUMBER() OVER (PARTITION BY {idc} ORDER BY {datec} DESC) AS _rev_rn, "
+        f"COUNT(*) OVER (PARTITION BY {idc}) AS _n_rows "
+        f"FROM `{source}`{snap}{where_clause}"
+        f") CROSS JOIN UNNEST(GENERATE_ARRAY(1, {horizon})) AS _step "
+        f"WHERE _rev_rn = LEAST({horizon} - _step + 1, _n_rows)"
+    )
 
 
 def build_create_model_sql(
@@ -311,7 +381,7 @@ def build_create_model_sql(
     fold_id: int | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
-    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model.
+    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS / ARIMA_PLUS_XREG native model.
 
     ``back_steps=None`` (default) is the **final** model: trained on *all* history so its forecast
     is a true beyond-data forecast (parity with the Spark final fit). A ``back_steps``/``fold_id``
@@ -328,12 +398,19 @@ def build_create_model_sql(
     from ..models import get_model
 
     model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
+    xreg_cols = _xreg_cols(cfg, model_name)
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = source_ref(cfg, dataset)
     # A fold model is trained for the fold's request (which reaches across the embargo), the final
     # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
     options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
-    training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
+    training = _training_select(
+        cfg,
+        source,
+        xreg_cols=xreg_cols,
+        back_steps=back_steps,
+        snapshot_millis=snapshot_millis,
+    )
     holiday_cte = build_custom_holiday_cte(model_cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -407,13 +484,97 @@ def _forecast_source(
 
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=back_steps,
+            snapshot_millis=snapshot_millis,
+        )
+        return f"ML.FORECAST(MODEL {ref}, {struct}, ({future_xreg}))"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
+
+
+def _explain_json_expr(xreg_cols: Sequence[str], alias: str = "_ex") -> str:
+    """Render a BigQuery ``TO_JSON(STRUCT(...))`` matching Tier 2 ``explanations`` JSON."""
+    p = f"{alias}." if alias else ""
+    seasonal = (
+        f"COALESCE({p}seasonal_period_yearly, 0.0) + "
+        f"COALESCE({p}seasonal_period_quarterly, 0.0) + "
+        f"COALESCE({p}seasonal_period_monthly, 0.0) + "
+        f"COALESCE({p}seasonal_period_weekly, 0.0) + "
+        f"COALESCE({p}seasonal_period_daily, 0.0)"
+    )
+    baseline = f"ROUND(COALESCE({p}trend, 0.0) + {seasonal}, 6)"
+    attr_fields = [
+        f"ROUND(COALESCE({p}trend, 0.0), 6) AS trend",
+        f"ROUND({seasonal}, 6) AS seasonal",
+        f"ROUND(COALESCE({p}holiday_effect, 0.0), 6) AS holiday_effect",
+    ]
+    for col in xreg_cols:
+        attr_fields.append(f"ROUND(COALESCE({p}attribution_{col}, 0.0), 6) AS {col}")
+    return (
+        f"TO_JSON(STRUCT({baseline} AS baseline_score, "
+        f"STRUCT({', '.join(attr_fields)}) AS attributions))"
+    )
+
+
+def build_explain_forecast_query(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    registry_dataset: str | None = None,
+    snapshot_millis: int | None = None,
+) -> str | None:
+    """Render ``SELECT * FROM ML.EXPLAIN_FORECAST(...) WHERE time_series_type = 'forecast'``.
+
+    Returns ``None`` for serverless ``timesfm`` (which has no ``ML.EXPLAIN_FORECAST`` surface).
+    Used by `bigquery_engine` to extract Tier 1 global feature attributions
+    (``forecast_metadata.fit_diagnostics["feature_attributions"]``) and Tier 2 per-step
+    attributions (``forecast_predictions.explanations``).
+    """
+    from ..models import base_model_name
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return None
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+    h = trained_horizon(cfg, fold=False)
+    struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        source = source_ref(cfg, dataset)
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=None,
+            snapshot_millis=snapshot_millis,
+        )
+        call = f"ML.EXPLAIN_FORECAST(MODEL {ref}, {struct}, ({future_xreg}))"
+    else:
+        call = f"ML.EXPLAIN_FORECAST(MODEL {ref}, {struct})"
+    idc = cfg.data.ts_id_col
+    return (
+        f"SELECT *\n"
+        f"FROM {call}\n"
+        f"WHERE time_series_type = 'forecast'\n"
+        f"ORDER BY {idc}, time_series_timestamp;"
+    )
 
 
 # Columns written to forecast_predictions, in DDL order (shared by the INSERT).
 _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
     "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at"
+)
+_PRED_COLS_EXPLAIN = (
+    "run_id, ts_id, model_type, compute_engine, forecast_date, "
+    "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, explanations, created_at"
 )
 
 
@@ -459,25 +620,59 @@ def build_forecast_insert_sql(
     ``forecast_value``.
     """
     dataset_q = f"`{registry_of(dataset, registry_dataset)}.forecast_predictions`"
-    forecast = _forecast_source(
-        cfg,
-        model_name,
-        dataset,
-        registry_dataset=registry_dataset,
-        snapshot_millis=snapshot_millis,
-    )
     idc = cfg.data.ts_id_col
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+        h = trained_horizon(cfg, fold=False)
+        struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+        source = source_ref(cfg, dataset)
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=None,
+            snapshot_millis=snapshot_millis,
+        )
+        explain_json = _explain_json_expr(xreg_cols, alias="_ex")
+        forecast = (
+            f"(\n"
+            f"  SELECT\n"
+            f"    _f.{idc}, _f.forecast_timestamp, _f.forecast_value,\n"
+            f"    _f.prediction_interval_lower_bound, _f.prediction_interval_upper_bound,\n"
+            f"    {explain_json} AS _explanations\n"
+            f"  FROM ML.FORECAST(MODEL {ref}, {struct}, ({future_xreg})) _f\n"
+            f"  LEFT JOIN (\n"
+            f"    SELECT * FROM ML.EXPLAIN_FORECAST(MODEL {ref}, {struct}, ({future_xreg}))\n"
+            f"    WHERE time_series_type = 'forecast'\n"
+            f"  ) _ex\n"
+            f"  ON _ex.{idc} = _f.{idc} AND _ex.time_series_timestamp = _f.forecast_timestamp\n"
+            f")"
+        )
+    else:
+        forecast = _forecast_source(
+            cfg,
+            model_name,
+            dataset,
+            registry_dataset=registry_dataset,
+            snapshot_millis=snapshot_millis,
+        )
+    pred_cols = _PRED_COLS_EXPLAIN if xreg_cols else _PRED_COLS
+    expl_select = " _explanations," if xreg_cols else ""
+    expl_inner = ", _explanations" if xreg_cols else ""
     fl = cfg.output.floor
     cp = cfg.output.cap
     rmode = cfg.output.integer_rounding
     if fl is None and cp is None and rmode == "none":
         return (
             f"INSERT INTO {dataset_q}\n"
-            f"  ({_PRED_COLS})\n"
+            f"  ({pred_cols})\n"
             f"SELECT\n"
             f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
             f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
-            f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+            f"  prediction_interval_lower_bound, prediction_interval_upper_bound,"
+            f" NULL,{expl_select}\n"
             f"  CURRENT_TIMESTAMP()\n"
             f"FROM {forecast};"
         )
@@ -502,21 +697,21 @@ def build_forecast_insert_sql(
 
     return (
         f"INSERT INTO {dataset_q}\n"
-        f"  ({_PRED_COLS})\n"
+        f"  ({pred_cols})\n"
         f"SELECT\n"
         f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
         f"  DATE(forecast_timestamp), _yhat_r, forecast_value, _yhat_r,\n"
-        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,\n"
+        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,{expl_select}\n"
         f"  CURRENT_TIMESTAMP()\n"
         f"FROM (\n"
         f"  SELECT\n"
-        f"    {idc}, forecast_timestamp, forecast_value,\n"
+        f"    {idc}, forecast_timestamp, forecast_value{expl_inner},\n"
         f"    {yhat_r} AS _yhat_r,\n"
         f"    {lo_r} AS _lo_r,\n"
         f"    {hi_r} AS _hi_r\n"
         f"  FROM (\n"
         f"    SELECT\n"
-        f"      {idc}, forecast_timestamp, forecast_value,\n"
+        f"      {idc}, forecast_timestamp, forecast_value{expl_inner},\n"
         f"      {val_c} AS _val_c,\n"
         f"      {lo_c} AS _lo_c,\n"
         f"      {hi_c} AS _hi_c\n"

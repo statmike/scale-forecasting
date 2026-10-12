@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-10-12
+
+### Added
+
+- **BigQuery ML `ARIMA_PLUS_XREG` Exogenous Covariate & `ML.EXPLAIN_FORECAST` Explainability Parity (`native` family):**
+  - `arima_plus` ([`src/scale_forecasting/models/bigquery_native.py`](./src/scale_forecasting/models/bigquery_native.py)) now declares `supports_exog = True`, `supports_future_covariates = True`, and `supports_explainability = True`, bringing `future_covariates`-capable models to 18 and explainability-capable models to 10.
+  - When `features.future_covariates` (`known_future_covariates` / `exog`) is configured on `arima_plus`, [`src/scale_forecasting/engines/bigquery_sql.py`](./src/scale_forecasting/engines/bigquery_sql.py) automatically compiles `CREATE OR REPLACE MODEL ... OPTIONS(model_type = 'ARIMA_PLUS_XREG', ...)` with the exogenous regressors in `SELECT` and passes the future regressor table as the 3rd argument to `ML.FORECAST` and `ML.EXPLAIN_FORECAST`. Univariate configs and `arima_plus@univariate` ablation variants continue to compile byte-identical `model_type = 'ARIMA_PLUS'` SQL, enabling direct Covariate FVA (`arima_plus` vs. `arima_plus@univariate`) in `compute_fva`.
+  - [`src/scale_forecasting/engines/bigquery_engine.py`](./src/scale_forecasting/engines/bigquery_engine.py) executes `ML.EXPLAIN_FORECAST` (`build_explain_forecast_query` + `extract_bqml_explanations`) to populate **Tier 1** global feature attributions (`forecast_metadata.fit_diagnostics["feature_attributions"]` across `trend`, `seasonal`, `holiday_effect`, and each `attribution_<col>` exogenous regressor) and **Tier 2** per-step forecast attributions (`forecast_predictions.explanations`).
+- **Semantic Versioning Charter (`MAJOR.MINOR.PATCH`):** Documented the formal versioning policy in [`AGENTS.md`](./AGENTS.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md) defining `PATCH` (`1.0.x`), `MINOR` (`1.x.0`), and `MAJOR` (`x.0.0`) boundaries and release precheck gates.
+
+### Changed
+
+- **PyPI Long-Description Mermaid Rendering (`hatch-fancy-pypi-readme`):** Configured `[tool.hatch.metadata.hooks.fancy-pypi-readme]` in [`pyproject.toml`](./pyproject.toml) so `README.md` retains its interactive ` ```mermaid ` architecture flowchart on GitHub and MkDocs while substituting the diagram with the high-resolution architecture card (`docs/assets/social_card.png`) in built wheel and sdist `METADATA` for `pypi.org`.
+
+---
+
 ## [1.0.0] - 2026-10-12
 
 ### Added
@@ -48,5 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTML Report Hardening (`report.py`):** The inline `EXPLORER_DATA` JSON escapes `<`, `>`, and `&` as `\u003c` / `\u003e` / `\u0026` so a series id containing `</script>` cannot close the script block, and the fan-chart label is HTML-escaped (`escHtml`) before `innerHTML` assignment.
 - **FIPS-Safe Content Addressing:** `code_delivery` tags staged code archives with `hashlib.md5(..., usedforsecurity=False)` (a content-address, not a digest), so staging works on FIPS-enforced hosts.
 
-[Unreleased]: https://github.com/statmike/scale-forecasting/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/statmike/scale-forecasting/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/statmike/scale-forecasting/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/statmike/scale-forecasting/releases/tag/v1.0.0

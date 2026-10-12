@@ -496,7 +496,7 @@ def test_every_model_declares_explicit_three_tier_covariate_support() -> None:
         assert isinstance(cls.supports_past_covariates, bool)
         assert isinstance(cls.supports_static_covariates, bool)
         assert cls.supports_future_covariates == cls.supports_exog
-        assert cls.supports_past_covariates == cls.supports_exog
+        assert cls.supports_past_covariates == (cls.supports_exog and name != "arima_plus")
         assert cls.supports_static_covariates == (name in static_models)
 
         row = catalog.loc[name]

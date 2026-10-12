@@ -111,6 +111,14 @@ If your change modifies a cloud execution engine (`src/scale_forecasting/engines
 
 `scale-forecasting` follows Semantic Versioning (`MAJOR.MINOR.PATCH`) and publishes to PyPI and GitHub Releases from git tags via [`.github/workflows/release.yml`](./.github/workflows/release.yml) using PyPI Trusted Publishing (OIDC + PEP 740 cryptographic attestations).
 
+### Semantic Versioning charter (`MAJOR.MINOR.PATCH`)
+
+| Version Level | When to Increment (`X.Y.Z`) | Concrete `scale-forecasting` Examples | `run_id` & Registry Compatibility Guarantee |
+| :--- | :--- | :--- | :--- |
+| **`MAJOR` (`X.0.0`)**<br/>*1st Level — Breaking Architectural / Contract Changes* | Breaking changes to `RunConfig` JSON/dict schema, CLI flags, Python SDK (`Forecaster`) signatures, compute runtime/runner execution contracts, or BigQuery registry table/view schemas. | Removing or renaming a `RunConfig` field without a backward-compatible alias; changing how a runtime job is launched/routed in a way that requires new IAM/infra; non-additive BigQuery DDL changes; raising the minimum Python floor; intentional `run_id` digest changes across existing configs. | May introduce a new `run_id_inputs` architecture axis in `docs/validation.md` or require a schema migration (`ensure_tables`). |
+| **`MINOR` (`1.X.0`)**<br/>*2nd Level — Backward-Compatible Capability Expansions* | Expanding the platform with new models, model capabilities, evaluation metrics, ensemble/reconciliation methods, optional `RunConfig` knobs, or new SDK/MCP/reporting tools. | Adding a new model or upgrading an existing model's capabilities (e.g., `ARIMA_PLUS_XREG` + `ML.EXPLAIN_FORECAST` on `arima_plus` in `v1.1.0`); adding a new metric to `METRIC_NAMES`; adding new optional `RunConfig` fields; adding new `Forecaster` or MCP methods. | **100% backward-compatible:** all new `RunConfig` fields default to prior behavior and are elided in `_DEFAULT_ELIDED` / `_NOT_IDENTITY` so existing configs keep their exact `run_id`. |
+| **`PATCH` (`1.x.Y`)**<br/>*3rd Level — Bug Fixes, Packaging & Polish* | Backward-compatible bug fixes, numerical edge-case guards, documentation/packaging improvements, and dependency patch updates with zero new models, metrics, or config fields. | Fixing an edge case in a model/metric wrapper; packaging/README rendering improvements (`hatch-fancy-pypi-readme`); lockfile security/patch refreshes (`make lock`). | **100% drop-in:** zero config, schema, or `run_id` changes. |
+
 ### Version single-sourcing & synchronized files
 
 `pyproject.toml` (`[project].version`) is the canonical version string read at runtime via `importlib.metadata.version("scale-forecasting")`. When preparing a new release (`X.Y.Z`), update these files in a release-prep pull request:

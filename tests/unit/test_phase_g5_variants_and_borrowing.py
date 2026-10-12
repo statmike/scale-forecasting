@@ -301,7 +301,11 @@ def test_dag_validation_for_variants() -> None:
     check_covariate_support(cfg)
     dag = plan_dag(cfg)
     assert dag.native_job is not None
-    assert set(dag.native_job.models) == {"arima_plus", "arima_plus@no_holidays"}
+    assert set(dag.native_job.models) == {
+        "arima_plus",
+        "arima_plus@no_holidays",
+        "arima_plus@univariate",
+    }
 
     # Invalid training_mode on a local_only model is rejected by check_model_params
     bad_cfg = RunConfig.model_validate(

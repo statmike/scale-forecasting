@@ -230,3 +230,48 @@ def test_a_fold_without_the_geometry_columns_still_produces_rows() -> None:
     assert {r["cutoff_date"] for r in oof} == {None}
     assert {r["horizon_step"] for r in oof} == {None}
     assert not math.isnan(panels["a"]["mase"])
+
+
+def test_extract_bqml_explanations_populates_tier1_and_tier2() -> None:
+    import json
+
+    import pandas as pd
+    import pytest
+
+    from scale_forecasting.engines.bigquery_engine import _meta_row, extract_bqml_explanations
+    from scale_forecasting.metrics import METRIC_NAMES
+
+    explain_df = pd.DataFrame(
+        {
+            "ts_id": ["s0", "s0"],
+            "time_series_timestamp": pd.to_datetime(["2026-02-01", "2026-02-02"]),
+            "trend": [10.0, 10.0],
+            "seasonal_period_weekly": [2.0, -2.0],
+            "holiday_effect": [0.0, 0.0],
+            "attribution_promo_flag": [8.0, 0.0],
+        }
+    )
+    tier1, tier2 = extract_bqml_explanations(
+        explain_df, ts_id_col="ts_id", xreg_cols=["promo_flag"]
+    )
+    assert "s0" in tier1
+    assert set(tier1["s0"]) >= {"trend", "seasonal", "promo_flag"}
+    assert sum(tier1["s0"].values()) == pytest.approx(1.0, abs=1e-4)
+
+    payload = json.loads(tier2[("s0", "2026-02-01")])
+    assert payload["baseline_score"] == pytest.approx(12.0)
+    assert payload["attributions"]["promo_flag"] == pytest.approx(8.0)
+
+    nan_panel = {name: float("nan") for name in METRIC_NAMES}
+    row = _meta_row(
+        "r1",
+        "s0",
+        "arima_plus",
+        nan_panel,
+        "{}",
+        None,
+        _cfg(),
+        feature_attributions=tier1["s0"],
+    )
+    diag = json.loads(row["fit_diagnostics"])
+    assert diag["feature_attributions"] == tier1["s0"]

@@ -1,8 +1,8 @@
 [project]
 name = "scale-forecasting"
-version = "1.0.0"
+version = "1.1.0"
 description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
-readme = "README.md"
+dynamic = ["readme"]
 # Two different pins, on purpose. `requires-python` is what *the package* installs on: the pure
 # layer (models, metrics, backtests, the playground) and the clients run on 3.11 and 3.12, and the
 # CI `core-install` job proves the bare install on each; 3.13 waits on the numpy<2 pin below (1.26
@@ -283,8 +283,15 @@ torch = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme>=24.1"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+fragments = [{ path = "README.md" }]
+substitutions = [
+    { pattern = '```mermaid[\s\S]*?```', replacement = '![scale-forecasting architecture](https://raw.githubusercontent.com/statmike/scale-forecasting/main/docs/assets/social_card.png)' },
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scale_forecasting"]
@@ -293,6 +300,7 @@ exclude = ["src/scale_forecasting/**/README.md"]
 [tool.hatch.build.targets.sdist]
 only-include = [
     "src/scale_forecasting",
+    "README.md",
     "CHANGELOG.md",
 ]
 exclude = ["src/scale_forecasting/**/README.md"]
