@@ -1080,7 +1080,7 @@ def regularize_series_grid(series: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame
     return frame
 
 
-def _local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
+def local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
     """Fast, fold-safe local trend + seasonal baseline for outlier and stockout imputation."""
     n = arr.size
     if n < 4:
@@ -1106,6 +1106,9 @@ def _local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
                 seas[mask] = float(np.median(finite))
         return trend + seas
     return trend
+
+
+_local_seasonal_baseline = local_seasonal_baseline
 
 
 def clean_training_target(

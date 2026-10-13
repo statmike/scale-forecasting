@@ -1604,7 +1604,7 @@ def compute_anomalies(
     "is_anomaly", "anomaly_probability", "lower_bound", "upper_bound"]``.
     """
     from .errors import ConfigError
-    from .features import _local_seasonal_baseline
+    from .features import local_seasonal_baseline
     from .seasonality import seasonal_period
 
     if not (0.0 < float(anomaly_prob_threshold) < 1.0):
@@ -1784,7 +1784,7 @@ def compute_anomalies(
     for tid, grp in s.groupby("ts_id", sort=False):
         g = grp.sort_values("ds")
         y_arr = g["y"].to_numpy(dtype=float)
-        baseline = _local_seasonal_baseline(y_arr, period)
+        baseline = local_seasonal_baseline(y_arr, period)
         resid = y_arr - baseline
         med = float(np.nanmedian(resid))
         yhat_arr = baseline + med
