@@ -694,7 +694,32 @@ def read_series_history(
     raw = read_run_config(run_id, settings=settings)
     if not raw:
         return []
-    cfg = RunConfig.model_validate(raw)
+    try:
+        cfg = RunConfig.model_validate(raw)
+    except Exception:  # noqa: BLE001 - legacy past run config fallback
+        data_blk = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        if not data_blk or "source_table" not in data_blk:
+            return []
+        cfg = RunConfig.model_validate(
+            {
+                "run_name": str(raw.get("run_name") or "past-run"),
+                "data": {
+                    k: v
+                    for k, v in data_blk.items()
+                    if k
+                    in (
+                        "source_table",
+                        "ts_id_col",
+                        "date_col",
+                        "target_col",
+                        "freq",
+                        "horizon",
+                        "series_limit",
+                    )
+                },
+                "models": ["naive_seasonal"],
+            }
+        )
     resolved = resolve_settings(settings)
     base_sql = build_history_query(cfg, resolved.registry_dataset_ref).rstrip().rstrip(";")
     if cfg.hierarchy.enabled:
@@ -844,7 +869,32 @@ def read_series_covariates(
     raw = read_run_config(run_id, settings=settings)
     if not raw:
         return []
-    cfg = RunConfig.model_validate(raw)
+    try:
+        cfg = RunConfig.model_validate(raw)
+    except Exception:  # noqa: BLE001 - legacy past run config fallback
+        data_blk = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+        if not data_blk or "source_table" not in data_blk:
+            return []
+        cfg = RunConfig.model_validate(
+            {
+                "run_name": str(raw.get("run_name") or "past-run"),
+                "data": {
+                    k: v
+                    for k, v in data_blk.items()
+                    if k
+                    in (
+                        "source_table",
+                        "ts_id_col",
+                        "date_col",
+                        "target_col",
+                        "freq",
+                        "horizon",
+                        "series_limit",
+                    )
+                },
+                "models": ["naive_seasonal"],
+            }
+        )
     cov_cols = cfg.features.dynamic_covariates
     if not cov_cols or cfg.hierarchy.enabled:
         return []

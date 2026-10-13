@@ -1017,3 +1017,169 @@ def test_arima_diagnostics_and_anomaly_change_point_queries() -> None:
     assert "ML.DETECT_CHANGE_POINTS(" in cp_sql
     assert "WHERE begin_timestamp IS NOT NULL" in cp_sql
     assert "WHERE is_gap_edge = FALSE" in cp_sql
+
+
+def test_universal_compute_anomalies_and_change_points_across_models_and_past_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from scale_forecasting import (
+        Forecaster,
+        Registry,
+        compute_anomalies,
+        compute_change_points,
+    )
+
+    dates = pd.date_range("2025-01-01", periods=60, freq="D")
+    records: list[dict[str, object]] = []
+    for model_type in ("xgboost", "tide", "vertex_tft", "ensemble_champion"):
+        for i, d in enumerate(dates):
+            base = 100.0 + 10.0 * np.sin(2.0 * np.pi * i / 7.0)
+            # Inject an unexplained 50-unit spike at index 25 and +40 regime shift at index 40
+            y_val = base + (50.0 if i == 25 else 0.0) + (40.0 if i >= 40 else 0.0)
+            records.append(
+                {
+                    "ts_id": "s_000000",
+                    "model_type": model_type,
+                    "fold_id": 0 if i < 30 else 1,
+                    "forecast_date": d.date(),
+                    "y_true": y_val,
+                    "yhat": base,
+                    "yhat_lower": base - 5.0,
+                    "yhat_upper": base + 5.0,
+                }
+            )
+    oof_df = pd.DataFrame.from_records(records)
+
+    # 1. Universal OOF anomaly detection (model_name=None evaluates all models in oof_df)
+    anom_default = compute_anomalies(oof_df=oof_df, anomaly_prob_threshold=0.95)
+    assert set(anom_default["model_type"].unique()) == {
+        "xgboost",
+        "tide",
+        "vertex_tft",
+        "ensemble_champion",
+    }
+    assert len(anom_default) == 240
+    flagged_dates = set(anom_default.loc[anom_default["is_anomaly"], "ds"])
+    assert dates[25].date() in flagged_dates
+
+    # Specific Python / AutoML model and model_name="all"
+    anom_xgb = compute_anomalies(
+        oof_df=oof_df,
+        model_name="xgboost",
+        anomaly_prob_threshold=0.99,
+        anomalies_only=True,
+    )
+    assert not anom_xgb.empty
+    assert set(anom_xgb["model_type"].unique()) == {"xgboost"}
+    assert bool(anom_xgb["is_anomaly"].all())
+
+    anom_all = compute_anomalies(oof_df=oof_df, model_name="all", anomaly_prob_threshold=0.95)
+    assert set(anom_all["model_type"].unique()) == {
+        "xgboost",
+        "tide",
+        "vertex_tft",
+        "ensemble_champion",
+    }
+
+    # 2. Forward forecast + newly arrived actuals anomaly detection
+    fut_dates = pd.date_range("2025-03-02", periods=7, freq="D")
+    pred_df = pd.DataFrame(
+        {
+            "ts_id": ["s_000000"] * 7,
+            "model_type": ["xgboost"] * 7,
+            "forecast_date": fut_dates.date,
+            "yhat": [100.0] * 7,
+            "yhat_lower": [92.0] * 7,
+            "yhat_upper": [108.0] * 7,
+        }
+    )
+    actuals_df = pd.DataFrame(
+        {
+            "ts_id": ["s_000000"] * 7,
+            "ds": fut_dates.date,
+            "y": [100.0, 101.0, 99.0, 165.0, 100.0, 98.0, 101.0],
+        }
+    )
+    anom_live = compute_anomalies(
+        predictions_df=pred_df,
+        actuals_df=actuals_df,
+        oof_df=oof_df,
+        model_name="xgboost",
+        anomalies_only=True,
+    )
+    assert len(anom_live) == 1
+    assert anom_live.iloc[0]["ds"] == fut_dates[3].date()
+
+    # 3. Model-free STL anomaly detection on raw series
+    raw_series_df = oof_df.loc[
+        oof_df["model_type"] == "xgboost", ["ts_id", "forecast_date", "y_true"]
+    ].rename(columns={"forecast_date": "ds", "y_true": "y"})
+    anom_stl = compute_anomalies(
+        series_df=raw_series_df,
+        model_name="stl",
+        anomaly_prob_threshold=0.99,
+        anomalies_only=True,
+    )
+    assert not anom_stl.empty
+    assert set(anom_stl["model_type"].unique()) == {"stl"}
+
+    # 4. Universal change-point detection on model residuals (oof_df) and raw series
+    cp_xgb = compute_change_points(oof_df=oof_df, model_name="xgboost")
+    assert len(cp_xgb) == 1
+    assert set(cp_xgb["model_type"].unique()) == {"xgboost"}
+    # The detected window brackets the regime shift at index 40 (not the 1-day spike at 25)
+    assert cp_xgb.iloc[0]["begin_date"] <= dates[40].date() <= cp_xgb.iloc[0]["end_date"]
+
+    cp_raw = compute_change_points(series_df=raw_series_df, model_name="raw")
+    assert len(cp_raw) >= 1
+    assert set(cp_raw["model_type"].unique()) == {"raw"}
+    assert any(
+        row["begin_date"] <= dates[40].date() <= row["end_date"] for _, row in cp_raw.iterrows()
+    )
+
+    # 5. Past-run routing via Forecaster.detect_anomalies_df / detect_change_points_df and Registry
+    from scale_forecasting.registry import reads as reg_reads
+
+    past_cfg = _cfg(["xgboost", "tide"], series_limit=10)
+    monkeypatch.setattr(
+        reg_reads, "read_run_config", lambda run_id, settings=None: past_cfg.model_dump(mode="json")
+    )
+    monkeypatch.setattr(
+        reg_reads,
+        "read_oof",
+        lambda run_id, ts_ids=None, models=None, limit=10000, settings=None: [
+            r for r in records if (models is None or r["model_type"] in models)
+        ],
+    )
+    monkeypatch.setattr(
+        reg_reads,
+        "read_predictions",
+        lambda run_id, ts_ids=None, models=None, limit=10000, settings=None: pred_df.to_dict(
+            orient="records"
+        ),
+    )
+
+    f = Forecaster(past_cfg)
+    past_anom = f.detect_anomalies_df(
+        "past-run-123456789abc", model_name="tide", anomalies_only=True
+    )
+    assert not past_anom.empty
+    assert set(past_anom["model_type"].unique()) == {"tide"}
+
+    past_cp = f.detect_change_points_df("past-run-123456789abc", model_name="xgboost")
+    assert len(past_cp) == 1
+    assert set(past_cp["model_type"].unique()) == {"xgboost"}
+
+    reg = Registry()
+    reg_anom = reg.detect_anomalies_df(
+        "past-run-123456789abc", model_name="ensemble_champion", anomalies_only=True
+    )
+    assert not reg_anom.empty
+    assert set(reg_anom["model_type"].unique()) == {"ensemble_champion"}
+
+    reg_cp = reg.detect_change_points_df("past-run-123456789abc", model_name="tide")
+    assert len(reg_cp) == 1
+    assert set(reg_cp["model_type"].unique()) == {"tide"}

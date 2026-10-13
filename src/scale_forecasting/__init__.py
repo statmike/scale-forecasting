@@ -136,6 +136,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "compute_realized_accuracy": (".diagnostics", "compute_realized_accuracy"),
     "compute_revision_stability": (".diagnostics", "compute_revision_stability"),
     "compute_exceptions_queue": (".diagnostics", "compute_exceptions_queue"),
+    "compute_anomalies": (".diagnostics", "compute_anomalies"),
+    "compute_change_points": (".diagnostics", "compute_change_points"),
     "rollup_time": (".diagnostics", "rollup_time"),
     "plot_fva": (".diagnostics", "plot_fva"),
     "plot_horizon_decay": (".diagnostics", "plot_horizon_decay"),
@@ -172,7 +174,9 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .agent_surfaces import probe_environment  # noqa: F401
     from .dag import DagNode  # noqa: F401
     from .diagnostics import (  # noqa: F401
+        compute_anomalies,
         compute_bias_report,
+        compute_change_points,
         compute_exceptions_queue,
         compute_fva,
         compute_horizon_decay,
