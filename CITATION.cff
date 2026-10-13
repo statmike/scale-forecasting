@@ -3,7 +3,9 @@ title: "scale-forecasting: Enterprise Time-Series Forecasting on Google Cloud"
 message: "If you use scale-forecasting in your work or research, please cite it using the metadata below."
 type: software
 authors:
-  - name: "scale-forecasting contributors"
+  - given-names: Mike
+    family-names: Henderson
+    alias: statmike
 repository-code: "https://github.com/statmike/scale-forecasting"
 url: "https://statmike.github.io/scale-forecasting/"
 license: Apache-2.0
