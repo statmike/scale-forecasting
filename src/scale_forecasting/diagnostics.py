@@ -1522,7 +1522,7 @@ def compute_exceptions_queue(
 # 6. Universal Model-Adapted Anomaly & Structural Change-Point Detection
 # ---------------------------------------------------------------------------
 
-_ANOMALY_COLUMNS: list[str] = [
+_ANOMALY_COLUMNS: tuple[str, ...] = (
     "ts_id",
     "model_type",
     "ds",
@@ -1532,9 +1532,9 @@ _ANOMALY_COLUMNS: list[str] = [
     "anomaly_probability",
     "lower_bound",
     "upper_bound",
-]
+)
 
-_CHANGE_POINT_COLUMNS: list[str] = [
+_CHANGE_POINT_COLUMNS: tuple[str, ...] = (
     "ts_id",
     "model_type",
     "begin_date",
@@ -1547,10 +1547,10 @@ _CHANGE_POINT_COLUMNS: list[str] = [
     "gap_edge_missing_steps",
     "is_gap_edge",
     "status",
-]
+)
 
 
-def _freq_Timedelta(freq: str) -> pd.Timedelta:
+def _freq_timedelta(freq: str) -> pd.Timedelta:
     """Approximate expected step delta for gap detection across common frequencies."""
     f = str(freq).upper().strip()
     if f.startswith("H"):
@@ -1895,7 +1895,7 @@ def compute_change_points(
     if isinstance(min_gap_steps, bool) or not isinstance(min_gap_steps, int) or min_gap_steps < 1:
         raise ConfigError(f"min_gap_steps={min_gap_steps!r} must be an integer >= 1.")
 
-    expected_step = _freq_Timedelta(freq)
+    expected_step = _freq_timedelta(freq)
     half_win = max(2, min(int(min_segment) // 2, 5))
     records: list[dict[str, Any]] = []
 

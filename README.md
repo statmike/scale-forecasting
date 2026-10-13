@@ -205,3 +205,6 @@ All notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/bl
 ## License
 
 Apache-2.0 — see [`LICENSE`](https://github.com/statmike/scale-forecasting/blob/main/LICENSE).
+
+This is not an officially supported Google product. It is built on Google products and is neither
+endorsed nor supported by Google.

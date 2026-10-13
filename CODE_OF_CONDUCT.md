@@ -1,5 +1,8 @@
 # Contributor Covenant Code of Conduct
 
+This project follows [Google's Open Source Community Guidelines](https://opensource.google/conduct/)
+and the Contributor Covenant Code of Conduct below.
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our

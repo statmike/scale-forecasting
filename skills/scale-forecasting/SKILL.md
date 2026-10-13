@@ -1,6 +1,10 @@
 ---
 name: scale-forecasting
 description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (34 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, build or validate a RunConfig JSON, choose models/metrics/runtimes/GPUs, run offline model benchmarks in the playground, launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, review model leaderboards or calibration, or surgically repair failed (ts_id, model_type) cells.
+license: Apache-2.0
+metadata:
+  author: statmike
+  version: 1.1.0
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide
