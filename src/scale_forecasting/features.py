@@ -470,12 +470,40 @@ def resolve_model_variant(
     if model_name != base and model_name in cfg.model_params:
         raw_params.update(cfg.model_params[model_name])
 
+    f = cfg.features
     if variant_tag is not None:
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
         if inferred_scope is not None and "training_mode" not in raw_params:
             raw_params["training_mode"] = inferred_scope
         if inferred_cov is not None and "covariate_mode" not in raw_params:
             raw_params["covariate_mode"] = inferred_cov
+        elif inferred_cov is None and not any(
+            k in raw_params
+            for k in ("exog", "future_covariates", "past_covariates", "static_covariates")
+        ):
+            declared = set(f.all_covariates)
+            if variant_tag.startswith("cov_drop_"):
+                drop_col = variant_tag[len("cov_drop_") :]
+                if drop_col in declared:
+                    raw_params["exog"] = [c for c in f.exog if c != drop_col]
+                    raw_params["future_covariates"] = [
+                        c for c in f.future_covariates if c != drop_col
+                    ]
+                    raw_params["past_covariates"] = [c for c in f.past_covariates if c != drop_col]
+                    raw_params["static_covariates"] = [
+                        c for c in f.static_covariates if c != drop_col
+                    ]
+            elif variant_tag.startswith("cov_"):
+                keep_col = variant_tag[len("cov_") :]
+                if keep_col in declared:
+                    raw_params["exog"] = [c for c in f.exog if c == keep_col]
+                    raw_params["future_covariates"] = [
+                        c for c in f.future_covariates if c == keep_col
+                    ]
+                    raw_params["past_covariates"] = [c for c in f.past_covariates if c == keep_col]
+                    raw_params["static_covariates"] = [
+                        c for c in f.static_covariates if c == keep_col
+                    ]
 
     scope_cap = model_cls.scope_capability()
     default_tm = "global" if scope_cap == "global_only" else "local"
@@ -491,7 +519,6 @@ def resolve_model_variant(
         "global" if tm_str == "global" else ("hybrid" if tm_str == "hybrid" else "local")
     )
 
-    f = cfg.features
     has_feature_overrides = any(k in raw_params for k in VARIANT_FEATURE_META_KEYS)
     if not has_feature_overrides:
         cand_features = f

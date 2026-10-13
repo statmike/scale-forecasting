@@ -722,7 +722,14 @@ def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
     from scale_forecasting.engines.bigquery_sql import build_explain_forecast_query
 
     cfg = _cfg(
-        ["arima_plus", "arima_plus@univariate", "timesfm"], exog=["promo_flag", "price_index"]
+        [
+            "arima_plus",
+            "arima_plus@cov_promo_flag",
+            "arima_plus@cov_drop_price_index",
+            "arima_plus@univariate",
+            "timesfm",
+        ],
+        exog=["is_holiday", "promo_flag", "price_index"],
     )
     opts_xreg = bqml_options(cfg, "arima_plus")
     opts_uni = bqml_options(cfg, "arima_plus@univariate")
@@ -731,7 +738,17 @@ def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
 
     create_xreg = build_create_model_sql(cfg, "arima_plus", _DS)
     assert "model_type = 'ARIMA_PLUS_XREG'" in create_xreg
-    assert "SELECT ts_id, ds, y, promo_flag, price_index" in create_xreg
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag, price_index" in create_xreg
+
+    create_single = build_create_model_sql(cfg, "arima_plus@cov_promo_flag", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_single
+    assert "SELECT ts_id, ds, y, promo_flag\n" in create_single
+    assert "price_index" not in create_single
+
+    create_drop = build_create_model_sql(cfg, "arima_plus@cov_drop_price_index", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_drop
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag\n" in create_drop
+    assert ", price_index" not in create_drop
 
     create_uni = build_create_model_sql(cfg, "arima_plus@univariate", _DS)
     assert "model_type = 'ARIMA_PLUS'" in create_uni
@@ -747,7 +764,7 @@ def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
 
     eval_xreg = build_eval_query(cfg, "arima_plus", _DS, back_steps=56, fold_id=0)
     expected_xreg = (
-        "SELECT ts_id, ds, promo_flag, price_index "
+        "SELECT ts_id, ds, is_holiday, promo_flag, price_index "
         "FROM `proj.scale_forecasting.source_series_native`"
     )
     assert expected_xreg in eval_xreg
@@ -757,7 +774,7 @@ def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
     assert explain_xreg is not None
     assert "ML.EXPLAIN_FORECAST(MODEL" in explain_xreg
     assert "WHERE time_series_type = 'forecast'" in explain_xreg
-    assert "promo_flag, price_index" in explain_xreg
+    assert "is_holiday, promo_flag, price_index" in explain_xreg
 
     explain_uni = build_explain_forecast_query(cfg, "arima_plus@univariate", _DS)
     assert explain_uni is not None
