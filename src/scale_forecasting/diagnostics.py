@@ -36,7 +36,9 @@ from .metrics import compute_metrics, loss_of
 
 __all__ = [
     "BASELINE_CANDIDATES",
+    "compute_anomalies",
     "compute_bias_report",
+    "compute_change_points",
     "compute_exceptions_queue",
     "compute_fva",
     "compute_horizon_decay",
@@ -104,7 +106,11 @@ def _match_sibling_baselines(
         return None, None
 
     tag = model_type.split("@", 1)[1] if "@" in model_type else ""
-    is_univariate = tag in ("univariate", "cov_none") or tag.endswith(("_univariate", "_cov_none"))
+    is_univariate = (
+        tag in ("univariate", "cov_none")
+        or tag.endswith(("_univariate", "_cov_none"))
+        or (not tag and f"{bname}@xreg" in siblings)
+    )
     has_global_uni_sibling = any(
         s in siblings for s in (f"{bname}@global_univariate", f"{bname}@global_cov_none")
     )
@@ -146,6 +152,8 @@ def _match_sibling_baselines(
                 f"{bname}@univariate",
                 f"{bname}@cov_none",
             ]
+            if f"{bname}@xreg" in all_models:
+                cands.append(bname)
         uni_base = next((c for c in cands if c in siblings), None)
 
     local_base: str | None = None
@@ -1508,3 +1516,511 @@ def compute_exceptions_queue(
         ["severity_score", "n_flags"], ascending=[False, False], ignore_index=True
     )
     return out.head(max(1, int(top_n)))
+
+
+# ---------------------------------------------------------------------------
+# 6. Universal Model-Adapted Anomaly & Structural Change-Point Detection
+# ---------------------------------------------------------------------------
+
+_ANOMALY_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "model_type",
+    "ds",
+    "y",
+    "yhat",
+    "is_anomaly",
+    "anomaly_probability",
+    "lower_bound",
+    "upper_bound",
+)
+
+_CHANGE_POINT_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "model_type",
+    "begin_date",
+    "end_date",
+    "window_count",
+    "window_avg",
+    "window_min",
+    "window_max",
+    "window_stddev",
+    "gap_edge_missing_steps",
+    "is_gap_edge",
+    "status",
+)
+
+
+def _freq_timedelta(freq: str) -> pd.Timedelta:
+    """Approximate expected step delta for gap detection across common frequencies."""
+    f = str(freq).upper().strip()
+    if f.startswith("H"):
+        return pd.Timedelta(hours=1)
+    if f.startswith("W"):
+        return pd.Timedelta(days=7)
+    if f.startswith("M"):
+        return pd.Timedelta(days=31)
+    if f.startswith("Q"):
+        return pd.Timedelta(days=92)
+    if f.startswith(("Y", "A")):
+        return pd.Timedelta(days=366)
+    return pd.Timedelta(days=1)
+
+
+def compute_anomalies(
+    oof_df: pd.DataFrame | None = None,
+    *,
+    series_df: pd.DataFrame | None = None,
+    predictions_df: pd.DataFrame | None = None,
+    actuals_df: pd.DataFrame | None = None,
+    model_name: str | None = None,
+    anomaly_prob_threshold: float = 0.95,
+    confidence_level: float = 0.80,
+    anomalies_only: bool = False,
+    freq: str = "D",
+) -> pd.DataFrame:
+    """Universal time-series anomaly detection across any of the 34 models, 9 ensembles, or STL.
+
+    Computes the exact two-sided Gaussian / conformal tail probability used by BigQuery ML
+    (`ML.DETECT_ANOMALIES`):
+
+    $$p_{\\text{anom}}(t) = 2\\,\\Phi\\left(|y_t - \\hat{y}_t| / \\hat{\\sigma}_t\\right) - 1$$
+
+    where $\\hat{\\sigma}_t = (U_t - L_t) / (2\\,z_{1-\\alpha/2})$ is recovered from each model's
+    prediction interval $[L_t, U_t]$ at ``confidence_level`` (falling back to the per-series
+    robust MAD scale $1.4826 \\cdot \\text{median}(|y - \\hat{y}|)$ when intervals are absent or
+    degenerate), and rescales ``lower_bound`` and ``upper_bound`` to
+    ``anomaly_prob_threshold`` ($\\tau \\in (0, 1)$).
+
+    Supports three input modes:
+    1. **Out-of-fold backtest predictions (``oof_df``):** Evaluates any Python, AutoML, BigQuery, or
+       Ensemble model (or ``model_name="all"``) over its out-of-fold predictions (`backtest_oof`).
+    2. **Published forecasts + new actuals (``predictions_df`` + ``actuals_df``):** Flags live
+       anomalies as new actuals arrive against published `forecast_predictions`.
+    3. **Model-free historical series (``series_df`` or ``model_name="stl"``):** Decomposes raw
+       historical series via seasonal-trend baseline + robust MAD residuals when no model OOF frame
+       is provided.
+
+    Returns a tidy ``DataFrame`` with columns ``["ts_id", "model_type", "ds", "y", "yhat",
+    "is_anomaly", "anomaly_probability", "lower_bound", "upper_bound"]``.
+    """
+    from .errors import ConfigError
+    from .features import local_seasonal_baseline
+    from .seasonality import seasonal_period
+
+    if not (0.0 < float(anomaly_prob_threshold) < 1.0):
+        raise ConfigError(
+            f"anomaly_prob_threshold={anomaly_prob_threshold!r} must lie strictly in (0.0, 1.0)."
+        )
+    eff_conf = float(confidence_level) if 0.0 < float(confidence_level) < 1.0 else 0.80
+    z_conf = float(stats.norm.ppf(0.5 + 0.5 * eff_conf))
+    z_thresh = float(stats.norm.ppf(0.5 + 0.5 * float(anomaly_prob_threshold)))
+
+    # 1. Join predictions_df + actuals_df if provided.
+    work_df: pd.DataFrame | None = None
+    if (
+        predictions_df is not None
+        and not predictions_df.empty
+        and actuals_df is not None
+        and not actuals_df.empty
+    ):
+        p = predictions_df.copy()
+        a = actuals_df.copy()
+        p_date = (
+            "forecast_date"
+            if "forecast_date" in p.columns
+            else ("target_date" if "target_date" in p.columns else "ds")
+        )
+        a_date = (
+            "ds"
+            if "ds" in a.columns
+            else ("target_date" if "target_date" in a.columns else "forecast_date")
+        )
+        a_val = "y" if "y" in a.columns else "y_true"
+        p["ds"] = pd.to_datetime(p[p_date]).dt.date
+        a["ds"] = pd.to_datetime(a[a_date]).dt.date
+        if "ts_id" not in p.columns:
+            p["ts_id"] = "series_0"
+        if "ts_id" not in a.columns:
+            a["ts_id"] = "series_0"
+        if "model_type" not in p.columns:
+            p["model_type"] = model_name or "model"
+        merged = p.merge(
+            a[["ts_id", "ds", a_val]].rename(columns={a_val: "y"}),
+            on=["ts_id", "ds"],
+            how="inner",
+        )
+        if not merged.empty:
+            work_df = merged
+
+    # 2. Otherwise use oof_df when available (unless model_name == "stl" explicitly).
+    if (
+        work_df is None
+        and oof_df is not None
+        and not oof_df.empty
+        and (model_name is None or str(model_name).lower() != "stl")
+    ):
+        work_df = oof_df.copy()
+
+    if work_df is not None and not work_df.empty:
+        df = work_df.copy()
+        if "ts_id" not in df.columns:
+            df["ts_id"] = "series_0"
+        if "model_type" not in df.columns:
+            df["model_type"] = model_name or "model"
+        date_col = (
+            "ds"
+            if "ds" in df.columns
+            else ("target_date" if "target_date" in df.columns else "forecast_date")
+        )
+        y_col = "y" if "y" in df.columns else "y_true"
+        yhat_col = "yhat" if "yhat" in df.columns else "forecast"
+        df["ds"] = pd.to_datetime(df[date_col]).dt.date
+        df["y"] = pd.to_numeric(df[y_col], errors="coerce")
+        df["yhat"] = pd.to_numeric(df[yhat_col], errors="coerce")
+        df["yhat_lower"] = (
+            pd.to_numeric(df["yhat_lower"], errors="coerce")
+            if "yhat_lower" in df.columns
+            else np.nan
+        )
+        df["yhat_upper"] = (
+            pd.to_numeric(df["yhat_upper"], errors="coerce")
+            if "yhat_upper" in df.columns
+            else np.nan
+        )
+
+        if model_name is not None and str(model_name).lower() not in ("all", "*"):
+            req = str(model_name).strip()
+            exact = df[df["model_type"] == req]
+            if exact.empty and req == "arima_plus_xreg":
+                exact = df[df["model_type"] == "arima_plus@xreg"]
+            df = exact
+
+        df = df.dropna(subset=["ds", "y", "yhat"])
+        if df.empty:
+            return pd.DataFrame(columns=_ANOMALY_COLUMNS)
+
+        # Deduplicate overlapping backtest fold dates by keeping the latest fold.
+        if "fold" in df.columns:
+            df = (
+                df.sort_values(["ts_id", "model_type", "ds", "fold"])
+                .drop_duplicates(subset=["ts_id", "model_type", "ds"], keep="last")
+                .reset_index(drop=True)
+            )
+        else:
+            df = (
+                df.sort_values(["ts_id", "model_type", "ds"])
+                .drop_duplicates(subset=["ts_id", "model_type", "ds"], keep="last")
+                .reset_index(drop=True)
+            )
+
+        out_frames: list[pd.DataFrame] = []
+        for (tid, mtype), grp in df.groupby(["ts_id", "model_type"], sort=False):
+            g = grp.sort_values("ds").copy()
+            y_arr = g["y"].to_numpy(dtype=float)
+            yhat_arr = g["yhat"].to_numpy(dtype=float)
+            lo_arr = g["yhat_lower"].to_numpy(dtype=float)
+            hi_arr = g["yhat_upper"].to_numpy(dtype=float)
+
+            abs_err = np.abs(y_arr - yhat_arr)
+            med_err = float(np.nanmedian(abs_err))
+            mad_sigma = max(1.4826 * med_err, float(np.nanstd(y_arr - yhat_arr)), 1e-6)
+
+            width = hi_arr - lo_arr
+            sigma = np.where(
+                np.isfinite(width) & (width > 1e-9),
+                width / (2.0 * max(z_conf, 1e-6)),
+                mad_sigma,
+            )
+            sigma = np.maximum(sigma, 1e-6)
+
+            z_val = abs_err / sigma
+            prob = np.clip(2.0 * stats.norm.cdf(z_val) - 1.0, 0.0, 1.0)
+            lower_b = yhat_arr - z_thresh * sigma
+            upper_b = yhat_arr + z_thresh * sigma
+            is_anom = (
+                (prob >= float(anomaly_prob_threshold)) | (y_arr < lower_b) | (y_arr > upper_b)
+            )
+
+            out_frames.append(
+                pd.DataFrame(
+                    {
+                        "ts_id": str(tid),
+                        "model_type": str(mtype),
+                        "ds": g["ds"].to_numpy(),
+                        "y": y_arr,
+                        "yhat": yhat_arr,
+                        "is_anomaly": is_anom.astype(bool),
+                        "anomaly_probability": np.round(prob, 6),
+                        "lower_bound": lower_b,
+                        "upper_bound": upper_b,
+                    }
+                )
+            )
+        if not out_frames:
+            return pd.DataFrame(columns=_ANOMALY_COLUMNS)
+        res = pd.concat(out_frames, ignore_index=True)
+        if anomalies_only:
+            res = res.loc[res["is_anomaly"] == True].reset_index(drop=True)  # noqa: E712
+        return res
+
+    # 3. Model-free seasonal-trend + MAD decomposition on series_df.
+    if series_df is None or series_df.empty:
+        return pd.DataFrame(columns=_ANOMALY_COLUMNS)
+
+    s = series_df.copy()
+    if "ts_id" not in s.columns:
+        s["ts_id"] = "series_0"
+    date_c = "ds" if "ds" in s.columns else ("date" if "date" in s.columns else s.columns[1])
+    y_c = "y" if "y" in s.columns else ("y_true" if "y_true" in s.columns else s.columns[-1])
+    s["ds"] = pd.to_datetime(s[date_c]).dt.date
+    s["y"] = pd.to_numeric(s[y_c], errors="coerce")
+    s = s.dropna(subset=["ds", "y"]).sort_values(["ts_id", "ds"])
+    if s.empty:
+        return pd.DataFrame(columns=_ANOMALY_COLUMNS)
+
+    period = max(1, int(seasonal_period(freq)))
+    label_model = str(model_name) if model_name and str(model_name).lower() != "all" else "stl"
+    stl_frames: list[pd.DataFrame] = []
+    for tid, grp in s.groupby("ts_id", sort=False):
+        g = grp.sort_values("ds")
+        y_arr = g["y"].to_numpy(dtype=float)
+        baseline = local_seasonal_baseline(y_arr, period)
+        resid = y_arr - baseline
+        med = float(np.nanmedian(resid))
+        yhat_arr = baseline + med
+        abs_dev = np.abs(y_arr - yhat_arr)
+        mad_sigma = max(1.4826 * float(np.nanmedian(abs_dev)), float(np.nanstd(resid)), 1e-6)
+        z_val = abs_dev / mad_sigma
+        prob = np.clip(2.0 * stats.norm.cdf(z_val) - 1.0, 0.0, 1.0)
+        lower_b = yhat_arr - z_thresh * mad_sigma
+        upper_b = yhat_arr + z_thresh * mad_sigma
+        is_anom = (prob >= float(anomaly_prob_threshold)) | (y_arr < lower_b) | (y_arr > upper_b)
+        stl_frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": str(tid),
+                    "model_type": label_model,
+                    "ds": g["ds"].to_numpy(),
+                    "y": y_arr,
+                    "yhat": yhat_arr,
+                    "is_anomaly": is_anom.astype(bool),
+                    "anomaly_probability": np.round(prob, 6),
+                    "lower_bound": lower_b,
+                    "upper_bound": upper_b,
+                }
+            )
+        )
+    res_stl = pd.concat(stl_frames, ignore_index=True)
+    if anomalies_only:
+        res_stl = res_stl.loc[res_stl["is_anomaly"] == True].reset_index(drop=True)  # noqa: E712
+    return res_stl
+
+
+def _segment_change_indices(
+    values: np.ndarray,
+    *,
+    min_segment: int = 7,
+    sigma_threshold: float = 3.0,
+    max_breaks: int = 5,
+) -> list[int]:
+    """Recursive binary segmentation returning sorted change-point indices in ``values``."""
+    n = int(values.size)
+    if n < 2 * min_segment:
+        return []
+    diffs = np.diff(values)
+    mad = float(np.median(np.abs(diffs - np.median(diffs))))
+    sigma = mad * 1.4826 / math.sqrt(2.0)
+    if not math.isfinite(sigma) or sigma <= 1e-9:
+        sigma = float(np.std(diffs)) / math.sqrt(2.0)
+    if not math.isfinite(sigma) or sigma <= 1e-9:
+        return []
+
+    found: list[int] = []
+
+    def _recurse(start: int, end: int, depth: int) -> None:
+        if depth >= max_breaks or (end - start) < 2 * min_segment:
+            return
+        seg = values[start:end]
+        m = seg.size
+        csum = np.cumsum(seg)
+        total = csum[-1]
+        k = np.arange(min_segment, m - min_segment + 1)
+        left_mean = csum[k - 1] / k
+        right_mean = (total - csum[k - 1]) / (m - k)
+        se = sigma * np.sqrt(1.0 / k + 1.0 / (m - k))
+        z_scores = np.abs(right_mean - left_mean) / np.maximum(se, 1e-12)
+        best_pos = int(np.argmax(z_scores))
+        if float(z_scores[best_pos]) < float(sigma_threshold):
+            return
+        split_idx = start + int(k[best_pos])
+        found.append(split_idx)
+        _recurse(start, split_idx, depth + 1)
+        _recurse(split_idx, end, depth + 1)
+
+    _recurse(0, n, 0)
+    return sorted(set(found))
+
+
+def compute_change_points(
+    series_df: pd.DataFrame | None = None,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    model_name: str | None = None,
+    exclude_gap_edges: bool = True,
+    min_gap_steps: int = 1,
+    freq: str = "D",
+    sigma_threshold: float = 3.0,
+    min_segment: int = 7,
+) -> pd.DataFrame:
+    """Detect sustained structural change-point windows on raw series or model residuals (pure).
+
+    - When ``model_name`` is ``None`` (or ``"raw"``) and ``series_df`` is provided, segments the
+      raw target series $y_t$ to identify sustained level shifts (`model_type = "raw"`).
+    - When ``oof_df`` is provided with ``model_name`` (e.g. ``"xgboost"``, ``"tide"``,
+      ``"arima_plus@xreg"``, ``"ensemble_champion"``, or ``"all"``), segments each model's
+      **residuals ($e_t = y_t - \\hat{y}_t$)** to identify structural regime shifts that the model
+      failed to absorb (`window_avg`, `window_min`, `window_max`, and `window_stddev` are reported
+      in the series' original $y_t$ units over the detected break window so they remain directly
+      comparable to BigQuery `ML.DETECT_CHANGE_POINTS`).
+
+    Annotates each detected window with ``gap_edge_missing_steps`` and ``is_gap_edge`` (filtering
+    out ingestion outage boundaries when ``exclude_gap_edges=True``).
+
+    Returns a tidy ``DataFrame`` with columns ``["ts_id", "model_type", "begin_date", "end_date",
+    "window_count", "window_avg", "window_min", "window_max", "window_stddev",
+    "gap_edge_missing_steps", "is_gap_edge", "status"]``.
+    """
+    from .errors import ConfigError
+
+    if isinstance(min_gap_steps, bool) or not isinstance(min_gap_steps, int) or min_gap_steps < 1:
+        raise ConfigError(f"min_gap_steps={min_gap_steps!r} must be an integer >= 1.")
+
+    expected_step = _freq_timedelta(freq)
+    half_win = max(2, min(int(min_segment) // 2, 5))
+    records: list[dict[str, Any]] = []
+
+    def _scan_group(
+        tid: str,
+        mtype: str,
+        dates_ts: pd.Series,
+        signal_arr: np.ndarray,
+        raw_y_arr: np.ndarray,
+    ) -> None:
+        n = int(signal_arr.size)
+        if n < 2 * min_segment:
+            return
+        breaks = _segment_change_indices(
+            signal_arr,
+            min_segment=max(3, int(min_segment)),
+            sigma_threshold=float(sigma_threshold),
+        )
+        if not breaks:
+            return
+        dt_vals = pd.to_datetime(dates_ts).reset_index(drop=True)
+        diffs = dt_vals.diff()
+        step_days = max(1.0, float(expected_step.total_seconds()) / 86400.0)
+        missing_steps_arr = np.maximum(
+            0,
+            np.floor(
+                diffs.dt.total_seconds().fillna(0.0).to_numpy() / (step_days * 86400.0) + 1e-6
+            ).astype(int)
+            - 1,
+        )
+
+        for b_idx in breaks:
+            w_start = max(0, b_idx - half_win)
+            w_end = min(n - 1, b_idx + half_win)
+            win_y = raw_y_arr[w_start : w_end + 1]
+            # Check whether any gap edge falls inside [w_start, w_end]
+            win_gaps = missing_steps_arr[w_start : w_end + 1]
+            qualifying_gaps = win_gaps[win_gaps >= int(min_gap_steps)]
+            max_gap = int(qualifying_gaps.max()) if qualifying_gaps.size > 0 else 0
+            is_gap = bool(max_gap > 0)
+            if exclude_gap_edges and is_gap:
+                continue
+            records.append(
+                {
+                    "ts_id": str(tid),
+                    "model_type": str(mtype),
+                    "begin_date": dt_vals.iloc[w_start].date(),
+                    "end_date": dt_vals.iloc[w_end].date(),
+                    "window_count": int(win_y.size),
+                    "window_avg": float(np.mean(win_y)),
+                    "window_min": float(np.min(win_y)),
+                    "window_max": float(np.max(win_y)),
+                    "window_stddev": float(np.std(win_y, ddof=1)) if win_y.size > 1 else 0.0,
+                    "gap_edge_missing_steps": max_gap,
+                    "is_gap_edge": is_gap,
+                    "status": "",
+                }
+            )
+
+    # 1. Model-residual mode when oof_df is provided and (model_name is set or series_df is None)
+    if oof_df is not None and not oof_df.empty and (model_name is not None or series_df is None):
+        df = oof_df.copy()
+        if "ts_id" not in df.columns:
+            df["ts_id"] = "series_0"
+        if "model_type" not in df.columns:
+            df["model_type"] = model_name or "model"
+        date_col = (
+            "ds"
+            if "ds" in df.columns
+            else ("target_date" if "target_date" in df.columns else "forecast_date")
+        )
+        y_col = "y" if "y" in df.columns else "y_true"
+        yhat_col = "yhat" if "yhat" in df.columns else "forecast"
+        df["ds"] = pd.to_datetime(df[date_col])
+        df["y"] = pd.to_numeric(df[y_col], errors="coerce")
+        df["yhat"] = pd.to_numeric(df[yhat_col], errors="coerce")
+        if model_name is not None and str(model_name).lower() not in ("all", "*", "raw"):
+            req = str(model_name).strip()
+            exact = df[df["model_type"] == req]
+            if exact.empty and req == "arima_plus_xreg":
+                exact = df[df["model_type"] == "arima_plus@xreg"]
+            df = exact
+        df = df.dropna(subset=["ds", "y", "yhat"])
+        if "fold" in df.columns:
+            df = (
+                df.sort_values(["ts_id", "model_type", "ds", "fold"])
+                .drop_duplicates(subset=["ts_id", "model_type", "ds"], keep="last")
+                .reset_index(drop=True)
+            )
+        else:
+            df = (
+                df.sort_values(["ts_id", "model_type", "ds"])
+                .drop_duplicates(subset=["ts_id", "model_type", "ds"], keep="last")
+                .reset_index(drop=True)
+            )
+        for (tid, mtype), grp in df.groupby(["ts_id", "model_type"], sort=False):
+            g = grp.sort_values("ds").reset_index(drop=True)
+            y_arr = g["y"].to_numpy(dtype=float)
+            yhat_arr = g["yhat"].to_numpy(dtype=float)
+            resid_arr = y_arr - yhat_arr
+            _scan_group(str(tid), str(mtype), g["ds"], resid_arr, y_arr)
+        if not records:
+            return pd.DataFrame(columns=_CHANGE_POINT_COLUMNS)
+        return pd.DataFrame.from_records(records, columns=_CHANGE_POINT_COLUMNS).sort_values(
+            ["ts_id", "model_type", "begin_date"], ignore_index=True
+        )
+
+    # 2. Raw series mode
+    if series_df is None or series_df.empty:
+        return pd.DataFrame(columns=_CHANGE_POINT_COLUMNS)
+    s = series_df.copy()
+    if "ts_id" not in s.columns:
+        s["ts_id"] = "series_0"
+    date_c = "ds" if "ds" in s.columns else ("date" if "date" in s.columns else s.columns[1])
+    y_c = "y" if "y" in s.columns else ("y_true" if "y_true" in s.columns else s.columns[-1])
+    s["ds"] = pd.to_datetime(s[date_c])
+    s["y"] = pd.to_numeric(s[y_c], errors="coerce")
+    s = s.dropna(subset=["ds", "y"]).sort_values(["ts_id", "ds"])
+    label_m = str(model_name) if model_name else "raw"
+    for tid, grp in s.groupby("ts_id", sort=False):
+        g = grp.sort_values("ds").reset_index(drop=True)
+        y_arr = g["y"].to_numpy(dtype=float)
+        _scan_group(str(tid), label_m, g["ds"], y_arr, y_arr)
+    if not records:
+        return pd.DataFrame(columns=_CHANGE_POINT_COLUMNS)
+    return pd.DataFrame.from_records(records, columns=_CHANGE_POINT_COLUMNS).sort_values(
+        ["ts_id", "model_type", "begin_date"], ignore_index=True
+    )

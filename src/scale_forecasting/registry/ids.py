@@ -307,6 +307,9 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
     uses_calendar = bool(
         spec.model_cls.supports_future_covariates or spec.base_model in ("prophet", "arima_plus")
     )
+    uses_py_calendar = bool(
+        spec.model_cls.supports_future_covariates and spec.base_model != "arima_plus"
+    )
     clean_no_tm = {k: v for k, v in spec.clean_params.items() if k != "training_mode"}
     spec_payload: dict[str, Any] = {
         "base_model": spec.base_model,
@@ -317,13 +320,9 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         "features": {
             "transform": eff_f.transform,
             "holidays": sorted(eff_f.holidays) if uses_calendar else [],
-            "fourier": bool(eff_f.fourier) if spec.model_cls.supports_future_covariates else False,
-            "level_shift": (
-                bool(eff_f.level_shift) if spec.model_cls.supports_future_covariates else False
-            ),
-            "trading_days": (
-                bool(eff_f.trading_days) if spec.model_cls.supports_future_covariates else False
-            ),
+            "fourier": bool(eff_f.fourier) if uses_py_calendar else False,
+            "level_shift": bool(eff_f.level_shift) if uses_py_calendar else False,
+            "trading_days": bool(eff_f.trading_days) if uses_py_calendar else False,
             "exog_lags": eff_f.exog_lags,
             "censored_col": eff_f.censored_col,
             "outlier_policy": eff_f.outlier_policy,

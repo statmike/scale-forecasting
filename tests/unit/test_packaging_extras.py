@@ -241,6 +241,7 @@ def test_pypi_metadata_and_urls_declared() -> None:
     pyproject = _project()
     proj = pyproject["project"]
     assert re.match(r"^\d+\.\d+\.\d+", proj["version"])
+    assert "readme" in proj.get("dynamic", [])
     assert set(proj["urls"]) >= {"Homepage", "Documentation", "Repository", "Changelog", "Issues"}
     classifiers = set(proj["classifiers"])
     assert "Development Status :: 5 - Production/Stable" in classifiers
@@ -250,7 +251,17 @@ def test_pypi_metadata_and_urls_declared() -> None:
     assert {"time-series", "forecasting", "google-cloud", "bigquery"} <= set(proj["keywords"])
     sdist = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]
     assert "src/scale_forecasting" in sdist["only-include"]
+    assert "README.md" in sdist["only-include"]
     assert "CHANGELOG.md" in sdist["only-include"]
+    fancy = pyproject["tool"]["hatch"]["metadata"]["hooks"]["fancy-pypi-readme"]
+    assert fancy["content-type"] == "text/markdown"
+    assert fancy["fragments"] == [{"path": "README.md"}]
+    readme_text = (ROOT / "README.md").read_text()
+    assert "```mermaid" in readme_text
+    for sub in fancy["substitutions"]:
+        readme_text = re.sub(sub["pattern"], sub["replacement"], readme_text)
+    assert "```mermaid" not in readme_text
+    assert "docs/assets/social_card.png" in readme_text
 
 
 def _bootstrap_extras(notebook: Path) -> list[str]:

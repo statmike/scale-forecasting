@@ -1399,6 +1399,343 @@ class Forecaster:
             run_ids, jump_threshold_pct=jump_threshold_pct, limit=limit
         )
 
+    def _effective_config_for_run(self, run_id: str) -> RunConfig:
+        """Return the stored `RunConfig` for ``run_id`` when inspecting a past run, falling back
+        to ``self._config``.
+        """
+        if run_id == self.run_id:
+            return self._config
+        with contextlib.suppress(Exception):
+            from .registry.reads import read_run_config
+
+            raw = read_run_config(run_id, settings=self._settings)
+            if raw:
+                try:
+                    return RunConfig.model_validate(raw)
+                except Exception:  # noqa: BLE001 - legacy past run config fallback
+                    data_blk = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+                    if data_blk and "source_table" in data_blk:
+                        return RunConfig.model_validate(
+                            {
+                                "run_name": str(raw.get("run_name") or "past-run"),
+                                "data": {
+                                    k: v
+                                    for k, v in data_blk.items()
+                                    if k
+                                    in (
+                                        "source_table",
+                                        "ts_id_col",
+                                        "date_col",
+                                        "target_col",
+                                        "freq",
+                                        "horizon",
+                                        "series_limit",
+                                    )
+                                },
+                                "models": ["naive_seasonal"],
+                            }
+                        )
+        return self._config
+
+    def detect_anomalies_df(
+        self,
+        run_id: str | None = None,
+        *,
+        model_name: str | None = None,
+        anomaly_prob_threshold: float = 0.95,
+        cutoff_back_steps: int | None = None,
+        anomalies_only: bool = False,
+        actuals_df: pd.DataFrame | None = None,
+        engine: str = "auto",
+        limit: int = 50000,
+    ) -> pd.DataFrame:
+        """Detect time-series anomalies across any of the 34 models, 9 ensembles, or past runs.
+
+        Supports four complementary execution paths controlled by ``model_name`` and ``engine``:
+
+        1. **In-database BigQuery ML (`engine="auto"` or `"bqml"` with `arima_plus` / `timesfm`):**
+           Runs `ML.DETECT_ANOMALIES(MODEL ...)` for `arima_plus` / `arima_plus@xreg` or serverless
+           `AI.DETECT_ANOMALIES` (`TimesFM`) directly in BigQuery. If inspecting an older past
+           ``run_id`` whose BQML model object was already dropped and ``engine="auto"``,
+           automatically falls back to the stored ``backtest_oof`` intervals.
+        2. **Universal Model / Ensemble OOF (`model_name="<any model>"`, `"ensemble_*"`, `"all"`,
+           or `engine="oof"`):** Scores stored ``backtest_oof`` out-of-fold predictions and
+           calibrated prediction intervals for **any** statistical, ML, deep-learning, Vertex AI
+           AutoML, BigQuery ML, or ensemble model on current or past runs via
+           :func:`diagnostics.compute_anomalies` — zero re-fitting required.
+        3. **Forward Forecast Realized Actuals (`actuals_df=...`):** Joins published
+           ``forecast_predictions`` intervals against newly arrived ``actuals_df`` to flag live
+           post-cutoff anomalies.
+        4. **Model-Free STL + Robust MAD (`model_name="stl"` or `engine="stl"`):** Decomposes raw
+           historical series when no backtest OOF intervals are available.
+
+        Returns a tidy ``DataFrame`` with columns ``["ts_id", "model_type", "ds", "y", "yhat",
+        "lower_bound", "upper_bound", "anomaly_probability", "is_anomaly"]``.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_anomalies
+        from .registry.reads import (
+            read_oof,
+            read_predictions,
+            read_series_history,
+            resolve_settings,
+        )
+
+        rid = run_id or self.run_id
+        eff_cfg = self._effective_config_for_run(rid)
+        conf_level = 0.80
+        freq = str(eff_cfg.data.freq)
+
+        # Mode 3: Forward predictions scored against newly arrived actuals_df.
+        if actuals_df is not None:
+            model_filter = [model_name] if model_name and model_name not in ("all", "stl") else None
+            pred_rows = read_predictions(
+                rid, models=model_filter, limit=limit, settings=self._settings
+            )
+            oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
+            pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+            oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+            return compute_anomalies(
+                predictions_df=pred_df,
+                actuals_df=actuals_df,
+                oof_df=oof_df,
+                model_name=model_name,
+                anomaly_prob_threshold=anomaly_prob_threshold,
+                confidence_level=conf_level,
+                anomalies_only=anomalies_only,
+                freq=freq,
+            )
+
+        # Mode 4: Explicit model-free STL decomposition over historical series.
+        if engine == "stl" or model_name == "stl":
+            hist_rows = read_series_history(
+                rid, history_tail=cutoff_back_steps or 1000, settings=self._settings
+            )
+            hist_df = pd.DataFrame.from_records(hist_rows) if hist_rows else pd.DataFrame()
+            return compute_anomalies(
+                series_df=hist_df,
+                model_name="stl",
+                anomaly_prob_threshold=anomaly_prob_threshold,
+                confidence_level=conf_level,
+                anomalies_only=anomalies_only,
+                freq=freq,
+            )
+
+        # Resolve default model_name when omitted.
+        eff_model = model_name
+        if eff_model is None:
+            if engine == "bqml":
+                native_candidates = [
+                    m
+                    for m in eff_cfg.models
+                    if m.split("@", 1)[0] in ("arima_plus", "arima_plus_xreg", "timesfm")
+                ]
+                eff_model = native_candidates[0] if native_candidates else "arima_plus"
+            elif (
+                engine == "auto"
+                and len(eff_cfg.models) == 1
+                and eff_cfg.models[0].split("@", 1)[0]
+                in ("arima_plus", "arima_plus_xreg", "timesfm")
+                and not eff_cfg.ensemble.enabled
+            ):
+                eff_model = eff_cfg.models[0]
+
+        base_requested = eff_model.split("@", 1)[0] if eff_model else ""
+        if base_requested == "arima_plus_xreg":
+            eff_model = "arima_plus@xreg"
+            base_requested = "arima_plus"
+
+        # Mode 1: Native BigQuery ML.DETECT_ANOMALIES / AI.DETECT_ANOMALIES when requested.
+        if (
+            engine in ("auto", "bqml")
+            and eff_model is not None
+            and base_requested in ("arima_plus", "timesfm")
+        ):
+            from google.cloud import bigquery
+
+            from .engines.bigquery_sql import build_detect_anomalies_query
+
+            resolved = resolve_settings(self._settings)
+            sql = build_detect_anomalies_query(
+                eff_cfg,
+                model_name=eff_model,
+                dataset=resolved.dataset_ref,
+                registry_dataset=resolved.registry_dataset_ref,
+                anomaly_prob_threshold=anomaly_prob_threshold,
+                cutoff_back_steps=cutoff_back_steps,
+                run_id=rid,
+            )
+            client = bigquery_client(resolved.project_id)
+            try:
+                df = client.query(
+                    sql, job_config=bigquery.QueryJobConfig(use_query_cache=False)
+                ).to_dataframe()
+                if not df.empty:
+                    if "model_type" not in df.columns:
+                        df.insert(1, "model_type", eff_model)
+                    if (
+                        "yhat" not in df.columns
+                        and "lower_bound" in df.columns
+                        and "upper_bound" in df.columns
+                    ):
+                        df.insert(
+                            4,
+                            "yhat",
+                            0.5
+                            * (
+                                pd.to_numeric(df["lower_bound"], errors="coerce")
+                                + pd.to_numeric(df["upper_bound"], errors="coerce")
+                            ),
+                        )
+                    ordered = [
+                        c
+                        for c in (
+                            "ts_id",
+                            "model_type",
+                            "ds",
+                            "y",
+                            "yhat",
+                            "lower_bound",
+                            "upper_bound",
+                            "anomaly_probability",
+                            "is_anomaly",
+                        )
+                        if c in df.columns
+                    ]
+                    df = df[ordered + [c for c in df.columns if c not in ordered]]
+                if anomalies_only and not df.empty and "is_anomaly" in df.columns:
+                    return df.loc[df["is_anomaly"] == True].reset_index(drop=True)  # noqa: E712 - nullable boolean series
+                return df
+            except Exception:
+                if engine == "bqml":
+                    raise
+                # Under engine="auto", if a past run's BQML model artifact was dropped, fall
+                # through to stored backtest_oof below.
+
+        # Mode 2: Universal backtest_oof residual & interval scoring across any model / ensemble.
+        model_filter = [eff_model] if eff_model and eff_model != "all" else None
+        oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
+        if oof_rows:
+            oof_df = pd.DataFrame.from_records(oof_rows)
+            if cutoff_back_steps is not None and cutoff_back_steps > 0:
+                oof_df = (
+                    oof_df.sort_values(["ts_id", "model_type", "forecast_date"])
+                    .groupby(["ts_id", "model_type"], as_index=False)
+                    .tail(int(cutoff_back_steps))
+                )
+            return compute_anomalies(
+                oof_df=oof_df,
+                model_name=eff_model,
+                anomaly_prob_threshold=anomaly_prob_threshold,
+                confidence_level=conf_level,
+                anomalies_only=anomalies_only,
+                freq=freq,
+            )
+
+        # Fallback when a run had backtest.enabled=False: use STL over historical series.
+        hist_rows = read_series_history(
+            rid, history_tail=cutoff_back_steps or 1000, settings=self._settings
+        )
+        hist_df = pd.DataFrame.from_records(hist_rows) if hist_rows else pd.DataFrame()
+        return compute_anomalies(
+            series_df=hist_df,
+            model_name=eff_model or "stl",
+            anomaly_prob_threshold=anomaly_prob_threshold,
+            confidence_level=conf_level,
+            anomalies_only=anomalies_only,
+            freq=freq,
+        )
+
+    def detect_change_points_df(
+        self,
+        run_id: str | None = None,
+        *,
+        model_name: str | None = None,
+        exclude_gap_edges: bool = True,
+        min_gap_steps: int = 1,
+        sigma_threshold: float = 3.0,
+        engine: str = "auto",
+        limit: int = 50000,
+    ) -> pd.DataFrame:
+        """Detect structural regime change points across raw series or any model's residuals on
+        current or past runs.
+
+        * **Raw series mode (`model_name=None` or `"raw"`):** Runs BigQuery's native
+          `ML.DETECT_CHANGE_POINTS` with gap-edge artifact filtering when ``engine in ("auto",
+          "bqml")``, or pure-Python binary segmentation (:func:`diagnostics.compute_change_points`)
+          when ``engine="oof"``.
+        * **Model-residual mode (`model_name="<model>"`, `"ensemble_*"`, or `"all"`):** Reads
+          stored ``backtest_oof`` trajectories for ``run_id`` and segments the model's residuals
+          $e_t = y_t - \\hat{y}_t$ via :func:`diagnostics.compute_change_points` to pinpoint
+          structural regime shifts that the model failed to anticipate (distinguishing unmodeled
+          structural breaks from seasonal or promotional jumps the model already explained).
+
+        Returns a tidy ``DataFrame`` with columns ``["ts_id", "model_type", "begin_date",
+        "end_date", "window_count", "window_avg", "window_min", "window_max", "window_stddev",
+        "gap_edge_missing_steps", "is_gap_edge", "status"]``.
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_change_points
+        from .registry.reads import read_oof, read_series_history, resolve_settings
+
+        rid = run_id or self.run_id
+        eff_cfg = self._effective_config_for_run(rid)
+        freq = str(eff_cfg.data.freq)
+
+        # Model-residual mode: segment backtest_oof residuals for any model or ensemble.
+        if model_name is not None and model_name != "raw":
+            eff_model = "arima_plus@xreg" if model_name == "arima_plus_xreg" else model_name
+            model_filter = [eff_model] if eff_model != "all" else None
+            oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
+            oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
+            return compute_change_points(
+                oof_df=oof_df,
+                model_name=eff_model,
+                exclude_gap_edges=exclude_gap_edges,
+                min_gap_steps=min_gap_steps,
+                freq=freq,
+                sigma_threshold=sigma_threshold,
+            )
+
+        # Raw series mode: BigQuery ML.DETECT_CHANGE_POINTS when engine in ("auto", "bqml").
+        if engine in ("auto", "bqml"):
+            from google.cloud import bigquery
+
+            from .engines.bigquery_sql import build_detect_change_points_query
+
+            resolved = resolve_settings(self._settings)
+            sql = build_detect_change_points_query(
+                eff_cfg,
+                dataset=resolved.dataset_ref,
+                exclude_gap_edges=exclude_gap_edges,
+                min_gap_steps=min_gap_steps,
+            )
+            client = bigquery_client(resolved.project_id)
+            try:
+                df = client.query(
+                    sql, job_config=bigquery.QueryJobConfig(use_query_cache=False)
+                ).to_dataframe()
+                if "model_type" not in df.columns:
+                    df.insert(1 if "ts_id" in df.columns else 0, "model_type", "raw")
+                return df
+            except Exception:
+                if engine == "bqml":
+                    raise
+
+        # Offline / fallback raw series change-point segmentation from stored history.
+        hist_rows = read_series_history(rid, history_tail=2000, settings=self._settings)
+        hist_df = pd.DataFrame.from_records(hist_rows) if hist_rows else pd.DataFrame()
+        return compute_change_points(
+            series_df=hist_df,
+            model_name="raw",
+            exclude_gap_edges=exclude_gap_edges,
+            min_gap_steps=min_gap_steps,
+            freq=freq,
+            sigma_threshold=sigma_threshold,
+        )
+
     def exceptions_df(
         self,
         run_id: str | None = None,
@@ -1769,6 +2106,73 @@ class Registry:
             rows = read_predictions(rid, limit=limit, settings=self._settings)
             by_run[str(rid)] = pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
         return compute_revision_stability(by_run, jump_threshold_pct=jump_threshold_pct)
+
+    def _forecaster_for_run(self, run_id: str) -> Forecaster:
+        """Recover a `Forecaster` for ``run_id`` from ``run_registry.raw_config`` (falling back to
+        a minimal config shell when inspecting OOF rows on a run with no stored config).
+        """
+        shell = Forecaster(
+            RunConfig.model_validate(
+                {
+                    "run_name": "registry-inspect",
+                    "data": {"source_table": "synthetic_daily_series"},
+                    "models": ["naive_seasonal"],
+                }
+            ),
+            settings=self._settings,
+        )
+        return Forecaster(shell._effective_config_for_run(run_id), settings=self._settings)
+
+    def detect_anomalies_df(
+        self,
+        run_id: str,
+        *,
+        model_name: str | None = None,
+        anomaly_prob_threshold: float = 0.95,
+        cutoff_back_steps: int | None = None,
+        anomalies_only: bool = False,
+        actuals_df: pd.DataFrame | None = None,
+        engine: str = "auto",
+        limit: int = 50000,
+    ) -> pd.DataFrame:
+        """Detect time-series anomalies on any completed ``run_id`` in this registry without
+        needing its original config file. Delegates to :meth:`Forecaster.detect_anomalies_df`.
+        """
+        return self._forecaster_for_run(run_id).detect_anomalies_df(
+            run_id,
+            model_name=model_name,
+            anomaly_prob_threshold=anomaly_prob_threshold,
+            cutoff_back_steps=cutoff_back_steps,
+            anomalies_only=anomalies_only,
+            actuals_df=actuals_df,
+            engine=engine,
+            limit=limit,
+        )
+
+    def detect_change_points_df(
+        self,
+        run_id: str,
+        *,
+        model_name: str | None = None,
+        exclude_gap_edges: bool = True,
+        min_gap_steps: int = 1,
+        sigma_threshold: float = 3.0,
+        engine: str = "auto",
+        limit: int = 50000,
+    ) -> pd.DataFrame:
+        """Detect structural regime change points on any completed ``run_id`` in this registry
+        (either on the run's raw source series or on a specific ``model_name``'s residuals).
+        Delegates to :meth:`Forecaster.detect_change_points_df`.
+        """
+        return self._forecaster_for_run(run_id).detect_change_points_df(
+            run_id,
+            model_name=model_name,
+            exclude_gap_edges=exclude_gap_edges,
+            min_gap_steps=min_gap_steps,
+            sigma_threshold=sigma_threshold,
+            engine=engine,
+            limit=limit,
+        )
 
 
 def build_explain_frame(cfg: RunConfig) -> pd.DataFrame:

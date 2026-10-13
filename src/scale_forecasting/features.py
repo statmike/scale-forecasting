@@ -88,6 +88,7 @@ VALID_COVARIATE_MODES: frozenset[str] = frozenset(
         "cov_none",
         "cov_future_only",
         "future_only",
+        "xreg",
         "cov_past_only",
         "past_only",
         "cov_static_only",
@@ -466,16 +467,47 @@ def resolve_model_variant(
 
         model_cls = get_model(base)
 
+    variant_explicit = cfg.model_params.get(model_name, {}) if model_name != base else {}
     raw_params: dict[str, Any] = dict(cfg.model_params.get(base, {}))
-    if model_name != base and model_name in cfg.model_params:
-        raw_params.update(cfg.model_params[model_name])
+    if variant_explicit:
+        raw_params.update(variant_explicit)
 
+    f = cfg.features
     if variant_tag is not None:
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
-        if inferred_scope is not None and "training_mode" not in raw_params:
+        if inferred_scope is not None and "training_mode" not in variant_explicit:
             raw_params["training_mode"] = inferred_scope
-        if inferred_cov is not None and "covariate_mode" not in raw_params:
+        if inferred_cov is not None and "covariate_mode" not in variant_explicit:
             raw_params["covariate_mode"] = inferred_cov
+        elif inferred_cov is None and not any(
+            k in variant_explicit
+            for k in ("exog", "future_covariates", "past_covariates", "static_covariates")
+        ):
+            declared = set(f.all_covariates)
+            if variant_tag.startswith("cov_drop_"):
+                drop_col = variant_tag[len("cov_drop_") :]
+                if drop_col in declared:
+                    raw_params["covariate_mode"] = None
+                    raw_params["exog"] = [c for c in f.exog if c != drop_col]
+                    raw_params["future_covariates"] = [
+                        c for c in f.future_covariates if c != drop_col
+                    ]
+                    raw_params["past_covariates"] = [c for c in f.past_covariates if c != drop_col]
+                    raw_params["static_covariates"] = [
+                        c for c in f.static_covariates if c != drop_col
+                    ]
+            elif variant_tag.startswith("cov_"):
+                keep_col = variant_tag[len("cov_") :]
+                if keep_col in declared:
+                    raw_params["covariate_mode"] = None
+                    raw_params["exog"] = [c for c in f.exog if c == keep_col]
+                    raw_params["future_covariates"] = [
+                        c for c in f.future_covariates if c == keep_col
+                    ]
+                    raw_params["past_covariates"] = [c for c in f.past_covariates if c == keep_col]
+                    raw_params["static_covariates"] = [
+                        c for c in f.static_covariates if c == keep_col
+                    ]
 
     scope_cap = model_cls.scope_capability()
     default_tm = "global" if scope_cap == "global_only" else "local"
@@ -491,7 +523,6 @@ def resolve_model_variant(
         "global" if tm_str == "global" else ("hybrid" if tm_str == "hybrid" else "local")
     )
 
-    f = cfg.features
     has_feature_overrides = any(k in raw_params for k in VARIANT_FEATURE_META_KEYS)
     if not has_feature_overrides:
         cand_features = f
@@ -516,7 +547,7 @@ def resolve_model_variant(
                 )
             if cm in ("univariate", "cov_none"):
                 new_exog, new_future, new_past, new_static, new_lags = [], [], [], [], {}
-            elif cm in ("cov_future_only", "future_only"):
+            elif cm in ("cov_future_only", "future_only", "xreg"):
                 new_past, new_static = [], []
             elif cm in ("cov_past_only", "past_only"):
                 new_exog, new_future, new_static = [], [], []
@@ -604,6 +635,11 @@ def resolve_model_variant(
     used_fut = list(eff_f.known_future_covariates) if model_cls.supports_future_covariates else []
     used_past = list(eff_f.past_covariates) if model_cls.supports_past_covariates else []
     used_stat = list(eff_f.static_covariates) if model_cls.supports_static_covariates else []
+    if (variant_tag == "xreg" or raw_params.get("covariate_mode") == "xreg") and not used_fut:
+        raise ConfigError(
+            f"model variant {model_name!r} ('ARIMA_PLUS_XREG') requires at least one known-future "
+            "covariate in features.future_covariates (or features.exog)."
+        )
     covariates_used = tuple(dict.fromkeys([*used_fut, *used_past, *used_stat]))
 
     cleaned = clean_model_params(raw_params)
@@ -696,7 +732,7 @@ def _cov_mode_is_feasible(cov_mode: str | None, features: Any, model_cls: type[A
     )
     has_past = bool(features.past_covariates) and bool(model_cls.supports_past_covariates)
     has_stat = bool(features.static_covariates) and bool(model_cls.supports_static_covariates)
-    if cov_mode in ("cov_future_only", "future_only"):
+    if cov_mode in ("cov_future_only", "future_only", "xreg"):
         return has_fut
     if cov_mode in ("cov_past_only", "past_only"):
         return has_past
@@ -1044,7 +1080,7 @@ def regularize_series_grid(series: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame
     return frame
 
 
-def _local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
+def local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
     """Fast, fold-safe local trend + seasonal baseline for outlier and stockout imputation."""
     n = arr.size
     if n < 4:
@@ -1070,6 +1106,9 @@ def _local_seasonal_baseline(arr: np.ndarray, period: int) -> np.ndarray:
                 seas[mask] = float(np.median(finite))
         return trend + seas
     return trend
+
+
+_local_seasonal_baseline = local_seasonal_baseline
 
 
 def clean_training_target(

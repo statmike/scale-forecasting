@@ -1849,6 +1849,49 @@ class RunConfig(BaseModel):
                         f"malformed model variant {m!r}; expected '<base_model>@<tag>'"
                     )
 
+        # 1a. Normalize the `arima_plus_xreg` alias to `arima_plus@xreg` (and when paired with
+        #     `arima_plus` in `models`, pin `arima_plus` to univariate `ARIMA_PLUS` so both
+        #     univariate and multivariate BigQuery ARIMA models can be compared side-by-side).
+        has_xreg_alias = any(
+            m == "arima_plus_xreg" or m.startswith("arima_plus_xreg@") for m in self.models
+        ) or ("arima_plus_xreg" in self.model_params)
+        has_both_arima_and_xreg = "arima_plus" in self.models and (
+            "arima_plus_xreg" in self.models or "arima_plus@xreg" in self.models
+        )
+        if has_xreg_alias or has_both_arima_and_xreg:
+            norm_models: list[str] = []
+            for m in self.models:
+                if m == "arima_plus_xreg":
+                    norm_models.append("arima_plus@xreg")
+                elif m.startswith("arima_plus_xreg@"):
+                    norm_models.append("arima_plus@" + m.split("@", 1)[1])
+                else:
+                    norm_models.append(m)
+            if len(set(norm_models)) != len(norm_models):
+                raise ValueError(f"models contains duplicates after normalization: {norm_models}")
+            norm_params: dict[str, dict[str, Any]] = {
+                k: dict(v) for k, v in self.model_params.items()
+            }
+            if "arima_plus_xreg" in norm_params:
+                xreg_p = norm_params.pop("arima_plus_xreg")
+                merged_xreg = {**xreg_p, **norm_params.get("arima_plus@xreg", {})}
+                norm_params["arima_plus@xreg"] = merged_xreg
+            if "arima_plus" in norm_models and "arima_plus@xreg" in norm_models:
+                ap_params = dict(norm_params.get("arima_plus", {}))
+                if not any(k in ap_params for k in ("covariate_mode", "exog", "future_covariates")):
+                    ap_params["covariate_mode"] = "univariate"
+                    norm_params["arima_plus"] = ap_params
+            object.__setattr__(self, "models", norm_models)
+            object.__setattr__(self, "model_params", norm_params)
+
+        if "arima_plus@xreg" in self.models:
+            from .features import resolve_model_variant
+
+            try:
+                resolve_model_variant(self, "arima_plus@xreg")
+            except ConfigError as e:
+                raise ValueError(str(e)) from e
+
         # 1b. Expand config-driven univariate baselines and ablation ladders when requested.
         if (
             self.features.include_univariate_baselines

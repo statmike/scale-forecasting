@@ -22,8 +22,8 @@
 | `random_forest` | `ml` | `python` | `scikit-learn` | `core` | Yes | Yes | No | Yes | `local` | No |
 | `regression_lags` | `ml` | `python` | `numpy` | `core` | Yes | Yes | No | Yes | `local` | No |
 | `xgboost` | `ml` | `python` | `xgboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
-| `arima_plus` | `native` | `bigquery` | `bigquery-ml` | `gcp` | No | No | No | No | `local` | No |
-| `timesfm` | `native` | `bigquery` | `bigquery-ml` | `gcp` | No | No | No | No | `local` | No |
+| `arima_plus` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | No | No | Yes | `local` | No |
+| `timesfm` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | Yes | No | No | `local` | No |
 | `auto_arima` | `statistical` | `python` | `statsforecast` | `models-stats` | Yes | Yes | No | No | `local` | No |
 | `auto_ces` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
 | `auto_theta` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |

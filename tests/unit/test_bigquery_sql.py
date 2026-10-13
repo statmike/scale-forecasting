@@ -716,3 +716,470 @@ def test_build_forecast_insert_sql_and_score_fold_apply_output_constraints() -> 
     assert oof_rows[0]["yhat_raw"] == pytest.approx(-5.4)
     for r in oof_rows:
         assert 0.0 <= r["yhat_lower"] <= r["yhat"] <= r["yhat_upper"] <= 5000.0
+
+
+def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
+    from scale_forecasting.engines.bigquery_sql import build_explain_forecast_query
+
+    cfg = _cfg(
+        [
+            "arima_plus",
+            "arima_plus@cov_promo_flag",
+            "arima_plus@cov_drop_price_index",
+            "arima_plus@univariate",
+            "timesfm",
+        ],
+        exog=["is_holiday", "promo_flag", "price_index"],
+    )
+    opts_xreg = bqml_options(cfg, "arima_plus")
+    opts_uni = bqml_options(cfg, "arima_plus@univariate")
+    assert opts_xreg["model_type"] == "ARIMA_PLUS_XREG"
+    assert opts_uni["model_type"] == "ARIMA_PLUS"
+
+    create_xreg = build_create_model_sql(cfg, "arima_plus", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_xreg
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag, price_index" in create_xreg
+
+    create_single = build_create_model_sql(cfg, "arima_plus@cov_promo_flag", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_single
+    assert "SELECT ts_id, ds, y, promo_flag\n" in create_single
+    assert "price_index" not in create_single
+
+    create_drop = build_create_model_sql(cfg, "arima_plus@cov_drop_price_index", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in create_drop
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag\n" in create_drop
+    assert ", price_index" not in create_drop
+
+    create_uni = build_create_model_sql(cfg, "arima_plus@univariate", _DS)
+    assert "model_type = 'ARIMA_PLUS'" in create_uni
+    assert "promo_flag" not in create_uni
+
+    insert_xreg = build_forecast_insert_sql(cfg, "arima_plus", _DS)
+    assert "explanations, created_at" in insert_xreg
+    assert "ML.FORECAST(MODEL" in insert_xreg
+    assert "ML.EXPLAIN_FORECAST(MODEL" in insert_xreg
+    assert "attribution_promo_flag" in insert_xreg
+    assert "attribution_price_index" in insert_xreg
+    assert "GENERATE_ARRAY(1, 28)" in insert_xreg
+
+    eval_xreg = build_eval_query(cfg, "arima_plus", _DS, back_steps=56, fold_id=0)
+    expected_xreg = (
+        "SELECT ts_id, ds, is_holiday, promo_flag, price_index "
+        "FROM `proj.scale_forecasting.source_series_native`"
+    )
+    assert expected_xreg in eval_xreg
+    assert "ds <= (SELECT DATE_SUB(MAX(ds), INTERVAL 28 DAY)" in eval_xreg
+
+    explain_xreg = build_explain_forecast_query(cfg, "arima_plus", _DS)
+    assert explain_xreg is not None
+    assert "ML.EXPLAIN_FORECAST(MODEL" in explain_xreg
+    assert "WHERE time_series_type = 'forecast'" in explain_xreg
+    assert "is_holiday, promo_flag, price_index" in explain_xreg
+
+    explain_uni = build_explain_forecast_query(cfg, "arima_plus@univariate", _DS)
+    assert explain_uni is not None
+    assert "ML.EXPLAIN_FORECAST(MODEL" in explain_uni
+    assert "promo_flag" not in explain_uni
+
+    assert build_explain_forecast_query(cfg, "timesfm", _DS) is None
+
+
+def test_arima_plus_xreg_alias_and_arima_plus_model_params() -> None:
+    from scale_forecasting.dag import check_model_params
+    from scale_forecasting.errors import ConfigError
+
+    # Pairing `arima_plus` and `arima_plus_xreg` pins `arima_plus` to univariate ARIMA_PLUS
+    # and normalizes `arima_plus_xreg` -> `arima_plus@xreg` (`ARIMA_PLUS_XREG`).
+    cfg_both = RunConfig(
+        run_name="arima plus and xreg side by side",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10},
+        models=["arima_plus", "arima_plus_xreg"],
+        features={"future_covariates": ["is_holiday", "promo_flag", "price_index"]},
+        model_params={
+            "arima_plus": {
+                "auto_arima_max_order": 3,
+                "auto_arima_min_order": 1,
+                "clean_spikes_and_dips": True,
+                "adjust_step_changes": True,
+                "decompose_time_series": True,
+                "holiday_region": ["US", "GB"],
+                "seasonalities": ["WEEKLY", "YEARLY"],
+                "time_series_length_fraction": 0.8,
+                "min_time_series_length": 30,
+                "max_time_series_length": 730,
+                "trend_smoothing_window_size": 7,
+            },
+            "arima_plus_xreg": {
+                "auto_arima_max_order": 4,
+            },
+        },
+    )
+    assert cfg_both.models == ["arima_plus", "arima_plus@xreg"]
+    check_model_params(cfg_both)
+
+    opts_uni = bqml_options(cfg_both, "arima_plus")
+    opts_xreg = bqml_options(cfg_both, "arima_plus@xreg")
+    assert opts_uni["model_type"] == "ARIMA_PLUS"
+    assert opts_uni["auto_arima_max_order"] == 3
+    assert opts_xreg["model_type"] == "ARIMA_PLUS_XREG"
+    assert opts_xreg["auto_arima_max_order"] == 4
+
+    sql_uni = build_create_model_sql(cfg_both, "arima_plus", _DS)
+    assert "model_type = 'ARIMA_PLUS'" in sql_uni
+    assert "auto_arima_max_order = 3" in sql_uni
+    assert "clean_spikes_and_dips = TRUE" in sql_uni
+    assert "holiday_region = ['US', 'GB']" in sql_uni
+    assert "seasonalities = ['WEEKLY', 'YEARLY']" in sql_uni
+    assert "promo_flag" not in sql_uni
+
+    sql_xreg = build_create_model_sql(cfg_both, "arima_plus@xreg", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in sql_xreg
+    assert "auto_arima_max_order = 4" in sql_xreg
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag, price_index" in sql_xreg
+
+    # Requesting `arima_plus_xreg` without future covariates fails fast at config load.
+    with pytest.raises(
+        (ConfigError, ValueError), match="requires at least one known-future covariate"
+    ):
+        _ = RunConfig(
+            run_name="xreg without covs",
+            data={"source_table": "source_series_native"},
+            models=["arima_plus_xreg"],
+        )
+
+    # `forecast_limit_lower_bound` / `forecast_limit_upper_bound` are explicitly forbidden.
+    cfg_bad_bounds = RunConfig(
+        run_name="bad bqml bounds",
+        data={"source_table": "source_series_native"},
+        models=["arima_plus"],
+        model_params={"arima_plus": {"forecast_limit_lower_bound": 0.0}},
+    )
+    with pytest.raises(ConfigError, match=r"output\.floor"):
+        check_model_params(cfg_bad_bounds)
+
+    # Manual non_seasonal_order / auto_arima=False is explicitly forbidden on multi-series models.
+    cfg_bad_manual = RunConfig(
+        run_name="bad manual arima",
+        data={"source_table": "source_series_native"},
+        models=["arima_plus"],
+        model_params={"arima_plus": {"auto_arima": False}},
+    )
+    with pytest.raises(ConfigError, match="time_series_id_col"):
+        check_model_params(cfg_bad_manual)
+
+
+def test_timesfm_multivariate_covariates_and_fallback_sql() -> None:
+    from scale_forecasting.dag import check_model_params
+    from scale_forecasting.errors import ConfigError
+
+    cfg = RunConfig(
+        run_name="timesfm cov test",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10, "horizon": 14},
+        models=["timesfm", "timesfm@univariate"],
+        features={
+            "future_covariates": ["is_holiday", "promo_flag", "price_index"],
+            "past_covariates": ["temperature"],
+        },
+    )
+    check_model_params(cfg)
+    opts_cov = bqml_options(cfg, "timesfm")
+    assert opts_cov["model"] == "TimesFM 3.0"
+    assert opts_cov["target_cols"] == ["y"]
+    assert opts_cov["future_covariate_cols"] == ["is_holiday", "promo_flag", "price_index"]
+    assert opts_cov["past_covariate_cols"] == ["temperature"]
+
+    opts_uni = bqml_options(cfg, "timesfm@univariate")
+    assert "target_cols" not in opts_uni
+    assert "future_covariate_cols" not in opts_uni
+
+    insert_cov = build_forecast_insert_sql(cfg, "timesfm", _DS)
+    assert "target_cols => ['y']" in insert_cov
+    assert "past_covariate_cols => ['temperature']" in insert_cov
+    assert "future_covariate_cols => ['is_holiday', 'promo_flag', 'price_index']" in insert_cov
+    assert "model => 'TimesFM 3.0'" in insert_cov
+    assert "y.value AS forecast_value" in insert_cov
+    assert "IF(LOWER(CAST(is_holiday AS STRING)) = 'true', 1.0, 0.0)" in insert_cov
+    assert "UNION ALL" in insert_cov
+
+    insert_uni = build_forecast_insert_sql(cfg, "timesfm@univariate", _DS)
+    assert "data_col => 'y'" in insert_uni
+    assert "target_cols" not in insert_uni
+
+    # Explicit TimesFM 2.5 with covariates falls back under on_unsupported_covariates='fallback'
+    # and raises under on_unsupported_covariates='error'.
+    cfg_25_err = RunConfig(
+        run_name="timesfm 2.5 cov error",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10},
+        models=["timesfm"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "on_unsupported_covariates": "error",
+        },
+        model_params={"timesfm": {"version": "2.5"}},
+    )
+    with pytest.raises(ConfigError, match=r"TimesFM 3\.0"):
+        check_model_params(cfg_25_err)
+
+
+def test_arima_diagnostics_and_anomaly_change_point_queries() -> None:
+    import pandas as pd
+
+    from scale_forecasting.engines.bigquery_engine import extract_arima_diagnostics
+    from scale_forecasting.engines.bigquery_sql import (
+        build_arima_coefficients_query,
+        build_arima_evaluate_query,
+        build_detect_anomalies_query,
+        build_detect_change_points_query,
+    )
+
+    cfg = _cfg(["arima_plus", "timesfm"], exog=["is_holiday", "promo_flag"], series_limit=10)
+    eval_sql = build_arima_evaluate_query(cfg, "arima_plus", _DS)
+    coef_sql = build_arima_coefficients_query(cfg, "arima_plus", _DS)
+    assert eval_sql is not None and "ML.ARIMA_EVALUATE(MODEL" in eval_sql
+    assert coef_sql is not None and "ML.ARIMA_COEFFICIENTS(MODEL" in coef_sql
+    assert build_arima_evaluate_query(cfg, "timesfm", _DS) is None
+    assert build_arima_coefficients_query(cfg, "timesfm", _DS) is None
+
+    eval_df = pd.DataFrame(
+        [
+            {
+                "ts_id": "s_000000",
+                "non_seasonal_p": 2,
+                "non_seasonal_d": 1,
+                "non_seasonal_q": 1,
+                "has_drift": False,
+                "log_likelihood": -4120.5,
+                "AIC": 8251.0,
+                "variance": 120.25,
+                "seasonal_periods": ["WEEKLY", "YEARLY"],
+                "has_holiday_effect": False,
+                "has_spikes_and_dips": True,
+                "has_step_changes": True,
+                "error_message": "",
+            }
+        ]
+    )
+    coef_df = pd.DataFrame(
+        [
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [],
+                "ma_coefficients": [],
+                "intercept_or_drift": float("nan"),
+                "processed_input": "is_holiday",
+                "weight": float("nan"),
+                "category_weights": [
+                    {"category": "false", "weight": 0.0},
+                    {"category": "true", "weight": 38.5735},
+                ],
+            },
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [],
+                "ma_coefficients": [],
+                "intercept_or_drift": float("nan"),
+                "processed_input": "promo_flag",
+                "weight": 115.205,
+                "category_weights": [],
+            },
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [0.42, -0.18],
+                "ma_coefficients": [-0.65],
+                "intercept_or_drift": 0.0,
+                "processed_input": None,
+                "weight": float("nan"),
+                "category_weights": [],
+            },
+        ]
+    )
+    diag = extract_arima_diagnostics(eval_df, coef_df)
+    assert diag["s_000000"]["non_seasonal_order"] == [2, 1, 1]
+    assert diag["s_000000"]["aic"] == 8251.0
+    assert diag["s_000000"]["seasonal_periods"] == ["WEEKLY", "YEARLY"]
+    assert diag["s_000000"]["ar_coefficients"] == [0.42, -0.18]
+    assert diag["s_000000"]["ma_coefficients"] == [-0.65]
+    assert diag["s_000000"]["xreg_weights"]["promo_flag"] == 115.205
+    assert diag["s_000000"]["xreg_weights"]["is_holiday"] == {"false": 0.0, "true": 38.5735}
+
+    anom_arima = build_detect_anomalies_query(cfg, "arima_plus", _DS, anomaly_prob_threshold=0.98)
+    assert "ML.DETECT_ANOMALIES(MODEL" in anom_arima
+    assert "0.98 AS anomaly_prob_threshold" in anom_arima
+
+    anom_tf = build_detect_anomalies_query(
+        cfg, "timesfm", _DS, anomaly_prob_threshold=0.95, cutoff_back_steps=14
+    )
+    assert "AI.DETECT_ANOMALIES(" in anom_tf
+    assert "anomaly_prob_threshold => 0.95" in anom_tf
+    assert "INTERVAL 14 DAY" in anom_tf
+
+    cp_sql = build_detect_change_points_query(cfg, _DS, exclude_gap_edges=True, min_gap_steps=1)
+    assert "ML.DETECT_CHANGE_POINTS(" in cp_sql
+    assert "WHERE begin_timestamp IS NOT NULL" in cp_sql
+    assert "WHERE is_gap_edge = FALSE" in cp_sql
+
+
+def test_universal_compute_anomalies_and_change_points_across_models_and_past_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+    import pandas as pd
+
+    from scale_forecasting import (
+        Forecaster,
+        Registry,
+        compute_anomalies,
+        compute_change_points,
+    )
+
+    dates = pd.date_range("2025-01-01", periods=60, freq="D")
+    records: list[dict[str, object]] = []
+    for model_type in ("xgboost", "tide", "vertex_tft", "ensemble_champion"):
+        for i, d in enumerate(dates):
+            base = 100.0 + 10.0 * np.sin(2.0 * np.pi * i / 7.0)
+            # Inject an unexplained 50-unit spike at index 25 and +40 regime shift at index 40
+            y_val = base + (50.0 if i == 25 else 0.0) + (40.0 if i >= 40 else 0.0)
+            records.append(
+                {
+                    "ts_id": "s_000000",
+                    "model_type": model_type,
+                    "fold_id": 0 if i < 30 else 1,
+                    "forecast_date": d.date(),
+                    "y_true": y_val,
+                    "yhat": base,
+                    "yhat_lower": base - 5.0,
+                    "yhat_upper": base + 5.0,
+                }
+            )
+    oof_df = pd.DataFrame.from_records(records)
+
+    # 1. Universal OOF anomaly detection (model_name=None evaluates all models in oof_df)
+    anom_default = compute_anomalies(oof_df=oof_df, anomaly_prob_threshold=0.95)
+    assert set(anom_default["model_type"].unique()) == {
+        "xgboost",
+        "tide",
+        "vertex_tft",
+        "ensemble_champion",
+    }
+    assert len(anom_default) == 240
+    flagged_dates = set(anom_default.loc[anom_default["is_anomaly"], "ds"])
+    assert dates[25].date() in flagged_dates
+
+    # Specific Python / AutoML model and model_name="all"
+    anom_xgb = compute_anomalies(
+        oof_df=oof_df,
+        model_name="xgboost",
+        anomaly_prob_threshold=0.99,
+        anomalies_only=True,
+    )
+    assert not anom_xgb.empty
+    assert set(anom_xgb["model_type"].unique()) == {"xgboost"}
+    assert bool(anom_xgb["is_anomaly"].all())
+
+    anom_all = compute_anomalies(oof_df=oof_df, model_name="all", anomaly_prob_threshold=0.95)
+    assert set(anom_all["model_type"].unique()) == {
+        "xgboost",
+        "tide",
+        "vertex_tft",
+        "ensemble_champion",
+    }
+
+    # 2. Forward forecast + newly arrived actuals anomaly detection
+    fut_dates = pd.date_range("2025-03-02", periods=7, freq="D")
+    pred_df = pd.DataFrame(
+        {
+            "ts_id": ["s_000000"] * 7,
+            "model_type": ["xgboost"] * 7,
+            "forecast_date": fut_dates.date,
+            "yhat": [100.0] * 7,
+            "yhat_lower": [92.0] * 7,
+            "yhat_upper": [108.0] * 7,
+        }
+    )
+    actuals_df = pd.DataFrame(
+        {
+            "ts_id": ["s_000000"] * 7,
+            "ds": fut_dates.date,
+            "y": [100.0, 101.0, 99.0, 165.0, 100.0, 98.0, 101.0],
+        }
+    )
+    anom_live = compute_anomalies(
+        predictions_df=pred_df,
+        actuals_df=actuals_df,
+        oof_df=oof_df,
+        model_name="xgboost",
+        anomalies_only=True,
+    )
+    assert len(anom_live) == 1
+    assert anom_live.iloc[0]["ds"] == fut_dates[3].date()
+
+    # 3. Model-free STL anomaly detection on raw series
+    raw_series_df = oof_df.loc[
+        oof_df["model_type"] == "xgboost", ["ts_id", "forecast_date", "y_true"]
+    ].rename(columns={"forecast_date": "ds", "y_true": "y"})
+    anom_stl = compute_anomalies(
+        series_df=raw_series_df,
+        model_name="stl",
+        anomaly_prob_threshold=0.99,
+        anomalies_only=True,
+    )
+    assert not anom_stl.empty
+    assert set(anom_stl["model_type"].unique()) == {"stl"}
+
+    # 4. Universal change-point detection on model residuals (oof_df) and raw series
+    cp_xgb = compute_change_points(oof_df=oof_df, model_name="xgboost")
+    assert len(cp_xgb) == 1
+    assert set(cp_xgb["model_type"].unique()) == {"xgboost"}
+    # The detected window brackets the regime shift at index 40 (not the 1-day spike at 25)
+    assert cp_xgb.iloc[0]["begin_date"] <= dates[40].date() <= cp_xgb.iloc[0]["end_date"]
+
+    cp_raw = compute_change_points(series_df=raw_series_df, model_name="raw")
+    assert len(cp_raw) >= 1
+    assert set(cp_raw["model_type"].unique()) == {"raw"}
+    assert any(
+        row["begin_date"] <= dates[40].date() <= row["end_date"] for _, row in cp_raw.iterrows()
+    )
+
+    # 5. Past-run routing via Forecaster.detect_anomalies_df / detect_change_points_df and Registry
+    from scale_forecasting.registry import reads as reg_reads
+
+    past_cfg = _cfg(["xgboost", "tide"], series_limit=10)
+    monkeypatch.setattr(
+        reg_reads, "read_run_config", lambda run_id, settings=None: past_cfg.model_dump(mode="json")
+    )
+    monkeypatch.setattr(
+        reg_reads,
+        "read_oof",
+        lambda run_id, ts_ids=None, models=None, limit=10000, settings=None: [
+            r for r in records if (models is None or r["model_type"] in models)
+        ],
+    )
+    monkeypatch.setattr(
+        reg_reads,
+        "read_predictions",
+        lambda run_id, ts_ids=None, models=None, limit=10000, settings=None: pred_df.to_dict(
+            orient="records"
+        ),
+    )
+
+    f = Forecaster(past_cfg)
+    past_anom = f.detect_anomalies_df(
+        "past-run-123456789abc", model_name="tide", anomalies_only=True
+    )
+    assert not past_anom.empty
+    assert set(past_anom["model_type"].unique()) == {"tide"}
+
+    past_cp = f.detect_change_points_df("past-run-123456789abc", model_name="xgboost")
+    assert len(past_cp) == 1
+    assert set(past_cp["model_type"].unique()) == {"xgboost"}
+
+    reg = Registry()
+    reg_anom = reg.detect_anomalies_df(
+        "past-run-123456789abc", model_name="ensemble_champion", anomalies_only=True
+    )
+    assert not reg_anom.empty
+    assert set(reg_anom["model_type"].unique()) == {"ensemble_champion"}
+
+    reg_cp = reg.detect_change_points_df("past-run-123456789abc", model_name="tide")
+    assert len(reg_cp) == 1
+    assert set(reg_cp["model_type"].unique()) == {"tide"}

@@ -32,6 +32,8 @@ from ..features import holiday_frame
 from .bigquery_names import model_ref, registry_of, sanitize_identifier, source_ref
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..config import RunConfig
 
 
@@ -171,11 +173,46 @@ def trained_horizon(cfg: RunConfig, *, fold: bool) -> int:
     return cfg.data.horizon
 
 
+def xreg_cols(cfg: RunConfig, model_name: str) -> list[str]:
+    """Return active known-future exogenous columns for ``model_name`` (``[]`` if univariate)."""
+    from ..features import effective_config_for_model
+    from ..models import base_model_name, get_model
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return []
+    model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
+    return list(model_cfg.features.known_future_covariates)
+
+
+_xreg_cols = xreg_cols
+
+
+def timesfm_cov_cols(cfg: RunConfig, model_name: str) -> tuple[list[str], list[str]]:
+    """Return ``(future_covariate_cols, past_covariate_cols)`` for ``timesfm``."""
+    from ..features import effective_config_for_model, resolve_model_variant
+    from ..models import base_model_name, get_model
+    from ..models.bigquery_native import resolve_timesfm_params
+
+    if base_model_name(model_name) != "timesfm":
+        return [], []
+    spec = resolve_model_variant(cfg, model_name)
+    tf_model, _ = resolve_timesfm_params(spec.clean_params)
+    if tf_model in ("TimesFM 2.0", "TimesFM 2.5"):
+        return [], []
+    model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
+    fut_cols = list(model_cfg.features.known_future_covariates)
+    past_cols = [c for c in model_cfg.features.past_covariates if c not in set(fut_cols)]
+    return fut_cols, past_cols
+
+
 def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict[str, Any]:
     """The resolved model parameters, as an ordered dict — one source of truth for two uses.
 
     For the ARIMA models this is the ``CREATE MODEL`` ``OPTIONS(...)`` body *and* the
     ``best_params`` JSON on each ``forecast_metadata`` row — the registry records what trained.
+    When ``features.future_covariates`` (or ``exog``) is configured on ``arima_plus`` (and not
+    stripped by an ``@univariate`` tag), ``model_type`` upgrades from ``ARIMA_PLUS`` to
+    ``ARIMA_PLUS_XREG``.
     TimesFM has no ``CREATE MODEL``; `_render_options` never sees its dict, but ``run`` still
     stamps ``best_params`` for every model, so we return the resolved ``AI.FORECAST`` arguments here
     — keeping the metadata row's provenance non-NULL and meaningful across both native shapes.
@@ -193,6 +230,7 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
 
         spec = resolve_model_variant(cfg, model_name)
         tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
+        fut_cols, past_cols = timesfm_cov_cols(cfg, model_name)
         tf_opts: dict[str, Any] = {
             "model_type": "TimesFM (AI.FORECAST)",
             "id_cols": [cfg.data.ts_id_col],
@@ -201,27 +239,52 @@ def bqml_options(cfg: RunConfig, model_name: str, *, fold: bool = False) -> dict
             "horizon": horizon,
             "confidence_level": _CONFIDENCE_LEVEL,
         }
-        if tf_model is not None:
+        if fut_cols or past_cols:
+            tf_opts["target_cols"] = [cfg.data.target_col]
+            if fut_cols:
+                tf_opts["future_covariate_cols"] = fut_cols
+            if past_cols:
+                tf_opts["past_covariate_cols"] = past_cols
+            tf_opts["model"] = tf_model or "TimesFM 3.0"
+        elif tf_model is not None:
             tf_opts["model"] = tf_model
         if tf_ctx is not None:
             tf_opts["context_window"] = tf_ctx
         return tf_opts
+    from ..models.bigquery_native import resolve_arima_plus_params
+
+    spec = resolve_model_variant(cfg, model_name)
+    extra_arima_opts = resolve_arima_plus_params(spec.clean_params)
+    xreg_cols = _xreg_cols(cfg, model_name)
+    bqml_type = "ARIMA_PLUS_XREG" if xreg_cols else _MODEL_TYPE[base_name]
     opts: dict[str, Any] = {
-        "model_type": _MODEL_TYPE[base_name],
+        "model_type": bqml_type,
         "time_series_id_col": cfg.data.ts_id_col,
         "time_series_timestamp_col": cfg.data.date_col,
         "time_series_data_col": cfg.data.target_col,
         "horizon": horizon,
         "data_frequency": freq,
     }
+    opts.update(extra_arima_opts)
     return opts
 
 
+def _render_option_value(value: Any) -> str:
+    """Format a single BigQuery ``OPTIONS(...)`` value (bool, list, string, or number)."""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, str):
+        return f"'{value}'"
+    if isinstance(value, list):
+        return "[" + ", ".join(_render_option_value(v) for v in value) + "]"
+    return str(value)
+
+
 def _render_options(opts: dict[str, Any]) -> str:
-    """Render an options dict to the ``OPTIONS(...)`` body (strings quoted, numbers bare)."""
+    """Render an options dict to the ``OPTIONS(...)`` body (strings quoted, booleans/arrays)."""
     lines = []
     for key, value in opts.items():
-        rendered = f"'{value}'" if isinstance(value, str) else str(value)
+        rendered = _render_option_value(value)
         lines.append(f"  {key} = {rendered}")
     return "OPTIONS(\n" + ",\n".join(lines) + "\n)"
 
@@ -283,15 +346,16 @@ def _training_select(
     cfg: RunConfig,
     source: str,
     *,
+    xreg_cols: Sequence[str] = (),
     back_steps: int | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
-    """The ``training_data`` SELECT: id/timestamp/target over the fit's training window.
+    """The ``training_data`` SELECT: id/timestamp/target (+ xreg_cols) over the training window.
 
     ``back_steps=None`` trains on **all** history (the final true-future fit); an int restricts to a
     backtest fold's window (see `_train_window_where`).
     """
-    cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col]
+    cols = [cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col, *xreg_cols]
     where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
     sfilter = _series_filter(cfg, source, cfg.data.ts_id_col, snapshot_millis=snapshot_millis)
     if sfilter:
@@ -299,6 +363,54 @@ def _training_select(
     clause = f"\n  WHERE {' AND '.join(where)}" if where else ""
     snap = _snapshot_clause(snapshot_millis)
     return f"SELECT {', '.join(cols)}\n  FROM `{source}`{snap}{clause}"
+
+
+def _future_xreg_select(
+    cfg: RunConfig,
+    source: str,
+    xreg_cols: Sequence[str],
+    *,
+    horizon: int,
+    back_steps: int | None = None,
+    snapshot_millis: int | None = None,
+) -> str:
+    """Render the future exogenous SELECT for ``ML.FORECAST`` / ``ML.EXPLAIN_FORECAST``.
+
+    * **Backtest fold (`back_steps is not None`):** selects actual post-cutoff rows ``ds > cutoff``
+      (bounded above by ``cutoff + horizon`` when ``back_steps > horizon``) from the source table.
+    * **Final true-future forecast (`back_steps is None`):** projects ``horizon`` future dates past
+      each series' ``MAX(ds)`` using the trailing ``horizon`` rows of that series in chronological
+      order (repeating the earliest row when a series is shorter than ``horizon``), matching the
+      Python worker's recency-window future exogenous stand-in.
+    """
+    idc, datec = cfg.data.ts_id_col, cfg.data.date_col
+    snap = _snapshot_clause(snapshot_millis)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+    if back_steps is not None:
+        cols = [idc, datec, *xreg_cols]
+        cutoff = _cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+        where = [f"{datec} > {cutoff}"]
+        if back_steps > horizon:
+            upper = _cutoff_expr(cfg, source, back_steps - horizon, snapshot_millis=snapshot_millis)
+            where.append(f"{datec} <= {upper}")
+        if sfilter:
+            where.append(sfilter)
+        return f"SELECT {', '.join(cols)} FROM `{source}`{snap} WHERE {' AND '.join(where)}"
+
+    _, unit = _freq(cfg)
+    where_clause = f" WHERE {sfilter}" if sfilter else ""
+    xreg_list = ", ".join(xreg_cols)
+    return (
+        f"SELECT {idc}, DATE_ADD(_max_ds, INTERVAL _step {unit}) AS {datec}, {xreg_list} "
+        f"FROM ("
+        f"SELECT {idc}, {xreg_list}, "
+        f"MAX({datec}) OVER (PARTITION BY {idc}) AS _max_ds, "
+        f"ROW_NUMBER() OVER (PARTITION BY {idc} ORDER BY {datec} DESC) AS _rev_rn, "
+        f"COUNT(*) OVER (PARTITION BY {idc}) AS _n_rows "
+        f"FROM `{source}`{snap}{where_clause}"
+        f") CROSS JOIN UNNEST(GENERATE_ARRAY(1, {horizon})) AS _step "
+        f"WHERE _rev_rn = LEAST({horizon} - _step + 1, _n_rows)"
+    )
 
 
 def build_create_model_sql(
@@ -311,7 +423,7 @@ def build_create_model_sql(
     fold_id: int | None = None,
     snapshot_millis: int | None = None,
 ) -> str:
-    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS native model.
+    """``CREATE OR REPLACE MODEL`` for an ARIMA_PLUS / ARIMA_PLUS_XREG native model.
 
     ``back_steps=None`` (default) is the **final** model: trained on *all* history so its forecast
     is a true beyond-data forecast (parity with the Spark final fit). A ``back_steps``/``fold_id``
@@ -328,12 +440,19 @@ def build_create_model_sql(
     from ..models import get_model
 
     model_cfg = effective_config_for_model(cfg, get_model(model_name), model_name)
+    xreg_cols = _xreg_cols(cfg, model_name)
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     source = source_ref(cfg, dataset)
     # A fold model is trained for the fold's request (which reaches across the embargo), the final
     # model for the shipped forecast. `back_steps` is exactly the "is this a fold" signal.
     options = _render_options(bqml_options(cfg, model_name, fold=back_steps is not None))
-    training = _training_select(cfg, source, back_steps=back_steps, snapshot_millis=snapshot_millis)
+    training = _training_select(
+        cfg,
+        source,
+        xreg_cols=xreg_cols,
+        back_steps=back_steps,
+        snapshot_millis=snapshot_millis,
+    )
     holiday_cte = build_custom_holiday_cte(model_cfg)
     if holiday_cte:
         body = f"  training_data AS (\n    {training}\n  ),\n  {holiday_cte}"
@@ -341,6 +460,60 @@ def build_create_model_sql(
     else:
         as_clause = f"AS (\n  {training}\n)"
     return f"CREATE OR REPLACE MODEL {ref}\n{options}\n{as_clause};"
+
+
+def _timesfm_numeric_expr(col: str) -> str:
+    """Render a BOOL/INT64/FLOAT64-safe numeric coercion expression for ``AI.FORECAST``."""
+    return (
+        f"IF({col} IS NULL, CAST(NULL AS FLOAT64), "
+        f"COALESCE(SAFE_CAST(CAST({col} AS STRING) AS FLOAT64), "
+        f"IF(LOWER(CAST({col} AS STRING)) = 'true', 1.0, 0.0))) AS {col}"
+    )
+
+
+def _timesfm_covariate_input_select(
+    cfg: RunConfig,
+    source: str,
+    fut_cols: Sequence[str],
+    past_cols: Sequence[str],
+    *,
+    horizon: int,
+    back_steps: int | None = None,
+    snapshot_millis: int | None = None,
+) -> str:
+    """Render the historical + future covariate input table expression for ``AI.FORECAST``."""
+    idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
+    where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+    if sfilter:
+        where.append(sfilter)
+    clause = f" WHERE {' AND '.join(where)}" if where else ""
+    snap = _snapshot_clause(snapshot_millis)
+    all_covs = [*fut_cols, *past_cols]
+    hist_cov_exprs = ", ".join(_timesfm_numeric_expr(c) for c in all_covs)
+    hist_select = (
+        f"SELECT {idc}, {datec}, CAST({targetc} AS FLOAT64) AS {targetc}, {hist_cov_exprs} "
+        f"FROM `{source}`{snap}{clause}"
+    )
+    if not fut_cols:
+        return hist_select
+    fut_inner = _future_xreg_select(
+        cfg,
+        source,
+        fut_cols,
+        horizon=horizon,
+        back_steps=back_steps,
+        snapshot_millis=snapshot_millis,
+    )
+    fut_cov_exprs = [
+        *(_timesfm_numeric_expr(c) for c in fut_cols),
+        *(f"CAST(NULL AS FLOAT64) AS {c}" for c in past_cols),
+    ]
+    fut_select = (
+        f"SELECT {idc}, {datec}, CAST(NULL AS FLOAT64) AS {targetc}, "
+        f"{', '.join(fut_cov_exprs)} FROM ({fut_inner})"
+    )
+    return f"{hist_select}\n    UNION ALL\n    {fut_select}"
 
 
 def _forecast_source(
@@ -381,6 +554,49 @@ def _forecast_source(
     if base_name == "timesfm":
         from ..models.bigquery_native import resolve_timesfm_params
 
+        spec = resolve_model_variant(cfg, model_name)
+        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
+        fut_cols, past_cols = timesfm_cov_cols(cfg, model_name)
+        if fut_cols or past_cols:
+            cov_input = _timesfm_covariate_input_select(
+                cfg,
+                source,
+                fut_cols,
+                past_cols,
+                horizon=h,
+                back_steps=back_steps,
+                snapshot_millis=snapshot_millis,
+            )
+            cov_args = ""
+            if past_cols:
+                past_list = ", ".join(f"'{c}'" for c in past_cols)
+                cov_args += f"\n    past_covariate_cols => [{past_list}],"
+            if fut_cols:
+                fut_list = ", ".join(f"'{c}'" for c in fut_cols)
+                cov_args += f"\n    future_covariate_cols => [{fut_list}],"
+            eff_tf_model = tf_model or "TimesFM 3.0"
+            ctx_arg = f",\n    context_window => {tf_ctx}" if tf_ctx is not None else ""
+            return (
+                "(\n"
+                f"  SELECT\n"
+                f"    {idc},\n"
+                f"    TIMESTAMP({datec}) AS forecast_timestamp,\n"
+                f"    {targetc}.value AS forecast_value,\n"
+                f"    {targetc}.prediction_interval_lower_bound AS "
+                f"prediction_interval_lower_bound,\n"
+                f"    {targetc}.prediction_interval_upper_bound AS "
+                f"prediction_interval_upper_bound\n"
+                f"  FROM AI.FORECAST(\n"
+                f"    ({cov_input}),\n"
+                f"    target_cols => ['{targetc}'],\n"
+                f"    timestamp_col => '{datec}',\n"
+                f"    id_cols => ['{idc}'],{cov_args}\n"
+                f"    model => '{eff_tf_model}',\n"
+                f"    horizon => {h},\n"
+                f"    confidence_level => {_CONFIDENCE_LEVEL}{ctx_arg})\n"
+                ")"
+            )
+
         where = _train_window_where(cfg, source, back_steps, snapshot_millis=snapshot_millis)
         sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
         if sfilter:
@@ -388,8 +604,6 @@ def _forecast_source(
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         snap = _snapshot_clause(snapshot_millis)
         inner = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{clause}"
-        spec = resolve_model_variant(cfg, model_name)
-        tf_model, tf_ctx = resolve_timesfm_params(spec.clean_params)
         extra = ""
         if tf_model is not None:
             extra += f",\n    model => '{tf_model}'"
@@ -407,13 +621,97 @@ def _forecast_source(
 
     ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), fold_id=fold_id)
     struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=back_steps,
+            snapshot_millis=snapshot_millis,
+        )
+        return f"ML.FORECAST(MODEL {ref}, {struct}, ({future_xreg}))"
     return f"ML.FORECAST(MODEL {ref}, {struct})"
+
+
+def _explain_json_expr(xreg_cols: Sequence[str], alias: str = "_ex") -> str:
+    """Render a BigQuery ``TO_JSON(STRUCT(...))`` matching Tier 2 ``explanations`` JSON."""
+    p = f"{alias}." if alias else ""
+    seasonal = (
+        f"COALESCE({p}seasonal_period_yearly, 0.0) + "
+        f"COALESCE({p}seasonal_period_quarterly, 0.0) + "
+        f"COALESCE({p}seasonal_period_monthly, 0.0) + "
+        f"COALESCE({p}seasonal_period_weekly, 0.0) + "
+        f"COALESCE({p}seasonal_period_daily, 0.0)"
+    )
+    baseline = f"ROUND(COALESCE({p}trend, 0.0) + {seasonal}, 6)"
+    attr_fields = [
+        f"ROUND(COALESCE({p}trend, 0.0), 6) AS trend",
+        f"ROUND({seasonal}, 6) AS seasonal",
+        f"ROUND(COALESCE({p}holiday_effect, 0.0), 6) AS holiday_effect",
+    ]
+    for col in xreg_cols:
+        attr_fields.append(f"ROUND(COALESCE({p}attribution_{col}, 0.0), 6) AS {col}")
+    return (
+        f"TO_JSON(STRUCT({baseline} AS baseline_score, "
+        f"STRUCT({', '.join(attr_fields)}) AS attributions))"
+    )
+
+
+def build_explain_forecast_query(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    registry_dataset: str | None = None,
+    snapshot_millis: int | None = None,
+) -> str | None:
+    """Render ``SELECT * FROM ML.EXPLAIN_FORECAST(...) WHERE time_series_type = 'forecast'``.
+
+    Returns ``None`` for serverless ``timesfm`` (which has no ``ML.EXPLAIN_FORECAST`` surface).
+    Used by `bigquery_engine` to extract Tier 1 global feature attributions
+    (``forecast_metadata.fit_diagnostics["feature_attributions"]``) and Tier 2 per-step
+    attributions (``forecast_predictions.explanations``).
+    """
+    from ..models import base_model_name
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return None
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+    h = trained_horizon(cfg, fold=False)
+    struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        source = source_ref(cfg, dataset)
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=None,
+            snapshot_millis=snapshot_millis,
+        )
+        call = f"ML.EXPLAIN_FORECAST(MODEL {ref}, {struct}, ({future_xreg}))"
+    else:
+        call = f"ML.EXPLAIN_FORECAST(MODEL {ref}, {struct})"
+    idc = cfg.data.ts_id_col
+    return (
+        f"SELECT *\n"
+        f"FROM {call}\n"
+        f"WHERE time_series_type = 'forecast'\n"
+        f"ORDER BY {idc}, time_series_timestamp;"
+    )
 
 
 # Columns written to forecast_predictions, in DDL order (shared by the INSERT).
 _PRED_COLS = (
     "run_id, ts_id, model_type, compute_engine, forecast_date, "
     "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, created_at"
+)
+_PRED_COLS_EXPLAIN = (
+    "run_id, ts_id, model_type, compute_engine, forecast_date, "
+    "yhat, yhat_raw, yhat_adjusted, yhat_lower, yhat_upper, quantiles, explanations, created_at"
 )
 
 
@@ -459,25 +757,59 @@ def build_forecast_insert_sql(
     ``forecast_value``.
     """
     dataset_q = f"`{registry_of(dataset, registry_dataset)}.forecast_predictions`"
-    forecast = _forecast_source(
-        cfg,
-        model_name,
-        dataset,
-        registry_dataset=registry_dataset,
-        snapshot_millis=snapshot_millis,
-    )
     idc = cfg.data.ts_id_col
+    xreg_cols = _xreg_cols(cfg, model_name)
+    if xreg_cols:
+        ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+        h = trained_horizon(cfg, fold=False)
+        struct = f"STRUCT({h} AS horizon, {_CONFIDENCE_LEVEL} AS confidence_level)"
+        source = source_ref(cfg, dataset)
+        future_xreg = _future_xreg_select(
+            cfg,
+            source,
+            xreg_cols,
+            horizon=h,
+            back_steps=None,
+            snapshot_millis=snapshot_millis,
+        )
+        explain_json = _explain_json_expr(xreg_cols, alias="_ex")
+        forecast = (
+            f"(\n"
+            f"  SELECT\n"
+            f"    _f.{idc}, _f.forecast_timestamp, _f.forecast_value,\n"
+            f"    _f.prediction_interval_lower_bound, _f.prediction_interval_upper_bound,\n"
+            f"    {explain_json} AS _explanations\n"
+            f"  FROM ML.FORECAST(MODEL {ref}, {struct}, ({future_xreg})) _f\n"
+            f"  LEFT JOIN (\n"
+            f"    SELECT * FROM ML.EXPLAIN_FORECAST(MODEL {ref}, {struct}, ({future_xreg}))\n"
+            f"    WHERE time_series_type = 'forecast'\n"
+            f"  ) _ex\n"
+            f"  ON _ex.{idc} = _f.{idc} AND _ex.time_series_timestamp = _f.forecast_timestamp\n"
+            f")"
+        )
+    else:
+        forecast = _forecast_source(
+            cfg,
+            model_name,
+            dataset,
+            registry_dataset=registry_dataset,
+            snapshot_millis=snapshot_millis,
+        )
+    pred_cols = _PRED_COLS_EXPLAIN if xreg_cols else _PRED_COLS
+    expl_select = " _explanations," if xreg_cols else ""
+    expl_inner = ", _explanations" if xreg_cols else ""
     fl = cfg.output.floor
     cp = cfg.output.cap
     rmode = cfg.output.integer_rounding
     if fl is None and cp is None and rmode == "none":
         return (
             f"INSERT INTO {dataset_q}\n"
-            f"  ({_PRED_COLS})\n"
+            f"  ({pred_cols})\n"
             f"SELECT\n"
             f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
             f"  DATE(forecast_timestamp), forecast_value, forecast_value, forecast_value,\n"
-            f"  prediction_interval_lower_bound, prediction_interval_upper_bound, NULL,\n"
+            f"  prediction_interval_lower_bound, prediction_interval_upper_bound,"
+            f" NULL,{expl_select}\n"
             f"  CURRENT_TIMESTAMP()\n"
             f"FROM {forecast};"
         )
@@ -502,21 +834,21 @@ def build_forecast_insert_sql(
 
     return (
         f"INSERT INTO {dataset_q}\n"
-        f"  ({_PRED_COLS})\n"
+        f"  ({pred_cols})\n"
         f"SELECT\n"
         f"  @run_id, {idc}, '{model_name}', 'bigquery',\n"
         f"  DATE(forecast_timestamp), _yhat_r, forecast_value, _yhat_r,\n"
-        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,\n"
+        f"  LEAST(_lo_r, _yhat_r), GREATEST(_hi_r, _yhat_r), NULL,{expl_select}\n"
         f"  CURRENT_TIMESTAMP()\n"
         f"FROM (\n"
         f"  SELECT\n"
-        f"    {idc}, forecast_timestamp, forecast_value,\n"
+        f"    {idc}, forecast_timestamp, forecast_value{expl_inner},\n"
         f"    {yhat_r} AS _yhat_r,\n"
         f"    {lo_r} AS _lo_r,\n"
         f"    {hi_r} AS _hi_r\n"
         f"  FROM (\n"
         f"    SELECT\n"
-        f"      {idc}, forecast_timestamp, forecast_value,\n"
+        f"      {idc}, forecast_timestamp, forecast_value{expl_inner},\n"
         f"      {val_c} AS _val_c,\n"
         f"      {lo_c} AS _lo_c,\n"
         f"      {hi_c} AS _hi_c\n"
@@ -780,4 +1112,239 @@ def render_setup_sql(
             registry_dataset=registry_dataset,
             snapshot_millis=snapshot_millis,
         )
+    )
+
+
+def build_arima_evaluate_query(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    registry_dataset: str | None = None,
+) -> str | None:
+    """Render ``SELECT * FROM ML.ARIMA_EVALUATE(MODEL ..., STRUCT(FALSE AS ...))``.
+
+    Returns ``None`` for serverless ``timesfm`` (which has no persisted model object).
+    """
+    from ..models import base_model_name
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return None
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+    idc = cfg.data.ts_id_col
+    return (
+        f"SELECT *\n"
+        f"FROM ML.ARIMA_EVALUATE(MODEL {ref}, STRUCT(FALSE AS show_all_candidate_models))\n"
+        f"ORDER BY {idc};"
+    )
+
+
+def build_arima_coefficients_query(
+    cfg: RunConfig,
+    model_name: str,
+    dataset: str = "{dataset}",
+    *,
+    registry_dataset: str | None = None,
+) -> str | None:
+    """Render ``SELECT * FROM ML.ARIMA_COEFFICIENTS(MODEL ...)`` for ``ARIMA_PLUS`` models.
+
+    Returns ``None`` for serverless ``timesfm``.
+    """
+    from ..models import base_model_name
+
+    if base_model_name(model_name) not in _MODEL_TYPE:
+        return None
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset))
+    idc = cfg.data.ts_id_col
+    return f"SELECT *\nFROM ML.ARIMA_COEFFICIENTS(MODEL {ref})\nORDER BY {idc};"
+
+
+def build_detect_anomalies_query(
+    cfg: RunConfig,
+    model_name: str = "arima_plus",
+    dataset: str = "{dataset}",
+    *,
+    registry_dataset: str | None = None,
+    anomaly_prob_threshold: float = 0.95,
+    cutoff_back_steps: int | None = None,
+    run_id: str | None = None,
+    snapshot_millis: int | None = None,
+) -> str:
+    """Render ``ML.DETECT_ANOMALIES`` (``arima_plus``) or ``AI.DETECT_ANOMALIES`` (``timesfm``).
+
+    Normalizes output columns across both engines to:
+    ``ts_id, ds, y, is_anomaly, anomaly_probability, lower_bound, upper_bound``.
+    """
+    from ..errors import ConfigError
+    from ..models import base_model_name
+
+    if not (0.0 < float(anomaly_prob_threshold) < 1.0):
+        raise ConfigError(
+            f"anomaly_prob_threshold={anomaly_prob_threshold!r} must lie strictly in (0.0, 1.0)."
+        )
+    prob = float(anomaly_prob_threshold)
+    idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
+    base_name = base_model_name(model_name)
+
+    if base_name == "timesfm":
+        source = source_ref(cfg, dataset)
+        snap = _snapshot_clause(snapshot_millis)
+        back_steps = cutoff_back_steps if cutoff_back_steps is not None else cfg.data.horizon
+        cutoff = _cutoff_expr(cfg, source, back_steps, snapshot_millis=snapshot_millis)
+        sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+        hist_where = [f"{datec} <= {cutoff}"]
+        target_where = [f"{datec} > {cutoff}"]
+        if sfilter:
+            hist_where.append(sfilter)
+            target_where.append(sfilter)
+        hist_sql = (
+            f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap} "
+            f"WHERE {' AND '.join(hist_where)}"
+        )
+        target_sql = (
+            f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap} "
+            f"WHERE {' AND '.join(target_where)}"
+        )
+        return (
+            f"SELECT\n"
+            f"  {idc} AS ts_id,\n"
+            f"  DATE(time_series_timestamp) AS ds,\n"
+            f"  CAST(time_series_data AS FLOAT64) AS y,\n"
+            f"  is_anomaly,\n"
+            f"  anomaly_probability,\n"
+            f"  lower_bound,\n"
+            f"  upper_bound\n"
+            f"FROM AI.DETECT_ANOMALIES(\n"
+            f"  ({hist_sql}),\n"
+            f"  ({target_sql}),\n"
+            f"  data_col => '{targetc}',\n"
+            f"  timestamp_col => '{datec}',\n"
+            f"  id_cols => ['{idc}'],\n"
+            f"  anomaly_prob_threshold => {prob})\n"
+            f"ORDER BY ts_id, ds;"
+        )
+
+    if base_name not in _MODEL_TYPE:
+        raise ConfigError(
+            f"build_detect_anomalies_query supports 'arima_plus' (and its variants) or 'timesfm'; "
+            f"got {model_name!r}."
+        )
+    ref = model_ref(cfg, model_name, registry_of(dataset, registry_dataset), run_id=run_id)
+    return (
+        f"SELECT\n"
+        f"  {idc} AS ts_id,\n"
+        f"  DATE({datec}) AS ds,\n"
+        f"  CAST({targetc} AS FLOAT64) AS y,\n"
+        f"  is_anomaly,\n"
+        f"  anomaly_probability,\n"
+        f"  lower_bound,\n"
+        f"  upper_bound\n"
+        f"FROM ML.DETECT_ANOMALIES(MODEL {ref}, STRUCT({prob} AS anomaly_prob_threshold))\n"
+        f"ORDER BY ts_id, ds;"
+    )
+
+
+def build_detect_change_points_query(
+    cfg: RunConfig,
+    dataset: str = "{dataset}",
+    *,
+    exclude_gap_edges: bool = True,
+    min_gap_steps: int = 1,
+    snapshot_millis: int | None = None,
+) -> str:
+    """Render ``ML.DETECT_CHANGE_POINTS`` with gap-edge detection and optional artifact filtering.
+
+    BigQuery's ``ML.DETECT_CHANGE_POINTS(TABLE, timestamp_col => ..., data_col => ...,
+    id_cols => [...])`` returns one row per detected change window (`begin_timestamp`,
+    `end_timestamp`, `status`, `metrics.{count, avg, min, max, stddev}`) after internally
+    gap-filling missing timestamps. Because internal linear interpolation across a data outage
+    manufactures false change windows at the outage boundaries, this query joins each detected
+    window against `_gaps` (`DATE_DIFF(...) - 1 >= min_gap_steps`) and annotates
+    `gap_edge_missing_steps` and `is_gap_edge`.
+
+    Returns ``ts_id, begin_date, end_date, window_count, window_avg, window_min, window_max,
+    window_stddev, gap_edge_missing_steps, is_gap_edge, status``.
+    """
+    from ..errors import ConfigError
+
+    if isinstance(min_gap_steps, bool) or not isinstance(min_gap_steps, int) or min_gap_steps < 1:
+        raise ConfigError(f"min_gap_steps={min_gap_steps!r} must be an integer >= 1.")
+
+    source = source_ref(cfg, dataset)
+    idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
+    _, unit = _freq(cfg)
+    snap = _snapshot_clause(snapshot_millis)
+    sfilter = _series_filter(cfg, source, idc, snapshot_millis=snapshot_millis)
+    where_clause = f" WHERE {sfilter}" if sfilter else ""
+    source_sql = f"SELECT {idc}, {datec}, {targetc} FROM `{source}`{snap}{where_clause}"
+    gap_filter = "\nWHERE is_gap_edge = FALSE" if exclude_gap_edges else ""
+    return (
+        f"WITH _gaps AS (\n"
+        f"  SELECT\n"
+        f"    {idc} AS ts_id,\n"
+        f"    DATE(LAG({datec}) OVER (PARTITION BY {idc} ORDER BY {datec})) AS last_before,\n"
+        f"    DATE({datec}) AS first_after,\n"
+        f"    DATE_DIFF(\n"
+        f"      DATE({datec}),\n"
+        f"      DATE(LAG({datec}) OVER (PARTITION BY {idc} ORDER BY {datec})),\n"
+        f"      {unit}\n"
+        f"    ) - 1 AS missing_steps\n"
+        f"  FROM `{source}`{snap}{where_clause}\n"
+        f"),\n"
+        f"_cp AS (\n"
+        f"  SELECT\n"
+        f"    {idc} AS ts_id,\n"
+        f"    DATE(begin_timestamp) AS begin_date,\n"
+        f"    DATE(end_timestamp) AS end_date,\n"
+        f"    metrics.count AS window_count,\n"
+        f"    metrics.avg AS window_avg,\n"
+        f"    metrics.min AS window_min,\n"
+        f"    metrics.max AS window_max,\n"
+        f"    metrics.stddev AS window_stddev,\n"
+        f"    status\n"
+        f"  FROM ML.DETECT_CHANGE_POINTS(\n"
+        f"    ({source_sql}),\n"
+        f"    timestamp_col => '{datec}',\n"
+        f"    data_col => '{targetc}',\n"
+        f"    id_cols => ['{idc}'])\n"
+        f"  WHERE begin_timestamp IS NOT NULL\n"
+        f"),\n"
+        f"_tagged AS (\n"
+        f"  SELECT\n"
+        f"    _cp.ts_id,\n"
+        f"    _cp.begin_date,\n"
+        f"    _cp.end_date,\n"
+        f"    _cp.window_count,\n"
+        f"    _cp.window_avg,\n"
+        f"    _cp.window_min,\n"
+        f"    _cp.window_max,\n"
+        f"    _cp.window_stddev,\n"
+        f"    COALESCE((\n"
+        f"      SELECT MAX(_gaps.missing_steps)\n"
+        f"      FROM _gaps\n"
+        f"      WHERE _gaps.ts_id = _cp.ts_id\n"
+        f"        AND _gaps.missing_steps >= {int(min_gap_steps)}\n"
+        f"        AND (_gaps.last_before BETWEEN _cp.begin_date AND _cp.end_date\n"
+        f"             OR _gaps.first_after BETWEEN _cp.begin_date AND _cp.end_date)\n"
+        f"    ), 0) AS gap_edge_missing_steps,\n"
+        f"    _cp.status\n"
+        f"  FROM _cp\n"
+        f"),\n"
+        f"_final AS (\n"
+        f"  SELECT\n"
+        f"    ts_id,\n"
+        f"    begin_date,\n"
+        f"    end_date,\n"
+        f"    window_count,\n"
+        f"    window_avg,\n"
+        f"    window_min,\n"
+        f"    window_max,\n"
+        f"    window_stddev,\n"
+        f"    gap_edge_missing_steps,\n"
+        f"    gap_edge_missing_steps > 0 AS is_gap_edge,\n"
+        f"    status\n"
+        f"  FROM _tagged\n"
+        f")\n"
+        f"SELECT * FROM _final{gap_filter}\n"
+        f"ORDER BY ts_id, begin_date;"
     )

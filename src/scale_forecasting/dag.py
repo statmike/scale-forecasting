@@ -259,6 +259,25 @@ def check_model_params(cfg: RunConfig) -> None:
         spec = resolve_model_variant(cfg, name, model_cls=model_cls, allow_unsupported=True)
         mode = spec.training_mode
         model_cls.validate_params(spec.clean_params, max_horizon=cfg.max_horizon)
+        if base_name == "timesfm" and spec.covariates_used:
+            from .models.bigquery_native import resolve_timesfm_params
+
+            tf_model, _ = resolve_timesfm_params(spec.clean_params)
+            if tf_model in ("TimesFM 2.0", "TimesFM 2.5"):
+                if cfg.features.on_unsupported_covariates == "error":
+                    raise ConfigError(
+                        f"model_params.{name} selects {tf_model!r} alongside covariates "
+                        f"{list(spec.covariates_used)}, but BigQuery AI.FORECAST supports "
+                        "past_covariate_cols / future_covariate_cols only on 'TimesFM 3.0'. "
+                        "Set version='3.0', use 'timesfm@univariate', or set "
+                        "features.on_unsupported_covariates='fallback'."
+                    )
+            elif cfg.max_horizon > 1024:
+                raise ConfigError(
+                    f"model '{name}' uses covariates {list(spec.covariates_used)}, which upgrades "
+                    "BigQuery AI.FORECAST to 'TimesFM 3.0' (maximum horizon 1024), but this run "
+                    f"requires max_horizon={cfg.max_horizon}."
+                )
         if mode in ("global", "hybrid"):
             if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
                 raise ConfigError(

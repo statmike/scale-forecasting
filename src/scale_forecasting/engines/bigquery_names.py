@@ -79,7 +79,12 @@ def registry_of(dataset: str, registry_dataset: str | None) -> str:
 
 
 def model_ref(
-    cfg: RunConfig, model_name: str, registry_dataset: str, *, fold_id: int | None = None
+    cfg: RunConfig,
+    model_name: str,
+    registry_dataset: str,
+    *,
+    fold_id: int | None = None,
+    run_id: str | None = None,
 ) -> str:
     """The backtick-quoted BQML model object path for one ``(model, run[, fold])`` (persisted).
 
@@ -94,8 +99,8 @@ def model_ref(
     name is an identifier — it cannot be a bound query parameter — so the ``run_id`` is interpolated
     here; it is a pure function of ``cfg`` (`make_run_id`), keeping every builder pure.
     """
-    run_id = make_run_id(cfg)
+    eff_run_id = run_id or make_run_id(cfg)
     suffix = f"_f{fold_id}" if fold_id is not None else ""
     safe_model = model_name.replace("@", "__") if "@" in model_name else model_name
-    stem = f"{_MODEL_PREFIX}{safe_model}_{sanitize_identifier(run_id)}{suffix}"
+    stem = f"{_MODEL_PREFIX}{safe_model}_{sanitize_identifier(eff_run_id)}{suffix}"
     return f"`{registry_dataset}.{stem}`"

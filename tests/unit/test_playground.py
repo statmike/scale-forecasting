@@ -60,7 +60,7 @@ def test_model_catalog_runtime_flags_are_consistent() -> None:
     automl = df[df["runtime"] == "vertex_automl"]
     assert automl["vertex_automl"].all()
     assert set(automl.index) == {"vertex_l2l", "vertex_tide", "vertex_tft", "vertex_seq2seq"}
-    # Explainability is supported by all 5 ml models and all 4 automl models.
+    # Explainability is supported by all 5 ml models, all 4 automl models, and arima_plus.
     assert set(df[df["explainability"]].index) == {
         "regression_lags",
         "random_forest",
@@ -71,6 +71,7 @@ def test_model_catalog_runtime_flags_are_consistent() -> None:
         "vertex_tide",
         "vertex_tft",
         "vertex_seq2seq",
+        "arima_plus",
     }
     # GPU is only the deep-learning and automl families, never a statistical/ml/native model.
     assert bool(df.loc["neuralprophet", "gpu"]) is True

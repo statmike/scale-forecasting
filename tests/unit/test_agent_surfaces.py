@@ -165,12 +165,19 @@ def test_skill_md_and_extension_manifests() -> None:
     assert symlinked_skill.resolve() == skill_path.resolve()
 
     # Google Antigravity plugin.json manifest (no legacy gemini-extension.json or `author` key)
+    import tomllib
+
+    expected_ver = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["version"]
+    assert f"version: {expected_ver}" in frontmatter
+
     assert not (REPO_ROOT / "gemini-extension.json").exists()
     plugin_path = REPO_ROOT / "plugin.json"
     assert plugin_path.is_file()
     plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
     assert plugin["name"] == "scale-forecasting"
-    assert plugin["version"] == "1.0.0"
+    assert plugin["version"] == expected_ver
     assert "author" not in plugin
     assert isinstance(plugin.get("suggestedPrompts"), list)
     assert 1 <= len(plugin["suggestedPrompts"]) <= 3

@@ -2,7 +2,12 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "scale-forecasting",
   "displayName": "Scale Forecasting on Google Cloud",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "license": "Apache-2.0",
+  "ownership": {
+    "team": "cloud-gtm/agentic-data-science",
+    "poc": "statmike"
+  },
   "description": "Configure, validate, dry-run, execute, and review massively-parallel time-series forecasting on Google Cloud (34 models, 21 metrics, 7 runtimes).",
   "suggestedPrompts": [
     "Probe my environment and recommend a forecasting model family and runtime",

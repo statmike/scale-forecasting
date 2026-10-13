@@ -50,6 +50,182 @@ _TIMESFM_ALLOWED_KEYS: frozenset[str] = frozenset(
     {"model", "version", "context_window", "training_mode"}
 )
 
+_ARIMA_PLUS_FORBIDDEN_BOUND_KEYS: frozenset[str] = frozenset(
+    {"forecast_limit_lower_bound", "forecast_limit_upper_bound"}
+)
+_ARIMA_PLUS_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "auto_arima_max_order",
+        "auto_arima_min_order",
+        "clean_spikes_and_dips",
+        "adjust_step_changes",
+        "decompose_time_series",
+        "holiday_region",
+        "seasonalities",
+        "time_series_length_fraction",
+        "min_time_series_length",
+        "max_time_series_length",
+        "trend_smoothing_window_size",
+        "training_mode",
+    }
+)
+_ARIMA_PLUS_SEASONALITIES: frozenset[str] = frozenset(
+    {"NO_SEASONALITY", "AUTO", "DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "YEARLY"}
+)
+
+
+def resolve_arima_plus_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and normalize ``model_params.arima_plus`` into BigQuery ``OPTIONS(...)`` entries.
+
+    Returns an ordered dict of authored ``CREATE MODEL`` options (empty when un-authored so default
+    SQL generation stays byte-identical). Explicitly rejects ``forecast_limit_lower_bound`` and
+    ``forecast_limit_upper_bound`` (pointing to ``output.floor`` / ``output.cap``) as well as
+    ``auto_arima=False`` / ``non_seasonal_order`` (unsupported on multi-series
+    ``time_series_id_col`` models in BigQuery ML).
+    """
+    bound_keys = sorted(set(params) & _ARIMA_PLUS_FORBIDDEN_BOUND_KEYS)
+    if bound_keys:
+        raise ConfigError(
+            f"model_params.arima_plus specifies {bound_keys}, which BigQuery ML applies via an "
+            "internal transformation that requires both bounds together, forces "
+            "decompose_time_series=TRUE, and frequently degrades multi-series fits at scale. "
+            "Configure physical forecast bounds via 'output.floor' and 'output.cap' instead."
+        )
+    if "non_seasonal_order" in params or params.get("auto_arima") is False:
+        raise ConfigError(
+            "model_params.arima_plus specifies manual ARIMA order ('auto_arima=False' or "
+            "'non_seasonal_order'), which BigQuery ML does not support on multi-series models "
+            "using 'time_series_id_col'. Use 'auto_arima_min_order' and 'auto_arima_max_order' "
+            "(1..5) instead."
+        )
+    if "auto_arima" in params and params["auto_arima"] is not True:
+        raise ConfigError(
+            f"model_params.arima_plus.auto_arima={params['auto_arima']!r} must be True "
+            "(BigQuery ML multi-series ARIMA_PLUS requires auto_arima=TRUE)."
+        )
+    unknown = sorted(set(params) - _ARIMA_PLUS_ALLOWED_KEYS - {"auto_arima"})
+    if unknown:
+        raise ConfigError(
+            f"model_params.arima_plus contains unsupported keys {unknown}; "
+            f"supported keys: {sorted(_ARIMA_PLUS_ALLOWED_KEYS - {'training_mode'})}."
+        )
+
+    out: dict[str, Any] = {}
+    max_order = params.get("auto_arima_max_order")
+    if max_order is not None:
+        if (
+            isinstance(max_order, bool)
+            or not isinstance(max_order, int)
+            or not (1 <= max_order <= 5)
+        ):
+            raise ConfigError(
+                f"model_params.arima_plus.auto_arima_max_order={max_order!r} must be an integer "
+                "between 1 and 5."
+            )
+        out["auto_arima_max_order"] = int(max_order)
+
+    min_order = params.get("auto_arima_min_order")
+    if min_order is not None:
+        if (
+            isinstance(min_order, bool)
+            or not isinstance(min_order, int)
+            or not (0 <= min_order <= 5)
+        ):
+            raise ConfigError(
+                f"model_params.arima_plus.auto_arima_min_order={min_order!r} must be an integer "
+                "between 0 and 5."
+            )
+        out["auto_arima_min_order"] = int(min_order)
+
+    if (
+        "auto_arima_min_order" in out
+        and "auto_arima_max_order" in out
+        and out["auto_arima_min_order"] > out["auto_arima_max_order"]
+    ):
+        raise ConfigError(
+            f"model_params.arima_plus.auto_arima_min_order ({out['auto_arima_min_order']}) "
+            f"cannot exceed auto_arima_max_order ({out['auto_arima_max_order']})."
+        )
+
+    for bool_key in ("clean_spikes_and_dips", "adjust_step_changes", "decompose_time_series"):
+        val = params.get(bool_key)
+        if val is not None:
+            if not isinstance(val, bool):
+                raise ConfigError(f"model_params.arima_plus.{bool_key}={val!r} must be a boolean.")
+            out[bool_key] = val
+
+    hol_reg = params.get("holiday_region")
+    if hol_reg is not None:
+        if isinstance(hol_reg, str):
+            if not hol_reg.strip():
+                raise ConfigError("model_params.arima_plus.holiday_region must be non-empty.")
+            out["holiday_region"] = hol_reg.strip()
+        elif (
+            isinstance(hol_reg, list)
+            and hol_reg
+            and all(isinstance(x, str) and x.strip() for x in hol_reg)
+        ):
+            out["holiday_region"] = [x.strip() for x in hol_reg]
+        else:
+            raise ConfigError(
+                f"model_params.arima_plus.holiday_region={hol_reg!r} must be a non-empty string "
+                "or list of strings (e.g. 'US' or ['US', 'GB'])."
+            )
+
+    seas = params.get("seasonalities")
+    if seas is not None:
+        if not isinstance(seas, list) or not seas or not all(isinstance(x, str) for x in seas):
+            raise ConfigError(
+                f"model_params.arima_plus.seasonalities={seas!r} must be a non-empty list of "
+                f"strings from {sorted(_ARIMA_PLUS_SEASONALITIES)}."
+            )
+        norm_seas = [x.strip().upper() for x in seas]
+        bad_seas = [x for x in norm_seas if x not in _ARIMA_PLUS_SEASONALITIES]
+        if bad_seas:
+            raise ConfigError(
+                f"model_params.arima_plus.seasonalities contains invalid entry {bad_seas}; "
+                f"supported values: {sorted(_ARIMA_PLUS_SEASONALITIES)}."
+            )
+        out["seasonalities"] = norm_seas
+
+    ts_frac = params.get("time_series_length_fraction")
+    if ts_frac is not None:
+        if (
+            isinstance(ts_frac, bool)
+            or not isinstance(ts_frac, (int, float))
+            or not (0.0 < float(ts_frac) <= 1.0)
+        ):
+            raise ConfigError(
+                f"model_params.arima_plus.time_series_length_fraction={ts_frac!r} must be a "
+                "float in (0.0, 1.0]."
+            )
+        out["time_series_length_fraction"] = float(ts_frac)
+
+    for int_key in (
+        "min_time_series_length",
+        "max_time_series_length",
+        "trend_smoothing_window_size",
+    ):
+        ival = params.get(int_key)
+        if ival is not None:
+            if isinstance(ival, bool) or not isinstance(ival, int) or ival <= 0:
+                raise ConfigError(
+                    f"model_params.arima_plus.{int_key}={ival!r} must be a positive integer."
+                )
+            out[int_key] = int(ival)
+
+    if (
+        "min_time_series_length" in out
+        and "max_time_series_length" in out
+        and out["min_time_series_length"] > out["max_time_series_length"]
+    ):
+        raise ConfigError(
+            f"model_params.arima_plus.min_time_series_length ({out['min_time_series_length']}) "
+            f"cannot exceed max_time_series_length ({out['max_time_series_length']})."
+        )
+
+    return out
+
 
 def resolve_timesfm_params(params: Mapping[str, Any]) -> tuple[str | None, int | None]:
     """Normalize and validate ``model_params.timesfm`` into ``(canonical_model, context_window)``.
@@ -143,17 +319,30 @@ class _BigQueryNativeModel(BaseModel):
 
 
 class ArimaPlus(_BigQueryNativeModel):
-    """BigQuery ML ``ARIMA_PLUS`` (univariate; custom holidays for parity with features.py)."""
+    """BigQuery ML ``ARIMA_PLUS`` / ``ARIMA_PLUS_XREG`` with ``ML.EXPLAIN_FORECAST``."""
 
     name = "arima_plus"
-    supports_exog = False
+    supports_exog = True
+    supports_future_covariates = True
+    supports_past_covariates = False
+    supports_static_covariates = False
+    supports_explainability = True
+
+    @classmethod
+    def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:
+        """Validate ``model_params.arima_plus`` options and reject unsupported bound knobs."""
+        super().validate_params(params, max_horizon=max_horizon)
+        resolve_arima_plus_params(params)
 
 
 class TimesFm(_BigQueryNativeModel):
-    """BigQuery ``AI.FORECAST`` with TimesFM (2.0 / 2.5 / 3.0; pretrained, no training step)."""
+    """BigQuery ``AI.FORECAST`` with TimesFM (2.0 / 2.5 / 3.0; univariate + covariates)."""
 
     name = "timesfm"
-    supports_exog = False
+    supports_exog = True
+    supports_future_covariates = True
+    supports_past_covariates = True
+    supports_static_covariates = False
 
     @classmethod
     def validate_params(cls, params: dict[str, Any], *, max_horizon: int) -> None:

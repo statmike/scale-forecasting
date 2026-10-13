@@ -28,7 +28,7 @@ flowchart TD
     end
 
     subgraph Nat["Family: native (2 BigQuery SQL Models — BigQuery ML)"]
-        N1["Serverless SQL Execution<br/>arima_plus (ARIMA_PLUS) · timesfm (AI.FORECAST 2.0 / 2.5 / 3.0)"]
+        N1["Serverless SQL Execution<br/>arima_plus / arima_plus_xreg (ARIMA_PLUS / ARIMA_PLUS_XREG + ML.EXPLAIN_FORECAST + ML.ARIMA_EVALUATE)<br/>timesfm (AI.FORECAST 2.0 / 2.5 / 3.0 + Multivariate Covariates)"]
     end
 
     Rec["Hierarchical Reconciliation (reconciliation.py)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg"]
@@ -78,15 +78,15 @@ Every model declares its upstream open-source package (`package` and `package_ur
 | **`vertex_tide`** | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Yes / Yes / Yes | **Tier 1 + Tier 2** *(Vertex Baseline)* | `global` | All 8 FPP3 + Global Panel | Yes | No | Managed Vertex AI Time-series Dense Encoder (`TiDE`) Tabular Workflow with reusable Stage-1 HPO and explainability. |
 | **`vertex_tft`** | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Yes / Yes / Yes | **Tier 1 + Tier 2** *(Vertex Baseline)* | `global` | All 8 FPP3 + Global Panel | Yes | No | Managed Vertex AI Temporal Fusion Transformer (`TFT`) Tabular Workflow with attention & baseline attributions. |
 | **`vertex_seq2seq`** | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Yes / Yes / Yes | **Tier 1 + Tier 2** *(Vertex Baseline)* | `global` | All 8 FPP3 + Global Panel | Yes | No | Managed Vertex AI Sequence-to-Sequence (`Seq2Seq+`) encoder-decoder Tabular Workflow with two-tier explainability. |
-| **`arima_plus`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | Structural | `local` | N/A (SQL) | Yes | No | BigQuery ML `ARIMA_PLUS` with custom country holiday CTEs (`build_custom_holiday_cte`). |
-| **`timesfm`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | No / No / No | Structural | `local` (zero-shot) | N/A (SQL) | Yes | No | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` default, or `TimesFM 3.0`). |
+| **`arima_plus`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | Yes / No / No | **Tier 1 + Tier 2** *(ML.EXPLAIN_FORECAST)* | `local` | N/A (SQL) | Yes | No | BigQuery ML `ARIMA_PLUS` / `ARIMA_PLUS_XREG` (`arima_plus_xreg` alias) with custom country holiday CTEs, future covariates, `ML.EXPLAIN_FORECAST` attributions, `ML.ARIMA_EVALUATE` / `ML.ARIMA_COEFFICIENTS` diagnostics, and `ML.DETECT_ANOMALIES` / `ML.DETECT_CHANGE_POINTS`. |
+| **`timesfm`** | `native` | BigQuery | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | Yes | Yes / Yes / No | Structural | `local` (zero-shot) | N/A (SQL) | Yes | No | Zero-shot foundation-model forecasting via BigQuery `AI.FORECAST` (`TimesFM 2.0`, `TimesFM 2.5` univariate default, or `TimesFM 3.0` with `future_covariates` and `past_covariates` via `target_cols => ['y']`) plus `AI.DETECT_ANOMALIES`. |
 
 ### Covariate tiers & mixed-model fallback policy
 
 - **Univariate-only runs** require no `features` covariate fields (`future_covariates: []`, `past_covariates: []`, `static_covariates: []`, `exog: []`). All 34 models support univariate forecasting.
 - **Three covariate tiers** when configured under `features`:
-  - **`future_covariates`** (`exog` alias): known across both history and the forecast horizon (e.g. promotions, scheduled prices, calendar events). Supported by 17 models (`auto_arima`, `sarimax`, `ucm`, `kalman`, `prophet`, all 5 `ml` models, `tide`, `tft`, `tsmixer`, and all 4 `automl` models).
-  - **`past_covariates`**: observed historically up to `cutoff_date` and masked in validation/future windows during rolling-origin backtesting and HPO so future actuals never leak. Supported by the same 17 dynamic-covariate models (natively as historical encoders in `tide`, `tft`, `tsmixer`, and `automl` models, or via `exog_lags` / cutoff carry-forward in `ml` and `statistical` models).
+  - **`future_covariates`** (`exog` alias): known across both history and the forecast horizon (e.g. promotions, scheduled prices, calendar events). Supported by 19 models (`auto_arima`, `sarimax`, `ucm`, `kalman`, `prophet`, all 5 `ml` models, `tide`, `tft`, `tsmixer`, all 4 `automl` models, `arima_plus` via `ARIMA_PLUS_XREG`, and `timesfm` via `TimesFM 3.0`).
+  - **`past_covariates`**: observed historically up to `cutoff_date` and masked in validation/future windows during rolling-origin backtesting and HPO so future actuals never leak. Supported by 18 dynamic-covariate models (natively as historical encoders in `tide`, `tft`, `tsmixer`, `automl` models, and `timesfm` via `TimesFM 3.0`, or via `exog_lags` / cutoff carry-forward in `ml` and `statistical` models).
   - **`static_covariates`**: time-invariant per-series metadata (`region`, `category`). Consumed by the cross-series `neuralforecast` architectures (`tide`, `tft`, `tsmixer`) and all 4 `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`).
 - **Mixed univariate + covariate runs (`features.on_unsupported_covariates`):**
   - **`"fallback"` (default):** A multi-model run mixing covariate-capable and univariate models (e.g. `["theta", "xgboost", "tide"]` with all three covariate tiers) logs a clear preflight warning per model and strips unsupported tiers (and their `exog_lags`) for that model across fit, backtesting, and HPO—so univariate models run on their full, un-truncated target history.
@@ -203,12 +203,16 @@ Models in the `automl` family execute as global cross-series models on **`runtim
 
 ### 5. BigQuery-native SQL family (`native`)
 
-Models in the `native` family execute directly inside BigQuery via [`engines/bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) in parallel with any Spark, Ray, Vertex CustomJob, GCE, GKE, or Vertex AutoML families. Although both models submit the entire panel in a single SQL statement (`time_series_id_col = 'ts_id'` for `arima_plus` and `id_cols => ['ts_id']` for `timesfm`), BigQuery partitions by `ts_id` and forecasts each series independently in isolation (**`local`**): `arima_plus` fits an independent seasonal ARIMA pipeline per `ts_id`, while `timesfm` runs zero-shot univariate inference per `ts_id` over only that series' own trailing `context_window`. Once each fold's SQL query completes, out-of-fold predictions are post-processed through `apply_output_constraints` and scored through the exact same Python [`metrics.compute_metrics`](./metrics_reference.md) pipeline as the Python models, while final horizon forecasts in `forecast_predictions` enforce configured `output` constraints (`floor`, `cap`, `integer_rounding`, including cumulative-error-preserving `"cumulative_round"`) directly in BigQuery SQL (`_build_sql_output_exprs`).
+Models in the `native` family execute directly inside BigQuery via [`engines/bigquery_engine.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/bigquery_engine.py) (`use_query_cache=False`) in parallel with any Spark, Ray, Vertex CustomJob, GCE, GKE, or Vertex AutoML families. Although both models submit the entire panel in a single SQL statement (`time_series_id_col = 'ts_id'` for `arima_plus` and `id_cols => ['ts_id']` for `timesfm`), BigQuery partitions by `ts_id` and forecasts each series independently in isolation (**`local`**): `arima_plus` fits an independent seasonal ARIMA / `ARIMA_PLUS_XREG` pipeline per `ts_id`, while `timesfm` runs zero-shot univariate or multivariate (`TimesFM 3.0`) inference per `ts_id` over that series' trailing `context_window`.
+
+- **Flexible `arima_plus` & `arima_plus_xreg` Configuration:** `"arima_plus"` is the canonical model name (`list_models()` stays at 34 models) and automatically upgrades from `ARIMA_PLUS` to `ARIMA_PLUS_XREG` whenever `features.future_covariates` (`exog`) is configured. You can also author `"arima_plus_xreg"` (or `"arima_plus@xreg"`) directly in `models` and `model_params`: when `["arima_plus", "arima_plus_xreg"]` are listed together, `"arima_plus"` is automatically pinned to univariate `ARIMA_PLUS` while `"arima_plus_xreg"` normalizes to `"arima_plus@xreg"` (`ARIMA_PLUS_XREG`) for side-by-side Covariate FVA.
+- **Per-Series `ML.ARIMA_EVALUATE` & `ML.ARIMA_COEFFICIENTS` Diagnostics:** After fitting the final `ARIMA_PLUS` / `ARIMA_PLUS_XREG` model, `bigquery_engine` queries `ML.ARIMA_EVALUATE(MODEL ..., STRUCT(FALSE AS show_all_candidate_models))` and `ML.ARIMA_COEFFICIENTS(MODEL ...)` and records each series' selected `(p, d, q)` order (`non_seasonal_order`), `has_drift`, `aic`, `log_likelihood`, `variance`, `seasonal_periods`, `has_holiday_effect`, `has_spikes_and_dips`, `has_step_changes`, `ar_coefficients`, `ma_coefficients`, `intercept_or_drift`, and linear `xreg_weights` inside `forecast_metadata.fit_diagnostics["arima_diagnostics"]`.
+- **In-Database Anomaly & Change-Point Detection (`Forecaster` SDK):** Both native models support historical anomaly detection via `forecaster.detect_anomalies_df(model_name="arima_plus" | "timesfm", anomaly_prob_threshold=0.95)` (`ML.DETECT_ANOMALIES` for `arima_plus` / `arima_plus@xreg` and `AI.DETECT_ANOMALIES` for `timesfm`), and `arima_plus` supports structural regime break detection via `forecaster.detect_change_points_df(model_name="arima_plus")` (`ML.DETECT_CHANGE_POINTS` with gap-edge artifact filtering).
 
 | Model | Upstream Package | Underlying BigQuery SQL Construct | Authored `model_params` & Defaults | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| `arima_plus` | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | `CREATE MODEL ... OPTIONS(model_type='ARIMA_PLUS')` + `ML.FORECAST` | — | Automated per-series seasonal ARIMA pipeline with custom country holiday CTEs (`build_custom_holiday_cte`), spike/dip cleanup, and step-change adjustment. |
-| `timesfm` | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | [`AI.FORECAST(...)`](https://cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-forecast) | `version` / `model`: `"TimesFM 2.0"`, `"TimesFM 2.5"` (BigQuery default), or `"TimesFM 3.0"` (shorthand `"2.0"`, `"2.5"`, `"3.0"`); `context_window`: `{64..15360}` for 2.0/2.5 or `32n` in `[64, 2048]` for 3.0 | Zero-shot foundation-model inference per `ts_id` in SQL with no `CREATE MODEL` training step. Validated at plan time (`max_horizon <= 10000` for 2.0/2.5; `max_horizon <= 1024` for 3.0). |
+| `arima_plus` (`arima_plus_xreg` alias) | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | `CREATE MODEL ... OPTIONS(model_type='ARIMA_PLUS' \| 'ARIMA_PLUS_XREG')` + `ML.FORECAST` + `ML.EXPLAIN_FORECAST` + `ML.ARIMA_EVALUATE` + `ML.ARIMA_COEFFICIENTS` | `auto_arima_max_order` (`1..5`), `auto_arima_min_order` (`0..5`), `clean_spikes_and_dips` (`bool`), `adjust_step_changes` (`bool`), `decompose_time_series` (`bool`), `holiday_region` (`str` \| `list[str]`), `seasonalities` (`list` of `"NO_SEASONALITY"`, `"DAILY"`, `"WEEKLY"`, `"MONTHLY"`, `"QUARTERLY"`, `"YEARLY"`), `time_series_length_fraction` (`(0, 1]`), `min_time_series_length` (`int >= 1`), `max_time_series_length` (`int >= 1`), `trend_smoothing_window_size` (`int >= 1`) | Automated per-series seasonal ARIMA pipeline with custom country holiday CTEs (`build_custom_holiday_cte`), future exogenous covariates (`ARIMA_PLUS_XREG`), `ML.EXPLAIN_FORECAST` attributions, and `ML.ARIMA_EVALUATE` / `ML.ARIMA_COEFFICIENTS` diagnostics. Rejects `forecast_limit_lower_bound` / `forecast_limit_upper_bound` (use `output.floor` / `output.cap` instead) and `auto_arima=False` on multi-series panels. |
+| `timesfm` | [`bigquery-ml`](https://cloud.google.com/bigquery/docs/bqml-introduction) | [`AI.FORECAST(...)`](https://cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-ai-forecast) | `version` / `model`: `"TimesFM 2.0"`, `"TimesFM 2.5"` (univariate default), or `"TimesFM 3.0"` (shorthand `"2.0"`, `"2.5"`, `"3.0"`, auto-selected when covariates are active); `context_window`: `{64..15360}` for 2.0/2.5 or `32n` in `[64, 2048]` for 3.0 | Zero-shot foundation-model inference per `ts_id` in SQL with no `CREATE MODEL` training step. Supports multivariate `future_covariates` + `past_covariates` via `TimesFM 3.0` (`target_cols => ['y']`). Validated at plan time (`max_horizon <= 10000` for 2.0/2.5; `max_horizon <= 1024` for 3.0). |
 
 ---
 
@@ -219,9 +223,10 @@ Models in the `native` family execute directly inside BigQuery via [`engines/big
 
 ```mermaid
 flowchart LR
-    subgraph Models["9 Native Attribution Models (supports_explainability = True)"]
+    subgraph Models["10 Native Attribution Models (supports_explainability = True)"]
         ML_MODS["5 Python ML Models (_lag_forecaster.py)<br/>xgboost · lightgbm · catboost<br/>regression_lags · random_forest"]
         AML_MODS["4 Vertex AI AutoML Models (automl_engine.py)<br/>vertex_l2l · vertex_tide<br/>vertex_tft · vertex_seq2seq"]
+        BQ_MODS["1 BigQuery ML Model (bigquery_engine.py)<br/>arima_plus (ML.EXPLAIN_FORECAST)"]
     end
 
     subgraph Tier1["Tier 1: Global / Per-Series Driver Importance"]
@@ -237,13 +242,13 @@ flowchart LR
         PLT["forecaster.plot_attributions(ts_id, model_type)<br/>2-Panel Global Bar Chart + Horizon-Step Stacked Bar"]
     end
 
-    ML_MODS & AML_MODS --> T1_BQ & T2_BQ
+    ML_MODS & AML_MODS & BQ_MODS --> T1_BQ & T2_BQ
     T1_BQ & T2_BQ --> DF --> PLT
 ```
 
 ### Model-level attribution mechanics (`supports_explainability = True`)
 
-All **9 models** in the `ml` and `automl` families populate both Tier-1 (`forecast_metadata.fit_diagnostics["feature_attributions"]`) and Tier-2 (`forecast_predictions.explanations`) attributions automatically on every run:
+All **10 models** with native explainability (`ml`, `automl`, and `arima_plus` in `native`) populate Tier-1 (`forecast_metadata.fit_diagnostics["feature_attributions"]`) and Tier-2 (`forecast_predictions.explanations`) attributions automatically:
 
 | Model(s) | Family | Tier 1 (Series / Global Importance) | Tier 2 (Per-Horizon-Step Local Attribution) | Additivity & Baseline Contract |
 | :--- | :--- | :--- | :--- | :--- |
@@ -253,6 +258,7 @@ All **9 models** in the `ml` and `automl` families populate both Tier-1 (`foreca
 | **`regression_lags`** | `ml` | Normalized $\|w_j\| \cdot \sigma_{X_j}$ standardized linear weight share | Closed-form linear attribution $\phi_{h,j} = w_j (x_{h,j} - \bar{x}_j)$ around $\text{baseline\_score} = \bar{y}_{\text{train}}$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \bar{y}_{\text{train}} + \sum_j w_j (x_{h,j} - \bar{x}_j)$ |
 | **`random_forest`** | `ml` | Impurity importance `feature_importances_` normalized to sum to $1$ | Importance-weighted directional deviation allocated across active features at step $h$ around $\bar{y}_{\text{train}}$ | Additive: $\hat{y}_{T+h}^{\text{raw}} = \bar{y}_{\text{train}} + \sum_j \phi_{h,j}$ |
 | **`vertex_l2l`**, **`vertex_tide`**, **`vertex_tft`**, **`vertex_seq2seq`** | `automl` | Mean $\|\text{attribution}\|$ per feature aggregated across each series' horizon steps (or Vertex `ModelEvaluation` feature attributions) | Vertex AI Explainable AI (`BatchPredictionJob(generate_explanation=True)` `explanation.attributions` `baseline_score` + `feature_attributions`) | Managed Vertex AI baseline-anchored Shapley / Integrated Gradients attribution per `(ts_id, forecast_date)` |
+| **`arima_plus`** | `native` | Normalized mean $\|\text{attribution}\|$ across `trend`, `seasonal`, `holiday_effect`, and each `attribution_<col>` from `ML.EXPLAIN_FORECAST` | BigQuery `ML.EXPLAIN_FORECAST` decomposition (`baseline_score = trend + seasonal`, `attributions = {trend, seasonal, holiday_effect, <xreg_cols>}`) | Additive decomposition of `ARIMA_PLUS` / `ARIMA_PLUS_XREG` components per `(ts_id, forecast_date)` |
 | **All 34 Models** *(including `statistical`, `deep_learning`, `native`)* | All 5 families | Post-hoc structural decomposition (`explain_forecast_frame` / `forecaster.explain_forecast`) | Decomposes any series' trajectory into **Trend**, **Regime Level Shift**, **Seasonal Cycle**, **Exogenous Covariate Alignment**, and **Conformal Uncertainty Width** | Model-agnostic: works identically across univariate statistical, neural, AutoML, and BigQuery SQL models |
 
 ---

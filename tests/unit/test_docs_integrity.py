@@ -566,3 +566,14 @@ def test_governance_and_release_kit_files_exist() -> None:
     assert f'version: "{expected_ver}"' in citation, (
         f'CITATION.cff missing version: "{expected_ver}"'
     )
+
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "This is not an officially supported Google product." in readme, (
+        "README.md missing Google OSPO non-official product disclaimer"
+    )
+
+    contributing = (_REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "Contributor License Agreement" in contributing, (
+        "CONTRIBUTING.md missing Contributor License Agreement section"
+    )
+    assert "## Releasing" in contributing, "CONTRIBUTING.md missing ## Releasing section"
