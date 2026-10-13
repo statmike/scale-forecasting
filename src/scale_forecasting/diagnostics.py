@@ -104,7 +104,11 @@ def _match_sibling_baselines(
         return None, None
 
     tag = model_type.split("@", 1)[1] if "@" in model_type else ""
-    is_univariate = tag in ("univariate", "cov_none") or tag.endswith(("_univariate", "_cov_none"))
+    is_univariate = (
+        tag in ("univariate", "cov_none")
+        or tag.endswith(("_univariate", "_cov_none"))
+        or (not tag and f"{bname}@xreg" in siblings)
+    )
     has_global_uni_sibling = any(
         s in siblings for s in (f"{bname}@global_univariate", f"{bname}@global_cov_none")
     )
@@ -146,6 +150,8 @@ def _match_sibling_baselines(
                 f"{bname}@univariate",
                 f"{bname}@cov_none",
             ]
+            if f"{bname}@xreg" in all_models:
+                cands.append(bname)
         uni_base = next((c for c in cands if c in siblings), None)
 
     local_base: str | None = None

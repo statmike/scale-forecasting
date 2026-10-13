@@ -782,3 +782,238 @@ def test_arima_plus_xreg_and_explain_forecast_sql() -> None:
     assert "promo_flag" not in explain_uni
 
     assert build_explain_forecast_query(cfg, "timesfm", _DS) is None
+
+
+def test_arima_plus_xreg_alias_and_arima_plus_model_params() -> None:
+    from scale_forecasting.dag import check_model_params
+    from scale_forecasting.errors import ConfigError
+
+    # Pairing `arima_plus` and `arima_plus_xreg` pins `arima_plus` to univariate ARIMA_PLUS
+    # and normalizes `arima_plus_xreg` -> `arima_plus@xreg` (`ARIMA_PLUS_XREG`).
+    cfg_both = RunConfig(
+        run_name="arima plus and xreg side by side",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10},
+        models=["arima_plus", "arima_plus_xreg"],
+        features={"future_covariates": ["is_holiday", "promo_flag", "price_index"]},
+        model_params={
+            "arima_plus": {
+                "auto_arima_max_order": 3,
+                "auto_arima_min_order": 1,
+                "clean_spikes_and_dips": True,
+                "adjust_step_changes": True,
+                "decompose_time_series": True,
+                "holiday_region": ["US", "GB"],
+                "seasonalities": ["WEEKLY", "YEARLY"],
+                "time_series_length_fraction": 0.8,
+                "min_time_series_length": 30,
+                "max_time_series_length": 730,
+                "trend_smoothing_window_size": 7,
+            },
+            "arima_plus_xreg": {
+                "auto_arima_max_order": 4,
+            },
+        },
+    )
+    assert cfg_both.models == ["arima_plus", "arima_plus@xreg"]
+    check_model_params(cfg_both)
+
+    opts_uni = bqml_options(cfg_both, "arima_plus")
+    opts_xreg = bqml_options(cfg_both, "arima_plus@xreg")
+    assert opts_uni["model_type"] == "ARIMA_PLUS"
+    assert opts_uni["auto_arima_max_order"] == 3
+    assert opts_xreg["model_type"] == "ARIMA_PLUS_XREG"
+    assert opts_xreg["auto_arima_max_order"] == 4
+
+    sql_uni = build_create_model_sql(cfg_both, "arima_plus", _DS)
+    assert "model_type = 'ARIMA_PLUS'" in sql_uni
+    assert "auto_arima_max_order = 3" in sql_uni
+    assert "clean_spikes_and_dips = TRUE" in sql_uni
+    assert "holiday_region = ['US', 'GB']" in sql_uni
+    assert "seasonalities = ['WEEKLY', 'YEARLY']" in sql_uni
+    assert "promo_flag" not in sql_uni
+
+    sql_xreg = build_create_model_sql(cfg_both, "arima_plus@xreg", _DS)
+    assert "model_type = 'ARIMA_PLUS_XREG'" in sql_xreg
+    assert "auto_arima_max_order = 4" in sql_xreg
+    assert "SELECT ts_id, ds, y, is_holiday, promo_flag, price_index" in sql_xreg
+
+    # Requesting `arima_plus_xreg` without future covariates fails fast at config load.
+    with pytest.raises(
+        (ConfigError, ValueError), match="requires at least one known-future covariate"
+    ):
+        _ = RunConfig(
+            run_name="xreg without covs",
+            data={"source_table": "source_series_native"},
+            models=["arima_plus_xreg"],
+        )
+
+    # `forecast_limit_lower_bound` / `forecast_limit_upper_bound` are explicitly forbidden.
+    cfg_bad_bounds = RunConfig(
+        run_name="bad bqml bounds",
+        data={"source_table": "source_series_native"},
+        models=["arima_plus"],
+        model_params={"arima_plus": {"forecast_limit_lower_bound": 0.0}},
+    )
+    with pytest.raises(ConfigError, match=r"output\.floor"):
+        check_model_params(cfg_bad_bounds)
+
+    # Manual non_seasonal_order / auto_arima=False is explicitly forbidden on multi-series models.
+    cfg_bad_manual = RunConfig(
+        run_name="bad manual arima",
+        data={"source_table": "source_series_native"},
+        models=["arima_plus"],
+        model_params={"arima_plus": {"auto_arima": False}},
+    )
+    with pytest.raises(ConfigError, match="time_series_id_col"):
+        check_model_params(cfg_bad_manual)
+
+
+def test_timesfm_multivariate_covariates_and_fallback_sql() -> None:
+    from scale_forecasting.dag import check_model_params
+    from scale_forecasting.errors import ConfigError
+
+    cfg = RunConfig(
+        run_name="timesfm cov test",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10, "horizon": 14},
+        models=["timesfm", "timesfm@univariate"],
+        features={
+            "future_covariates": ["is_holiday", "promo_flag", "price_index"],
+            "past_covariates": ["temperature"],
+        },
+    )
+    check_model_params(cfg)
+    opts_cov = bqml_options(cfg, "timesfm")
+    assert opts_cov["model"] == "TimesFM 3.0"
+    assert opts_cov["target_cols"] == ["y"]
+    assert opts_cov["future_covariate_cols"] == ["is_holiday", "promo_flag", "price_index"]
+    assert opts_cov["past_covariate_cols"] == ["temperature"]
+
+    opts_uni = bqml_options(cfg, "timesfm@univariate")
+    assert "target_cols" not in opts_uni
+    assert "future_covariate_cols" not in opts_uni
+
+    insert_cov = build_forecast_insert_sql(cfg, "timesfm", _DS)
+    assert "target_cols => ['y']" in insert_cov
+    assert "past_covariate_cols => ['temperature']" in insert_cov
+    assert "future_covariate_cols => ['is_holiday', 'promo_flag', 'price_index']" in insert_cov
+    assert "model => 'TimesFM 3.0'" in insert_cov
+    assert "y.value AS forecast_value" in insert_cov
+    assert "IF(LOWER(CAST(is_holiday AS STRING)) = 'true', 1.0, 0.0)" in insert_cov
+    assert "UNION ALL" in insert_cov
+
+    insert_uni = build_forecast_insert_sql(cfg, "timesfm@univariate", _DS)
+    assert "data_col => 'y'" in insert_uni
+    assert "target_cols" not in insert_uni
+
+    # Explicit TimesFM 2.5 with covariates falls back under on_unsupported_covariates='fallback'
+    # and raises under on_unsupported_covariates='error'.
+    cfg_25_err = RunConfig(
+        run_name="timesfm 2.5 cov error",
+        data={"source_table": "source_series_covariates_native", "series_limit": 10},
+        models=["timesfm"],
+        features={
+            "future_covariates": ["promo_flag"],
+            "on_unsupported_covariates": "error",
+        },
+        model_params={"timesfm": {"version": "2.5"}},
+    )
+    with pytest.raises(ConfigError, match=r"TimesFM 3\.0"):
+        check_model_params(cfg_25_err)
+
+
+def test_arima_diagnostics_and_anomaly_change_point_queries() -> None:
+    import pandas as pd
+
+    from scale_forecasting.engines.bigquery_engine import extract_arima_diagnostics
+    from scale_forecasting.engines.bigquery_sql import (
+        build_arima_coefficients_query,
+        build_arima_evaluate_query,
+        build_detect_anomalies_query,
+        build_detect_change_points_query,
+    )
+
+    cfg = _cfg(["arima_plus", "timesfm"], exog=["is_holiday", "promo_flag"], series_limit=10)
+    eval_sql = build_arima_evaluate_query(cfg, "arima_plus", _DS)
+    coef_sql = build_arima_coefficients_query(cfg, "arima_plus", _DS)
+    assert eval_sql is not None and "ML.ARIMA_EVALUATE(MODEL" in eval_sql
+    assert coef_sql is not None and "ML.ARIMA_COEFFICIENTS(MODEL" in coef_sql
+    assert build_arima_evaluate_query(cfg, "timesfm", _DS) is None
+    assert build_arima_coefficients_query(cfg, "timesfm", _DS) is None
+
+    eval_df = pd.DataFrame(
+        [
+            {
+                "ts_id": "s_000000",
+                "non_seasonal_p": 2,
+                "non_seasonal_d": 1,
+                "non_seasonal_q": 1,
+                "has_drift": False,
+                "log_likelihood": -4120.5,
+                "AIC": 8251.0,
+                "variance": 120.25,
+                "seasonal_periods": ["WEEKLY", "YEARLY"],
+                "has_holiday_effect": False,
+                "has_spikes_and_dips": True,
+                "has_step_changes": True,
+                "error_message": "",
+            }
+        ]
+    )
+    coef_df = pd.DataFrame(
+        [
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [],
+                "ma_coefficients": [],
+                "intercept_or_drift": float("nan"),
+                "processed_input": "is_holiday",
+                "weight": float("nan"),
+                "category_weights": [
+                    {"category": "false", "weight": 0.0},
+                    {"category": "true", "weight": 38.5735},
+                ],
+            },
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [],
+                "ma_coefficients": [],
+                "intercept_or_drift": float("nan"),
+                "processed_input": "promo_flag",
+                "weight": 115.205,
+                "category_weights": [],
+            },
+            {
+                "ts_id": "s_000000",
+                "ar_coefficients": [0.42, -0.18],
+                "ma_coefficients": [-0.65],
+                "intercept_or_drift": 0.0,
+                "processed_input": None,
+                "weight": float("nan"),
+                "category_weights": [],
+            },
+        ]
+    )
+    diag = extract_arima_diagnostics(eval_df, coef_df)
+    assert diag["s_000000"]["non_seasonal_order"] == [2, 1, 1]
+    assert diag["s_000000"]["aic"] == 8251.0
+    assert diag["s_000000"]["seasonal_periods"] == ["WEEKLY", "YEARLY"]
+    assert diag["s_000000"]["ar_coefficients"] == [0.42, -0.18]
+    assert diag["s_000000"]["ma_coefficients"] == [-0.65]
+    assert diag["s_000000"]["xreg_weights"]["promo_flag"] == 115.205
+    assert diag["s_000000"]["xreg_weights"]["is_holiday"] == {"false": 0.0, "true": 38.5735}
+
+    anom_arima = build_detect_anomalies_query(cfg, "arima_plus", _DS, anomaly_prob_threshold=0.98)
+    assert "ML.DETECT_ANOMALIES(MODEL" in anom_arima
+    assert "0.98 AS anomaly_prob_threshold" in anom_arima
+
+    anom_tf = build_detect_anomalies_query(
+        cfg, "timesfm", _DS, anomaly_prob_threshold=0.95, cutoff_back_steps=14
+    )
+    assert "AI.DETECT_ANOMALIES(" in anom_tf
+    assert "anomaly_prob_threshold => 0.95" in anom_tf
+    assert "INTERVAL 14 DAY" in anom_tf
+
+    cp_sql = build_detect_change_points_query(cfg, _DS, exclude_gap_edges=True, min_gap_steps=1)
+    assert "ML.DETECT_CHANGE_POINTS(" in cp_sql
+    assert "WHERE begin_timestamp IS NOT NULL" in cp_sql
+    assert "WHERE is_gap_edge = FALSE" in cp_sql

@@ -1399,6 +1399,76 @@ class Forecaster:
             run_ids, jump_threshold_pct=jump_threshold_pct, limit=limit
         )
 
+    def detect_anomalies_df(
+        self,
+        *,
+        model_name: str = "arima_plus",
+        anomaly_prob_threshold: float = 0.95,
+        cutoff_back_steps: int | None = None,
+        anomalies_only: bool = False,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Run in-database BigQuery time-series anomaly detection (`ML.DETECT_ANOMALIES` for
+        ``arima_plus`` / ``arima_plus@xreg`` or serverless `AI.DETECT_ANOMALIES` for ``timesfm``).
+
+        Returns a tidy ``DataFrame`` with columns ``["ts_id", "ds", "y", "is_anomaly",
+        "anomaly_probability", "lower_bound", "upper_bound"]``.
+        """
+        from google.cloud import bigquery
+
+        from .engines.bigquery_sql import build_detect_anomalies_query
+        from .registry.reads import resolve_settings
+
+        resolved = resolve_settings(self._settings)
+        sql = build_detect_anomalies_query(
+            self._config,
+            model_name=model_name,
+            dataset=resolved.dataset_ref,
+            registry_dataset=resolved.registry_dataset_ref,
+            anomaly_prob_threshold=anomaly_prob_threshold,
+            cutoff_back_steps=cutoff_back_steps,
+            run_id=run_id or self.run_id,
+        )
+        client = bigquery_client(resolved.project_id)
+        df = client.query(
+            sql, job_config=bigquery.QueryJobConfig(use_query_cache=False)
+        ).to_dataframe()
+        if anomalies_only and not df.empty and "is_anomaly" in df.columns:
+            return df.loc[df["is_anomaly"] == True].reset_index(drop=True)  # noqa: E712 - nullable boolean series
+        return df
+
+    def detect_change_points_df(
+        self,
+        *,
+        exclude_gap_edges: bool = True,
+        min_gap_steps: int = 1,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Run in-database BigQuery structural change-point detection (`ML.DETECT_CHANGE_POINTS`)
+        with optional gap-edge artifact filtering across the configured source series.
+
+        Returns a tidy ``DataFrame`` with columns ``["ts_id", "begin_date", "end_date",
+        "window_count", "window_avg", "window_min", "window_max", "window_stddev",
+        "gap_edge_missing_steps", "is_gap_edge", "status"]``.
+        """
+        from google.cloud import bigquery
+
+        from .engines.bigquery_sql import build_detect_change_points_query
+        from .registry.reads import resolve_settings
+
+        _ = run_id
+        resolved = resolve_settings(self._settings)
+        sql = build_detect_change_points_query(
+            self._config,
+            dataset=resolved.dataset_ref,
+            exclude_gap_edges=exclude_gap_edges,
+            min_gap_steps=min_gap_steps,
+        )
+        client = bigquery_client(resolved.project_id)
+        return client.query(
+            sql, job_config=bigquery.QueryJobConfig(use_query_cache=False)
+        ).to_dataframe()
+
     def exceptions_df(
         self,
         run_id: str | None = None,

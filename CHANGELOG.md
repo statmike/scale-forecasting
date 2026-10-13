@@ -11,18 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.1.0] - 2026-10-12
+## [1.1.0] - 2026-10-13
 
 ### Added
 
 - **BigQuery ML `ARIMA_PLUS_XREG` Exogenous Covariate & `ML.EXPLAIN_FORECAST` Explainability Parity (`native` family):**
-  - `arima_plus` ([`src/scale_forecasting/models/bigquery_native.py`](./src/scale_forecasting/models/bigquery_native.py)) now declares `supports_exog = True`, `supports_future_covariates = True`, and `supports_explainability = True`, bringing `future_covariates`-capable models to 18 and explainability-capable models to 10.
-  - When `features.future_covariates` (`known_future_covariates` / `exog`) is configured on `arima_plus`, [`src/scale_forecasting/engines/bigquery_sql.py`](./src/scale_forecasting/engines/bigquery_sql.py) automatically compiles `CREATE OR REPLACE MODEL ... OPTIONS(model_type = 'ARIMA_PLUS_XREG', ...)` with the exogenous regressors in `SELECT` and passes the future regressor table as the 3rd argument to `ML.FORECAST` and `ML.EXPLAIN_FORECAST`. Univariate configs and `arima_plus@univariate` ablation variants continue to compile byte-identical `model_type = 'ARIMA_PLUS'` SQL, enabling direct Covariate FVA (`arima_plus` vs. `arima_plus@univariate`) in `compute_fva`.
+  - `arima_plus` ([`src/scale_forecasting/models/bigquery_native.py`](./src/scale_forecasting/models/bigquery_native.py)) now declares `supports_exog = True`, `supports_future_covariates = True`, and `supports_explainability = True`, and supports `"arima_plus_xreg"` (and `"arima_plus@xreg"`) as a first-class model entry in `RunConfig.models` and `model_params`. When `["arima_plus", "arima_plus_xreg"]` are listed together, `"arima_plus"` is automatically pinned to univariate `ARIMA_PLUS` while `"arima_plus_xreg"` normalizes to `"arima_plus@xreg"` (`ARIMA_PLUS_XREG`) for side-by-side Covariate FVA.
+  - When `features.future_covariates` (`known_future_covariates` / `exog`) is active, [`src/scale_forecasting/engines/bigquery_sql.py`](./src/scale_forecasting/engines/bigquery_sql.py) compiles `CREATE OR REPLACE MODEL ... OPTIONS(model_type = 'ARIMA_PLUS_XREG', ...)` with the exogenous regressors in `SELECT` and passes the future regressor table as the 3rd argument to `ML.FORECAST` and `ML.EXPLAIN_FORECAST`. Univariate configs and `arima_plus@univariate` ablation variants compile byte-identical `model_type = 'ARIMA_PLUS'` SQL.
   - [`src/scale_forecasting/engines/bigquery_engine.py`](./src/scale_forecasting/engines/bigquery_engine.py) executes `ML.EXPLAIN_FORECAST` (`build_explain_forecast_query` + `extract_bqml_explanations`) to populate **Tier 1** global feature attributions (`forecast_metadata.fit_diagnostics["feature_attributions"]` across `trend`, `seasonal`, `holiday_effect`, and each `attribution_<col>` exogenous regressor) and **Tier 2** per-step forecast attributions (`forecast_predictions.explanations`).
+- **BigQuery `AI.FORECAST` (`timesfm`) Multivariate Covariate Support (`TimesFM 3.0`):**
+  - `timesfm` ([`src/scale_forecasting/models/bigquery_native.py`](./src/scale_forecasting/models/bigquery_native.py)) now declares `supports_exog = True`, `supports_future_covariates = True`, and `supports_past_covariates = True` (bringing `future_covariates`-capable models to 19 and `past_covariates`-capable models to 18).
+  - When `future_covariates` or `past_covariates` are active on `timesfm`, `bigquery_sql.py` automatically targets `model => 'TimesFM 3.0'` with `target_cols => ['y']`, feeding future covariates through the future horizon window and masking past covariates (`CAST(NULL AS FLOAT64)`) across the future window so zero-shot `AI.FORECAST` conditions on historical + future covariates without data leakage. Univariate `timesfm` and `timesfm@univariate` continue to default to `TimesFM 2.5` with `data_col => 'y'`.
+- **`model_params.arima_plus` Options & Multi-Series Guardrails:**
+  - `resolve_arima_plus_params` validates and renders `auto_arima_max_order` (`1..5`), `auto_arima_min_order` (`0..5`), `clean_spikes_and_dips`, `adjust_step_changes`, `decompose_time_series`, `holiday_region` (`str` or `list[str]`), `seasonalities`, `time_series_length_fraction`, `min_time_series_length`, `max_time_series_length`, and `trend_smoothing_window_size` into `CREATE MODEL ... OPTIONS(...)`.
+  - Explicitly rejects `forecast_limit_lower_bound` and `forecast_limit_upper_bound` with a `ConfigError` pointing to `output.floor` and `output.cap`, and rejects manual `auto_arima=False` / `non_seasonal_order` on multi-series `time_series_id_col` panels.
+- **Per-Series `ML.ARIMA_EVALUATE` & `ML.ARIMA_COEFFICIENTS` Diagnostics:**
+  - `bigquery_engine.run` executes `build_arima_evaluate_query` and `build_arima_coefficients_query` (`extract_arima_diagnostics`) on the fitted `ARIMA_PLUS` / `ARIMA_PLUS_XREG` model and populates `forecast_metadata.fit_diagnostics["arima_diagnostics"]` per `ts_id` with `non_seasonal_order` (`[p, d, q]`), `has_drift`, `aic`, `log_likelihood`, `variance`, `seasonal_periods`, `has_holiday_effect`, `has_spikes_and_dips`, `has_step_changes`, `ar_coefficients`, `ma_coefficients`, `intercept_or_drift`, and linear `xreg_weights`.
+- **In-Database Time-Series Anomaly & Structural Change-Point Detection (`Forecaster` SDK & SQL):**
+  - Added `build_detect_anomalies_query` (`ML.DETECT_ANOMALIES` for `arima_plus` / `arima_plus@xreg` and `AI.DETECT_ANOMALIES` for `timesfm`), `build_detect_change_points_query` (`ML.DETECT_CHANGE_POINTS` with gap-edge artifact filtering), `Forecaster.detect_anomalies_df(...)`, and `Forecaster.detect_change_points_df(...)`.
 - **Semantic Versioning Charter (`MAJOR.MINOR.PATCH`):** Documented the formal versioning policy in [`AGENTS.md`](./AGENTS.md) and [`CONTRIBUTING.md`](./CONTRIBUTING.md) defining `PATCH` (`1.0.x`), `MINOR` (`1.x.0`), and `MAJOR` (`x.0.0`) boundaries and release precheck gates.
 
 ### Changed
 
+- **BigQuery Query Cache Prevention (`use_query_cache=False`):** `bigquery_engine._query` now sets `QueryJobConfig(use_query_cache=False)` so `native` wall-clock runtime measurements and fresh forecast queries never hit cached results.
 - **PyPI Long-Description Mermaid Rendering (`hatch-fancy-pypi-readme`):** Configured `[tool.hatch.metadata.hooks.fancy-pypi-readme]` in [`pyproject.toml`](./pyproject.toml) so `README.md` retains its interactive ` ```mermaid ` architecture flowchart on GitHub and MkDocs while substituting the diagram with the high-resolution architecture card (`docs/assets/social_card.png`) in built wheel and sdist `METADATA` for `pypi.org`.
 
 ---

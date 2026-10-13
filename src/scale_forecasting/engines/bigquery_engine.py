@@ -121,6 +121,8 @@ def run(
     from ..worker import rollup_metrics
     from .bigquery_sql import (
         bqml_options,
+        build_arima_coefficients_query,
+        build_arima_evaluate_query,
         build_eval_query,
         build_explain_forecast_query,
         build_fold_create_statements,
@@ -150,7 +152,8 @@ def run(
 
     def _query(sql: str) -> Any:
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+            query_parameters=[bigquery.ScalarQueryParameter("run_id", "STRING", run_id)],
+            use_query_cache=False,
         )
         return client.query(sql, job_config=job_config, job_id_prefix=job_id_prefix).result()
 
@@ -180,6 +183,7 @@ def run(
         try:
             # --- Phase 1: final true-future forecast → forecast_predictions (always) ----------
             tier1_by_model: dict[str, dict[str, dict[str, float]]] = {}
+            arima_diag_by_model: dict[str, dict[str, dict[str, Any]]] = {}
             for model_name in models:
                 for stmt in build_setup_statements(
                     cfg,
@@ -207,6 +211,33 @@ def run(
                         tier1_by_model[model_name] = t1
                     except Exception as exc:  # noqa: BLE001 - explainability is best-effort
                         log.warning("ML.EXPLAIN_FORECAST failed for %s: %s", model_name, exc)
+                arima_eval_sql = build_arima_evaluate_query(
+                    cfg,
+                    model_name,
+                    dataset,
+                    registry_dataset=registry_dataset,
+                )
+                if arima_eval_sql is not None:
+                    try:
+                        arima_eval_df = _query(arima_eval_sql).to_dataframe()
+                        arima_coef_sql = build_arima_coefficients_query(
+                            cfg,
+                            model_name,
+                            dataset,
+                            registry_dataset=registry_dataset,
+                        )
+                        arima_coef_df = (
+                            _query(arima_coef_sql).to_dataframe()
+                            if arima_coef_sql is not None
+                            else None
+                        )
+                        arima_diag_by_model[model_name] = extract_arima_diagnostics(
+                            arima_eval_df,
+                            arima_coef_df,
+                            ts_id_col=cfg.data.ts_id_col,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - ARIMA diagnostics are best-effort
+                        log.warning("ML.ARIMA_EVALUATE failed for %s: %s", model_name, exc)
 
             # --- Phase 2: scored evaluation ---------------------------------------------------
             oof_rows: list[dict[str, Any]] = []
@@ -303,6 +334,9 @@ def run(
                                 first_val_date=first_val,
                                 last_val_date=last_val,
                                 feature_attributions=tier1_by_model.get(model_name, {}).get(ts_id),
+                                arima_diagnostics=arima_diag_by_model.get(model_name, {}).get(
+                                    ts_id
+                                ),
                             )
                         )
             else:
@@ -321,6 +355,9 @@ def run(
                                 created_at,
                                 cfg,
                                 feature_attributions=tier1_by_model.get(model_name, {}).get(ts_id),
+                                arima_diagnostics=arima_diag_by_model.get(model_name, {}).get(
+                                    ts_id
+                                ),
                             )
                         )
 
@@ -555,6 +592,123 @@ def extract_bqml_explanations(
     return tier1_by_ts, tier2_by_ts_date
 
 
+def extract_arima_diagnostics(
+    eval_df: pd.DataFrame,
+    coef_df: pd.DataFrame | None = None,
+    *,
+    ts_id_col: str = "ts_id",
+) -> dict[str, dict[str, Any]]:
+    """Extract per-series diagnostics from ``ML.ARIMA_EVALUATE`` and ``ML.ARIMA_COEFFICIENTS``.
+
+    Populates ``non_seasonal_order`` (``[p, d, q]``), ``has_drift``, ``aic``, ``log_likelihood``,
+    ``variance``, ``seasonal_periods``, ``has_holiday_effect``, ``has_spikes_and_dips``,
+    ``has_step_changes``, ``ar_coefficients``, ``ma_coefficients``, ``intercept_or_drift``, and
+    ``xreg_weights`` (for ``ARIMA_PLUS_XREG`` numeric and categorical regressors).
+    """
+    import numpy as np
+    import pandas as pd
+
+    out: dict[str, dict[str, Any]] = {}
+    if not eval_df.empty and ts_id_col in eval_df.columns:
+        for _, row in eval_df.iterrows():
+            ts_id = str(row[ts_id_col])
+            entry: dict[str, Any] = {}
+            p = row.get("non_seasonal_p")
+            d = row.get("non_seasonal_d")
+            q = row.get("non_seasonal_q")
+            if (
+                p is not None
+                and d is not None
+                and q is not None
+                and not (pd.isna(p) or pd.isna(d) or pd.isna(q))
+            ):
+                entry["non_seasonal_order"] = [int(p), int(d), int(q)]
+            for bkey in (
+                "has_drift",
+                "has_holiday_effect",
+                "has_spikes_and_dips",
+                "has_step_changes",
+            ):
+                bval = row.get(bkey)
+                if bval is not None and not pd.isna(bval):
+                    entry[bkey] = bool(bval)
+            for fkey, out_key in (
+                ("AIC", "aic"),
+                ("aic", "aic"),
+                ("log_likelihood", "log_likelihood"),
+                ("variance", "variance"),
+            ):
+                fval = row.get(fkey)
+                if fval is not None and not pd.isna(fval) and np.isfinite(float(fval)):
+                    entry[out_key] = round(float(fval), 6)
+            s_periods = row.get("seasonal_periods")
+            if (
+                s_periods is not None
+                and hasattr(s_periods, "__iter__")
+                and not isinstance(s_periods, (str, bytes))
+            ):
+                entry["seasonal_periods"] = [str(s) for s in s_periods if s is not None]
+            err_msg = row.get("error_message")
+            if err_msg is not None and not pd.isna(err_msg) and str(err_msg).strip():
+                entry["error_message"] = str(err_msg).strip()
+            out[ts_id] = entry
+
+    if coef_df is not None and not coef_df.empty and ts_id_col in coef_df.columns:
+        for ts_id_raw, g in coef_df.groupby(ts_id_col):
+            ts_id = str(ts_id_raw)
+            entry = out.setdefault(ts_id, {})
+            xreg_weights: dict[str, Any] = {}
+            for _, crow in g.iterrows():
+                proc_in = crow.get("processed_input")
+                is_arima_row = proc_in is None or (
+                    not isinstance(proc_in, (list, np.ndarray)) and pd.isna(proc_in)
+                )
+                if is_arima_row:
+                    for ckey in ("ar_coefficients", "ma_coefficients"):
+                        cval = crow.get(ckey)
+                        if (
+                            cval is not None
+                            and hasattr(cval, "__iter__")
+                            and not isinstance(cval, (str, bytes))
+                        ):
+                            entry[ckey] = [
+                                round(float(x), 6)
+                                for x in cval
+                                if x is not None and np.isfinite(float(x))
+                            ]
+                    idrift = crow.get("intercept_or_drift")
+                    if idrift is not None and not pd.isna(idrift) and np.isfinite(float(idrift)):
+                        entry["intercept_or_drift"] = round(float(idrift), 6)
+                else:
+                    feat_name = str(proc_in)
+                    w = crow.get("weight")
+                    if w is not None and not pd.isna(w) and np.isfinite(float(w)):
+                        xreg_weights[feat_name] = round(float(w), 6)
+                    else:
+                        cat_w = crow.get("category_weights")
+                        if (
+                            cat_w is not None
+                            and hasattr(cat_w, "__iter__")
+                            and not isinstance(cat_w, (str, bytes))
+                        ):
+                            cat_map: dict[str, float] = {}
+                            for item in cat_w:
+                                if (
+                                    isinstance(item, Mapping)
+                                    and "category" in item
+                                    and "weight" in item
+                                    and item["weight"] is not None
+                                    and np.isfinite(float(item["weight"]))
+                                ):
+                                    cat_map[str(item["category"])] = round(float(item["weight"]), 6)
+                            if cat_map:
+                                xreg_weights[feat_name] = cat_map
+            if xreg_weights:
+                entry["xreg_weights"] = xreg_weights
+
+    return out
+
+
 def _meta_row(
     run_id: str,
     ts_id: str,
@@ -567,6 +721,7 @@ def _meta_row(
     first_val_date: Any = None,
     last_val_date: Any = None,
     feature_attributions: Mapping[str, float] | None = None,
+    arima_diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row (``fold_id=NULL``) for a native model (pure).
 
@@ -615,6 +770,8 @@ def _meta_row(
         diag_dict.update(variant_diagnostics_for(model_name, cfg))
     if feature_attributions:
         diag_dict["feature_attributions"] = dict(feature_attributions)
+    if arima_diagnostics:
+        diag_dict["arima_diagnostics"] = dict(arima_diagnostics)
     fit_diag: str | None = json.dumps(diag_dict, sort_keys=True) if diag_dict else None
 
     return {
