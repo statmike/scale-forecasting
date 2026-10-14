@@ -479,12 +479,14 @@ def test_every_model_declares_explicit_three_tier_covariate_support() -> None:
     from scale_forecasting.playground import model_catalog
 
     catalog = model_catalog().set_index("model")
-    assert len(catalog) == 34
+    assert len(catalog) == 37
 
     static_models = {
         "tide",
         "tft",
         "tsmixer",
+        "chronos2",
+        "timesfm_torch",
         "vertex_l2l",
         "vertex_tide",
         "vertex_tft",

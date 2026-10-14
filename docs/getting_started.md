@@ -19,7 +19,7 @@ flowchart LR
 | Goal | Install command (`uv` or `pip`) | What you get |
 | :--- | :--- | :--- |
 | **Try locally (no Google Cloud account needed)** | `pip install scale-forecasting` | 15 built-in models (NumPy, SciPy, statsmodels, scikit-learn), all 21 evaluation metrics, rolling-origin backtesting, conformal calibration, 7 FPP3 reconciliation methods, ensembling, synthetic data, and `RunConfig` dry-run planning. |
-| **Try locally with all open-source models + plots** | `pip install "scale-forecasting[models-stats,models-trees,models-prophet,models-dl,notebook]"` | Adds StatsForecast, LightGBM, XGBoost, CatBoost, Prophet, NeuralProphet, NeuralForecast (`TiDE`, `TFT`, `TSMixer`, `PatchTST`), and matplotlib plotting helpers. |
+| **Try locally with all open-source models + plots** | `pip install "scale-forecasting[models-stats,models-trees,models-prophet,models-dl,models-foundation,notebook]"` | Adds StatsForecast, LightGBM, XGBoost, CatBoost, Prophet, NeuralProphet, NeuralForecast (`TiDE`, `TFT`, `TSMixer`, `PatchTST`), open-weight foundation models (`Chronos-Bolt`, `Chronos-2`, `TimesFM`), and matplotlib plotting helpers. |
 | **Submit and review runs on Google Cloud** | `pip install "scale-forecasting[gcp,notebook]"` | Adds the Google Cloud clients (BigQuery, Storage, Dataproc, Vertex AI) plus plotting helpers for reviewing runs from a laptop or notebook. |
 | **Full contributor / workstation checkout** | `git clone https://github.com/statmike/scale-forecasting.git && cd scale-forecasting && uv sync --all-extras` | Locked environment with every runtime client (`spark`, `ray`, `gcp`), every model family, and notebook tooling. |
 
@@ -32,7 +32,7 @@ Full extra-by-extra breakdown: [Runtime dependencies](./runtime_dependencies.md#
 Run the built-in playground from your terminal to list available models, fit a single model with rolling-origin backtesting, or compare multiple models head-to-head on synthetic series:
 
 ```bash
-# List all 34 registered models and which ones are installed in your environment
+# List all 37 registered models and which ones are installed in your environment
 python -m scale_forecasting.playground --list
 
 # Fit Theta on a synthetic daily series with a 3-fold expanding backtest and 14-day horizon
@@ -198,7 +198,7 @@ WHERE run_id = 'YOUR_RUN_ID';
 
 ## Where to go next
 
-- **[Platform overview](./overview.md):** Conceptual tour of the 7 runtimes, 34 models, 21 metrics, and 5 analytical SQL views.
+- **[Platform overview](./overview.md):** Conceptual tour of the 7 runtimes, 37 models, 21 metrics, and 5 analytical SQL views.
 - **[Running and reviewing](./running_and_reviewing.md):** Full operator loop — feasibility checks, quota preflight, live monitoring, and re-ensembling.
 - **[Notebook tour](./notebooks/README.md):** 11 end-to-end notebooks (`00`–`10`) across local sandbox, cloud runtimes, covariates/hierarchy/HPO, and operations.
 - **[Compute runtimes reference](./runtimes_reference.md):** Detailed guide to `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery`.

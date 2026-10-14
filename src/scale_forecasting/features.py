@@ -479,6 +479,18 @@ def resolve_model_variant(
             raw_params["training_mode"] = inferred_scope
         if inferred_cov is not None and "covariate_mode" not in variant_explicit:
             raw_params["covariate_mode"] = inferred_cov
+        elif (
+            base == "chronos_bolt"
+            and variant_tag in ("tiny", "mini", "small", "base")
+            and "size" not in variant_explicit
+        ):
+            raw_params["size"] = variant_tag
+        elif (
+            base in ("timesfm_torch", "timesfm")
+            and variant_tag in ("v2.0", "2.0", "v2.5", "2.5", "v3.0", "3.0")
+            and "version" not in variant_explicit
+        ):
+            raw_params["version"] = variant_tag.lstrip("v")
         elif inferred_cov is None and not any(
             k in variant_explicit
             for k in ("exog", "future_covariates", "past_covariates", "static_covariates")

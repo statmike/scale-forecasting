@@ -1,13 +1,13 @@
 # AI Agents, Portable Skills & Built-in MCP Server
 
-`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **34 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
+`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **37 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
 
 ```mermaid
 flowchart TB
     subgraph Truth["Single Source of Truth (Python Code & Registries)"]
         direction LR
         T1["config.py (RunConfig + 14 Blocks)"]
-        T2["models/* (34) · metrics/* (21)"]
+        T2["models/* (37) · metrics/* (21)"]
         T3["resources/catalog.py · registry/views.py"]
         T4["configs/*.json (20 Demo + 42 Smokes)"]
     end
@@ -128,8 +128,8 @@ report = probe_environment()
 
 | Inspection Dimension | What It Checks | How Agents Use It |
 | :--- | :--- | :--- |
-| **`extras` (12 extras)** | Calls `is_importable()` on the probe modules for `gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl`, `models`, and `all`. | Recommends the exact `pip install "scale-forecasting[<extra>]"` command or filters to installed models (`--ignore-unavailable-models`). |
-| **`models` (34 models)** | Calls `cls.is_available()` on all 34 registered models and groups them into `available` (14 core models on a bare install) vs. `missing` (with `extra` and `install_command`). | Ensures `run_playground` only executes locally installed models while allowing `validate_and_dry_run` to plan cloud runs for all 34 models. |
+| **`extras` (13 extras)** | Calls `is_importable()` on the probe modules for `gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-foundation`, `models-automl`, `models`, and `all`. | Recommends the exact `pip install "scale-forecasting[<extra>]"` command or filters to installed models (`--ignore-unavailable-models`). |
+| **`models` (37 models)** | Calls `cls.is_available()` on all 37 registered models and groups them into `available` (14 core models on a bare install) vs. `missing` (with `extra` and `install_command`). | Ensures `run_playground` only executes locally installed models while allowing `validate_and_dry_run` to plan cloud runs for all 37 models. |
 | **`settings_env` (`SF_*`)** | Checks `SF_PROJECT_ID`, `SF_CONNECTION`, `SF_WAREHOUSE_URI`, `SF_DATASET_ID`, `SF_REGISTRY_DATASET_ID`, `SF_REGION`, `SF_SERVICE_ACCOUNT`, `SF_CONTAINER_IMAGE`, `SF_GKE_CLUSTER`, `SF_SUBNET`, `SF_LOG_LEVEL`, plus `.env.infra` presence on disk. | Tells the agent whether to run `set -a && source .env.infra && set +a` before invoking live BigQuery/cloud tools. |
 | **`adc_configured`** | Checks `GOOGLE_APPLICATION_CREDENTIALS`, `~/.config/gcloud/application_default_credentials.json`, and GCE/Cloud Run metadata environment variables. | Detects missing local authentication before attempting cloud API calls. |
 | **`execution_paths_ready`** | Booleans for all 5 execution paths (`path_1_offline_playground_and_dry_run` and `path_5_airflow_dag_emission` are always `True`; paths 2–4 require `[gcp]` + `SF_*`). | Routes the agent to offline dry-run/playground vs. live cloud preflight/execution. |
@@ -144,7 +144,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | :--- | :--- | :--- |
 | [`skills/scale-forecasting/SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md) | YAML frontmatter (`name`, `description`) + 4-step operational workflow (Probe → Author & Validate `RunConfig` → Pre-Flight & Execute across 5 paths → Review & Surgically Repair). | Hand-authored workflow guide |
 | [`skills/scale-forecasting/references/config_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/config_reference.md) | Every field, type, default, and constraint across `RunConfig` and all 14 nested Pydantic config classes, 7 cross-field normalization rules, GPU-to-VM shape matrix, and `run_id` digest exclusions. | Auto-generated from [`config.py`](./api/config.md) |
-| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **34 models**, **21 metrics**, **7 runtimes**, **12 extras**, **4 source / 5 registry / 5 view schemas**, and **62 shipped configs** (`20` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
+| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **37 models**, **21 metrics**, **7 runtimes**, **13 extras**, **4 source / 5 registry / 5 view schemas**, and **62 shipped configs** (`20` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
 | [`skills/scale-forecasting/references/execution_paths_and_ops.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/execution_paths_and_ops.md) | Exact CLI commands and Python SDK snippets for `SF_*` environment variables, all 5 execution paths, monitoring/calibration/review, surgical cell repair (`retry_run`), and registry operations (`registry.ops`). | Auto-generated from [`agent_surfaces.py`](./api/agent_surfaces.md) |
 
 ---
@@ -159,7 +159,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | :--- | :--- | :--- |
 | `forecast://environment` | `application/json` | Live `probe_environment()` report (extras, models, `SF_*` env vars, ADC, path readiness). |
 | `forecast://schema/run-config` | `application/schema+json` | Full Draft 2020-12 JSON Schema for `RunConfig` and all nested blocks. |
-| `forecast://catalog/models` | `application/json` | All 34 models with family, runtime, package, extra, covariate flags, explainability, and local availability. |
+| `forecast://catalog/models` | `application/json` | All 37 models with family, runtime, package, extra, covariate flags, explainability, and local availability. |
 | `forecast://catalog/metrics` | `application/json` | All 21 evaluation metrics (16 point + 5 interval) with direction and requirements. |
 | `forecast://catalog/runtimes` | `application/json` | All 7 compute runtimes and 4 GPU types (`T4`, `L4`, `A100`, `A100_80GB`). |
 | `forecast://catalog/configs` | `application/json` | All 62 shipped configs (20 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
@@ -234,7 +234,7 @@ Add `"$schema"` to any config JSON file to get instant field autocomplete, hover
 
 For LLM web crawlers, documentation indexers, and notebook/chat context attachment, two standard files are generated in `docs/` and published at the root of the documentation site:
 - **[`llms.txt`](./llms.txt):** Concise markdown index of the platform's architecture, agent surfaces, positioning guides, and reference pages.
-- **[`llms-full.txt`](./llms-full.txt):** Single-file context bundle concatenating `llms.txt` with the complete `RunConfig` schema reference, all 34 models / 21 metrics / 7 runtimes / 12 extras / 62 configs, and all 5 execution paths.
+- **[`llms-full.txt`](./llms-full.txt):** Single-file context bundle concatenating `llms.txt` with the complete `RunConfig` schema reference, all 37 models / 21 metrics / 7 runtimes / 13 extras / 62 configs, and all 5 execution paths.
 
 ---
 

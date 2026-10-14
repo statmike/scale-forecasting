@@ -1,6 +1,6 @@
 # Welcome to `scale-forecasting` in Google Cloud Shell
 
-This interactive tutorial walks you through **`scale-forecasting`** — a declarative, multi-runtime time-series forecasting platform for Google Cloud that orchestrates **34 models** across **5 model families**, **21 evaluation metrics**, and **7 compute runtimes** from a single `RunConfig` JSON contract.
+This interactive tutorial walks you through **`scale-forecasting`** — a declarative, multi-runtime time-series forecasting platform for Google Cloud that orchestrates **37 models** across **5 model families**, **21 evaluation metrics**, and **7 compute runtimes** from a single `RunConfig` JSON contract.
 
 You will complete three steps in ~5 minutes:
 1. **Step 1 (Zero GCP Required):** Install the pure offline core, probe your environment, and run an offline model benchmark in the playground.

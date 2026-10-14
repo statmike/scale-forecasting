@@ -4,7 +4,7 @@
 
 ---
 
-## 1. Forecasting Models (34 Models Across 5 Families)
+## 1. Forecasting Models (37 Models Across 5 Families)
 
 | Model (`models` key) | Family | Runtime | Upstream Package | Install Extra | Future Cov. | Past Cov. | Static Cov. | Explainability | Global / Hybrid | GPU Capable |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -12,10 +12,13 @@
 | `vertex_seq2seq` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
 | `vertex_tft` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
 | `vertex_tide` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
+| `chronos2` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | Yes | Yes | Yes | No | `local/global` | Yes |
+| `chronos_bolt` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | No | No | No | No | `local/global` | Yes |
 | `neuralprophet` | `deep_learning` | `python` | `neuralprophet` | `models-dl` | No | No | No | No | `local/global/hybrid` | Yes |
 | `patchtst` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | No | No | No | No | `local/global` | Yes |
 | `tft` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
 | `tide` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
+| `timesfm_torch` | `deep_learning` | `python` | `timesfm` | `models-foundation` | Yes | Yes | Yes | No | `local/global` | Yes |
 | `tsmixer` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
 | `catboost` | `ml` | `python` | `catboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
 | `lightgbm` | `ml` | `python` | `lightgbm` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
@@ -87,7 +90,7 @@
 
 ---
 
-## 4. Dependency Extras (12 Extras in `pyproject.toml`)
+## 4. Dependency Extras (13 Extras in `pyproject.toml`)
 
 | Extra | Install Command | Key Probe Modules | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -101,9 +104,10 @@
 | `[models-trees]` | `pip install "scale-forecasting[models-trees]"` | `xgboost`, `lightgbm`, `catboost` | Gradient-boosted tree models: XGBoost, LightGBM, CatBoost (3 models) |
 | `[models-prophet]` | `pip install "scale-forecasting[models-prophet]"` | `prophet` | Prophet additive/multiplicative decomposable model (1 model) |
 | `[models-dl]` | `pip install "scale-forecasting[models-dl]"` | `torch`, `neuralprophet`, `neuralforecast` | PyTorch, NeuralProphet, and NeuralForecast deep-learning models (5 models) |
+| `[models-foundation]` | `pip install "scale-forecasting[models-foundation]"` | `torch`, `chronos`, `timesfm` | Open-weight zero-shot foundation models: Chronos-Bolt, Chronos-2, TimesFM (3 models) |
 | `[models-automl]` | `pip install "scale-forecasting[models-automl]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+2 more) | Vertex AI Pipelines / KFP components for Tabular Workflows (4 models) |
-| `[models]` | `pip install "scale-forecasting[models]"` | `statsforecast`, `xgboost`, `lightgbm`, `catboost` (+10 more) | All 5 model family extras combined |
-| `[all]` | `pip install "scale-forecasting[all]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+13 more) | Complete installation (all cloud clients, runtimes, notebooks, and model families) |
+| `[models]` | `pip install "scale-forecasting[models]"` | `statsforecast`, `xgboost`, `lightgbm`, `catboost` (+13 more) | All 6 model family extras combined |
+| `[all]` | `pip install "scale-forecasting[all]"` | `google.cloud.bigquery`, `google.cloud.bigquery_storage`, `google.cloud.storage`, `google.cloud.dataproc_v1` (+15 more) | Complete installation (all cloud clients, runtimes, notebooks, and model families) |
 
 ---
 

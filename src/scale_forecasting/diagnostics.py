@@ -1578,7 +1578,7 @@ def compute_anomalies(
     anomalies_only: bool = False,
     freq: str = "D",
 ) -> pd.DataFrame:
-    """Universal time-series anomaly detection across any of the 34 models, 9 ensembles, or STL.
+    """Universal time-series anomaly detection across any of the 37 models, 9 ensembles, or STL.
 
     Computes the exact two-sided Gaussian / conformal tail probability used by BigQuery ML
     (`ML.DETECT_ANOMALIES`):

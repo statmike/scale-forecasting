@@ -37,6 +37,13 @@ _MODEL_DEP: dict[str, str] = {
     "tft": "neuralforecast",
     "tide": "neuralforecast",
     "tsmixer": "neuralforecast",
+    "chronos_bolt": "chronos",
+    "chronos2": "chronos",
+    "timesfm_torch": "timesfm",
+}
+
+_FAST_PARAMS: dict[str, dict[str, Any]] = {
+    "chronos_bolt": {"size": "tiny"},
 }
 
 
@@ -74,7 +81,7 @@ def _make(name: str) -> BaseModel:
     dep = _MODEL_DEP.get(name)
     if dep is not None and importlib.util.find_spec(dep) is None:
         pytest.skip(f"optional dependency '{dep}' not installed for model '{name}'")
-    return get_model(name)({}, _ctx())
+    return get_model(name)(dict(_FAST_PARAMS.get(name, {})), _ctx())
 
 
 @pytest.fixture(params=_python_models())
@@ -127,7 +134,7 @@ def test_original_units_after_log1p(model_name: str) -> None:
     dep = _MODEL_DEP.get(model_name)
     if dep is not None and importlib.util.find_spec(dep) is None:
         pytest.skip(f"optional dependency '{dep}' not installed")
-    inst = m({}, _ctx(transform="log1p"))
+    inst = m(dict(_FAST_PARAMS.get(model_name, {})), _ctx(transform="log1p"))
     y, X = _golden_series(with_exog=inst.supports_exog)
     inst.fit(np.log1p(y).rename("y"), X)
     fx = X.iloc[:HORIZON] if (X is not None and inst.supports_exog) else None
@@ -146,9 +153,10 @@ def test_original_units_after_boxcox(model_name: str) -> None:
     dep = _MODEL_DEP.get(model_name)
     if dep is not None and importlib.util.find_spec(dep) is None:
         pytest.skip(f"optional dependency '{dep}' not installed")
-    y, X = _golden_series(with_exog=m({}, _ctx()).supports_exog)
+    params = dict(_FAST_PARAMS.get(model_name, {}))
+    y, X = _golden_series(with_exog=m(params, _ctx()).supports_exog)
     lam = fit_transform_lambda(y, "boxcox")
-    inst = m({}, _ctx(transform="boxcox", transform_lambda=lam))
+    inst = m(params, _ctx(transform="boxcox", transform_lambda=lam))
     inst.fit(apply_transform(y, "boxcox", lam).rename("y"), X)
     fx = X.iloc[:HORIZON] if (X is not None and inst.supports_exog) else None
     df = inst.predict(HORIZON, fx)

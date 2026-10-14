@@ -1,10 +1,10 @@
 ---
 name: scale-forecasting
-description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (34 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, build or validate a RunConfig JSON, choose models/metrics/runtimes/GPUs, run offline model benchmarks in the playground, launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, review model leaderboards or calibration, or surgically repair failed (ts_id, model_type) cells.
+description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (37 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, build or validate a RunConfig JSON, choose models/metrics/runtimes/GPUs, run offline model benchmarks in the playground, launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, review model leaderboards or calibration, or surgically repair failed (ts_id, model_type) cells.
 license: Apache-2.0
 metadata:
   author: statmike
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide
@@ -18,7 +18,7 @@ metadata:
 Read these companion reference files in [`references/`](./references/) whenever you need exhaustive field-by-field or catalog-level detail:
 
 1. **[`references/config_reference.md`](./references/config_reference.md):** Every field, type, default, constraint, and cross-field rule across `RunConfig` and its 14 nested Pydantic blocks (`data`, `features`, `backtest`, `output`, `hpo`, `ensemble`, `hierarchy`, `compute`, `compute.families.<family>`, `compute.ensemble`, `compute.profile`, `compute.capacity`), GPU-to-VM shape resolution, and `run_id` digest exclusions.
-2. **[`references/catalog_reference.md`](./references/catalog_reference.md):** All **34 models** (with family, runtime, package, `[extra]`, covariate support, explainability, training modes, and GPU capability), **21 evaluation metrics** (16 point + 5 interval), **7 compute runtimes**, **12 dependency extras**, **4 source tables / 5 registry tables / 5 analytical SQL views**, and all **62 shipped configs** (`20` root demos + `42` smoke configs `01`–`42`).
+2. **[`references/catalog_reference.md`](./references/catalog_reference.md):** All **37 models** (with family, runtime, package, `[extra]`, covariate support, explainability, training modes, and GPU capability), **21 evaluation metrics** (16 point + 5 interval), **7 compute runtimes**, **13 dependency extras**, **4 source tables / 5 registry tables / 5 analytical SQL views**, and all **62 shipped configs** (`20` root demos + `42` smoke configs `01`–`42`).
 3. **[`references/execution_paths_and_ops.md`](./references/execution_paths_and_ops.md):** Step-by-step CLI commands and Python SDK patterns for `SF_*` environment variables, **all 5 Execution Paths**, **Pre-Flight Verification** (`--dry-run`, `--feasibility`, `--quota`, `--stage-only`, `--emit-airflow`), **Post-Run Review & Surgical Repair** (`review_run`, `calibration_report`, `retry_run`, `--probe`, `--settle`, `--cancel`), and **Registry Lifecycle Operations** (`scale_forecasting.registry.ops`).
 
 > **Built-in MCP Server Available:** If your agent client supports the Model Context Protocol (MCP), run `python -m scale_forecasting.mcp` (or `python -m scale_forecasting.mcp --allow-launch` to unlock cloud job submission and registry repair). It exposes 7 structured `forecast://*` resources and 9 tools directly over `stdio`.
@@ -50,7 +50,7 @@ env = probe_environment()
 ```
 
 Use the returned report to route your workflow:
-- **`extras`** and **`models`**: Shows which of the 12 extras (`gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl`, `models`, `all`) and which of the 34 models are importable right now, along with exact `pip install "scale-forecasting[<extra>]"` commands for any missing package.
+- **`extras`** and **`models`**: Shows which of the 13 extras (`gcp`, `notebook`, `spark`, `ray`, `submit`, `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-foundation`, `models-automl`, `models`, `all`) and which of the 37 models are importable right now, along with exact `pip install "scale-forecasting[<extra>]"` commands for any missing package.
   - Pure core (`pip install scale-forecasting`) includes 14 statistical and ML models (`croston`, `fft`, `holtwinters`, `kalman`, `naive_drift`, `naive_mean`, `naive_moving_average`, `naive_seasonal`, `random_forest`, `regression_lags`, `sarimax`, `stl_bagging`, `theta`, `ucm`) plus all 21 metrics, backtesting, ensembling, hierarchical reconciliation, and the MCP server — **zero model extras or GCP credentials required**.
 - **`execution_paths_ready`**:
   - `path_1_offline_playground_and_dry_run` (`True` on every install): Use `scale_forecasting.playground` (`sample_data`, `run_model`, `bakeoff`, `summarize`) and `Forecaster.dry_run()` for instant zero-GCP benchmarking and config validation.
@@ -68,9 +68,9 @@ Always include `"$schema": "https://statmike.github.io/scale-forecasting/schemas
 2. **Match `models` to family and runtime rules:**
    - Every config block enforces `extra="forbid"` — unknown keys fail immediately with `ConfigError`.
    - Statistical models (`statistical` family, 18 models) and Tree/ML models (`ml` family, 5 models) run on Python runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`).
-   - Deep learning models (`deep_learning` family: `neuralprophet`, `patchtst`, `tft`, `tide`, `tsmixer`) run on Python runtimes and support GPU acceleration (`hardware: "gpu"`).
+   - Deep learning and open-weight foundation models (`deep_learning` family: `chronos2`, `chronos_bolt`, `neuralprophet`, `patchtst`, `tft`, `tide`, `timesfm_torch`, `tsmixer`) run on Python runtimes and support GPU acceleration (`hardware: "gpu"`).
    - Vertex AI AutoML models (`automl` family: `vertex_l2l`, `vertex_seq2seq`, `vertex_tft`, `vertex_tide`) require `compute.families.automl.runtime = "vertex_automl"`.
-   - BigQuery-native models (`native` family: `arima_plus`, `timesfm`) execute as in-warehouse SQL on `bigquery`.
+   - BigQuery-native models (`native` family: `arima_plus`, `timesfm` / alias `bq_timesfm`) execute as in-warehouse SQL on `bigquery`.
 3. **Learned Ensembles & HPO Require Backtesting:**
    - `hpo.enabled = true` requires `backtest.enabled = true`.
    - If `ensemble.strategies` includes learned stackers (`"nnls"`, `"ridge"`, or `"xgb"`), you **must** set `"backtest": {"enabled": true, ...}` so out-of-fold (`backtest_oof`) predictions exist to train the combiner weights; otherwise `RunConfig` drops the learned strategies down to `"mean"` with a warning.

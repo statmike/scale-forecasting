@@ -1,7 +1,7 @@
 """Built-in Model Context Protocol (MCP) server for `scale-forecasting` over `stdio`.
 
-Exposes the platform's configuration schema, canonical catalogs (34 models, 21 metrics, 7 runtimes,
-4 GPU types, 12 extras, 5 views, 62 shipped configs), environment readiness probe, offline model
+Exposes the platform's configuration schema, canonical catalogs (37 models, 21 metrics, 7 runtimes,
+4 GPU types, 13 extras, 5 views, 62 shipped configs), environment readiness probe, offline model
 playground, `RunConfig` validator and DAG planner, Airflow DAG emitter, and live BigQuery registry
 inspection/review/repair tools to any MCP-compatible AI coding agent (Google Antigravity `agy` CLI
 & IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI Codex CLI).
@@ -216,7 +216,7 @@ class McpServer:
                 "uri": "forecast://environment",
                 "name": "Active Environment & Readiness Report",
                 "description": (
-                    "Installed extras (12), available vs. missing models (34), SF_* environment "
+                    "Installed extras (13), available vs. missing models (37), SF_* environment "
                     "variables, ADC status, and readiness across all 5 execution paths."
                 ),
                 "mimeType": "application/json",
@@ -229,9 +229,9 @@ class McpServer:
             },
             {
                 "uri": "forecast://catalog/models",
-                "name": "Forecasting Models Catalog (34 Models)",
+                "name": "Forecasting Models Catalog (37 Models)",
                 "description": (
-                    "All 34 registered models across 5 families with runtime, package, extra, "
+                    "All 37 registered models across 5 families with runtime, package, extra, "
                     "covariate flags, explainability, and local availability."
                 ),
                 "mimeType": "application/json",
@@ -313,8 +313,8 @@ class McpServer:
             {
                 "name": "probe_environment",
                 "description": (
-                    "Inspect the active Python environment: installed optional extras (out of 12), "
-                    "locally available vs. missing-extra models (out of 34), SF_* environment "
+                    "Inspect the active Python environment: installed optional extras (out of 13), "
+                    "locally available vs. missing-extra models (out of 37), SF_* environment "
                     "variables, .env.infra presence, ADC credentials, and readiness across all 5 "
                     "execution paths. Call this first to adapt recommendations to the machine."
                 ),
@@ -327,8 +327,8 @@ class McpServer:
             {
                 "name": "list_catalog",
                 "description": (
-                    "Query the canonical catalogs of models (34), metrics (21), runtimes (7), "
-                    "GPUs (4), dependency extras (12), BigQuery views (5), or shipped configs (62)."
+                    "Query the canonical catalogs of models (37), metrics (21), runtimes (7), "
+                    "GPUs (4), dependency extras (13), BigQuery views (5), or shipped configs (62)."
                 ),
                 "inputSchema": {
                     "type": "object",

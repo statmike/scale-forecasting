@@ -43,7 +43,7 @@ In this hands-on workshop, you will deploy and operate **`scale-forecasting`** â
 
 ### Key Learning Outcomes
 1. **Infrastructure as Code:** Deploy the complete data lakehouse and compute infrastructure using Terraform in under 15 minutes.
-2. **Unified Modeling Contract:** Train, backtest, and evaluate 34 statistical, machine learning, deep learning, Vertex AI AutoML, and BigQuery SQL models with zero code changes.
+2. **Unified Modeling Contract:** Train, backtest, and evaluate 37 statistical, machine learning, deep learning, foundation, Vertex AI AutoML, and BigQuery SQL models with zero code changes.
 3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, Vertex `CustomJob`, GCE Single-VM, GKE, Vertex AI AutoML (`vertex_automl`), and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
 4. **Stacked Ensembling:** Train meta-learners (Non-Negative Least Squares, Ridge, XGBoost) over out-of-fold predictions to outperform any single model.
 5. **Operational Observability:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, and inspect 5 analytical SQL views.
@@ -201,10 +201,10 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 ### Lab 1: Foundations, Local Prototyping & Custom Plugins
 **Notebooks:** [`notebooks/00_model_playground.ipynb`](notebooks/00_model_playground.ipynb) & [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb)  
 **Duration:** 20 minutes  
-**Goal:** Explore the 34-model and 21-metric contracts, rolling-origin backtesting, conformal interval calibration, Two-Tier Explainability, and custom plugin authoring with zero cloud compute costs.
+**Goal:** Explore the 37-model and 21-metric contracts, rolling-origin backtesting, conformal interval calibration, Two-Tier Explainability, and custom plugin authoring with zero cloud compute costs.
 
 #### Key Highlights
-- Inspect `model_catalog()` (34 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, Vertex AI AutoML, and native SQL families.
+- Inspect `model_catalog()` (37 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, Vertex AI AutoML, and native SQL families.
 - Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky) and run single-series and panel bake-offs (`compare_models`, `compare_panel`).
 - Author custom `BaseModel` and `BaseMetric` plugins in [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb) and verify them through the exact production worker contract (`run_cell`, `run_panel_model`).
 

@@ -1892,6 +1892,37 @@ class RunConfig(BaseModel):
             except ConfigError as e:
                 raise ValueError(str(e)) from e
 
+        # 1a-bis. Normalize the `bq_timesfm` clarity alias to `timesfm` so configurations can
+        #         explicitly distinguish BigQuery AI.FORECAST (`bq_timesfm` / `timesfm`) from
+        #         PyTorch `timesfm_torch` while preserving identical `run_id` digests.
+        has_bq_timesfm_alias = any(
+            m == "bq_timesfm" or m.startswith("bq_timesfm@") for m in self.models
+        ) or any(k == "bq_timesfm" or k.startswith("bq_timesfm@") for k in self.model_params)
+        if has_bq_timesfm_alias:
+            tf_models: list[str] = []
+            for m in self.models:
+                if m == "bq_timesfm":
+                    tf_models.append("timesfm")
+                elif m.startswith("bq_timesfm@"):
+                    tf_models.append("timesfm@" + m.split("@", 1)[1])
+                else:
+                    tf_models.append(m)
+            if len(set(tf_models)) != len(tf_models):
+                raise ValueError(f"models contains duplicates after normalization: {tf_models}")
+            tf_params: dict[str, dict[str, Any]] = {}
+            for k, v in self.model_params.items():
+                target_k = (
+                    "timesfm"
+                    if k == "bq_timesfm"
+                    else ("timesfm@" + k.split("@", 1)[1] if k.startswith("bq_timesfm@") else k)
+                )
+                if target_k in tf_params:
+                    tf_params[target_k] = {**tf_params[target_k], **dict(v)}
+                else:
+                    tf_params[target_k] = dict(v)
+            object.__setattr__(self, "models", tf_models)
+            object.__setattr__(self, "model_params", tf_params)
+
         # 1b. Expand config-driven univariate baselines and ablation ladders when requested.
         if (
             self.features.include_univariate_baselines

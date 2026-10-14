@@ -1,6 +1,6 @@
 # Forecasting Models (`src/scale_forecasting/models/`)
 
-This subpackage contains all **34 built-in forecasting models** (28 Python models, 4 Vertex AI AutoML models, and 2 BigQuery-native SQL models), the [`BaseModel`](./base_model.py) interface they implement, the shared autoregressive lag/covariate engine ([`_lag_forecaster.py`](./_lag_forecaster.py)), the shared Nixtla `neuralforecast` adapter ([`_neuralforecast_base.py`](./_neuralforecast_base.py)), the shared Vertex AI AutoML Tabular Workflow adapter ([`_vertex_automl_base.py`](./_vertex_automl_base.py)), and the model catalogue registry ([`__init__.py`](./__init__.py)).
+This subpackage contains all **37 built-in forecasting models** (31 Python models, 4 Vertex AI AutoML models, and 2 BigQuery-native SQL models), the [`BaseModel`](./base_model.py) interface they implement, the shared autoregressive lag/covariate engine ([`_lag_forecaster.py`](./_lag_forecaster.py)), the shared Nixtla `neuralforecast` adapter ([`_neuralforecast_base.py`](./_neuralforecast_base.py)), the shared open-weight foundation model adapter ([`_foundation_base.py`](./_foundation_base.py)), the shared Vertex AI AutoML Tabular Workflow adapter ([`_vertex_automl_base.py`](./_vertex_automl_base.py)), and the model catalogue registry ([`__init__.py`](./__init__.py)).
 
 Every model lives in its own file and registers itself on import via `register(ModelClass)`. Models are grouped into five **families** (`statistical`, `ml`, `deep_learning`, `automl`, and `native`), which [`dag.py`](../dag.py) uses to route each family to its optimal compute runtime in parallel.
 
@@ -18,8 +18,9 @@ flowchart TB
         lag["Autoregressive Lag & Calendar Matrix + Two-Tier Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
     end
 
-    subgraph dl["Family: deep_learning (5 Python GPU/CPU Models — Local, Global & Hybrid)"]
+    subgraph dl["Family: deep_learning (8 Python GPU/CPU Models — Local, Global & Hybrid)"]
         np["neuralprophet · tide · tft · tsmixer · patchtst<br/>PyTorch Local, Global & Hybrid Panel Forecasters"]
+        fnd["chronos_bolt · chronos2 · timesfm_torch<br/>Open-Weight Zero-Shot Foundation Forecasters"]
     end
 
     subgraph aml["Family: automl (4 Vertex AI AutoML / Tabular Workflow Models)"]
@@ -27,7 +28,7 @@ flowchart TB
     end
 
     subgraph nat["Family: native (2 BigQuery SQL Models)"]
-        bq["bigquery_native.py<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG) · timesfm (AI.FORECAST)"]
+        bq["bigquery_native.py<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG) · timesfm / bq_timesfm (AI.FORECAST)"]
     end
 
     base --> stat & ml & dl & aml & nat
@@ -67,6 +68,9 @@ flowchart TB
 | `tft` | [`tft.py`](./tft.py) | `deep_learning` | Python | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Structural | `local`, `global` | Beneficial (`cuda`) | Temporal Fusion Transformer (`TFT`, Lim et al. 2021) with variable selection networks and multi-head attention. |
 | `tsmixer` | [`tsmixer.py`](./tsmixer.py) | `deep_learning` | Python | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | Yes | Structural | `local`, `global` | Beneficial (`cuda`) | All-MLP time- and feature-mixing architecture (`TSMixerx`, Chen et al. 2023) with future, past, and static covariates. |
 | `patchtst` | [`patchtst.py`](./patchtst.py) | `deep_learning` | Python | [`neuralforecast`](https://nixtlaverse.nixtla.io/neuralforecast/) | No | Structural | `local`, `global` | Beneficial (`cuda`) | Channel-independent subseries-patch Transformer (`PatchTST`, Nie et al. 2023) with `MQLoss` quantile heads. |
+| `chronos_bolt` | [`chronos_bolt.py`](./chronos_bolt.py) | `deep_learning` | Python | [`chronos-forecasting`](https://github.com/amazon-science/chronos-forecasting) | No | Structural | `local`, `global` | Beneficial (`cuda`) | Amazon Chronos-Bolt zero-shot patch-based T5 foundation model (`amazon/chronos-bolt-base` default, `small`/`mini`/`tiny` selectable). |
+| `chronos2` | [`chronos2.py`](./chronos2.py) | `deep_learning` | Python | [`chronos-forecasting`](https://github.com/amazon-science/chronos-forecasting) | Yes | Structural | `local`, `global` | Beneficial (`cuda`) | Amazon Chronos-2 zero-shot foundation model (`amazon/chronos-2`) with future, past, and static covariates and panel `cross_learning`. |
+| `timesfm_torch` | [`timesfm_torch.py`](./timesfm_torch.py) | `deep_learning` | Python | [`timesfm`](https://github.com/google-research/timesfm) | Yes | Structural | `local`, `global` | Beneficial (`cuda`) | Google Research open-weight PyTorch `TimesFM 3.0` (`google/timesfm-3.0-pytorch` default with native Variate Attention) and `TimesFM 2.5` (`@v2.5`). |
 | `vertex_l2l` | [`vertex_l2l.py`](./vertex_l2l.py) | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Two-Tier (Vertex Baseline) | `global` | Optional (`cuda`) | Managed Vertex AI AutoML / Learn-to-Learn neural architecture search & ensemble with two-tier explainability. |
 | `vertex_tide` | [`vertex_tide.py`](./vertex_tide.py) | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Two-Tier (Vertex Baseline) | `global` | Beneficial (`cuda`) | Managed Vertex AI Time-series Dense Encoder (`TiDE`) Tabular Workflow with reusable Stage-1 HPO and explainability. |
 | `vertex_tft` | [`vertex_tft.py`](./vertex_tft.py) | `automl` | Vertex AutoML | [`google-cloud-pipeline-components`](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/tabular-data/tabular-workflows/forecasting) | Yes | Two-Tier (Vertex Baseline) | `global` | Beneficial (`cuda`) | Managed Vertex AI Temporal Fusion Transformer (`TFT`) Tabular Workflow with attention & baseline attributions. |
@@ -94,6 +98,9 @@ Shared engine behind `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, 
 
 ### [`_neuralforecast_base.py`](./_neuralforecast_base.py)
 Shared adapter behind `tide`, `tft`, `tsmixer`, and `patchtst`. Wraps Nixtla's `neuralforecast` PyTorch Lightning architectures with `MQLoss(quantiles=[0.1, 0.5, 0.9])`, supports both per-series (`training_mode="local"`) and cross-series panel (`training_mode="global"`) execution, and routes `future_covariates` (`futr_exog_list`), `past_covariates` (`hist_exog_list`), and `static_covariates` (`stat_exog_list`).
+
+### [`_foundation_base.py`](./_foundation_base.py)
+Shared adapter behind `chronos_bolt`, `chronos2`, and `timesfm_torch`. Provides zero-shot local (`fit`, `predict`, `recondition`, `advance_origin`) and batched panel (`fit_panel`, `predict_panel`) execution, bounded LRU checkpoint caching across cells and folds, decile-to-quantile interpolation, and instance-norm-preserving static covariate phase carriers.
 
 ### [`_vertex_automl_base.py`](./_vertex_automl_base.py)
 Shared adapter behind `vertex_l2l`, `vertex_tide`, `vertex_tft`, and `vertex_seq2seq`. Provides offline panel ridge-regression execution for local testing and `playground.py` while delegating cloud execution to [`engines/automl_engine.py`](../engines/automl_engine.py).

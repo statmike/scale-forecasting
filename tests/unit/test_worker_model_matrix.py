@@ -59,6 +59,9 @@ _MODEL_DEP: dict[str, str] = {
     "tft": "neuralforecast",
     "tide": "neuralforecast",
     "tsmixer": "neuralforecast",
+    "chronos_bolt": "chronos",
+    "chronos2": "chronos",
+    "timesfm_torch": "timesfm",
 }
 
 # The metrics a well-behaved model on a well-behaved series has no excuse for. The other twelve are
@@ -87,12 +90,13 @@ def _series(n: int = 400) -> pd.DataFrame:
     return pd.DataFrame({"ts_id": "series-a", "ds": idx, "y": trend + weekly + noise})
 
 
-_PARAMS: dict[str, dict[str, int]] = {
+_PARAMS: dict[str, dict[str, int | str]] = {
     "neuralprophet": {"epochs": 5},
     "patchtst": {"max_steps": 5},
     "tft": {"max_steps": 5},
     "tide": {"max_steps": 5},
     "tsmixer": {"max_steps": 5},
+    "chronos_bolt": {"size": "tiny"},
 }
 
 

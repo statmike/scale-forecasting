@@ -486,13 +486,13 @@ submit, ops, and plotting entry points carry the guided check.
 launches and reviews wants `[gcp,notebook]`; the per-surface install table is in
 [runtime_dependencies.md](./runtime_dependencies.md#dependency-extras).
 
-### `list_models(available_only=True)` returns 15, not 34
-**Symptom:** the catalogue lists all 34 models but only 15 report as available.
+### `list_models(available_only=True)` returns 15, not 37
+**Symptom:** the catalogue lists all 37 models but only 15 report as available.
 **Cause:** availability is honest about what is importable: the 15 are the models whose library is
 in the core install (statsmodels, scikit-learn, scipy). The rest declare an `optional_extra` —
-`models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-automl` for the four Vertex AI
-AutoML models, or `gcp` for the two BigQuery-native models.
-**Fix:** install the family extras you intend to run (`[models]` is all five families, AutoML
+`models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-foundation`, `models-automl`
+for the four Vertex AI AutoML models, or `gcp` for the two BigQuery-native models.
+**Fix:** install the family extras you intend to run (`[models]` is all six model extras, AutoML
 included) plus `[gcp]` for the BigQuery-native pair. The model→extra map is the "Granular
 installation extras" table in [models_reference.md](./models_reference.md).
 

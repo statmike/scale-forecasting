@@ -132,7 +132,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
     # 1. probe_environment
     is_err, env_payload = _call_tool(server, "probe_environment")
     assert not is_err
-    assert env_payload["models"]["total"] == 34
+    assert env_payload["models"]["total"] == 37
 
     # 2. list_catalog across categories and filters
     for cat in ("all", "models", "metrics", "runtimes", "gpus", "configs", "views", "extras"):
@@ -145,7 +145,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         {"category": "models", "family": "deep_learning", "available_only": True},
     )
     assert not is_err
-    assert len(dl_models["models"]) <= 5
+    assert len(dl_models["models"]) <= 8
 
     # 3. inspect_config_schema (overview, property, class name, unknown)
     is_err, schema_overview = _call_tool(server, "inspect_config_schema")
@@ -429,4 +429,4 @@ def test_mcp_stdio_framing_and_cli_entrypoints() -> None:
         check=False,
     )
     assert probe_proc.returncode == 0
-    assert json.loads(probe_proc.stdout)["models"]["total"] == 34
+    assert json.loads(probe_proc.stdout)["models"]["total"] == 37

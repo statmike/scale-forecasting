@@ -36,7 +36,7 @@ schema) surfaces as a single `ConfigError`.
 ```mermaid
 flowchart LR
     RunCfg["RunConfig"] --> Data["data (DataConfig)<br/>source_table · freq · horizon"]
-    RunCfg --> Models["models + model_params<br/>34 registered models across 5 families"]
+    RunCfg --> Models["models + model_params<br/>37 registered models across 5 families"]
     RunCfg --> Feat["features (FeaturesConfig)<br/>transform · holidays · fourier<br/>level_shift · static/future/past covariates"]
     RunCfg --> BT["backtest (BacktestConfig)<br/>scheme · n_folds · gap<br/>short_series · decision_metric"]
     RunCfg --> Out["output (OutputConfig)<br/>point_forecast: auto | median | mean | raw"]

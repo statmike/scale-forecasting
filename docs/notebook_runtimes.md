@@ -54,7 +54,7 @@ Colab Enterprise templates can bake them in, so no environment cell is needed (s
 
 | Notebook | Cloud compute | Python | Notes | Extras the bootstrap locks | Colab template |
 |----------|---------------|--------|-------|-------|----------------|
-| `00_model_playground` | none (fully local) | 3.11 | pure local sandbox across 34 models (5 families), 21 metrics, covariates, two-tier explainability & 8 FPP3 reconciliation methods | none (core only) | `sf-main` |
+| `00_model_playground` | none (fully local) | 3.11 | pure local sandbox across 37 models (5 families), 21 metrics, covariates, two-tier explainability & 8 FPP3 reconciliation methods | none (core only) | `sf-main` |
 | `01_bigquery_native_sql` | BigQuery | 3.11 | pure SQL (`ARIMA_PLUS`, `TimesFM`) + ensembling | `[gcp]` | `sf-main` |
 | `02_vertex_and_gce_vms` | GCE Single-VM, Vertex `CustomJob` & GKE Jobs | 3.11 | compares `gce` single-VM, `vertex` multi-worker sharding, and `gke` Indexed Jobs + feature attributions | `[gcp]` | `sf-main` |
 | `03_spark_serverless_and_connect` | Dataproc Spark (`serverless` / `cluster` / `connect`) | 3.11 | Serverless Spark batch $\parallel$ BQ + interactive Spark Connect on runtime **2.3** | `[gcp]` + `[spark]` | `sf-main` |

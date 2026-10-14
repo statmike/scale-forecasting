@@ -7,8 +7,8 @@ the canonical Python declarations (`RunConfig`, `list_models`, `METRIC_NAMES`, `
 1. ``docs/schemas/run_config.schema.json`` — JSON Schema (Draft 2020-12) for `RunConfig`.
 2. ``skills/scale-forecasting/references/config_reference.md`` — complete field-by-field reference
    for `RunConfig` and every nested Pydantic model, cross-field rules, and ``run_id`` exclusions.
-3. ``skills/scale-forecasting/references/catalog_reference.md`` — all 34 models, 21 metrics,
-   7 compute runtimes, 4 GPU types, 12 dependency extras, BigQuery tables/views, and 62 configs.
+3. ``skills/scale-forecasting/references/catalog_reference.md`` — all 37 models, 21 metrics,
+   7 compute runtimes, 4 GPU types, 13 dependency extras, BigQuery tables/views, and 62 configs.
 4. ``skills/scale-forecasting/references/execution_paths_and_ops.md`` — all 5 execution paths,
    environment variables, monitoring/review/calibration, surgical repair, and registry operations.
 5. ``docs/llms.txt`` — concise LLM index following the ``llms.txt`` convention.
@@ -93,6 +93,7 @@ _MODELS_STATS_MODULES: tuple[str, ...] = ("statsforecast",)
 _MODELS_TREES_MODULES: tuple[str, ...] = ("xgboost", "lightgbm", "catboost")
 _MODELS_PROPHET_MODULES: tuple[str, ...] = ("prophet",)
 _MODELS_DL_MODULES: tuple[str, ...] = ("torch", "neuralprophet", "neuralforecast")
+_MODELS_FOUNDATION_MODULES: tuple[str, ...] = ("torch", "chronos", "timesfm")
 _MODELS_AUTOML_MODULES: tuple[str, ...] = EXTRA_MODULES["models-automl"]
 
 ALL_EXTRA_MODULES: dict[str, tuple[str, ...]] = {
@@ -105,12 +106,14 @@ ALL_EXTRA_MODULES: dict[str, tuple[str, ...]] = {
     "models-trees": _MODELS_TREES_MODULES,
     "models-prophet": _MODELS_PROPHET_MODULES,
     "models-dl": _MODELS_DL_MODULES,
+    "models-foundation": _MODELS_FOUNDATION_MODULES,
     "models-automl": _MODELS_AUTOML_MODULES,
     "models": (
         *_MODELS_STATS_MODULES,
         *_MODELS_TREES_MODULES,
         *_MODELS_PROPHET_MODULES,
         *_MODELS_DL_MODULES,
+        *_MODELS_FOUNDATION_MODULES,
         *_MODELS_AUTOML_MODULES,
     ),
     "all": tuple(
@@ -124,6 +127,7 @@ ALL_EXTRA_MODULES: dict[str, tuple[str, ...]] = {
                 *_MODELS_TREES_MODULES,
                 *_MODELS_PROPHET_MODULES,
                 *_MODELS_DL_MODULES,
+                *_MODELS_FOUNDATION_MODULES,
                 *_MODELS_AUTOML_MODULES,
             ]
         )
@@ -140,8 +144,11 @@ EXTRA_DESCRIPTIONS: dict[str, str] = {
     "models-trees": "Gradient-boosted tree models: XGBoost, LightGBM, CatBoost (3 models)",
     "models-prophet": "Prophet additive/multiplicative decomposable model (1 model)",
     "models-dl": "PyTorch, NeuralProphet, and NeuralForecast deep-learning models (5 models)",
+    "models-foundation": (
+        "Open-weight zero-shot foundation models: Chronos-Bolt, Chronos-2, TimesFM (3 models)"
+    ),
     "models-automl": "Vertex AI Pipelines / KFP components for Tabular Workflows (4 models)",
-    "models": "All 5 model family extras combined",
+    "models": "All 6 model family extras combined",
     "all": "Complete installation (all cloud clients, runtimes, notebooks, and model families)",
 }
 
@@ -1094,7 +1101,7 @@ def render_skill_execution_paths_reference() -> str:
             "# Probe installed extras, available models, and environment readiness",
             "python -m scale_forecasting.agent_surfaces --probe-env",
             "",
-            "# List all 34 models and 21 metrics with availability and capabilities",
+            "# List all 37 models and 21 metrics with availability and capabilities",
             "python -m scale_forecasting.playground --list",
             "python -m scale_forecasting.playground --catalog",
             "",
@@ -1349,7 +1356,7 @@ def render_llms_txt() -> str:
             "",
             (
                 "> Declarative, multi-runtime enterprise time-series forecasting platform for "
-                "Google Cloud. One frozen Pydantic `RunConfig` orchestrates 34 models across 5 "
+                "Google Cloud. One frozen Pydantic `RunConfig` orchestrates 37 models across 5 "
                 "families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 "
                 "evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, "
                 "`vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, "
@@ -1373,7 +1380,7 @@ def render_llms_txt() -> str:
             (
                 f"- [Comprehensive LLM Context Bundle (`llms-full.txt`)]"
                 f"({_SITE_BASE}/llms-full.txt): Single-file reference containing all `RunConfig` "
-                "fields, all 34 models, 21 metrics, 7 runtimes, 12 extras, and 5 execution paths."
+                "fields, all 37 models, 21 metrics, 7 runtimes, 13 extras, and 5 execution paths."
             ),
             (
                 f"- [Repository Portable Skill (`skills/scale-forecasting/SKILL.md`)]"
@@ -1426,7 +1433,7 @@ def render_llms_txt() -> str:
                 "lifecycle governance, and executive HTML/JSON reports."
             ),
             (
-                f"- [Models Reference (34 Models)]({_SITE_BASE}/models_reference/): All 34 "
+                f"- [Models Reference (37 Models)]({_SITE_BASE}/models_reference/): All 37 "
                 "models, covariate support, explainability, and granular extras."
             ),
             (

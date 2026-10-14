@@ -49,6 +49,9 @@ _MODEL_DEP: dict[str, str] = {
     "tft": "neuralforecast",
     "tide": "neuralforecast",
     "tsmixer": "neuralforecast",
+    "chronos_bolt": "chronos",
+    "chronos2": "chronos",
+    "timesfm_torch": "timesfm",
 }
 
 # Cheap-but-equivalent params: this file asserts *where* a forecast is anchored, never how good it
@@ -60,6 +63,7 @@ _PARAMS: dict[str, dict[str, Any]] = {
     "tft": {"max_steps": 5},
     "tide": {"max_steps": 5},
     "tsmixer": {"max_steps": 5},
+    "chronos_bolt": {"size": "tiny"},
 }
 
 # Models whose point forecast provably *must* move when the history steps up by a constant, because
@@ -273,6 +277,8 @@ def test_the_re_condition_tier_is_the_one_the_plan_names() -> None:
         "auto_ces",
         "auto_theta",
         "catboost",
+        "chronos2",
+        "chronos_bolt",
         "croston",
         "kalman",
         "lightgbm",
@@ -286,6 +292,7 @@ def test_the_re_condition_tier_is_the_one_the_plan_names() -> None:
         "sarimax",
         "tft",
         "tide",
+        "timesfm_torch",
         "tsmixer",
         "ucm",
         "xgboost",

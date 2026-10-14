@@ -28,7 +28,7 @@ flowchart TB
     subgraph core["Per-Series & Panel Forecasting Core"]
         eng["Execution Engines<br/>engines/ (Spark · Ray · Vertex/GCE/GKE · Vertex AutoML · BigQuery)"]
         wf["Feature, Backtest, Reconciliation, Ensemble & Diagnostics Core<br/>features.py · backtest.py · calibration.py · reconciliation.py<br/>hpo.py · ensembler.py · ensemble_run.py · diagnostics.py · scenarios.py"]
-        mod["Models & Metrics<br/>models/ (34 models) · metrics/ (21 metrics)"]
+        mod["Models & Metrics<br/>models/ (37 models) · metrics/ (21 metrics)"]
     end
 
     reg[("BigQuery Run Registry<br/>registry/ (DDL · Storage Write API · Views · Ops)")]
@@ -49,7 +49,7 @@ Each subpackage has its own `README.md` with architecture diagrams and module gu
 
 | Subpackage | Purpose |
 | :--- | :--- |
-| **[`models/`](./models/README.md)** | The 34 forecasting models (`statistical`, `ml`, `deep_learning`, `automl`, `native`), the `BaseModel` contract (local, global, and hybrid scopes + two-tier explainability), recursive lag design matrix (`_lag_forecaster.py`), Nixtla `neuralforecast` adapter (`_neuralforecast_base.py`), Vertex AI AutoML adapter (`_vertex_automl_base.py`), and model registry. |
+| **[`models/`](./models/README.md)** | The 37 forecasting models (`statistical`, `ml`, `deep_learning`, `automl`, `native`), the `BaseModel` contract (local, global, and hybrid scopes + two-tier explainability), recursive lag design matrix (`_lag_forecaster.py`), Nixtla `neuralforecast` adapter (`_neuralforecast_base.py`), open-weight foundation adapter (`_foundation_base.py`), Vertex AI AutoML adapter (`_vertex_automl_base.py`), and model registry. |
 | **[`metrics/`](./metrics/README.md)** | The 21 evaluation metrics (16 point metrics + 5 prediction-interval metrics), `BaseMetric` contract, and `METRIC_NAMES` schema driver. |
 | **[`engines/`](./engines/README.md)** | Distributed, single-VM, and managed AutoML engines for Dataproc Spark (`spark_explode.py`, `spark_io.py`), Ray on Vertex AI & GKE (`ray_engine.py`, `ray_io.py`), Vertex AI `CustomJob`, Compute Engine & GKE Indexed Jobs (`vertex_engine.py`), Vertex AI AutoML Tabular Workflows (`automl_engine.py`), and BigQuery SQL (`bigquery_engine.py`, `bigquery_sql.py`). |
 | **[`registry/`](./registry/README.md)** | BigQuery table DDL (`ddl.py`), deterministic `run_id` hashing (`ids.py`), Storage Write API streaming (`write_api.py`), SQL views (`views.py`), and operator maintenance verbs (`ops.py`). |

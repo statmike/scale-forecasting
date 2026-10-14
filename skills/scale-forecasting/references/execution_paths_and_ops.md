@@ -40,7 +40,7 @@ Works on a bare `pip install scale-forecasting` core install with no Google Clou
 # Probe installed extras, available models, and environment readiness
 python -m scale_forecasting.agent_surfaces --probe-env
 
-# List all 34 models and 21 metrics with availability and capabilities
+# List all 37 models and 21 metrics with availability and capabilities
 python -m scale_forecasting.playground --list
 python -m scale_forecasting.playground --catalog
 

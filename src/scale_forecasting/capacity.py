@@ -100,6 +100,7 @@ _CAPACITY_MARKERS: tuple[str, ...] = (
     "out of resources",
     "try a different",
     "capacity",
+    "is not ready",
 )
 
 # api_core exception class names that are transient by nature (gRPC UNAVAILABLE=14,

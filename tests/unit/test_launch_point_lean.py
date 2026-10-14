@@ -34,6 +34,9 @@ _MODEL_STACK = (
     "neuralprophet",
     "prophet",
     "torch",
+    "chronos",
+    "timesfm",
+    "timesfm3",
 )
 
 

@@ -282,7 +282,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 
 | Field | Allowed Values / Rule |
 | :--- | :--- |
-| `models` | Non-empty list of registered model names (`34` available; see [`catalog_reference.md`](./catalog_reference.md)). No duplicates allowed. |
+| `models` | Non-empty list of registered model names (`37` available; see [`catalog_reference.md`](./catalog_reference.md)). No duplicates allowed. |
 | `backtest.decision_metric` | Any of the `21` registered metrics: `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball`, `mase_seasonal`, `maape`, `interval_score`, `interval_width`, `ope`, `rmsle`, `msse`, `msis`, `r2`, `cv`. |
 | `ensemble.strategies` | Calculated: `mean`, `median`, `inverse_error` (work with or without backtest). Learned stackers: `nnls`, `ridge`, `xgb` (require `backtest.enabled=true`). Singular shorthand `strategy` is also accepted. |
 | `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `middle_out`, `mint_nonneg`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |

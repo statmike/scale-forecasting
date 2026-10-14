@@ -1,6 +1,6 @@
 [project]
 name = "scale-forecasting"
-version = "1.1.0"
+version = "1.2.0"
 description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
 dynamic = ["readme"]
 # Two different pins, on purpose. `requires-python` is what *the package* installs on: the pure
@@ -26,6 +26,7 @@ keywords = [
     "gke",
     "automl",
     "timesfm",
+    "chronos",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -42,7 +43,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Core dependencies: the pure forecasting layer — config, the 34 model plugins' shared base, the 21
+# Core dependencies: the pure forecasting layer — config, the 37 model plugins' shared base, the 21
 # metrics, features, backtests, calibration, reconciliation, ensembling, HPO, the worker, and the
 # playground. Nothing here talks to a cloud API. A bare `pip install scale-forecasting` is enough to
 # run `python -m scale_forecasting.playground` on synthetic data with no project, no billing, and
@@ -160,8 +161,8 @@ submit = [
 ]
 # Granular model extras for environment agility — install individual model libraries
 # when enterprise environments restrict specific packages, or install `models` for the full suite.
-# 15 of the 34 models run on the core install alone (numpy / scipy / statsmodels / scikit-learn);
-# these extras add the 17 that need a third-party or cloud library, and the two BigQuery ML models
+# 15 of the 37 models run on the core install alone (numpy / scipy / statsmodels / scikit-learn);
+# these extras add the 20 that need a third-party or cloud library, and the two BigQuery ML models
 # need [gcp]. docs/models_reference.md maps each extra to its models.
 models-stats = [
     "statsforecast>=2.0",
@@ -185,6 +186,14 @@ models-dl = [
     # compatibility lets a 12.6-built wheel run on the 535 driver.
     "torch>=2.13,<2.14",
 ]
+# Zero-shot pretrained foundation models (`chronos_bolt`, `chronos2`, `timesfm_torch`). Separated
+# from `models-dl` so users who only want pretrained zero-shot inference (CPU-default, GPU-optional)
+# do not need `neuralprophet` or `neuralforecast`, and vice versa. Both packages depend on `torch`
+# transitively (whose version floor is declared in `models-dl`).
+models-foundation = [
+    "chronos-forecasting>=2.2",
+    "timesfm[torch]>=3.0",
+]
 # The four Vertex AI AutoML models (vertex_l2l / tide / tft / seq2seq) run as Tabular Workflow
 # pipelines or managed training jobs. The Vertex SDK is in [gcp]; this adds the pipeline components
 # the Tabular Workflow path compiles against.
@@ -192,10 +201,10 @@ models-automl = [
     "scale-forecasting[gcp]",
     "google-cloud-pipeline-components>=2.14",
 ]
-# Full optional model suite (statistical + boosted-tree + Prophet + deep-learning + Vertex AutoML),
-# composed from the family extras so every version floor is declared exactly once.
+# Full optional model suite (statistical + boosted-tree + Prophet + deep-learning + foundation +
+# Vertex AutoML), composed from the family extras so every version floor is declared exactly once.
 models = [
-    "scale-forecasting[models-stats,models-trees,models-prophet,models-dl,models-automl]",
+    "scale-forecasting[models-stats,models-trees,models-prophet,models-dl,models-foundation,models-automl]",
 ]
 # Everything: every client, every model library, both on-cluster runtimes, the notebook kernel.
 # This is what `uv sync --all-extras` (CI, `make sync`) resolves to, spelled as one installable name.
@@ -355,6 +364,9 @@ module = [
     "prophet.*",
     "neuralprophet.*",
     "neuralforecast.*",
+    "chronos.*",
+    "timesfm.*",
+    "timesfm3.*",
     "sklearn.*",
     "google_cloud_pipeline_components.*",
     "kfp.*",
