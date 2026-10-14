@@ -468,6 +468,25 @@ class McpServer:
                                 "Optional price column name for revenue impact simulation."
                             ),
                         },
+                        "include_inventory_policy": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute operational (s, S) / (R, S) inventory & "
+                                "replenishment policy (ROP, safety_stock, order_up_to_level, "
+                                "recommended_order_qty, Newsvendor cost) from the forward "
+                                "forecast and backtest residuals."
+                            ),
+                        },
+                        "inventory_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword overrides for compute_inventory_policy "
+                                "(lead_time, lead_time_std, review_period, service_level, "
+                                "fill_rate, on_hand, on_order, backorders, holding_cost, "
+                                "stockout_cost, min_order_qty, order_multiple)."
+                            ),
+                        },
                         "export_report_path": {
                             "type": "string",
                             "description": (
@@ -614,6 +633,24 @@ class McpServer:
                             "default": False,
                             "description": (
                                 "When true, include Top-N operational exception triage queue."
+                            ),
+                        },
+                        "include_inventory_policy": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include operational (s, S) / (R, S) inventory & "
+                                "replenishment policy table (ROP, safety_stock, "
+                                "order_up_to_level, recommended_order_qty, Newsvendor cost)."
+                            ),
+                        },
+                        "inventory_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword overrides for compute_inventory_policy "
+                                "(lead_time, lead_time_std, review_period, service_level, "
+                                "fill_rate, on_hand, on_order, backorders, holding_cost, "
+                                "stockout_cost, min_order_qty, order_multiple, model_type)."
                             ),
                         },
                         "export_report_path": {
@@ -888,6 +925,12 @@ class McpServer:
                     price_col=str(price_col) if price_col else None,
                 )
                 out_pg["scenario_summary"] = summarize_scenarios(sim_df).to_dict(orient="records")
+            inv_params_pg = args.get("inventory_params")
+            if bool(args.get("include_inventory_policy", False)) or isinstance(inv_params_pg, dict):
+                inv_kw_pg = dict(inv_params_pg) if isinstance(inv_params_pg, dict) else {}
+                out_pg["inventory_policy"] = run.inventory_policy_df(**inv_kw_pg).to_dict(
+                    orient="records"
+                )
             rep_path = args.get("export_report_path")
             if rep_path:
                 written = run.export_report(str(rep_path))
@@ -1083,8 +1126,12 @@ class McpServer:
             want_decay = bool(args.get("include_horizon_decay", False))
             want_bias = bool(args.get("include_bias_report", False))
             want_exc = bool(args.get("include_exceptions", False))
+            inv_params_rev = args.get("inventory_params")
+            want_inv = bool(args.get("include_inventory_policy", False)) or isinstance(
+                inv_params_rev, dict
+            )
             rep_path_rev = args.get("export_report_path")
-            if want_fva or want_decay or want_bias or want_exc or rep_path_rev:
+            if want_fva or want_decay or want_bias or want_exc or want_inv or rep_path_rev:
                 import pandas as pd
 
                 from .diagnostics import (
@@ -1092,6 +1139,7 @@ class McpServer:
                     compute_exceptions_queue,
                     compute_fva,
                     compute_horizon_decay,
+                    compute_inventory_policy,
                 )
                 from .registry.reads import read_oof, read_predictions
                 from .report import export_report
@@ -1111,9 +1159,18 @@ class McpServer:
                     out["exceptions"] = compute_exceptions_queue(
                         oof_df=oof_df, metric=metric
                     ).to_dict(orient="records")
-                if rep_path_rev:
+                pred_df: pd.DataFrame | None = None
+                if want_inv or rep_path_rev:
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                if want_inv and pred_df is not None:
+                    inv_kw_rev = dict(inv_params_rev) if isinstance(inv_params_rev, dict) else {}
+                    out["inventory_policy"] = compute_inventory_policy(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        **inv_kw_rev,
+                    ).to_dict(orient="records")
+                if rep_path_rev and pred_df is not None:
                     written_r = export_report(
                         {"run_id": run_id, "oof_df": oof_df, "predictions_df": pred_df},
                         str(rep_path_rev),

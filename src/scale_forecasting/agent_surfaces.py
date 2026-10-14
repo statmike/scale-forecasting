@@ -1281,9 +1281,9 @@ def render_skill_execution_paths_reference() -> str:
             ),
             "| **Interval & arm calibration** | — | `calibration_report(run_id)` |",
             (
-                "| **Forecaster's Workbench diagnostics** | — | "
-                "`Forecaster(cfg).fva()` / `.horizon_decay()` / `.bias_report()` / "
-                "`.exceptions_queue()` |"
+                "| **Forecaster's Workbench & Inventory Policy** | — | "
+                "`Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / "
+                "`.exceptions_df()` / `.inventory_policy_df()` |"
             ),
             (
                 "| **Executive HTML + JSON report** | "

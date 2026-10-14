@@ -104,7 +104,7 @@ claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 - *"Probe my environment, tell me which model families are installed locally, and run a 14-day backtest of `holtwinters` in the offline playground."*
 - *"Build a validated `RunConfig` for daily retail sales in `my_project.retail.sales` with `promo_flag` as a future covariate, comparing `auto_arima`, `lightgbm`, and `tft` with an `nnls` stacked ensemble, routing `deep_learning` to an `L4` GPU on Vertex AI CustomJob."*
 - *"Dry-run `configs/ensemble_demo.json`, show me the per-family DAG and deterministic `run_id`, and emit a Cloud Composer 3 Airflow DAG with surgical retry enabled."*
-- *"Inspect the live BigQuery registry with `doctor`, review the latest completed run's leaderboard and interval coverage calibration, and preview a surgical `--retry` plan for any failed cells."*
+- *"Inspect the live BigQuery registry with `doctor`, review the latest completed run's leaderboard, interval coverage calibration, and 95% CSL inventory reorder points (`include_inventory_policy=True`), and preview a surgical `--retry` plan for any failed cells."*
 
 ---
 
@@ -173,10 +173,10 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, or shipped configs. |
 | `inspect_config_schema` | No | No | Inspect the top-level `RunConfig` overview or drill into a specific section/class (`compute`, `backtest`, `FamilyCompute`, etc.). |
 | `validate_and_dry_run` | No | No | Validate a `RunConfig` (dict, JSON string, or file path), compute deterministic `run_id`, estimate workload, resolve per-family DAG nodes, and check local model extras. |
-| `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, returning metrics and sample predictions. |
+| `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, workbench diagnostics (`include_fva`, `include_horizon_decay`, `include_bias_report`, `include_exceptions`, `include_inventory_policy`, `scenarios`), and sample predictions. |
 | `plan_execution` | Mode-dependent | Only `stage_only` | Plan or emit execution artifacts: `dry_run`, `emit_airflow` (with `--with-retry`), `feasibility` (live BQ), `quota` (live GCP quotas), or `stage_only` (uploads to GCS). |
 | `inspect_registry` | Yes | No | Read-only live BigQuery registry inspection: `doctor`, `recent_runs` (`v_run_summary`), `probe_run` (live runtime reconciliation), or `retry_preview` (surgical cell repair table). |
-| `review_run` | Yes | No | Full data-science evaluation of a `run_id` (`review_run` + `calibration_report`): champion models, ensemble lift, leaderboard, arm comparison, and interval coverage. |
+| `review_run` | Yes | No | Full data-science and supply-chain evaluation of a `run_id` (`review_run` + `calibration_report` + optional workbench diagnostics including `include_inventory_policy` / `inventory_params`): champion models, ensemble lift, leaderboard, interval coverage, and inventory reorder policies (`SS`, `ROP`, `S`, `EOQ`). |
 | `launch_or_repair_run` | Yes | **Yes** | Safety-gated execution and repair: `run` (launch multi-family DAG), `retry` (submit surgical repair), `settle` (repair stale job rows), `cancel` (stop cloud jobs), or `close_runs`. |
 
 ### Safety-By-Default (`--allow-launch`)

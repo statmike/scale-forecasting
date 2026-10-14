@@ -249,6 +249,91 @@ class PlaygroundRun:
         )
         return rollup_time(preds, freq=freq, oof_df=oof, level=level)
 
+    def inventory_policy_df(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+    ) -> pd.DataFrame:
+        """Translate this run's calibrated forecasts into an operational inventory policy."""
+        from .diagnostics import compute_inventory_policy
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        return compute_inventory_policy(
+            preds,
+            oof_df=oof,
+            inventory_df=inventory_df,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+        )
+
+    def plot_inventory_policy(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot Reorder Point (`ROP`), Safety Stock (`SS`), and Order Quantity for this run."""
+        from .diagnostics import plot_inventory_policy
+
+        df = self.inventory_policy_df(
+            inventory_df=inventory_df,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+        )
+        return plot_inventory_policy(df, ax=ax, title=title)
+
     def simulate_scenarios(
         self,
         scenarios: dict[str, dict[str, Any]],
@@ -367,6 +452,90 @@ class BakeOff:
         from .diagnostics import rollup_time
 
         return rollup_time(self.predictions, freq=freq, oof_df=self.oof, level=level)
+
+    def inventory_policy_df(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+    ) -> pd.DataFrame:
+        """Translate bake-off forecasts across all models into operational inventory policies."""
+        from .diagnostics import compute_inventory_policy
+
+        return compute_inventory_policy(
+            self.predictions,
+            oof_df=self.oof,
+            inventory_df=inventory_df,
+            model_name=model_name or model_type,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+        )
+
+    def plot_inventory_policy(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+        max_rows: int = 15,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot Reorder Points (`ROP`), Safety Stock (`SS`), and Order Quantities across models."""
+        from .diagnostics import plot_inventory_policy
+
+        df = self.inventory_policy_df(
+            inventory_df=inventory_df,
+            model_name=model_name or model_type,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+        )
+        return plot_inventory_policy(df, max_rows=max_rows, ax=ax, title=title)
 
     def simulate_scenarios(
         self,

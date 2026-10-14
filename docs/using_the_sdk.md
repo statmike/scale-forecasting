@@ -168,6 +168,7 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.horizon_decay_df()` / `plot_horizon_decay()` | `pd.DataFrame` / `Figure` | Step-by-step error decay ($h = 1 \dots H$) and crossover horizon $h^*$ vs. baseline |
 | `forecaster.bias_df()` | `pd.DataFrame` | Directional percentage bias, Trigg Tracking Signal ($\text{TS}$), and chronic over/under-forecasting streaks |
 | `forecaster.rollup_time(freq="W")` | `pd.DataFrame` | Autocorrelation-aware temporal or $L$-day lead-time aggregation of point and interval forecasts |
+| `forecaster.inventory_policy_df(...)` / `plot_inventory_policy(...)` | `pd.DataFrame` / `Axes` | Translates calibrated forecasts, empirical AR(1) residual autocorrelation, and supplier lead-time variability into continuous $(s, S)$ and periodic $(R, S)$ **Reorder Points (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To Levels ($S$)**, **Recommended Order Quantities ($Q$)**, and **Expected Holding vs. Stockout Cost** tables |
 | `forecaster.simulate_scenarios(scenarios={...})` | `pd.DataFrame` | Counterfactual future covariate shocks (promo/price elasticity) with delta units and revenue impact |
 | `forecaster.score_realized(actuals_df)` | `pd.DataFrame` | Joins published predictions against newly arrived actuals and flags live accuracy drift (`drift_flagged`) |
 | `forecaster.revision_stability_df([run_1, ...])` | `pd.DataFrame` | Cross-run forecast revision stability (`mar`, `revision_cov`, `whipsaw_flagged`) across overlapping target dates |
@@ -177,9 +178,10 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
 top level of `scale_forecasting` (`build_variant_matrix_frame`, `explain_forecast_frame`, `plot_forecast_explanation`,
 `build_attributions_frame`, `plot_attributions`, `compute_anomalies`, `compute_change_points`,
-`build_calibration_frames`, `plot_calibration`, `build_ensemble_weights_frame`,
-`plot_ensemble_weights`, `build_cohorts_frame`), so you can run the exact same diagnostics on
-in-memory `CellResult` objects in `00_model_playground.ipynb` before touching Google Cloud.
+`compute_inventory_policy`, `plot_inventory_policy`, `build_calibration_frames`, `plot_calibration`,
+`build_ensemble_weights_frame`, `plot_ensemble_weights`, `build_cohorts_frame`), so you can run the
+exact same diagnostics on in-memory `CellResult` objects in `00_model_playground.ipynb` before
+touching Google Cloud.
 
 ---
 

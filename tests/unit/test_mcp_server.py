@@ -324,6 +324,36 @@ def test_mcp_cloud_tools_with_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
         "read_recent_runs",
         lambda **kw: [{"run_id": "demo-123456789abc", "status": "COMPLETED"}],
     )
+    monkeypatch.setattr(
+        reads,
+        "read_oof",
+        lambda run_id, **kw: [
+            {
+                "ts_id": "s_000000",
+                "model_type": "holtwinters",
+                "fold_id": 0,
+                "horizon_step": 1,
+                "forecast_date": "2026-01-01",
+                "y_true": 100.0,
+                "yhat": 102.0,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        reads,
+        "read_predictions",
+        lambda run_id, **kw: [
+            {
+                "ts_id": "s_000000",
+                "model_type": "holtwinters",
+                "forecast_date": f"2026-02-0{d}",
+                "yhat": 100.0,
+                "yhat_lower": 85.0,
+                "yhat_upper": 115.0,
+            }
+            for d in range(1, 8)
+        ],
+    )
     monkeypatch.setattr(rec_mod, "probe_run", lambda run_id, **kw: _FakeTableStat())
     monkeypatch.setattr(
         retry_mod,
@@ -378,10 +408,18 @@ def test_mcp_cloud_tools_with_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
     is_err, rev_res = _call_tool(
         server,
         "review_run",
-        {"run_id": "demo-123456789abc", "include_calibration": True, "include_leaderboard": True},
+        {
+            "run_id": "demo-123456789abc",
+            "include_calibration": True,
+            "include_leaderboard": True,
+            "include_inventory_policy": True,
+            "inventory_params": {"lead_time": 5.0, "service_level": 0.95},
+        },
     )
     assert not is_err, rev_res
     assert rev_res["run_id"] == "demo-123456789abc"
+    assert len(rev_res["inventory_policy"]) == 1
+    assert rev_res["inventory_policy"][0]["reorder_point"] > 500.0
 
     for action in ("run", "retry", "settle", "cancel", "close_runs"):
         is_err, l_res = _call_tool(

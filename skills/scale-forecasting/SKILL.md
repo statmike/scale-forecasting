@@ -122,14 +122,17 @@ Every cloud run persists structured lineage and outputs to 5 BigQuery tables (`r
 1. **Verify Run Completion & Job Telemetry:**
    - Check `run_registry` (or `v_run_summary`) for `status = 'COMPLETED'` and `overhead_seconds`.
    - Inspect `run_jobs` (or `v_run_jobs`) for per-family wall-clock duration, `machine_type`, and `$.sizing` / `$.sizing_executed` JSON telemetry.
-2. **Run the Automated Data-Science Review & Calibration Report:**
+2. **Run the Automated Data-Science Review, Calibration & Supply-Chain Policy Translators:**
    ```python
+   from scale_forecasting import Forecaster
    from scale_forecasting.review import calibration_report, review_run
 
    review = review_run("ensemble-demo-8ca68173be52")
    cal = calibration_report("ensemble-demo-8ca68173be52")
+   f = Forecaster.from_run_id("ensemble-demo-8ca68173be52")
+   policy_df = f.inventory_policy_df(lead_time=7.0, service_level=0.95)
    ```
-   Or via MCP: `review_run(run_id="...")`. Returns `best_overall`, `best_per_family`, `ensemble_lift`, full model leaderboard (`score`, `pooled_wape`, `n_comparable_series`, `cohort`), point-forecast arm win-rate (`arms`), and empirical vs. nominal interval coverage (`coverage`, `mean_coverage`, `worst_step`).
+   Or via MCP: `review_run(run_id="...", include_inventory_policy=True, inventory_params={"lead_time": 7.0, "service_level": 0.95})`. Returns `best_overall`, `best_per_family`, `ensemble_lift`, full model leaderboard (`score`, `pooled_wape`, `n_comparable_series`, `cohort`), point-forecast arm win-rate (`arms`), empirical vs. nominal interval coverage (`coverage`, `mean_coverage`, `worst_step`), and optional Forecaster Workbench diagnostics (`fva`, `horizon_decay`, `bias_report`, `exceptions`, `inventory_policy`, `scenarios`).
 3. **Surgical Repair of Failed or Partial Runs (Never Re-Run Everything Blindly):**
    - **Preview or submit surgical cell repair (`retry_run`):** Re-runs only missing or failed `(ts_id, model_type)` cells and re-runs the ensemble barrier if any cell was repaired:
      ```bash

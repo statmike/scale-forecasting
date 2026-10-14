@@ -16,6 +16,9 @@ summary payload) combining:
 5. **Interactive Series & Multi-Quantile Fan Explorer** — client-side ``ts_id`` and ``model_type``
    selector rendering an interactive SVG chart of historical actuals, point forecast, $80\\%$
    calibrated interval, and multi-percentile fan (`p10`–`p95`).
+6. **Inventory & Replenishment Policy (ROP / Safety Stock)** — dynamic safety stock, reorder
+   point ($s$), order-up-to target ($S$), and recommended order quantity combining forward
+   forecasts, AR(1) multi-step error covariance, and supplier lead-time variability.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from .diagnostics import (
     compute_exceptions_queue,
     compute_fva,
     compute_horizon_decay,
+    compute_inventory_policy,
 )
 
 __all__ = [
@@ -308,6 +312,7 @@ def build_report_payload(
     exceptions_df: pd.DataFrame | None = None,
     realized_df: pd.DataFrame | None = None,
     stability_df: pd.DataFrame | None = None,
+    inventory_policy_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
@@ -325,6 +330,8 @@ def build_report_payload(
             stability_df=stability_df,
             metric=metric,
         )
+    if inventory_policy_df is None and predictions_df is not None and not predictions_df.empty:
+        inventory_policy_df = compute_inventory_policy(predictions_df, oof_df=oof_df)
 
     fva_recs = _df_to_records(fva_df)
     lb_recs = _df_to_records(leaderboard_df)
@@ -333,6 +340,7 @@ def build_report_payload(
     bias_recs = _df_to_records(bias_df)
     real_recs = _df_to_records(realized_df)
     stab_recs = _df_to_records(stability_df)
+    inv_recs = _df_to_records(inventory_policy_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -367,6 +375,7 @@ def build_report_payload(
         "bias_report": bias_recs,
         "realized_accuracy": real_recs,
         "revision_stability": stab_recs,
+        "inventory_policy": inv_recs,
         "explorer": explorer,
     }
 
@@ -424,6 +433,7 @@ def render_html_report(
     exceptions_df: pd.DataFrame | None = None,
     realized_df: pd.DataFrame | None = None,
     stability_df: pd.DataFrame | None = None,
+    inventory_policy_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
@@ -440,6 +450,7 @@ def render_html_report(
         exceptions_df=exceptions_df,
         realized_df=realized_df,
         stability_df=stability_df,
+        inventory_policy_df=inventory_policy_df,
         metric=metric,
     )
     kpis = payload["kpis"]
@@ -457,6 +468,10 @@ def render_html_report(
     )
     decay_html = _html_table(payload["horizon_decay"], empty_msg="No horizon decay rows.")
     bias_html = _html_table(payload["bias_report"], empty_msg="No bias report rows.")
+    inv_html = _html_table(
+        payload["inventory_policy"],
+        empty_msg="No forward predictions available for inventory policy translation.",
+    )
 
     fva_kpi_str = f"{kpis['best_fva_pct']:+.1f}%" if kpis["best_fva_pct"] is not None else "n/a"
     explorer_json = _script_safe_json(payload["explorer"])
@@ -587,6 +602,9 @@ def render_html_report(
   <button class="tab-btn" onclick="switchTab('tab-decay', this)">
     Horizon Decay &amp; Bias
   </button>
+  <button class="tab-btn" onclick="switchTab('tab-inventory', this)">
+    Inventory Policy (ROP / SS)
+  </button>
   <button class="tab-btn" onclick="switchTab('tab-explorer', this)">
     Interactive Series &amp; Fan Explorer
   </button>
@@ -638,6 +656,13 @@ def render_html_report(
   <div class="card">
     <h2>Directional Bias &amp; Trigg Tracking Signal Audit</h2>
     {bias_html}
+  </div>
+</section>
+
+<section id="tab-inventory" class="tab-panel">
+  <div class="card">
+    <h2>Inventory &amp; Replenishment Policy (ROP / Safety Stock / Order-Up-To)</h2>
+    {inv_html}
   </div>
 </section>
 
@@ -807,6 +832,7 @@ def export_report(
     horizon_decay_df: pd.DataFrame | None = None
     bias_df: pd.DataFrame | None = None
     exceptions_df: pd.DataFrame | None = None
+    inventory_policy_df: pd.DataFrame | None = None
 
     # 1. BakeOff duck-typing
     if hasattr(target, "leaderboard") and hasattr(target, "predictions") and hasattr(target, "oof"):
@@ -814,6 +840,8 @@ def export_report(
         predictions_df = target.predictions
         oof_df = target.oof
         history_df = getattr(target, "series", None)
+        if hasattr(target, "inventory_policy_df"):
+            inventory_policy_df = target.inventory_policy_df()
         if hasattr(target, "config"):
             run_id = getattr(target.config, "run_name", run_id)
             if metric is None:
@@ -826,6 +854,8 @@ def export_report(
         if res.oof is not None and not res.oof.empty:
             oof_df = res.oof.assign(ts_id=res.ts_id, model_type=res.model_type)
         history_df = target.series
+        if hasattr(target, "inventory_policy_df"):
+            inventory_policy_df = target.inventory_policy_df()
     # 3. Forecaster duck-typing
     elif hasattr(target, "leaderboard_df") and hasattr(target, "fva_df"):
         run_id = getattr(target, "run_id", run_id)
@@ -836,6 +866,8 @@ def export_report(
         predictions_df = target.predictions_df(run_id)
         if hasattr(target, "exceptions_df"):
             exceptions_df = target.exceptions_df(run_id)
+        if hasattr(target, "inventory_policy_df"):
+            inventory_policy_df = target.inventory_policy_df(run_id)
     # 4. Mapping of DataFrames
     elif isinstance(target, dict):
         run_id = str(target.get("run_id", run_id))
@@ -847,6 +879,7 @@ def export_report(
         horizon_decay_df = target.get("horizon_decay_df")
         bias_df = target.get("bias_df")
         exceptions_df = target.get("exceptions_df")
+        inventory_policy_df = target.get("inventory_policy_df")
 
     eff_title = title or f"Scale-Forecasting Executive Report ({run_id})"
     html_str = render_html_report(
@@ -860,6 +893,7 @@ def export_report(
         horizon_decay_df=horizon_decay_df,
         bias_df=bias_df,
         exceptions_df=exceptions_df,
+        inventory_policy_df=inventory_policy_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
@@ -876,6 +910,7 @@ def export_report(
             horizon_decay_df=horizon_decay_df,
             bias_df=bias_df,
             exceptions_df=exceptions_df,
+            inventory_policy_df=inventory_policy_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")
