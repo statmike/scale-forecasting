@@ -42,10 +42,13 @@ def _cfg(**over: Any) -> RunConfig:
 def test_only_the_model_with_a_tensor_library_under_it_is_gpu_capable() -> None:
     capable = [n for n in list_models() if get_model(n).gpu_capable]
     assert capable == [
+        "chronos2",
+        "chronos_bolt",
         "neuralprophet",
         "patchtst",
         "tft",
         "tide",
+        "timesfm_torch",
         "tsmixer",
         "vertex_l2l",
         "vertex_seq2seq",

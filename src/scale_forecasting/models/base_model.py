@@ -224,7 +224,7 @@ class BaseModel(ABC):
     def is_available(cls) -> bool:
         """Whether this model's upstream Python package is installed in the current environment.
 
-        Probed without importing it (`errors.is_importable`), so listing 34 models costs nothing and
+        Probed without importing it (`errors.is_importable`), so listing 37 models costs nothing and
         a dotted name whose parent is absent (``google.cloud.bigquery`` on a core-only install)
         reads as "not installed" rather than raising.
         """

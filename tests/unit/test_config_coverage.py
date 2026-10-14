@@ -326,6 +326,15 @@ UNPROVEN: dict[str, str] = {
         "test_reconciliation_mint_nonneg_guarantees_nonnegative_coherent_forecasts"
     ),
     # --- models --------------------------------------------------------------------------------
+    "models=chronos2": (
+        "tests/unit/test_foundation_models.py::test_real_weight_foundation_local_and_global_panel"
+    ),
+    "models=chronos_bolt": (
+        "tests/unit/test_foundation_models.py::test_real_weight_foundation_local_and_global_panel"
+    ),
+    "models=timesfm_torch": (
+        "tests/unit/test_foundation_models.py::test_real_weight_foundation_local_and_global_panel"
+    ),
     "models=vertex_l2l": (
         "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
     ),

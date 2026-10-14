@@ -123,7 +123,7 @@ def test_probe_environment_structure_and_cli(
     env = agent_surfaces.probe_environment(REPO_ROOT)
     assert "python_version" in env
     assert set(env["extras"].keys()) == set(agent_surfaces.ALL_EXTRA_MODULES.keys())
-    assert env["models"]["total"] == 34
+    assert env["models"]["total"] == 37
     assert env["models"]["available_count"] >= 14
     assert env["execution_paths_ready"]["path_1_offline_playground_and_dry_run"] is True
     assert env["execution_paths_ready"]["path_5_airflow_dag_emission"] is True
@@ -132,7 +132,7 @@ def test_probe_environment_structure_and_cli(
     rc = agent_surfaces.main(["--probe-env"])
     assert rc == 0
     captured = json.loads(capsys.readouterr().out)
-    assert captured["models"]["total"] == 34
+    assert captured["models"]["total"] == 37
 
 
 def test_skill_md_and_extension_manifests() -> None:

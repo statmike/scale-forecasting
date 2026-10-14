@@ -429,7 +429,7 @@ After reviewing which model won and how its intervals calibrated, you can inspec
    fig = forecaster.plot_attributions(model_type="xgboost", ts_id="S000001", top_k=8)
    ```
 2. **4-Panel Structural Decomposition (`Forecaster.explain_forecast()` & `Forecaster.plot_forecast_explanation()`):**
-   Works universally across all **34 models** and ensembles, decomposing historical actuals and future predictions into trend, regime level shift, seasonal cycle, and exogenous covariate ridge attribution.
+   Works universally across all **37 models** and ensembles, decomposing historical actuals and future predictions into trend, regime level shift, seasonal cycle, and exogenous covariate ridge attribution.
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or

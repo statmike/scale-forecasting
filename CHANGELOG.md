@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-10-14
+
+### Added
+
+- **Open-Weight Zero-Shot Foundation Model Suite (`[models-foundation]` extra; `34 → 37` models, `12 → 13` extras):**
+  - Added `[models-foundation]` (`chronos-forecasting>=2.2`, `timesfm[torch]>=3.0`) in [`pyproject.toml`](./pyproject.toml), separated from `[models-dl]` and composed into `[models]` and `[all]`. All three models run on CPU by default (`hardware = "cpu"`, `gpu_capable = True`) in `scale_forecasting.playground` and across all 5 Python cloud runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`), automatically accelerating on NVIDIA `T4`, `L4`, `A100`, or `A100_80GB` GPUs when `use_gpu = True` or `hardware = "gpu"`:
+    1. **`chronos_bolt`** ([`src/scale_forecasting/models/chronos_bolt.py`](./src/scale_forecasting/models/chronos_bolt.py)): Amazon `ChronosBoltPipeline` (`amazon/chronos-bolt-base` default; `size="small" | "mini" | "tiny"` or `@small` / `@mini` / `@tiny` variant tags), univariate zero-shot inference with native multi-quantile heads (`0.1`–`0.9`), supporting both `local` and `global` batch modes.
+    2. **`chronos2`** ([`src/scale_forecasting/models/chronos2.py`](./src/scale_forecasting/models/chronos2.py)): Amazon `Chronos2Pipeline` (`amazon/chronos-2`), supporting univariate and 3-tier covariates (`future_covariates`, `past_covariates`, `static_covariates`) across `local` and `global` modes (`cross_learning = True` in `global` mode for cross-series group attention).
+    3. **`timesfm_torch`** ([`src/scale_forecasting/models/timesfm_torch.py`](./src/scale_forecasting/models/timesfm_torch.py)): Google `TimesFM 3.0` (`google/timesfm-3.0-pytorch` default via `timesfm3.TimesFM3Forecaster` with native Variate Attention for past, future, and static covariates, plus `version="2.5"` / `timesfm_torch@v2.5` option using `timesfm.TimesFM_2p5_200M_torch` and pure-NumPy in-context Ridge regression), supporting `local` and `global` modes.
+- **BigQuery Managed Alias (`"bq_timesfm"`):**
+  - [`RunConfig._normalize`](./src/scale_forecasting/config.py) and [`models.base_model_name`](./src/scale_forecasting/models/__init__.py) accept `"bq_timesfm"` (and `"bq_timesfm@<tag>"`) as an explicit alias for BigQuery `AI.FORECAST` (`"timesfm"`), normalizing to `"timesfm"` without altering any `run_id`.
+- **Shared-Instance Default for Zero-Shot Foundation Runs (`workers = 1`):**
+  - [`effective_worker_count`](./src/scale_forecasting/engines/vertex_engine.py) keeps `workers = 1` by default when `deep_learning` runs only zero-shot `[models-foundation]` models on `vertex` or `gke` (executing sequentially on a single shared VM/pod with automatic VRAM/RAM cleanup between models), while preserving automatic per-model multi-worker expansion (`1 → len(models)`) when trained `[models-dl]` models are present.
+- **Operational Inventory & Replenishment Policy Translators (`diagnostics.py`, `sdk.py`, `playground.py`, `report.py`, `mcp.py`):**
+  - Added [`compute_inventory_policy()`](./src/scale_forecasting/diagnostics.py) and [`plot_inventory_policy()`](./src/scale_forecasting/diagnostics.py), exported at the top level of `scale_forecasting`, plus `Forecaster.inventory_policy_df(...)` / `Forecaster.plot_inventory_policy(...)`, `PlaygroundRun.inventory_policy_df(...)` / `PlaygroundRun.plot_inventory_policy(...)`, and `BakeOff.inventory_policy_df(...)` / `BakeOff.plot_inventory_policy(...)`.
+  - Translates calibrated forecast distributions (`yhat`, `yhat_lower`, `yhat_upper`) and out-of-fold backtest residuals (`backtest_oof`) into concrete per-SKU replenishment tables across **Continuous Review $(s, S)$** and **Periodic Review $(R, S)$** policies, **Cycle Service Level ($\text{CSL}$)**, **Unit Fill Rate ($\beta$ via inverse standard normal loss $G(z) = \sigma_P^{-1}(1-\beta)\mu_L$)**, and **Newsvendor Critical Fractile ($\alpha^* = c_u / (c_u + c_o)$)** targets, with **AR(1) autocorrelation-adjusted** + **stochastic lead-time ($\sigma_L$)** protection-window uncertainty ($\sigma_P = \sqrt{\sigma_{D,P}^2 + \bar{d}^2 \sigma_L^2}$), **Inventory Position ($IP = \text{on\_hand} + \text{on\_order} - \text{backorders}$)**, **EOQ / lot-sizing (`min_order_qty`, `order_multiple`)**, expected stockout units and holding/stockout cost, and per-SKU `overrides_df` support.
+  - Added a dedicated **"Inventory Policy (ROP / SS)"** interactive tab (`tab-inventory`) and `"inventory_policy"` JSON payload section in [`report.py`](./src/scale_forecasting/report.py) (wired automatically into `Forecaster.export_report()`), plus `include_inventory_policy` and `inventory_params` on the `run_playground` and `review_run` MCP tools in [`mcp.py`](./src/scale_forecasting/mcp.py).
+
+### Changed
+
+- **Cloud Worker Cache & Compilerless CUDA Hardening ([`src/scale_forecasting/models/_foundation_base.py`](./src/scale_forecasting/models/_foundation_base.py)):**
+  - `_ensure_writable_hf_cache()` and `_checkpoint_load_lock()` detect unwritable `$HOME/.cache` directories (such as YARN user `yarn` on Dataproc clusters), redirect `HF_HOME`, `HF_HUB_CACHE`, `TORCH_HOME`, `TRITON_CACHE_DIR`, and `huggingface_hub.constants` / `transformers.utils.hub` cache attributes to `<tempdir>/scale_forecasting_hf_cache`, and serialize concurrent worker weight downloads on the same host via `fcntl.flock`.
+  - `_ensure_torch_runtime_ready()` deregisters PyTorch 2.11's `('bmm', 'CUDA')` Triton JIT outer-product override (`torch._native.triton_utils.deregister_op_overrides()`) when no C compiler (`gcc` / `clang` / `cc`) is on `PATH`, dispatching `aten::bmm` directly to precompiled cuBLAS kernels; [`docker/Dockerfile`](./docker/Dockerfile) also includes `gcc` and `libc6-dev`.
+  - [`src/scale_forecasting/capacity.py`](./src/scale_forecasting/capacity.py) classifies transient GCE subnetwork contention (`400 The resource '.../subnetworks/...' is not ready`) under `_CAPACITY_MARKERS` so concurrent cluster launches automatically retry with backoff.
+
+---
+
 ## [1.1.0] - 2026-10-13
 
 ### Added
@@ -76,6 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTML Report Hardening (`report.py`):** The inline `EXPLORER_DATA` JSON escapes `<`, `>`, and `&` as `\u003c` / `\u003e` / `\u0026` so a series id containing `</script>` cannot close the script block, and the fan-chart label is HTML-escaped (`escHtml`) before `innerHTML` assignment.
 - **FIPS-Safe Content Addressing:** `code_delivery` tags staged code archives with `hashlib.md5(..., usedforsecurity=False)` (a content-address, not a digest), so staging works on FIPS-enforced hosts.
 
-[Unreleased]: https://github.com/statmike/scale-forecasting/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/statmike/scale-forecasting/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/statmike/scale-forecasting/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/statmike/scale-forecasting/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/statmike/scale-forecasting/releases/tag/v1.0.0

@@ -1,6 +1,6 @@
 # Forecaster Workbench: Bounds, Quantiles, Econometrics, Scenarios & Reports
 
-Beyond scaling 34 models across 7 Google Cloud runtimes, `scale-forecasting` includes an end-to-end **Forecaster Workbench** designed around the daily workflow of demand planners, supply-chain analysts, retail merchandisers, and econometricians. Every capability runs identically in the zero-GCP local playground (`scale_forecasting.playground`), the Python SDK (`sf.Forecaster`), the built-in MCP server (`scale_forecasting.mcp`), and distributed cloud jobs.
+Beyond scaling 37 models across 7 Google Cloud runtimes, `scale-forecasting` includes an end-to-end **Forecaster Workbench** designed around the daily workflow of demand planners, supply-chain analysts, retail merchandisers, and econometricians. Every capability runs identically in the zero-GCP local playground (`scale_forecasting.playground`), the Python SDK (`sf.Forecaster`), the built-in MCP server (`scale_forecasting.mcp`), and distributed cloud jobs.
 
 ```mermaid
 flowchart TD
@@ -18,10 +18,10 @@ flowchart TD
         B1 --> B2 --> B3
     end
 
-    subgraph S3["Stage 3: Econometric Diagnostics, Rollups & What-If Scenarios (G.3)"]
+    subgraph S3["Stage 3: Econometric Diagnostics, Rollups, Inventory Policies & Scenarios (G.3 + Track B)"]
         D1["Forecast Value Added (FVA) & Diebold-Mariano p-values<br/>compute_fva · diebold_mariano_test (HLN 1997) · wilcoxon_pvalue"]
         D2["Lead-Time Horizon Decay & Trigg Bias Audit<br/>compute_horizon_decay (crossover h*) · compute_bias_report"]
-        D3["Autocorrelation-Aware Rollup & Promo/Price Scenarios<br/>rollup_time (AR(1) covariance) · simulate_scenarios · summarize_scenarios"]
+        D3["Autocorrelation-Aware Rollup, Inventory Policies & Promo/Price Scenarios<br/>rollup_time · compute_inventory_policy (ROP / SS) · simulate_scenarios"]
         D1 --> D2 --> D3
     end
 
@@ -104,6 +104,8 @@ The pure offline modules [`scale_forecasting.diagnostics`](./api/review.md) and 
 | `sf.compute_horizon_decay(oof_df, ...)` / `bo.horizon_decay_df()` / `forecaster.horizon_decay_df()` | Evaluates accuracy and empirical interval coverage at each step $h = 1 \dots H$ and identifies `crossover_step` ($h^*$), the first lead-time step where a model's error exceeds the baseline. |
 | `sf.compute_bias_report(oof_df)` / `bo.bias_df()` / `forecaster.bias_df()` | Audits per-`(ts_id, model_type)` signed `bias_pct`, **Trigg / APICS Tracking Signal** ($\text{TS} = \sum e_t / \text{MAD}$), `max_over_streak`, `max_under_streak`, and `bias_status` (`unbiased`, `over_forecasting`, `under_forecasting`). |
 | `sf.rollup_time(predictions_df, freq="W", oof_df=...)` / `bo.rollup_time(...)` | Aggregates daily/weekly forecasts to Weekly (`"W"`), Monthly (`"MS"`), Quarterly (`"QS"`), or $L$-day supplier lead-time windows (`window=7`) using **empirical AR(1) multi-step error covariance** so cumulative uncertainty bands are realistic rather than naively summed. |
+| `sf.compute_inventory_policy(predictions_df, oof_df=..., ...)` / `bo.inventory_policy_df(...)` / `forecaster.inventory_policy_df(...)` | Translates non-stationary forward forecasts ($\hat{y}_1 \dots \hat{y}_H$), empirical AR(1) residual autocorrelation ($\hat{\rho}_1$ from `oof_df`), and supplier lead-time variability ($\mu_L, \sigma_L$) into continuous-review $(s, S)$ and periodic-review $(R, S)$ **Reorder Points (`reorder_point`)**, **Calibrated Safety Stock (`safety_stock` vs. `naive_iid_safety_stock` and `naive_linear_safety_stock`)**, **Order-Up-To Levels (`order_up_to_level`)**, **Recommended Order Quantities (`recommended_order_qty` with `min_order_qty` & `order_multiple` lot-sizing)**, and **Expected Holding vs. Stockout Cost** across **Cycle Service Level ($\alpha$)**, **Unit Fill Rate ($\beta$ via standard normal loss $G(z)$)**, or **Newsvendor Critical Fractile ($\alpha^* = c_u / (c_u + c_o)$)**. |
+| `sf.plot_inventory_policy(policy_df)` / `bo.plot_inventory_policy(...)` / `forecaster.plot_inventory_policy(...)` | Plots a horizontal stacked bar chart of Lead-Time Demand ($\mu_L$), Calibrated Safety Stock (`SS`), Review-Period Demand ($R$), current Inventory Position (`IP`), and annotated Recommended Order Quantities ($Q$). |
 | `sf.simulate_scenarios(...)` / `run.simulate_scenarios(scenarios={...})` | Runs counterfactual future covariate trajectories (additive `+`, multiplicative `*`, or override `=` shocks to `price_index`, `promo_flag`, etc.) without refitting models, returning delta units (`delta_yhat`, `delta_pct`) and revenue impact (`baseline_revenue`, `scenario_revenue`, `delta_revenue`). |
 
 ---
@@ -117,7 +119,7 @@ Once forecasts are published into operations, [`scale_forecasting.diagnostics`](
 | **Realized Accuracy & Live Drift** | `sf.compute_realized_accuracy(pred_df, actuals_df, oof_df=...)`<br/>`forecaster.score_realized(actuals_df)` | Joins published forecasts against newly arrived actuals, scores all 21 metrics + realized interval coverage, and flags `drift_flagged = True` when live error exceeds `drift_threshold` $\times$ backtest OOF expectation (`drift_ratio`). |
 | **Cross-Run Revision Stability ("Whipsaw")** | `sf.compute_revision_stability(runs_predictions)`<br/>`forecaster.revision_stability_df([run_1, run_2, ...])` | Compares overlapping forecast target dates across consecutive runs (`run_t-2`, `run_t-1`, `run_t`) to measure Mean Absolute Revision (`mar`), Revision CoV (`revision_cov`), and `max_single_step_jump_pct`, flagging supply-chain whipsaw (`whipsaw_flagged`). |
 | **Top-$N$ Exception Triage Queue** | `sf.compute_exceptions_queue(...)`<br/>`bo.exceptions_df()` · `forecaster.exceptions_df()` | Ranks `(ts_id, model_type)` cells by a composite `severity_score` across 5 operational flags (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) with plain-English `exception_reasons`. |
-| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, filterable Exception Triage table, SVG Horizon Decay & Bias tables, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
+| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, filterable Exception Triage table, SVG Horizon Decay & Bias tables, Operational Inventory Policy (`ROP` / `SS` / `Order-Up-To`) tab, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
 
 ---
 
@@ -208,8 +210,10 @@ print(bo.horizon_decay_df().head())
 print(bo.bias_df().head())
 print(bo.exceptions_df().head())
 
-# 3. Roll daily forecasts up to weekly replenishment buckets with AR(1)-aware intervals
+# 3. Roll daily forecasts up to weekly replenishment buckets and translate into (s, S) / (R, S) inventory policies
 weekly_df = bo.rollup_time(freq="W")
+inv_df = bo.inventory_policy_df(lead_time=7.0, lead_time_std=1.0, service_level=0.95, on_hand=150.0, order_multiple=10.0)
+print(inv_df[["ts_id", "model_type", "reorder_point", "safety_stock", "recommended_order_qty", "expected_total_cost"]])
 
 # 4. Export a standalone interactive HTML + JSON executive report
 bo.export_report("workbench_report.html", write_json=True)

@@ -281,7 +281,16 @@ _UNSTABLE_FIT_RTOL_BIAS = 4e-2
 # extra (`models-dl`) that a plain `uv sync` does not install, so the snapshot would be unbuildable
 # on a normal checkout. Their fold geometry is still covered — that half is pure arithmetic and does
 # not depend on the model.
-_TOO_SLOW = {"neuralprophet", "patchtst", "tft", "tide", "tsmixer"}
+_TOO_SLOW = {
+    "neuralprophet",
+    "patchtst",
+    "tft",
+    "tide",
+    "tsmixer",
+    "chronos_bolt",
+    "chronos2",
+    "timesfm_torch",
+}
 
 
 def _shipped_configs() -> list[tuple[str, RunConfig]]:

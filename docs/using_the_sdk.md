@@ -161,13 +161,14 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.plot_forecast_explanation(ts_id, model)` | `matplotlib.figure.Figure` | Multi-panel decomposition plot (history + fan chart, baseline vs residual split, and future exogenous drivers) |
 | `forecaster.attributions_df(ts_id=..., model=...)` | `pd.DataFrame` | Returns **Tier 1 (`fit_diagnostics.feature_attributions`)** and **Tier 2 (`forecast_predictions.explanations`)** feature attributions across `automl` (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`), `ml` (`xgboost`, `lightgbm`, `catboost`, `random_forest`, `regression_lags`), and `native` (`arima_plus` / `arima_plus@xreg` via `ML.EXPLAIN_FORECAST`) models |
 | `forecaster.plot_attributions(ts_id, model)` | `matplotlib.figure.Figure` | 2-panel visualization of Tier 1 overall feature importance and Tier 2 per-horizon-step local attribution over `forecast_date` |
-| `forecaster.detect_anomalies_df(run_id=..., model_name=...)` | `pd.DataFrame` | Universal time-series anomaly detection across **all 34 models, 9 ensembles, and past runs** (`ML.DETECT_ANOMALIES` for `arima_plus`, `AI.DETECT_ANOMALIES` for `timesfm`, stored `backtest_oof` conformal intervals via `compute_anomalies` for any `statistical` / `ml` / `deep_learning` / `automl` / `ensemble_*` model or `model_name="all"`, forward `actuals_df` scoring, or model-free `engine="stl"`) |
+| `forecaster.detect_anomalies_df(run_id=..., model_name=...)` | `pd.DataFrame` | Universal time-series anomaly detection across **all 37 models, 9 ensembles, and past runs** (`ML.DETECT_ANOMALIES` for `arima_plus`, `AI.DETECT_ANOMALIES` for `timesfm`, stored `backtest_oof` conformal intervals via `compute_anomalies` for any `statistical` / `ml` / `deep_learning` / `automl` / `ensemble_*` model or `model_name="all"`, forward `actuals_df` scoring, or model-free `engine="stl"`) |
 | `forecaster.detect_change_points_df(run_id=..., model_name=...)` | `pd.DataFrame` | Structural regime break and level-shift detection across raw series (`ML.DETECT_CHANGE_POINTS` with gap-edge artifact filtering) or **any model's / ensemble's backtest residuals** (`model_name="<model>"` or `"all"` via `compute_change_points`) on current or past runs |
 | `forecaster.plot_series(ts_id, models=[...])` | `matplotlib.figure.Figure` | Overlay historical actuals, prediction intervals, and multi-model forecast trajectories |
 | `forecaster.fva_df()` / `plot_fva()` | `pd.DataFrame` / `Figure` | Forecast Value Added (FVA) waterfall (`fva_vs_baseline_pct`, `covariate_fva_pct` vs. same-scope `@univariate` sibling, `pooling_fva_pct` vs. same-cov `@local_*` sibling) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano & Wilcoxon $p$-values |
 | `forecaster.horizon_decay_df()` / `plot_horizon_decay()` | `pd.DataFrame` / `Figure` | Step-by-step error decay ($h = 1 \dots H$) and crossover horizon $h^*$ vs. baseline |
 | `forecaster.bias_df()` | `pd.DataFrame` | Directional percentage bias, Trigg Tracking Signal ($\text{TS}$), and chronic over/under-forecasting streaks |
 | `forecaster.rollup_time(freq="W")` | `pd.DataFrame` | Autocorrelation-aware temporal or $L$-day lead-time aggregation of point and interval forecasts |
+| `forecaster.inventory_policy_df(...)` / `plot_inventory_policy(...)` | `pd.DataFrame` / `Axes` | Translates calibrated forecasts, empirical AR(1) residual autocorrelation, and supplier lead-time variability into continuous $(s, S)$ and periodic $(R, S)$ **Reorder Points (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To Levels ($S$)**, **Recommended Order Quantities ($Q$)**, and **Expected Holding vs. Stockout Cost** tables |
 | `forecaster.simulate_scenarios(scenarios={...})` | `pd.DataFrame` | Counterfactual future covariate shocks (promo/price elasticity) with delta units and revenue impact |
 | `forecaster.score_realized(actuals_df)` | `pd.DataFrame` | Joins published predictions against newly arrived actuals and flags live accuracy drift (`drift_flagged`) |
 | `forecaster.revision_stability_df([run_1, ...])` | `pd.DataFrame` | Cross-run forecast revision stability (`mar`, `revision_cov`, `whipsaw_flagged`) across overlapping target dates |
@@ -177,9 +178,10 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
 top level of `scale_forecasting` (`build_variant_matrix_frame`, `explain_forecast_frame`, `plot_forecast_explanation`,
 `build_attributions_frame`, `plot_attributions`, `compute_anomalies`, `compute_change_points`,
-`build_calibration_frames`, `plot_calibration`, `build_ensemble_weights_frame`,
-`plot_ensemble_weights`, `build_cohorts_frame`), so you can run the exact same diagnostics on
-in-memory `CellResult` objects in `00_model_playground.ipynb` before touching Google Cloud.
+`compute_inventory_policy`, `plot_inventory_policy`, `build_calibration_frames`, `plot_calibration`,
+`build_ensemble_weights_frame`, `plot_ensemble_weights`, `build_cohorts_frame`), so you can run the
+exact same diagnostics on in-memory `CellResult` objects in `00_model_playground.ipynb` before
+touching Google Cloud.
 
 ---
 

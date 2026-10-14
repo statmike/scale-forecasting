@@ -19,11 +19,19 @@ accuracy decay, directional bias, and temporal/lead-time aggregation:
   fixed $L$-step supplier lead-time windows (`freq="7D"` or `window=7`) while computing
   period-level prediction intervals from empirical multi-step error covariance rather than naively
   summing daily interval bounds.
+* **Operational Inventory & Replenishment Policy Translators (`compute_inventory_policy`,
+  `plot_inventory_policy`)** — translates calibrated multi-step forecasts, AR(1) error covariance,
+  and supplier lead-time variability ($\\mu_L, \\sigma_L$) into continuous-review $(s, S)$ and
+  periodic-review $(R, S)$ **Reorder Points (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To
+  Levels ($S$)**, **Recommended Order Quantities ($Q$)**, and **Newsvendor Expected Holding vs.
+  Stockout Cost** tables under Cycle Service Level ($\\alpha$), Unit Fill Rate ($\\beta$), or
+  critical-fractile cost optimization.
 """
 
 from __future__ import annotations
 
 import itertools
+import json
 import math
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -42,11 +50,13 @@ __all__ = [
     "compute_exceptions_queue",
     "compute_fva",
     "compute_horizon_decay",
+    "compute_inventory_policy",
     "compute_realized_accuracy",
     "compute_revision_stability",
     "diebold_mariano_test",
     "plot_fva",
     "plot_horizon_decay",
+    "plot_inventory_policy",
     "rollup_time",
     "wilcoxon_pvalue",
 ]
@@ -1578,7 +1588,7 @@ def compute_anomalies(
     anomalies_only: bool = False,
     freq: str = "D",
 ) -> pd.DataFrame:
-    """Universal time-series anomaly detection across any of the 34 models, 9 ensembles, or STL.
+    """Universal time-series anomaly detection across any of the 37 models, 9 ensembles, or STL.
 
     Computes the exact two-sided Gaussian / conformal tail probability used by BigQuery ML
     (`ML.DETECT_ANOMALIES`):
@@ -2024,3 +2034,552 @@ def compute_change_points(
     return pd.DataFrame.from_records(records, columns=_CHANGE_POINT_COLUMNS).sort_values(
         ["ts_id", "model_type", "begin_date"], ignore_index=True
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. Operational Inventory & Replenishment Policy Translators (Track B)
+# ---------------------------------------------------------------------------
+
+_INVENTORY_POLICY_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "model_type",
+    "policy_type",
+    "target_mode",
+    "lead_time",
+    "lead_time_std",
+    "review_period",
+    "protection_steps",
+    "mean_step_demand",
+    "lead_time_demand",
+    "protection_demand",
+    "error_autocorr_rho",
+    "forecast_error_std",
+    "lead_time_var_std",
+    "total_protection_std",
+    "target_service_level",
+    "implied_fill_rate",
+    "safety_factor_z",
+    "safety_stock",
+    "naive_iid_safety_stock",
+    "naive_linear_safety_stock",
+    "reorder_point",
+    "order_up_to_level",
+    "inventory_position",
+    "reorder_triggered",
+    "recommended_order_qty",
+    "expected_units_short",
+    "expected_holding_cost",
+    "expected_stockout_cost",
+    "expected_total_cost",
+)
+
+
+def _normal_loss(z: float) -> float:
+    """Standard normal first-order loss function $G(z) = \\phi(z) - z\\,(1 - \\Phi(z))$."""
+    zf = float(z)
+    if zf >= 8.0:
+        return 0.0
+    if zf <= -8.0:
+        return -zf
+    return float(stats.norm.pdf(zf) - zf * stats.norm.sf(zf))
+
+
+def _solve_z_for_fill_rate(
+    fill_rate: float,
+    protection_demand: float,
+    protection_std: float,
+) -> float:
+    """Invert $G(z) = (1 - \\beta)\\,\\mu_P / \\sigma_P$ for the non-negative safety factor $z$."""
+    if protection_std <= 1e-12:
+        return 0.0
+    target_g = (1.0 - float(fill_rate)) * max(float(protection_demand), 1e-9) / protection_std
+    g_zero = _normal_loss(0.0)  # 1 / sqrt(2 * pi) ~= 0.39894228
+    if target_g >= g_zero:
+        return 0.0
+    if target_g <= _normal_loss(6.0):
+        return 6.0
+    lo, hi = 0.0, 6.0
+    for _ in range(48):
+        mid = 0.5 * (lo + hi)
+        if _normal_loss(mid) > target_g:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _window_sum(values: np.ndarray, steps: float) -> float:
+    """Sum the first ``steps`` elements of ``values``, extrapolating with the mean when needed."""
+    if values.size == 0 or steps <= 0.0:
+        return 0.0
+    mean_v = float(np.nanmean(values)) if np.isfinite(values).any() else 0.0
+    full_steps = math.floor(steps)
+    frac = float(steps) - full_steps
+    avail = min(full_steps, int(values.size))
+    total = float(np.nansum(values[:avail])) if avail > 0 else 0.0
+    if full_steps > avail:
+        total += float(full_steps - avail) * mean_v
+    if frac > 1e-9:
+        next_val = float(values[avail]) if avail < int(values.size) else mean_v
+        total += frac * (next_val if math.isfinite(next_val) else mean_v)
+    return max(0.0, total)
+
+
+def _protection_sigma_vector(sigmas: np.ndarray, steps: float) -> np.ndarray:
+    """Build the step-level standard-deviation vector over ``steps`` protection periods."""
+    if sigmas.size == 0 or steps <= 0.0:
+        return np.zeros(1, dtype=float)
+    mean_s = float(np.nanmean(sigmas)) if np.isfinite(sigmas).any() else 0.0
+    full_steps = math.floor(steps)
+    frac = float(steps) - full_steps
+    parts: list[float] = []
+    for idx in range(full_steps):
+        val = float(sigmas[idx]) if idx < int(sigmas.size) else mean_s
+        parts.append(max(0.0, val if math.isfinite(val) else mean_s))
+    if frac > 1e-9:
+        next_s = float(sigmas[full_steps]) if full_steps < int(sigmas.size) else mean_s
+        next_s = max(0.0, next_s if math.isfinite(next_s) else mean_s)
+        parts.append(next_s * math.sqrt(frac))
+    if not parts:
+        return np.zeros(1, dtype=float)
+    return np.asarray(parts, dtype=float)
+
+
+def _normalize_inventory_overrides(
+    inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Normalize per-SKU inventory overrides into ``{ts_id: {field: value}}``."""
+    if inventory_df is None:
+        return {}
+    if isinstance(inventory_df, Mapping):
+        return {str(k): dict(v) for k, v in inventory_df.items() if isinstance(v, Mapping)}
+    if isinstance(inventory_df, pd.DataFrame):
+        if inventory_df.empty:
+            return {}
+        df = inventory_df.copy()
+        if "ts_id" not in df.columns:
+            df = df.reset_index().rename(columns={df.index.name or "index": "ts_id"})
+        out: dict[str, dict[str, Any]] = {}
+        for row in df.to_dict(orient="records"):
+            tid = str(row.get("ts_id", ""))
+            if tid:
+                out[tid] = {
+                    str(k): v
+                    for k, v in row.items()
+                    if k != "ts_id"
+                    and v is not None
+                    and not (isinstance(v, float) and math.isnan(v))
+                }
+        return out
+    return {}
+
+
+def compute_inventory_policy(
+    predictions_df: pd.DataFrame,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None = None,
+    model_name: str | None = None,
+    model_type: str | None = None,
+    lead_time: float = 7.0,
+    lead_time_std: float = 0.0,
+    review_period: float = 0.0,
+    service_level: float | None = 0.95,
+    fill_rate: float | None = None,
+    on_hand: float = 0.0,
+    on_order: float = 0.0,
+    backorders: float = 0.0,
+    holding_cost: float = 1.0,
+    stockout_cost: float = 9.0,
+    min_order_qty: float = 0.0,
+    order_multiple: float = 0.0,
+    confidence_level: float = 0.80,
+) -> pd.DataFrame:
+    """Translate calibrated multi-step forecasts into inventory & replenishment policies.
+
+    Combines non-stationary forward forecasts ($\\hat{y}_1 \\dots \\hat{y}_H$), empirical AR(1)
+    multi-step forecast error covariance ($\\hat{\\rho}_1$ estimated from ``oof_df``), and supplier
+    lead-time variability ($\\mu_L, \\sigma_L$) to compute continuous-review $(s, S)$ and
+    periodic-review $(R, S)$ policies:
+
+    $$\\sigma_P = \\sqrt{\\sum_{i=1}^{\\lceil P \\rceil} \\sigma_i^2 +
+      2\\sum_{1 \\le i < j \\le \\lceil P \\rceil} \\hat{\\rho}_1^{j-i}\\,\\sigma_i\\,\\sigma_j +
+      \\sigma_L^2\\,\\bar{\\mu}_{\\text{step}}^2}$$
+
+    Supports three service-level targeting modes (globally or per-SKU via ``inventory_df``):
+    1. **Cycle Service Level (``service_level``, Type-1 CSL $\\alpha \\in (0, 1)$):**
+       Sets $z = \\Phi^{-1}(\\alpha)$ so the probability of zero stockout during the protection
+       window $P = \\mu_L + R$ equals $\\alpha$.
+    2. **Unit Fill Rate (``fill_rate``, Type-2 Fill Rate $\\beta \\in (0, 1)$):**
+       Solves the standard normal loss equation $G(z) = (1 - \\beta)\\,\\mu_P / \\sigma_P$ for $z$
+       so the expected fraction of demand satisfied immediately from stock equals $\\beta$.
+    3. **Newsvendor Critical Fractile (``service_level=None`` and ``fill_rate=None``):**
+       Computes $\\alpha^* = c_u / (c_u + c_o)$ from ``stockout_cost`` ($c_u$) and ``holding_cost``
+       ($c_o$) to minimize total expected holding + stockout cost per cycle.
+
+    Also reports ``naive_iid_safety_stock`` ($\\rho = 0$) and ``naive_linear_safety_stock``
+    ($\\rho = 1$) alongside ``safety_stock`` so supply-chain planners can audit the buffer impact
+    of autocorrelation-aware interval aggregation.
+    """
+    from .errors import ConfigError
+
+    if float(lead_time) <= 0.0:
+        raise ConfigError(f"lead_time={lead_time!r} must be > 0.")
+    if float(lead_time_std) < 0.0:
+        raise ConfigError(f"lead_time_std={lead_time_std!r} must be >= 0.")
+    if float(review_period) < 0.0:
+        raise ConfigError(f"review_period={review_period!r} must be >= 0.")
+    if service_level is not None and not (0.0 < float(service_level) < 1.0):
+        raise ConfigError(f"service_level={service_level!r} must lie strictly in (0.0, 1.0).")
+    if fill_rate is not None and not (0.0 < float(fill_rate) < 1.0):
+        raise ConfigError(f"fill_rate={fill_rate!r} must lie strictly in (0.0, 1.0).")
+    if float(holding_cost) < 0.0 or float(stockout_cost) < 0.0:
+        raise ConfigError("holding_cost and stockout_cost must be >= 0.")
+    if (
+        service_level is None
+        and fill_rate is None
+        and (float(holding_cost) <= 0.0 or float(stockout_cost) <= 0.0)
+    ):
+        raise ConfigError(
+            "When both service_level and fill_rate are None (Newsvendor mode), "
+            "both holding_cost and stockout_cost must be > 0."
+        )
+    if float(min_order_qty) < 0.0 or float(order_multiple) < 0.0:
+        raise ConfigError("min_order_qty and order_multiple must be >= 0.")
+
+    if predictions_df is None or predictions_df.empty:
+        return pd.DataFrame(columns=_INVENTORY_POLICY_COLUMNS)
+
+    df = predictions_df.copy()
+    if "segment" in df.columns and (df["segment"] == "forecast").any():
+        df = df[df["segment"] == "forecast"].copy()
+    if df.empty:
+        return pd.DataFrame(columns=_INVENTORY_POLICY_COLUMNS)
+
+    date_col = (
+        "forecast_date"
+        if "forecast_date" in df.columns
+        else (
+            "target_date" if "target_date" in df.columns else ("ds" if "ds" in df.columns else None)
+        )
+    )
+    if date_col is None:
+        raise ValueError(
+            "predictions_df must contain a 'ds', 'forecast_date', or 'target_date' column"
+        )
+    yhat_col = "yhat" if "yhat" in df.columns else "forecast"
+    lo_col = (
+        "yhat_lower"
+        if "yhat_lower" in df.columns
+        else ("lower_bound" if "lower_bound" in df.columns else None)
+    )
+    hi_col = (
+        "yhat_upper"
+        if "yhat_upper" in df.columns
+        else ("upper_bound" if "upper_bound" in df.columns else None)
+    )
+
+    eff_model = model_name or model_type
+    if "ts_id" not in df.columns:
+        df["ts_id"] = "series_0"
+    if "model_type" not in df.columns:
+        df["model_type"] = eff_model or "model"
+
+    if eff_model is not None and str(eff_model).lower() not in ("all", "*"):
+        req = str(eff_model).strip()
+        exact = df[df["model_type"] == req]
+        if exact.empty and req == "arima_plus_xreg":
+            exact = df[df["model_type"] == "arima_plus@xreg"]
+        df = exact
+        if df.empty:
+            return pd.DataFrame(columns=_INVENTORY_POLICY_COLUMNS)
+
+    df["_dt"] = pd.to_datetime(df[date_col])
+    df = df.sort_values(["ts_id", "model_type", "_dt"])
+
+    rho_map = _estimate_oof_error_rho(oof_df)
+    oof_sigma_map: dict[tuple[str, str], float] = {}
+    if oof_df is not None and not oof_df.empty:
+        oof_norm = _ensure_oof_columns(oof_df)
+        for (tid_o, mtype_o), grp_o in oof_norm.groupby(["ts_id", "model_type"], sort=False):
+            err_o = (
+                (
+                    pd.to_numeric(grp_o["y_true"], errors="coerce")
+                    - pd.to_numeric(grp_o["yhat"], errors="coerce")
+                )
+                .dropna()
+                .to_numpy(dtype=float)
+            )
+            err_o = err_o[np.isfinite(err_o)]
+            if err_o.size > 0:
+                mad_o = 1.4826 * float(np.median(np.abs(err_o)))
+                rmse_o = float(np.sqrt(np.mean(err_o**2)))
+                oof_sigma_map[(str(tid_o), str(mtype_o))] = max(mad_o, rmse_o, 1e-6)
+
+    eff_conf = float(confidence_level) if 0.0 < float(confidence_level) < 1.0 else 0.80
+    z_conf = max(float(stats.norm.ppf(0.5 + 0.5 * eff_conf)), 1e-6)
+    overrides = _normalize_inventory_overrides(inventory_df)
+
+    records: list[dict[str, Any]] = []
+    for (tid, mtype), grp in df.groupby(["ts_id", "model_type"], sort=True):
+        tid_s, mtype_s = str(tid), str(mtype)
+        sku = overrides.get(tid_s, {})
+
+        lt = float(sku.get("lead_time", lead_time))
+        lt_std = float(sku.get("lead_time_std", lead_time_std))
+        rev_p = float(sku.get("review_period", review_period))
+        oh = float(sku.get("on_hand", on_hand))
+        oo = float(sku.get("on_order", on_order))
+        bo = float(sku.get("backorders", backorders))
+        h_cost = float(sku.get("holding_cost", holding_cost))
+        s_cost = float(sku.get("stockout_cost", stockout_cost))
+        moq = float(sku.get("min_order_qty", min_order_qty))
+        mult = float(sku.get("order_multiple", order_multiple))
+        sku_fr = sku.get("fill_rate", fill_rate)
+        sku_sl = sku.get("service_level", service_level)
+
+        if lt <= 0.0 or lt_std < 0.0 or rev_p < 0.0:
+            raise ConfigError(f"Invalid lead_time/review_period override for ts_id={tid_s!r}.")
+
+        yh = np.maximum(
+            0.0,
+            np.nan_to_num(
+                pd.to_numeric(grp[yhat_col], errors="coerce").to_numpy(dtype=float),
+                nan=0.0,
+            ),
+        )
+        n_avail = int(yh.size)
+        if n_avail == 0:
+            continue
+
+        # Recover step-level upper-tail standard deviations sigma_h.
+        sigma_hi = np.zeros(n_avail, dtype=float)
+        if hi_col is not None:
+            yu = pd.to_numeric(grp[hi_col], errors="coerce").to_numpy(dtype=float)
+            if lo_col is not None:
+                yl = pd.to_numeric(grp[lo_col], errors="coerce").to_numpy(dtype=float)
+                half_w = np.maximum(yu - yh, 0.5 * (yu - yl))
+            else:
+                half_w = yu - yh
+            valid_w = np.isfinite(half_w) & (half_w > 1e-9)
+            sigma_hi = np.where(valid_w, np.maximum(half_w, 0.0) / z_conf, 0.0)
+
+        # If upper bounds were absent, check `quantiles` column if present.
+        if not (sigma_hi > 1e-9).any() and "quantiles" in grp.columns:
+            q_sigmas: list[float] = []
+            for y_val, q_raw in zip(yh, grp["quantiles"], strict=False):
+                q_dict: dict[str, Any] = {}
+                if isinstance(q_raw, str) and q_raw.startswith("{"):
+                    try:
+                        q_dict = json.loads(q_raw)
+                    except Exception:  # noqa: BLE001 - malformed JSON falls back to empty dict
+                        q_dict = {}
+                elif isinstance(q_raw, Mapping):
+                    q_dict = dict(q_raw)
+                hi_q_candidates: list[tuple[float, float]] = []
+                for k_q, v_q in q_dict.items():
+                    k_clean = str(k_q).lstrip("pqPQ")
+                    try:
+                        qf = float(k_clean)
+                        if qf > 1.0:
+                            qf /= 100.0
+                        vf = float(v_q)
+                        if 0.55 <= qf < 1.0 and math.isfinite(vf):
+                            hi_q_candidates.append((qf, vf))
+                    except (TypeError, ValueError):
+                        continue
+                if hi_q_candidates:
+                    qf_best, vf_best = max(hi_q_candidates, key=lambda item: item[0])
+                    zq = max(float(stats.norm.ppf(qf_best)), 1e-6)
+                    q_sigmas.append(max(0.0, vf_best - float(y_val)) / zq)
+                else:
+                    q_sigmas.append(0.0)
+            sigma_hi = np.asarray(q_sigmas, dtype=float)
+
+        fallback_sigma = oof_sigma_map.get((tid_s, mtype_s), float(np.nanmean(yh)) * 0.15)
+        sigma_hi = np.where(sigma_hi > 1e-9, sigma_hi, max(fallback_sigma, 1e-6))
+
+        prot_steps = lt + rev_p
+        lt_demand = _window_sum(yh, lt)
+        prot_demand = _window_sum(yh, prot_steps)
+        mean_step = prot_demand / max(prot_steps, 1e-9)
+
+        rho = rho_map.get((tid_s, mtype_s), 0.35)
+        prot_sigmas = _protection_sigma_vector(sigma_hi, prot_steps)
+        fcst_std = _ar1_sum_scale(prot_sigmas, rho)
+        iid_fcst_std = _ar1_sum_scale(prot_sigmas, 0.0)
+        lin_fcst_std = float(np.sum(prot_sigmas))
+
+        lt_var_std = lt_std * max(mean_step, 0.0)
+        total_std = math.sqrt(fcst_std**2 + lt_var_std**2)
+        total_iid_std = math.sqrt(iid_fcst_std**2 + lt_var_std**2)
+        total_lin_std = math.sqrt(lin_fcst_std**2 + lt_var_std**2)
+
+        # Resolve safety factor z, target_mode, and effective cycle service level alpha.
+        if sku_fr is not None:
+            fr_val = float(sku_fr)
+            if not (0.0 < fr_val < 1.0):
+                raise ConfigError(f"fill_rate={sku_fr!r} must lie strictly in (0.0, 1.0).")
+            z_factor = _solve_z_for_fill_rate(fr_val, prot_demand, total_std)
+            target_csl = float(stats.norm.cdf(z_factor))
+            target_mode = "fill_rate"
+        elif sku_sl is not None and str(sku_sl).lower() != "newsvendor":
+            sl_val = float(sku_sl)
+            if not (0.0 < sl_val < 1.0):
+                raise ConfigError(f"service_level={sku_sl!r} must lie strictly in (0.0, 1.0).")
+            target_csl = sl_val
+            z_factor = max(0.0, float(stats.norm.ppf(target_csl)))
+            target_mode = "cycle_service_level"
+        else:
+            if h_cost <= 0.0 or s_cost <= 0.0:
+                raise ConfigError(
+                    f"Newsvendor service level for ts_id={tid_s!r} requires "
+                    "holding_cost > 0 and stockout_cost > 0."
+                )
+            target_csl = float(s_cost / (s_cost + h_cost))
+            z_factor = max(0.0, float(stats.norm.ppf(target_csl)))
+            target_mode = "newsvendor_critical_fractile"
+
+        ss = max(0.0, z_factor * total_std)
+        ss_iid = max(0.0, z_factor * total_iid_std)
+        ss_lin = max(0.0, z_factor * total_lin_std)
+
+        rop = lt_demand + ss
+        out_level = prot_demand + ss
+        inv_pos = oh + oo - bo
+        pol_type = "periodic_R_S" if rev_p > 0.0 else "continuous_s_S"
+        triggered = bool(inv_pos < out_level) if rev_p > 0.0 else bool(inv_pos <= rop)
+
+        raw_q = max(0.0, out_level - inv_pos) if triggered else 0.0
+        rec_q = raw_q
+        if rec_q > 0.0:
+            if moq > 0.0:
+                rec_q = max(rec_q, moq)
+            if mult > 0.0:
+                rec_q = math.ceil(rec_q / mult - 1e-12) * mult
+
+        exp_short = total_std * _normal_loss(z_factor)
+        imp_fill = float(np.clip(1.0 - exp_short / max(prot_demand, 1e-9), 0.0, 1.0))
+        exp_overage = ss + exp_short
+        exp_hold_cost = h_cost * exp_overage
+        exp_stock_cost = s_cost * exp_short
+        exp_tot_cost = exp_hold_cost + exp_stock_cost
+
+        records.append(
+            {
+                "ts_id": tid_s,
+                "model_type": mtype_s,
+                "policy_type": pol_type,
+                "target_mode": target_mode,
+                "lead_time": lt,
+                "lead_time_std": lt_std,
+                "review_period": rev_p,
+                "protection_steps": prot_steps,
+                "mean_step_demand": mean_step,
+                "lead_time_demand": lt_demand,
+                "protection_demand": prot_demand,
+                "error_autocorr_rho": rho,
+                "forecast_error_std": fcst_std,
+                "lead_time_var_std": lt_var_std,
+                "total_protection_std": total_std,
+                "target_service_level": target_csl,
+                "implied_fill_rate": imp_fill,
+                "safety_factor_z": z_factor,
+                "safety_stock": ss,
+                "naive_iid_safety_stock": ss_iid,
+                "naive_linear_safety_stock": ss_lin,
+                "reorder_point": rop,
+                "order_up_to_level": out_level,
+                "inventory_position": inv_pos,
+                "reorder_triggered": triggered,
+                "recommended_order_qty": rec_q,
+                "expected_units_short": exp_short,
+                "expected_holding_cost": exp_hold_cost,
+                "expected_stockout_cost": exp_stock_cost,
+                "expected_total_cost": exp_tot_cost,
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(columns=_INVENTORY_POLICY_COLUMNS)
+    return pd.DataFrame.from_records(records, columns=_INVENTORY_POLICY_COLUMNS)
+
+
+def plot_inventory_policy(
+    policy_df: pd.DataFrame,
+    *,
+    max_rows: int = 15,
+    ax: Any = None,
+    title: str | None = None,
+) -> Any:
+    """Plot Reorder Points (`ROP` = Lead-Time Demand + Safety Stock), Order-Up-To Levels ($S$),
+    and Current Inventory Position per ``(ts_id, model_type)``.
+    """
+    from .errors import require_extra
+
+    require_extra("notebook", purpose="Plotting inventory policy")
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 5))
+    if policy_df is None or policy_df.empty:
+        ax.set_title(title or "Inventory & Replenishment Policy (no rows)")
+        return ax
+
+    sub = policy_df.head(max(1, int(max_rows))).copy()
+    labels = [f"{r.ts_id} ({r.model_type})" for r in sub.itertuples(index=False)]
+    lt_dem = sub["lead_time_demand"].to_numpy(dtype=float)
+    ss = sub["safety_stock"].to_numpy(dtype=float)
+    rev_extra = np.maximum(0.0, sub["protection_demand"].to_numpy(dtype=float) - lt_dem)
+    inv_pos = sub["inventory_position"].to_numpy(dtype=float)
+    rec_q = sub["recommended_order_qty"].to_numpy(dtype=float)
+
+    y_pos = np.arange(len(labels))
+    ax.barh(y_pos, lt_dem, color="#2563eb", alpha=0.85, label="Lead-Time Demand (μ_L)")
+    ax.barh(
+        y_pos,
+        ss,
+        left=lt_dem,
+        color="#f59e0b",
+        alpha=0.88,
+        label="Calibrated Safety Stock (SS)",
+    )
+    if (rev_extra > 1e-6).any():
+        ax.barh(
+            y_pos,
+            rev_extra,
+            left=lt_dem + ss,
+            color="#9333ea",
+            alpha=0.75,
+            label="Review-Period Demand (R)",
+        )
+    ax.scatter(
+        inv_pos,
+        y_pos,
+        color="#16a34a",
+        marker="D",
+        s=48,
+        zorder=5,
+        label="Inventory Position (IP)",
+    )
+    for idx, q_val in enumerate(rec_q):
+        if q_val > 0.0:
+            total_bar = lt_dem[idx] + ss[idx] + rev_extra[idx]
+            ax.text(
+                total_bar * 1.01,
+                y_pos[idx],
+                f" Order Q={q_val:,.0f}",
+                va="center",
+                fontsize=8.5,
+                color="#b91c1c",
+                fontweight="bold",
+            )
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("Units")
+    ax.set_title(title or "Operational Inventory Policy: ROP, Safety Stock & Order Quantities")
+    ax.legend(loc="best", frameon=True)
+    ax.grid(axis="x", alpha=0.25)
+    return ax

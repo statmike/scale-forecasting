@@ -27,6 +27,8 @@ from . import (  # noqa: F401
     autoets,
     bigquery_native,
     catboost_model,
+    chronos2,
+    chronos_bolt,
     croston,
     fft,
     holtwinters,
@@ -47,6 +49,7 @@ from . import (  # noqa: F401
     tft,
     theta,
     tide,
+    timesfm_torch,
     tsmixer,
     ucm,
     vertex_l2l,
@@ -59,10 +62,16 @@ from .base_model import _REGISTRY, BaseModel
 
 _log = get_logger(__name__)
 
+# Clarity aliases mapping to their canonical registered base model names.
+_MODEL_ALIASES: dict[str, str] = {
+    "bq_timesfm": "timesfm",
+}
+
 
 def base_model_name(name: str) -> str:
     """Return the canonical registered base model name from a ``<base>@<tag>`` variant string."""
-    return name.split("@", 1)[0].strip()
+    base = name.split("@", 1)[0].strip()
+    return _MODEL_ALIASES.get(base, base)
 
 
 def get_model(name: str) -> type[BaseModel]:

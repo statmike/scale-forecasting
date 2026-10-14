@@ -16,7 +16,7 @@ flowchart LR
 
 ## Start here
 Understand what the platform does, fit your first forecast locally in 5 minutes, choose a runtime, and review cost controls before launching your first cloud run.
-- [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 34 models, 21 evaluation metrics, per-family DAG, and 5 analytical SQL views.
+- [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 37 models, 21 evaluation metrics, per-family DAG, and 5 analytical SQL views.
 - [getting_started.md](./getting_started.md) — **Getting started**: install the offline layer or `[gcp]` extra, run the local playground, validate a `RunConfig` with `dry_run()`, connect to a Google Cloud deployment, and read the leaderboard.
 - [agent_and_mcp_guide.md](./agent_and_mcp_guide.md) — **AI agents, portable skills & built-in MCP server**: connect Google Antigravity (`agy` CLI & IDE), Claude Code, Cursor, VS Code Copilot, and Windsurf via `python -m scale_forecasting.mcp`, `SKILL.md`, JSON Schema autocomplete, and `llms.txt`.
 - [choosing_a_runtime.md](./choosing_a_runtime.md) — **Choosing a runtime**: decision flowchart, 7-runtime fit matrix, structural advantages, and multi-runtime per-family routing example.
@@ -48,7 +48,7 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
-- [models_reference.md](./models_reference.md) — all 34 built-in models, 9 ensemble strategies, 8 reconciliation methods,
+- [models_reference.md](./models_reference.md) — all 37 built-in models, 9 ensemble strategies, 8 reconciliation methods,
   Two-Tier Explainability (`attributions_df`, `plot_attributions`), upstream package provenance, hyperparameter search spaces, and optional dependency extras.
 - [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
   definitions, direction/calibration flags, and edge-case rules.

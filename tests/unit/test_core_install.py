@@ -38,6 +38,9 @@ _OPTIONAL_TOP_LEVEL = (
     "neuralforecast",
     "statsforecast",
     "immutabledict",
+    "chronos",
+    "timesfm",
+    "timesfm3",
 )
 
 _SCRIPT = f"""
@@ -71,7 +74,7 @@ from scale_forecasting.errors import MissingExtraError
 from scale_forecasting.metrics import METRIC_NAMES
 from scale_forecasting.models import list_models
 
-assert len(list_models()) == 34, len(list_models())
+assert len(list_models()) == 37, len(list_models())
 assert len(METRIC_NAMES) == 21, len(METRIC_NAMES)
 
 # Built-in agent probe and MCP server work in the pure-core install with zero optional extras.

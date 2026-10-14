@@ -103,6 +103,9 @@ _MODEL_LPT_WEIGHTS: dict[str, float] = {
     "patchtst": 7.0,
     "tide": 6.0,
     "tsmixer": 6.0,
+    "chronos2": 5.0,
+    "timesfm_torch": 5.0,
+    "chronos_bolt": 4.0,
     "xgboost": 4.0,
     "lightgbm": 3.0,
     "ets": 2.5,
@@ -232,16 +235,22 @@ def resolve_worker_topology(
 
 
 def _is_dedicated_vm_model_set(cfg: RunConfig, models: Sequence[str]) -> bool:
-    """True when every model in ``models`` is a panel model or belongs to ``deep_learning`` (pure).
+    """True when ``models`` should auto-expand ``workers=1`` to ``len(models)`` dedicated VMs.
 
     Global/hybrid panel models (`tide`, `tft`, `tsmixer`, `patchtst`, and `neuralprophet` with
-    `global_fit=True`) fit across the entire series panel simultaneously, and `deep_learning`
-    models (PyTorch Lightning trainers) get their own dedicated VM when multiple models run in one
-    job rather than sharing a single VM sequentially.
+    `global_fit=True`) fit across the entire series panel simultaneously, and trained `models-dl`
+    deep-learning models (PyTorch Lightning trainers) get their own dedicated VM when multiple
+    models run in one job rather than sharing a single VM sequentially. Zero-shot foundation models
+    (`optional_extra == "models-foundation"`: `chronos_bolt`, `chronos2`, `timesfm_torch`) default
+    to a single shared VM (`workers = 1`) with bounded LRU checkpoint caching, and scale out across
+    workers only when `workers > 1` is explicitly requested (or when paired with trained
+    `models-dl` models).
     """
     from ..models import get_model
 
     if not models:
+        return False
+    if all(get_model(m).optional_extra == "models-foundation" for m in models):
         return False
     return all(is_panel_model(m, cfg) or get_model(m).family == "deep_learning" for m in models)
 

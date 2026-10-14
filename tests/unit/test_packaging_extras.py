@@ -34,7 +34,7 @@ NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 # Distributions the pure layer must never pull: Google clients, the kernel, plotting, runtimes.
 _NOT_IN_CORE = re.compile(
     r"^(google-|db-dtypes|protobuf|ipykernel|matplotlib|pyspark|ray\b|torch|xgboost|lightgbm|"
-    r"catboost|prophet|neuralprophet|neuralforecast|statsforecast)"
+    r"catboost|prophet|neuralprophet|neuralforecast|statsforecast|chronos-forecasting|timesfm)"
 )
 # The Google clients `[gcp]` must carry — each is imported by name somewhere under src/.
 _GCP_CLIENTS = {

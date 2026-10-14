@@ -58,9 +58,9 @@ a thin Cloud Shell client from carrying PySpark's JARs or PyTorch.
 | `spark` | PySpark + `dataproc-spark-connect` (the interactive Spark Connect client; submitting a batch needs only `gcp`) | `gcp` |
 | `ray` | `ray[default]` (Ray's `JobSubmissionClient`, the one launch client that is not a Google library) + `immutabledict` | `gcp` |
 | `submit` | the thin launch client for Cloud Shell and CI — every launch client, no PySpark | `ray` |
-| `models-stats`, `models-trees`, `models-prophet`, `models-dl` | statsforecast; xgboost + lightgbm + catboost; prophet; neuralprophet + neuralforecast + torch | — |
+| `models-stats`, `models-trees`, `models-prophet`, `models-dl`, `models-foundation` | statsforecast; xgboost + lightgbm + catboost; prophet; neuralprophet + neuralforecast + torch; chronos-forecasting + timesfm[torch] | — |
 | `models-automl` | `google-cloud-pipeline-components` (the Tabular Workflow compiler behind the four `vertex_*` models) | `gcp` |
-| `models` | the five family extras | `models-*` |
+| `models` | the six family extras | `models-*` |
 | `all` | everything — what `uv sync --all-extras` and `make sync` install | every extra |
 
 Each surface installs a named subset of this table: the shared runtime image and the

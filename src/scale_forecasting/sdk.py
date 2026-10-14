@@ -1283,6 +1283,122 @@ class Forecaster:
         oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
         return rollup_time(pred_df, freq=freq, oof_df=oof_df, level=level)
 
+    def inventory_policy_df(
+        self,
+        run_id: str | None = None,
+        *,
+        inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Translate ``run_id`` calibrated forecasts into operational inventory & replenishment
+        policies (`diagnostics.compute_inventory_policy`).
+
+        Computes continuous-review $(s, S)$ and periodic-review $(R, S)$ **Reorder Points
+        (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To Levels ($S$)**, **Recommended Order
+        Quantities ($Q$)**, and **Expected Holding vs. Stockout Cost** tables using AR(1)
+        multi-step forecast error covariance ($\\hat{\\rho}_1$ from ``backtest_oof``) and supplier
+        lead-time variability ($\\mu_L, \\sigma_L$).
+        """
+        import pandas as pd
+
+        from .diagnostics import compute_inventory_policy
+        from .registry.reads import read_oof, read_predictions
+
+        rid = run_id or self.run_id
+        eff_model = model_name or model_type
+        model_filter = [eff_model] if eff_model and eff_model not in ("all", "*") else None
+        pred_rows = read_predictions(rid, models=model_filter, limit=limit, settings=self._settings)
+        oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
+        pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+        oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+        return compute_inventory_policy(
+            pred_df,
+            oof_df=oof_df,
+            inventory_df=inventory_df,
+            model_name=eff_model,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+        )
+
+    def plot_inventory_policy(
+        self,
+        run_id: str | None = None,
+        *,
+        inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float | None = 0.95,
+        fill_rate: float | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+        max_rows: int = 15,
+        limit: int = 20000,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot Reorder Points (`ROP`), Safety Stock (`SS`), and Recommended Order Quantities ($Q$)
+        for ``run_id``.
+        """
+        from .diagnostics import plot_inventory_policy
+
+        rid = run_id or self.run_id
+        df = self.inventory_policy_df(
+            rid,
+            inventory_df=inventory_df,
+            model_name=model_name or model_type,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+            limit=limit,
+        )
+        return plot_inventory_policy(
+            df,
+            max_rows=max_rows,
+            ax=ax,
+            title=title or f"{rid} — Inventory & Replenishment Policy",
+        )
+
     def simulate_scenarios(
         self,
         scenarios: Mapping[str, Mapping[str, Any]],
@@ -1449,7 +1565,7 @@ class Forecaster:
         engine: str = "auto",
         limit: int = 50000,
     ) -> pd.DataFrame:
-        """Detect time-series anomalies across any of the 34 models, 9 ensembles, or past runs.
+        """Detect time-series anomalies across any of the 37 models, 9 ensembles, or past runs.
 
         Supports four complementary execution paths controlled by ``model_name`` and ``engine``:
 
@@ -1797,6 +1913,7 @@ class Forecaster:
             "horizon_decay_df": self.horizon_decay_df(rid),
             "bias_df": self.bias_report_df(rid),
             "exceptions_df": self.exceptions_df(rid),
+            "inventory_policy_df": self.inventory_policy_df(rid),
             "predictions_df": self.predictions_df(rid),
         }
         return export_report(

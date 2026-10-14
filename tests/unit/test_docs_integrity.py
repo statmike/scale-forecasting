@@ -521,6 +521,18 @@ def test_social_card_and_site_url() -> None:
     assert assets_readme.is_file(), "Missing docs/assets/README.md"
     assert png_path.is_file(), "Missing docs/assets/social_card.png (run: make social-card)"
 
+    html_text = html_path.read_text(encoding="utf-8")
+    expected_models = f"{len(list_models())} models"
+    expected_metrics = f"{len(METRIC_NAMES)} evaluation metrics"
+    assert expected_models in html_text, (
+        f"docs/assets/social_card.html missing '{expected_models}' "
+        "(update HTML and run: make social-card)"
+    )
+    assert expected_metrics in html_text, (
+        f"docs/assets/social_card.html missing '{expected_metrics}' "
+        "(update HTML and run: make social-card)"
+    )
+
     data = png_path.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "docs/assets/social_card.png is not a valid PNG"
     assert data[12:16] == b"IHDR", "docs/assets/social_card.png missing IHDR chunk"

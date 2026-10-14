@@ -53,7 +53,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -138,9 +138,11 @@ _LAZY: dict[str, tuple[str, str]] = {
     "compute_exceptions_queue": (".diagnostics", "compute_exceptions_queue"),
     "compute_anomalies": (".diagnostics", "compute_anomalies"),
     "compute_change_points": (".diagnostics", "compute_change_points"),
+    "compute_inventory_policy": (".diagnostics", "compute_inventory_policy"),
     "rollup_time": (".diagnostics", "rollup_time"),
     "plot_fva": (".diagnostics", "plot_fva"),
     "plot_horizon_decay": (".diagnostics", "plot_horizon_decay"),
+    "plot_inventory_policy": (".diagnostics", "plot_inventory_policy"),
     "apply_scenario_shocks": (".scenarios", "apply_scenario_shocks"),
     "simulate_scenarios": (".scenarios", "simulate_scenarios"),
     "summarize_scenarios": (".scenarios", "summarize_scenarios"),
@@ -180,11 +182,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         compute_exceptions_queue,
         compute_fva,
         compute_horizon_decay,
+        compute_inventory_policy,
         compute_realized_accuracy,
         compute_revision_stability,
         diebold_mariano_test,
         plot_fva,
         plot_horizon_decay,
+        plot_inventory_policy,
         rollup_time,
         wilcoxon_pvalue,
     )

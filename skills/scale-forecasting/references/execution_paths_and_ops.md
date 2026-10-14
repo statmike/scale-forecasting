@@ -40,7 +40,7 @@ Works on a bare `pip install scale-forecasting` core install with no Google Clou
 # Probe installed extras, available models, and environment readiness
 python -m scale_forecasting.agent_surfaces --probe-env
 
-# List all 34 models and 21 metrics with availability and capabilities
+# List all 37 models and 21 metrics with availability and capabilities
 python -m scale_forecasting.playground --list
 python -m scale_forecasting.playground --catalog
 
@@ -138,7 +138,7 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Submit surgical cell repair** | `python -m scale_forecasting.main --run-id <run_id> --retry --force --reason "..."` | `Forecaster(cfg).retry(confirm=True, reason="...")` |
 | **Full data-science run review** | — | `review_run(run_id)` / `Forecaster(cfg).review()` |
 | **Interval & arm calibration** | — | `calibration_report(run_id)` |
-| **Forecaster's Workbench diagnostics** | — | `Forecaster(cfg).fva()` / `.horizon_decay()` / `.bias_report()` / `.exceptions_queue()` |
+| **Forecaster's Workbench & Inventory Policy** | — | `Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / `.exceptions_df()` / `.inventory_policy_df()` |
 | **Executive HTML + JSON report** | `python -m scale_forecasting.report --model holtwinters --output-dir ./report` | `Forecaster(cfg).export_report()` / `export_report(bench, './report')` |
 
 ---
