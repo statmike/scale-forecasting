@@ -787,10 +787,12 @@ def _stamp_executed_sizing(
     inside a live run on the cluster head. A header that will not take an overlay costs a record,
     never a run.
     """
+    from ..code_delivery import verify_version_parity
     from ..registry.header import merge_header_telemetry
 
     try:
-        merge_header_telemetry(run_id, patch, settings=settings)
+        parity = verify_version_parity()
+        merge_header_telemetry(run_id, {**patch, "version": parity}, settings=settings)
     except Exception as exc:  # noqa: BLE001 - telemetry is an overlay, never fatal
         _log.warning("executed sizing capture failed (non-fatal): %r", exc)
 

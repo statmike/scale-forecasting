@@ -30,11 +30,13 @@ substitutions:
   _REPO: scale-forecasting
   _IMAGE: spark-runtime
   _TAG: latest
+  _VERSION_TAG: "v1.2.1"
   _CODE_BUCKET: "" # code bucket for the packed-venv archive; empty = skip the pack/upload
   _VENV_HASH: "latest" # archive object name envs/<hash>.tar.gz (Terraform passes the requirements md5)
 
 images:
   - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_VERSION_TAG}"
 
 steps:
   - id: build
@@ -45,6 +47,8 @@ steps:
       - docker/Dockerfile
       - --tag
       - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_TAG}"
+      - --tag
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE}:${_VERSION_TAG}"
       - .
 
   # Pack the image's self-contained /opt/venv into an archive. /opt/venv already bundles its own

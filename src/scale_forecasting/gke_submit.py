@@ -1292,6 +1292,8 @@ def submit_gke(
     created_ephemeral_cluster = False
     landed_location = cluster_location or settings.region
     cluster_obj: dict[str, Any] | None = None
+    t_submit_start = time.monotonic()
+    t_job_start: float | None = None
 
     if not plan.ephemeral_cluster:
         cluster_obj = get_gke_cluster(
@@ -1429,6 +1431,7 @@ def submit_gke(
             if not wait:
                 return run_id, plan.job_name, handle
 
+            t_job_start = time.monotonic()
             timeout_s = (
                 wait_timeout_seconds
                 if wait_timeout_seconds is not None
@@ -1444,6 +1447,29 @@ def submit_gke(
             while time.monotonic() < deadline:
                 cur_job = k8s.get_job(plan.namespace, plan.job_name)
                 state, detail = k8s_job_state(cur_job)
+                if state in {"SUCCEEDED", "FAILED"} and job_id:
+                    from .batch_telemetry import platform_phases
+
+                    t_end = time.monotonic()
+                    meta = (cur_job or {}).get("metadata") or {}
+                    st = (cur_job or {}).get("status") or {}
+                    phases = platform_phases(
+                        (cluster_obj or {}).get("createTime") or meta.get("creationTimestamp"),
+                        st.get("startTime") or meta.get("creationTimestamp"),
+                        st.get("completionTime"),
+                    )
+                    if phases.get("provision_s") is None and t_job_start is not None:
+                        phases["provision_s"] = round(max(0.0, t_job_start - t_submit_start), 1)
+                    if phases.get("execute_s") is None and t_job_start is not None:
+                        phases["execute_s"] = round(max(0.0, t_end - t_job_start), 1)
+                    if phases.get("total_wall_s") is None:
+                        phases["total_wall_s"] = round(max(0.0, t_end - t_submit_start), 1)
+                    with contextlib.suppress(Exception):
+                        update_job(
+                            job_id,
+                            settings=settings,
+                            merge_telemetry={"platform": phases},
+                        )
                 if state == "SUCCEEDED":
                     _log.info(
                         "gke job %s SUCCEEDED on cluster %s (%s)",

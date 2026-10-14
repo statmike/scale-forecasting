@@ -37,19 +37,50 @@ def _batch_client(region: str) -> BatchControllerClient:
     )
 
 
-def _rfc3339_seconds(a: object, b: object) -> float | None:
-    """Whole seconds between two Dataproc timestamp fields (``b - a``), or None.
+def _to_epoch_seconds(val: object) -> float | None:
+    """Coerce a protobuf ``Timestamp``, ``datetime``, epoch int/float, or ISO-8601 string."""
+    if val is None or isinstance(val, bool):
+        return None
+    ts_fn = getattr(val, "timestamp", None)
+    if callable(ts_fn):
+        try:
+            res = ts_fn()
+            return float(res) if isinstance(res, int | float) else None
+        except Exception:  # noqa: BLE001 - telemetry is best-effort, never fatal
+            return None
+    if isinstance(val, int | float):
+        fval = float(val)
+        # Ray JobInfo timestamps are epoch milliseconds (> 1e11 for modern dates).
+        return fval / 1000.0 if fval > 1e11 else fval
+    if isinstance(val, str) and val.strip():
+        from datetime import datetime
 
-    Dataproc stamps ``create_time``/``state_time`` as ``google.protobuf.Timestamp``; both expose
-    ``.timestamp()`` (via the proto's datetime helper). Returns None if either is missing so a
-    partial batch object degrades cleanly rather than raising.
+        raw = val.strip()
+        try:
+            return (
+                float(raw)
+                if raw.replace(".", "", 1).isdigit()
+                else datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            )
+        except Exception:  # noqa: BLE001 - malformed timestamp string degrades cleanly
+            return None
+    return None
+
+
+def _rfc3339_seconds(a: object, b: object) -> float | None:
+    """Seconds between two timestamps (``b - a``), or None.
+
+    Accepts ``google.protobuf.Timestamp`` / ``datetime`` (``.timestamp()``), epoch seconds or
+    milliseconds (``int`` / ``float``), and ISO-8601 / RFC-3339 strings (such as Kubernetes
+    ``creationTimestamp`` / ``startTime`` / ``completionTime``). Returns None if either is missing
+    so a partial job object degrades cleanly rather than raising.
     """
-    ts_a = getattr(a, "timestamp", None)
-    ts_b = getattr(b, "timestamp", None)
-    if not callable(ts_a) or not callable(ts_b):
+    ea = _to_epoch_seconds(a)
+    eb = _to_epoch_seconds(b)
+    if ea is None or eb is None:
         return None
     try:
-        return round(ts_b() - ts_a(), 1)
+        return round(max(0.0, eb - ea), 1)
     except Exception:  # noqa: BLE001 - telemetry is best-effort, never fatal
         return None
 

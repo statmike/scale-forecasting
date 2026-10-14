@@ -100,11 +100,17 @@ def _stamp_executed_fanout(
     Best-effort in the same sense as every other telemetry write: this runs inside a live run, and
     a header that will not take an overlay is a lost record, never a lost run.
     """
+    from ..code_delivery import verify_version_parity
     from ..registry.header import executed_sizing_path, merge_header_telemetry
 
     try:
         path = executed_sizing_path(_fanout_family(executed))
-        merge_header_telemetry(run_id, {path: {"fanout": fanout}}, settings=settings)
+        parity = verify_version_parity()
+        merge_header_telemetry(
+            run_id,
+            {path: {"fanout": fanout}, "version": parity},
+            settings=settings,
+        )
     except Exception as exc:  # noqa: BLE001 - telemetry is an overlay, never fatal
         _log.warning("executed fan-out capture failed (non-fatal): %r", exc)
 

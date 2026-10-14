@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -620,7 +621,13 @@ def test_gce_runtime_planning_spec_and_probe(monkeypatch: pytest.MonkeyPatch) ->
     assert spec["scheduling"]["maxRunDuration"] == {"seconds": "3600"}
     assert spec["scheduling"]["instanceTerminationAction"] == "DELETE"
     assert spec["scheduling"]["automaticRestart"] is False
+    assert spec["scheduling"]["onHostMaintenance"] == "TERMINATE"
     assert "accessConfigs" not in spec["networkInterfaces"][0]
+
+    # E2 CPU VMs require onHostMaintenance="MIGRATE" on non-preemptible instances.
+    plan_e2 = dataclasses.replace(plan, machine_type="e2-standard-4")
+    spec_e2 = build_gce_instance_spec_dict(plan_e2, project_id="p", zone="us-central1-a")
+    assert spec_e2["scheduling"]["onHostMaintenance"] == "MIGRATE"
 
     demands = gce_demands(plan, "us-central1")
     assert any(d.metric.metric == "compute.googleapis.com/cpus" for d in demands)

@@ -291,6 +291,9 @@ def submit_cluster_job(
         workers,
     )
 
+    import time
+
+    t_submit_start = time.perf_counter()
     if reuse:
         # A named cluster (standing, or the run's shared ephemeral): submit to its region — a shared
         # cluster may have hopped on a capacity failover, so trust the region the caller threads.
@@ -322,6 +325,8 @@ def submit_cluster_job(
 
     cluster_client = _cluster_client(region)
     job_client = _job_client(region)
+    t_job_start = time.perf_counter()
+    provision_s = round(max(0.0, t_job_start - t_submit_start), 1)
 
     # Before submit, so nothing this job writes can predate the liveness window the watchdog reads.
     since = launch_window_start()
@@ -355,6 +360,24 @@ def submit_cluster_job(
         # The fallback is kept for the case where we did name it and the response still came back
         # without one: the id is ours and we already know it, so there is no reason to return "".
         final_id = submitted_id or job_id or ""
+        if wait and job_id is not None:
+            import contextlib
+
+            from .registry.jobs import update_job
+
+            exec_s = round(max(0.0, time.perf_counter() - t_job_start), 1)
+            with contextlib.suppress(Exception):
+                update_job(
+                    job_id,
+                    settings=settings,
+                    merge_telemetry={
+                        "platform": {
+                            "provision_s": provision_s,
+                            "execute_s": exec_s,
+                            "total_wall_s": round(max(0.0, provision_s + exec_s), 1),
+                        }
+                    },
+                )
         if wait and state_name != "DONE":
             raise EngineError(
                 f"cluster job {final_id} terminal state {state_name}: {detail or '(no detail)'}"

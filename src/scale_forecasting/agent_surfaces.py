@@ -23,6 +23,7 @@ CLI usage::
     python -m scale_forecasting.agent_surfaces --write
     python -m scale_forecasting.agent_surfaces --check
     python -m scale_forecasting.agent_surfaces --probe-env
+    python -m scale_forecasting.agent_surfaces --bump-version X.Y.Z
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -73,6 +75,7 @@ __all__ = [
     "GPU_CATALOG",
     "RUNTIME_CATALOG",
     "build_run_config_json_schema",
+    "bump_version",
     "check_agent_surfaces",
     "expected_agent_surface_files",
     "main",
@@ -1530,6 +1533,138 @@ def check_agent_surfaces(repo_root: Path | None = None) -> list[str]:
     return drifted
 
 
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.\-+]+)?$")
+
+
+def bump_version(
+    new_version: str,
+    repo_root: Path | None = None,
+    *,
+    release_date: str | None = None,
+) -> list[Path]:
+    """Atomically update the package version across all version-locked repository files.
+
+    Updates:
+    1. ``pyproject.toml`` (``[project].version``)
+    2. ``src/scale_forecasting/__init__.py`` (``__version__`` fallback)
+    3. ``plugin.json`` (``"version"``)
+    4. ``skills/scale-forecasting/SKILL.md`` (``metadata.version``)
+    5. ``CITATION.cff`` (``version`` and ``date-released``)
+    6. ``CHANGELOG.md`` (inserts ``## [<version>] - <date>`` section if not already present)
+    7. ``docker/cloudbuild.yaml`` (``_VERSION_TAG: "v<version>"`` when present)
+    8. All 6 generated agent surface files via `write_agent_surfaces` when ``mkdocs.yml`` exists.
+
+    Returns the list of modified file paths.
+    """
+    ver = new_version.strip().lstrip("v")
+    if not _SEMVER_RE.match(ver):
+        raise ValueError(f"Invalid semantic version {new_version!r}; expected 'MAJOR.MINOR.PATCH'.")
+    root = repo_root or _default_repo_root()
+    from datetime import UTC, datetime
+
+    rel_date = release_date or datetime.now(UTC).strftime("%Y-%m-%d")
+    updated: list[Path] = []
+
+    pyproject_path = root / "pyproject.toml"
+    if pyproject_path.is_file():
+        text = pyproject_path.read_text(encoding="utf-8")
+        new_text, n = re.subn(
+            r'(?m)^version\s*=\s*"[^"]+"',
+            f'version = "{ver}"',
+            text,
+            count=1,
+        )
+        if n:
+            pyproject_path.write_text(new_text, encoding="utf-8")
+            updated.append(pyproject_path)
+
+    init_path = root / "src" / "scale_forecasting" / "__init__.py"
+    if init_path.is_file():
+        text = init_path.read_text(encoding="utf-8")
+        new_text, n = re.subn(
+            r'(?m)^(\s*__version__\s*=\s*)"[^"]+"',
+            rf'\1"{ver}"',
+            text,
+            count=1,
+        )
+        if n:
+            init_path.write_text(new_text, encoding="utf-8")
+            updated.append(init_path)
+
+    plugin_path = root / "plugin.json"
+    if plugin_path.is_file():
+        plugin_data = json.loads(plugin_path.read_text(encoding="utf-8"))
+        plugin_data["version"] = ver
+        plugin_path.write_text(json.dumps(plugin_data, indent=2) + "\n", encoding="utf-8")
+        updated.append(plugin_path)
+
+    skill_path = root / "skills" / "scale-forecasting" / "SKILL.md"
+    if skill_path.is_file():
+        text = skill_path.read_text(encoding="utf-8")
+        new_text, n = re.subn(
+            r"(?m)^(\s*version:\s*)\S+",
+            rf"\g<1>{ver}",
+            text,
+            count=1,
+        )
+        if n:
+            skill_path.write_text(new_text, encoding="utf-8")
+            updated.append(skill_path)
+
+    citation_path = root / "CITATION.cff"
+    if citation_path.is_file():
+        text = citation_path.read_text(encoding="utf-8")
+        new_text = re.sub(
+            r'(?m)^version:\s*"[^"]+"',
+            f'version: "{ver}"',
+            text,
+            count=1,
+        )
+        new_text = re.sub(
+            r'(?m)^date-released:\s*"[^"]+"',
+            f'date-released: "{rel_date}"',
+            new_text,
+            count=1,
+        )
+        citation_path.write_text(new_text, encoding="utf-8")
+        updated.append(citation_path)
+
+    changelog_path = root / "CHANGELOG.md"
+    if changelog_path.is_file():
+        text = changelog_path.read_text(encoding="utf-8")
+        if f"## [{ver}]" not in text:
+            stub = (
+                f"## [Unreleased]\n\n---\n\n"
+                f"## [{ver}] - {rel_date}\n\n"
+                f"### Changed\n\n"
+                f"- Release `{ver}`.\n\n---"
+            )
+            if "## [Unreleased]\n\n---" in text:
+                new_text = text.replace("## [Unreleased]\n\n---", stub, 1)
+            else:
+                new_text = text + f"\n## [{ver}] - {rel_date}\n"
+            changelog_path.write_text(new_text, encoding="utf-8")
+            updated.append(changelog_path)
+
+    cloudbuild_path = root / "docker" / "cloudbuild.yaml"
+    if cloudbuild_path.is_file():
+        text = cloudbuild_path.read_text(encoding="utf-8")
+        new_text, n = re.subn(
+            r'(?m)^(\s*_VERSION_TAG:\s*)"[^"]+"',
+            rf'\1"v{ver}"',
+            text,
+            count=1,
+        )
+        if n:
+            cloudbuild_path.write_text(new_text, encoding="utf-8")
+            updated.append(cloudbuild_path)
+
+    if (root / "mkdocs.yml").is_file():
+        updated.extend(write_agent_surfaces(root))
+
+    return updated
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for generating, checking, or probing agent surfaces."""
     configure_cli_logging()
@@ -1553,10 +1688,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print a JSON report of installed extras, available models, and SF_* cloud readiness.",
     )
+    group.add_argument(
+        "--bump-version",
+        metavar="X.Y.Z",
+        help="Atomically bump package version across all version-locked files and agent surfaces.",
+    )
     args = parser.parse_args(argv)
 
     if args.probe_env:
         print(json.dumps(probe_environment(), indent=2, sort_keys=True))
+        return 0
+
+    if args.bump_version:
+        updated = bump_version(args.bump_version)
+        for path in updated:
+            print(f"updated {path}")
         return 0
 
     if args.write:

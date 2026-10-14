@@ -225,6 +225,7 @@ def submit_ray(
     # that actually got a cluster (torn down after the job) or a create that reached ERROR after the
     # loop settled on a region. Reuse leaves the standing cluster alone.
     teardown_target: str | None = None
+    t_submit_start = time.perf_counter()
     try:
         if reuse:
             # A reused cluster (a standing one, or the run's shared ephemeral one) lives in a known
@@ -248,12 +249,32 @@ def submit_ray(
 
         cluster = ray_cluster._get_cluster(cluster_resource_name)
         started = time.perf_counter()
+        provision_s = round(max(0.0, started - t_submit_start), 1)
         job_id, status, detail = ray_jobs._submit_and_poll(
             cluster_resource_name, entrypoint, runtime_env, wait=wait, submission_id=submission_id
         )
         wall_s = round(time.perf_counter() - started, 1) if wait else None
 
         if wait:
+            if submission_id is not None:
+                import contextlib
+
+                from .registry.jobs import update_job
+
+                with contextlib.suppress(Exception):
+                    update_job(
+                        submission_id,
+                        settings=settings,
+                        merge_telemetry={
+                            "platform": {
+                                "provision_s": provision_s,
+                                "execute_s": wall_s,
+                                "total_wall_s": round(
+                                    max(0.0, (provision_s or 0.0) + (wall_s or 0.0)), 1
+                                ),
+                            }
+                        },
+                    )
             telemetry = ray_telemetry.extract_ray_telemetry(
                 plan,
                 cluster=cluster,

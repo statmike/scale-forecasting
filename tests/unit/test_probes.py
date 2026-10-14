@@ -2233,3 +2233,35 @@ def test_a_terminal_header_needs_no_hint_at_all() -> None:
 
     plan = _settle_plan(_fp("statistical", "COMPLETED"), status="COMPLETED")
     assert _header_hint(plan, {"statistical": "COMPLETED"}) == ""
+
+
+def test_platform_phases_supports_protobuf_iso8601_and_epoch_timestamps() -> None:
+    from scale_forecasting.batch_telemetry import platform_phases
+
+    # ISO-8601 / RFC-3339 timestamps (GKE Kubernetes Job status)
+    k8s_phases = platform_phases(
+        "2026-10-14T12:00:00Z",
+        "2026-10-14T12:01:30Z",
+        "2026-10-14T12:04:00Z",
+    )
+    assert k8s_phases == {
+        "provision_s": 90.0,
+        "execute_s": 150.0,
+        "total_wall_s": 240.0,
+    }
+
+    # Epoch seconds (GCE status marker)
+    gce_phases = platform_phases(1700000000, 1700000045, 1700000165)
+    assert gce_phases == {
+        "provision_s": 45.0,
+        "execute_s": 120.0,
+        "total_wall_s": 165.0,
+    }
+
+    # Epoch milliseconds (Ray JobInfo start_time / end_time)
+    ray_phases = platform_phases(1700000000000, 1700000030000, 1700000090000)
+    assert ray_phases == {
+        "provision_s": 30.0,
+        "execute_s": 60.0,
+        "total_wall_s": 90.0,
+    }
