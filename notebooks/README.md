@@ -13,7 +13,7 @@ flowchart TD
     end
 
     subgraph Track2["Track 2: Cloud Runtimes & Distributed Engines"]
-        NB01["01_bigquery_native_sql.ipynb<br/>Serverless BigQuery SQL (ARIMA_PLUS · TimesFM 2.0)"]
+        NB01["01_bigquery_native_sql.ipynb<br/>Serverless BigQuery SQL (ARIMA_PLUS · ARIMA_PLUS_XREG · TimesFM 2.5/3.0)"]
         NB02["02_vertex_and_gce_vms.ipynb<br/>GCE Single-VM, Vertex AI & GKE Indexed Jobs (CPU + L4 GPU)"]
         NB03["03_spark_serverless_and_connect.ipynb<br/>Dataproc Serverless Batch, Cluster & Spark Connect"]
         NB04["04_ray_on_vertex_gpu.ipynb<br/>Autoscaling Ray on Vertex AI & GKE + Fractional GPU Packing"]
@@ -26,7 +26,7 @@ flowchart TD
     end
 
     subgraph Track4["Track 4: Master Multi-Family DAG, Registry Ops & Run Review"]
-        NB08["08_multi_engine_master_workflow.ipynb<br/>Multi-Family Parallel DAG + Stacked Ensembles"]
+        NB08["08_multi_engine_master_workflow.ipynb<br/>Multi-Family Parallel DAG + Foundation Models + Stacked Ensembles"]
         NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes, Composer DAG & Run Review"]
     end
 
@@ -56,7 +56,7 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 ### Track 2: Cloud Runtimes & Distributed Engines
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`01_bigquery_native_sql.ipynb`](./01_bigquery_native_sql.ipynb) | Serverless BigQuery ML | Execute `arima_plus` (`ML.FORECAST`) and Google Research `timesfm` (`AI.FORECAST` TimesFM 2.0) directly inside BigQuery SQL with zero cluster provisioning, understand why both are per-series (`local`) models, blend them into an ensemble, audit all 21 metrics, and inspect horizon-step interval calibration (`plot_calibration()`) and forecast decomposition (`plot_forecast_explanation()`). |
+| [`01_bigquery_native_sql.ipynb`](./01_bigquery_native_sql.ipynb) | Serverless BigQuery ML | Execute `arima_plus` (`ARIMA_PLUS`), `arima_plus_xreg` (`ARIMA_PLUS_XREG` + `ML.EXPLAIN_FORECAST` Two-Tier attributions), and Google Research `timesfm@univariate` (`TimesFM 2.5`) vs. `timesfm` (`TimesFM 3.0` multivariate covariates via `AI.FORECAST`) directly inside BigQuery SQL with zero cluster provisioning, blend them into stacked ensembles, evaluate Covariate FVA (`fva_df()`), detect anomalies and structural change points (`detect_anomalies_df()`, `detect_change_points_df()`), and compute $(s, S)$ inventory replenishment policies (`inventory_policy_df()`, `plot_inventory_policy()`). |
 | [`02_vertex_and_gce_vms.ipynb`](./02_vertex_and_gce_vms.ipynb) | GCE Single-VM, Vertex AI CustomJob & GKE Indexed Jobs | Compare all three direct container runtimes powered by `vertex_engine.py`: ephemeral GCE Single-VM (`runtime="gce"`, triple-redundant auto-delete), multi-worker Vertex AI CustomJob (`runtime="vertex"`), and Google Kubernetes Engine Indexed Jobs (`runtime="gke", gke_mode="job"`, per-model GPU pod auto-expansion and independent node scale-down), plus inspect Two-Tier Feature Attributions (`attributions_df()`, `plot_attributions()`). |
 | [`03_spark_serverless_and_connect.ipynb`](./03_spark_serverless_and_connect.ipynb) | Dataproc Spark (`serverless` / `cluster` / `connect`) | Run the distributed Arrow-backed `groupBy(bucket).applyInPandas` fan-out on Dataproc Serverless in parallel with BigQuery SQL, compare with Dataproc Standard Clusters and interactive Spark Connect (`DataprocSparkSession`), and embed the pure Spark UDF directly via `spark_io.run_group()`. |
 | [`04_ray_on_vertex_gpu.ipynb`](./04_ray_on_vertex_gpu.ipynb) | Ray on Vertex AI & Ray on GKE (CPU & GPU) | Provision ephemeral autoscaling Ray clusters on Vertex AI (`ray_mode="vertex"`) or GKE (`ray_mode="gke"` / `runtime="gke", gke_mode="ray"`), pack PyTorch deep learning tasks fractionally onto GPUs (`gpu_fraction=0.25`), compare `local`, `global`, and `hybrid` neural network regimes, and embed Ray task chunking directly via `ray_io.chunk_cells()`. |
@@ -75,7 +75,7 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 ### Track 4: Master Multi-Family Workflow, Registry Operations & Run Review
 | Notebook | Target Environment | What You Will Learn |
 | :--- | :--- | :--- |
-| [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex / GKE / AutoML $\parallel$ BigQuery | Dispatch active model families concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute** — including a 5-family execution plan preview with `automl` on `vertex_automl`), join them in a stacked ensemble, and run the complete diagnostic & explainability suite (`leaderboard_df`, `cohorts_df`, `jobs_df`, `attributions_df`, `plot_attributions`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`). |
+| [`08_multi_engine_master_workflow.ipynb`](./08_multi_engine_master_workflow.ipynb) | Spark $\parallel$ Vertex / GKE / AutoML $\parallel$ BigQuery | Dispatch active model families (`statistical`, `ml`, `deep_learning` including `[models-foundation]` `chronos_bolt`, and `native`) concurrently across their optimal runtimes from a single `RunConfig` (**zero-idle per-family compute** — including a 5-family execution plan preview with `automl` on `vertex_automl`), join them in a stacked ensemble, and run the complete diagnostic, explainability, anomaly/change-point, and inventory replenishment workbench (`leaderboard_df`, `fva_df`, `cohorts_df`, `jobs_df`, `attributions_df`, `plot_attributions`, `plot_calibration`, `plot_ensemble_weights`, `plot_forecasts`, `plot_forecast_explanation`, `plot_trace`, `detect_anomalies_df`, `detect_change_points_df`, `inventory_policy_df`, `plot_inventory_policy`). |
 | [`10_registry_operations_and_scale.ipynb`](./10_registry_operations_and_scale.ipynb) | BigQuery Registry & Ops | Zero-SQL registry health audit (`reg.doctor()`, `reg.runs_df()`), historical run reattachment (`Forecaster.from_run_id()`, `attributions_df()`), pre-flight fold feasibility (`feasibility()`), preview-safe Day-2 verbs (`retry`, `settle`, `cancel`), **all 5 production launch pathways** (including live execution of the Cloud Composer 3 `airflow_tasks` DAG sequence against a GCS-staged config), and a cross-platform review of every completed run in the registry (the 100,000-series benchmark `run_id`s themselves are recorded in [Quota & Scale](../quota_and_scale.md)). |
 
 ---

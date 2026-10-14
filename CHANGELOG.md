@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.1] - 2026-10-14
+
+### Added
+
+- **Atomic Version Bump Automation (`make bump VERSION=X.Y.Z`):**
+  - Added [`bump_version()`](./src/scale_forecasting/agent_surfaces.py) (`python -m scale_forecasting.agent_surfaces --bump-version X.Y.Z`) and `make bump VERSION=X.Y.Z` in [`Makefile`](./Makefile) to atomically update all 7 version-locked files ([`pyproject.toml`](./pyproject.toml), [`src/scale_forecasting/__init__.py`](./src/scale_forecasting/__init__.py), [`plugin.json`](./plugin.json), [`skills/scale-forecasting/SKILL.md`](./skills/scale-forecasting/SKILL.md), [`CHANGELOG.md`](./CHANGELOG.md), [`CITATION.cff`](./CITATION.cff), and [`docker/cloudbuild.yaml`](./docker/cloudbuild.yaml)), refresh `uv.lock` and `docker/requirements.txt`, sync the editable `.venv` `.dist-info`, and regenerate all 6 AI agent surface files.
+- **Version-Tagged Runtime Containers (`:vX.Y.Z`) & Launcher $\leftrightarrow$ Worker Version Parity Guard (`code_delivery.py`):**
+  - [`docker/cloudbuild.yaml`](./docker/cloudbuild.yaml) and `make image` in [`Makefile`](./Makefile) now tag and push both `:latest` and `:v<version>` (`:v1.2.1`) to Artifact Registry alongside the content-addressed `venv_archive` tarball.
+  - Added [`verify_version_parity()`](./src/scale_forecasting/code_delivery.py), wired into `spark_explode._stamp_executed_fanout` and `ray_engine._stamp_executed_sizing` (shared across `ray`, `vertex`, `gce`, and `gke`), stamping `launcher` and `worker` `scale_forecasting.__version__` (`$.version`) into `run_registry.job_telemetry` and raising `ConfigError` on mismatch when `SF_STRICT_VERSION_PARITY=1`.
+- **Complete 7-Runtime Provisioning vs. Execution Telemetry (`$.platform`):**
+  - Extended [`batch_telemetry.platform_phases()`](./src/scale_forecasting/batch_telemetry.py) (`_to_epoch_seconds` / `_rfc3339_seconds`) to accept protobuf `Timestamp`, `datetime`, epoch seconds/milliseconds, and RFC 3339 strings, and wired `$.platform` (`provision_s`, `execute_s`, `total_wall_s`) into `RayProbe`, `GceProbe`, `GkeProbe`, and `VertexAutoMLProbe` in [`src/scale_forecasting/probes/runtimes.py`](./src/scale_forecasting/probes/runtimes.py) as well as ephemeral submitters ([`gce_submit.py`](./src/scale_forecasting/gce_submit.py), [`gke_submit.py`](./src/scale_forecasting/gke_submit.py), [`ray_submit.py`](./src/scale_forecasting/ray_submit.py), [`cluster_submit.py`](./src/scale_forecasting/cluster_submit.py), [`automl_submit.py`](./src/scale_forecasting/automl_submit.py)) so `v_run_jobs.provision_seconds` and `execute_seconds` are populated across all compute runtimes.
+- **Cross-Version BigQuery Registry Compatibility Tripwire ([`tests/unit/test_cross_version_resilience.py`](./tests/unit/test_cross_version_resilience.py)):**
+  - Verifies backward and forward compatibility of `Forecaster.from_run_id()`, `ops.match_reusable_models()` & `render_borrow_model_sql()`, `review._assemble_review()` & DataFrame builders, and `diagnostics.py` (`compute_fva`, `compute_inventory_policy`, `compute_anomalies`, `compute_change_points`) across historical `v1.0.0`, `v1.1.0`, and `v1.2.0` registry payloads.
+
+### Changed
+
+- **Interactive Showcase Notebook Refresh ([`notebooks/01_bigquery_native_sql.ipynb`](./notebooks/01_bigquery_native_sql.ipynb) & [`notebooks/08_multi_engine_master_workflow.ipynb`](./notebooks/08_multi_engine_master_workflow.ipynb)):**
+  - Re-executed and persisted `01_bigquery_native_sql.ipynb` (`arima_plus`, `arima_plus_xreg`, `timesfm` `TimesFM 3.0` multivariate, `timesfm@univariate` `TimesFM 2.5`, Covariate FVA, Two-Tier `ML.EXPLAIN_FORECAST` attributions, anomaly/change-point detection, and $(s, S)$ inventory replenishment policy) and `08_multi_engine_master_workflow.ipynb` (4-family parallel DAG with `[models-foundation]` `chronos_bolt`, FVA, TreeSHAP attributions, `v_run_jobs` provisioning telemetry, anomaly/change-point detection, and inventory replenishment policy) against the `v1.2.1` runtime container.
+
+---
+
 ## [1.2.0] - 2026-10-14
 
 ### Added

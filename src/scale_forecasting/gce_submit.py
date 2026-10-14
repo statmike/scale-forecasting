@@ -325,6 +325,8 @@ def build_gce_startup_script(
         f"STATUS_OBJECT_ENC={shlex.quote(encoded_obj)}\n"
         "LOG_FILE=/tmp/sf_container.log\n"
         ': > "$LOG_FILE"\n'
+        "BOOT_EPOCH=$(date +%s)\n"
+        "EXEC_START_EPOCH=$BOOT_EPOCH\n"
         "\n"
         "get_token() {\n"
         "  curl -sf -H 'Metadata-Flavor: Google' \\\n"
@@ -337,12 +339,17 @@ def build_gce_startup_script(
         '  local st="$1"\n'
         '  local rc="$2"\n'
         '  local detail="$3"\n'
+        "  local end_epoch\n"
+        "  end_epoch=$(date +%s)\n"
+        "  local exec_s=$((end_epoch - EXEC_START_EPOCH))\n"
         '  if [ -n "$STATUS_BUCKET" ]; then\n'
         "    local tok\n"
         "    tok=$(get_token || true)\n"
         '    printf \'{"status":"%s","exit_code":%s,"instance":"%s",'
-        '"zone":"%s","detail":"%s"}\\n\' \\\n'
+        '"zone":"%s","detail":"%s","boot_epoch":%s,"exec_start_epoch":%s,'
+        '"end_epoch":%s,"execute_s":%s}\\n\' \\\n'
         '      "$st" "$rc" "$INSTANCE_NAME" "$ZONE" "$detail" \\\n'
+        '      "$BOOT_EPOCH" "$EXEC_START_EPOCH" "$end_epoch" "$exec_s" \\\n'
         '      | curl -sf -X POST -H "Authorization: Bearer ${tok}" \\\n'
         "        -H 'Content-Type: application/json' --data-binary @- \\\n"
         '        "https://storage.googleapis.com/upload/storage/v1/b/'
@@ -378,6 +385,7 @@ def build_gce_startup_script(
         'echo "$TOKEN" | docker login -u oauth2accesstoken '
         f'--password-stdin {registry_url_q} >>"$LOG_FILE" 2>&1\n'
         f'docker pull {shlex.quote(plan.image_uri)} >>"$LOG_FILE" 2>&1\n'
+        "EXEC_START_EPOCH=$(date +%s)\n"
         f'{docker_cmd} >>"$LOG_FILE" 2>&1\n'
     )
 
@@ -399,12 +407,17 @@ def build_gce_instance_spec_dict(
     3. ``disks[0].autoDelete = True`` so the boot persistent disk never outlives the VM.
     """
     startup_script = build_gce_startup_script(plan, driver_args, project_id=project_id, zone=zone)
+    on_host_maintenance = (
+        "MIGRATE"
+        if plan.accelerator_count == 0 and str(plan.machine_type).startswith("e2-")
+        else "TERMINATE"
+    )
     spec: dict[str, Any] = {
         "name": plan.instance_name,
         "machineType": f"zones/{zone}/machineTypes/{plan.machine_type}",
         "scheduling": {
             "automaticRestart": False,
-            "onHostMaintenance": "TERMINATE",
+            "onHostMaintenance": on_host_maintenance,
             "maxRunDuration": {"seconds": str(plan.max_run_duration_seconds)},
             "instanceTerminationAction": "DELETE",
         },
@@ -909,6 +922,7 @@ def submit_gce(
 
     if wait:
         assert chosen_zone is not None
+        t_poll_start = time.monotonic()
         try:
             marker = _poll_gce_instance(
                 session,
@@ -920,6 +934,34 @@ def submit_gce(
                 grace_s=int(infra.stall_grace_seconds),
                 since=since,
             )
+            if effective_job_id is not None:
+                from .batch_telemetry import platform_phases
+
+                phases = platform_phases(
+                    marker.get("create_epoch") or since or marker.get("boot_epoch"),
+                    marker.get("exec_start_epoch") or marker.get("boot_epoch"),
+                    marker.get("end_epoch"),
+                )
+                if phases.get("execute_s") is None and isinstance(
+                    marker.get("execute_s"), int | float
+                ):
+                    phases["execute_s"] = round(float(marker["execute_s"]), 1)
+                if phases.get("total_wall_s") is None:
+                    phases["total_wall_s"] = round(max(0.0, time.monotonic() - t_poll_start), 1)
+                exec_val = phases.get("execute_s")
+                wall_val = phases.get("total_wall_s")
+                if (
+                    phases.get("provision_s") is None
+                    and exec_val is not None
+                    and wall_val is not None
+                ):
+                    phases["provision_s"] = round(max(0.0, wall_val - exec_val), 1)
+                with contextlib.suppress(Exception):
+                    update_job(
+                        effective_job_id,
+                        settings=settings,
+                        merge_telemetry={"platform": phases},
+                    )
             if marker.get("status") != "SUCCEEDED":
                 detail = marker.get("detail") or f"exit_code={marker.get('exit_code')}"
                 raise EngineError(

@@ -239,7 +239,10 @@ def submit_automl(
                 },
             )
 
+    import time
+
     _ = wait
+    t_start = time.monotonic()
     outcome = automl_engine.run(
         cfg,
         models=automl_models,
@@ -247,6 +250,7 @@ def submit_automl(
         settings=settings,
         job_id=plan.display_name,
     )
+    wall_s = round(max(0.0, time.monotonic() - t_start), 1)
 
     # If the pipeline produced a concrete resource_name or pipeline_job_id, update the handle.
     models_telem = outcome.get("models") or {}
@@ -263,6 +267,12 @@ def submit_automl(
         region=settings.region,
         resource_name=str(resource_name) if resource_name else None,
     )
+    prov_s = first_telem.get("provision_s")
+    exec_s = first_telem.get("execute_s")
+    if exec_s is None:
+        exec_s = wall_s
+    if prov_s is None:
+        prov_s = round(max(0.0, wall_s - float(exec_s)), 1)
     if job_id is not None:
         with contextlib.suppress(Exception):
             update_job(
@@ -270,6 +280,11 @@ def submit_automl(
                 settings=settings,
                 merge_telemetry={
                     "probe_handle": final_handle.to_blob(),
+                    "platform": {
+                        "provision_s": prov_s,
+                        "execute_s": exec_s,
+                        "total_wall_s": wall_s,
+                    },
                     "vertex_automl": {
                         **plan.to_dict(),
                         "models_telemetry": models_telem,

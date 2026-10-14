@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from ..batch_telemetry import platform_phases
 from ..errors import ConfigError
 from ..registry.tables import bigquery_client
 from .vocabulary import (
@@ -347,7 +348,7 @@ class RayProbe:
                 )
             _init_vertex(settings, handle.region or settings.region)
             try:
-                _get_cluster(resource_name)
+                cluster = _get_cluster(resource_name)
             except NotFound:
                 return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail="ray cluster torn down")
             client = _connect_job_client(resource_name)
@@ -361,12 +362,20 @@ class RayProbe:
                 )
             native = _RAY_JOB_STATES.get(status, NATIVE_UNKNOWN)
             detail = ""
+            telem: dict[str, Any] = {}
             try:
                 info = client.get_job_info(handle.native_id)
                 detail = getattr(info, "message", None) or ""
+                start_t = getattr(info, "start_time", None)
+                end_t = getattr(info, "end_time", None)
+                create_t = getattr(cluster, "create_time", None) or handle.created_at or start_t
+                if start_t is not None or end_t is not None:
+                    phases = platform_phases(create_t, start_t, end_t)
+                    if any(v is not None for v in phases.values()):
+                        telem = phases
             except Exception:  # noqa: BLE001 - job-info is a best-effort enrichment, not the state
                 pass
-            return ProbeResult(native, exists=True, detail=detail)
+            return ProbeResult(native, exists=True, detail=detail, telemetry=telem)
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 
@@ -638,6 +647,15 @@ class GceProbe:
                 else None
             )
             if marker is not None:
+                if "provision_s" not in marker and any(
+                    k in marker for k in ("boot_epoch", "exec_start_epoch", "end_epoch")
+                ):
+                    phases = platform_phases(
+                        marker.get("create_epoch") or handle.created_at or marker.get("boot_epoch"),
+                        marker.get("exec_start_epoch") or marker.get("boot_epoch"),
+                        marker.get("end_epoch"),
+                    )
+                    marker = {**marker, **phases}
                 m_state = str(marker.get("status") or marker.get("state") or "").upper()
                 exit_code = marker.get("exit_code")
                 if m_state == "SUCCEEDED":
@@ -763,11 +781,23 @@ class GkeProbe:
             state, detail = k8s_job_state(job_obj)
             if state == "NOT_FOUND":
                 return ProbeResult(NATIVE_NOT_FOUND, exists=False, detail=detail)
+            meta = (job_obj or {}).get("metadata") or {}
+            st = (job_obj or {}).get("status") or {}
+            create_ts = (
+                cluster.get("createTime") or meta.get("creationTimestamp") or handle.created_at
+            )
+            start_ts = st.get("startTime") or meta.get("creationTimestamp")
+            end_ts = st.get("completionTime")
+            telem: dict[str, Any] = {}
+            if any(x is not None for x in (create_ts, start_ts, end_ts)):
+                phases = platform_phases(create_ts, start_ts, end_ts)
+                if any(v is not None for v in phases.values()):
+                    telem = phases
             if state == "SUCCEEDED":
-                return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail)
+                return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail, telemetry=telem)
             if state == "FAILED":
-                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail)
-            return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail)
+                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail, telemetry=telem)
+            return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail, telemetry=telem)
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 
@@ -866,11 +896,21 @@ class VertexAutoMLProbe:
                     any_failed = True
                     error = getattr(job, "error", None)
                     detail = getattr(error, "message", "") or detail if error else detail
+            first_job = jobs[0] if jobs else None
+            telem: dict[str, Any] = {}
+            if first_job is not None:
+                c_t = getattr(first_job, "create_time", None) or handle.created_at
+                s_t = getattr(first_job, "start_time", None)
+                e_t = getattr(first_job, "end_time", None)
+                if any(x is not None for x in (c_t, s_t, e_t)):
+                    phases = platform_phases(c_t, s_t, e_t)
+                    if any(v is not None for v in phases.values()):
+                        telem = phases
             if any_running:
-                return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail)
+                return ProbeResult(NATIVE_RUNNING, exists=True, detail=detail, telemetry=telem)
             if any_failed:
-                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail)
-            return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail)
+                return ProbeResult(NATIVE_FAILED, exists=True, detail=detail, telemetry=telem)
+            return ProbeResult(NATIVE_SUCCEEDED, exists=True, detail=detail, telemetry=telem)
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
 

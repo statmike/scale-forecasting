@@ -194,3 +194,45 @@ def write_package_zip(dest_dir: str | Path | None = None) -> Path:
     out = base / f"scale_forecasting-{code_hash}.zip"
     out.write_bytes(data)
     return out
+
+
+def verify_version_parity(
+    launcher_version: str | None = None,
+    worker_version: str | None = None,
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Compare launcher and worker ``scale_forecasting.__version__`` strings.
+
+    Returns a structured telemetry dict ``{"launcher": str, "worker": str, "match": bool}``.
+    When ``launcher_version`` or ``worker_version`` is omitted, resolves
+    ``scale_forecasting.__version__`` from the active process (or ``SF_LAUNCHER_VERSION`` in
+    ``os.environ`` for the launcher side on a remote worker). Logs a warning when the versions
+    differ and raises `ConfigError` when ``strict=True``.
+    """
+    import os
+
+    import scale_forecasting
+
+    from .errors import ConfigError, get_logger
+
+    current_ver = scale_forecasting.__version__
+    resolved_worker = (worker_version or current_ver).strip()
+    resolved_launcher = (
+        launcher_version or os.environ.get("SF_LAUNCHER_VERSION") or current_ver
+    ).strip()
+    match = resolved_launcher == resolved_worker
+    if not match:
+        msg = (
+            f"scale-forecasting version mismatch between launcher ({resolved_launcher!r}) and "
+            f"worker ({resolved_worker!r}); rebuild runtime image with `make image` or sync "
+            "package versions."
+        )
+        get_logger(__name__).warning(msg)
+        if strict:
+            raise ConfigError(msg)
+    return {
+        "launcher": resolved_launcher,
+        "worker": resolved_worker,
+        "match": match,
+    }

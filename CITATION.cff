@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/statmike/scale-forecasting"
 url: "https://statmike.github.io/scale-forecasting/"
 license: Apache-2.0
-version: "1.2.0"
+version: "1.2.1"
 date-released: "2026-10-14"
 keywords:
   - time-series

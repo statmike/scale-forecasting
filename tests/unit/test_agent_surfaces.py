@@ -194,3 +194,53 @@ def test_skill_md_and_extension_manifests() -> None:
     assert tutorial_path.is_file()
     tutorial_text = tutorial_path.read_text(encoding="utf-8")
     assert "<walkthrough-conclusion-trophy" in tutorial_text
+
+
+def test_bump_version_updates_all_version_locked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify `agent_surfaces.bump_version` updates all 7 version-locked files."""
+    for rel in (
+        "pyproject.toml",
+        "src/scale_forecasting/__init__.py",
+        "plugin.json",
+        "skills/scale-forecasting/SKILL.md",
+        "CHANGELOG.md",
+        "CITATION.cff",
+        "docker/cloudbuild.yaml",
+    ):
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / rel, dst)
+
+    updated = agent_surfaces.bump_version("9.8.7", tmp_path, release_date="2026-10-14")
+    assert {p.relative_to(tmp_path).as_posix() for p in updated} == {
+        "pyproject.toml",
+        "src/scale_forecasting/__init__.py",
+        "plugin.json",
+        "skills/scale-forecasting/SKILL.md",
+        "CHANGELOG.md",
+        "CITATION.cff",
+        "docker/cloudbuild.yaml",
+    }
+    assert 'version = "9.8.7"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert '__version__ = "9.8.7"' in (tmp_path / "src/scale_forecasting/__init__.py").read_text(
+        encoding="utf-8"
+    )
+    assert json.loads((tmp_path / "plugin.json").read_text(encoding="utf-8"))["version"] == "9.8.7"
+    assert "  version: 9.8.7" in (tmp_path / "skills/scale-forecasting/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## [9.8.7] - 2026-10-14" in (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert 'version: "9.8.7"' in (tmp_path / "CITATION.cff").read_text(encoding="utf-8")
+    assert '_VERSION_TAG: "v9.8.7"' in (tmp_path / "docker/cloudbuild.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    monkeypatch.setattr(agent_surfaces, "_default_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(agent_surfaces, "write_agent_surfaces", lambda root=None: [])
+    assert agent_surfaces.main(["--bump-version", "9.8.8"]) == 0
+    assert 'version = "9.8.8"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid semantic version"):
+        agent_surfaces.bump_version("not-a-semver", tmp_path)

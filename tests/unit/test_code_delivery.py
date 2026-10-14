@@ -348,3 +348,41 @@ def test_missing_cluster_requirements_names_what_was_searched(monkeypatch) -> No
     message = str(excinfo.value)
     assert "nope/req.txt" in message
     assert "composer-sync" in message
+
+
+def test_cloudbuild_tags_both_latest_and_version_tag() -> None:
+    import tomllib
+
+    expected_ver = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["version"]
+    cb_text = _CLOUDBUILD.read_text(encoding="utf-8")
+    assert f'_VERSION_TAG: "v{expected_ver}"' in cb_text
+    assert "${_IMAGE}:${_TAG}" in cb_text
+    assert "${_IMAGE}:${_VERSION_TAG}" in cb_text
+
+
+def test_verify_version_parity_detects_skew_and_strict_mode() -> None:
+    import pytest
+
+    from scale_forecasting import __version__
+    from scale_forecasting.code_delivery import verify_version_parity
+    from scale_forecasting.errors import ConfigError
+
+    match_info = verify_version_parity("1.2.0", "1.2.0")
+    assert match_info == {
+        "launcher": "1.2.0",
+        "worker": "1.2.0",
+        "match": True,
+    }
+
+    default_info = verify_version_parity()
+    assert default_info["launcher"] == __version__
+    assert default_info["worker"] == __version__
+    assert default_info["match"] is True
+
+    skew_info = verify_version_parity("1.2.1", "1.1.0", strict=False)
+    assert skew_info["match"] is False
+
+    with pytest.raises(ConfigError, match="version mismatch"):
+        verify_version_parity("1.2.1", "1.1.0", strict=True)

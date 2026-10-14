@@ -8,10 +8,11 @@
 # The exact export that produces docker/requirements.txt. Must stay identical here, in the file's
 # header comment, and in the CI drift check (.github/workflows/ci.yml) — that three-way match is what
 # guarantees the committed file always equals the lock.
+export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 export UV_NO_CONFIG := 1
 EXPORT_ARGS := --frozen --no-emit-project --no-dev --no-hashes --extra gcp --extra models --extra ray --format requirements-txt
 
-.PHONY: lock lock-check sync test typecheck ci-offline hooks docs social-card agent-surfaces composer-sync
+.PHONY: lock lock-check sync test typecheck ci-offline hooks docs social-card agent-surfaces bump image composer-sync
 
 ## lock: re-resolve uv.lock from pyproject.toml and regenerate docker/requirements.txt from it.
 ## Run this after editing dependencies in pyproject.toml, then commit both files.
@@ -111,6 +112,27 @@ social-card:
 ## agent-surfaces: regenerate JSON Schema, llms.txt, llms-full.txt, and skills/scale-forecasting/references/*.md from code.
 agent-surfaces:
 	uv run python -m scale_forecasting.agent_surfaces --write
+
+## bump: atomically bump package version across all version-locked files, lockfile, editable .venv, and agent surfaces (usage: make bump VERSION=1.2.1).
+bump:
+	@test -n "$(VERSION)" || { echo "Usage: make bump VERSION=X.Y.Z" >&2; exit 1; }
+	uv run python -m scale_forecasting.agent_surfaces --bump-version "$(VERSION)"
+	$(MAKE) lock
+	uv pip install --python .venv/bin/python --no-deps -e .
+
+## image: build & push runtime container (:latest + :vX.Y.Z) and upload packed worker venv to GCS via Cloud Build.
+IMAGE_PROJECT ?= $(or $(SF_PROJECT_ID),statmike-scale-forecasting)
+IMAGE_REGION  ?= $(or $(SF_REGION),us-central1)
+IMAGE_BUCKET  ?= $(or $(SF_CODE_BUCKET),$(IMAGE_PROJECT)-code)
+image:
+	@VENV_HASH=$$(md5sum docker/requirements.txt | awk '{print $$1}'); \
+	PKG_VER=$$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])'); \
+	echo "Building runtime image :latest + :v$$PKG_VER (venv hash: $$VENV_HASH) in $(IMAGE_PROJECT)..."; \
+	gcloud builds submit \
+		--project "$(IMAGE_PROJECT)" \
+		--config docker/cloudbuild.yaml \
+		--substitutions="_REGION=$(IMAGE_REGION),_REPO=scale-forecasting,_IMAGE=spark-runtime,_TAG=latest,_VERSION_TAG=v$$PKG_VER,_CODE_BUCKET=$(IMAGE_BUCKET),_VENV_HASH=$$VENV_HASH" \
+		.
 
 ## composer-sync: deliver THIS working tree's src/ to the Composer workers (the code-delivery step).
 ## GitHub is only the origin — you pull/fork/modify locally, and this ships your src/ to the env so a
