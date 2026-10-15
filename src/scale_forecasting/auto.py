@@ -1853,6 +1853,15 @@ def _build_compute_block_for_where(
     families_present = {get_model(base_model_name(m)).family for m in models}
     families_block: dict[str, Any] = {}
 
+    if (
+        s_regime in ("large", "massive")
+        and where in ("cloud_cpu", "cloud_all", "auto")
+        and (families_present & {"statistical", "ml"})
+    ):
+        compute_cfg["persist_models"] = False
+        compute_cfg["bucket_target_cells"] = 200
+        compute_cfg["max_executors"] = 20
+
     if where == "cloud_cpu":
         for fam in ("statistical", "ml", "deep_learning"):
             if fam in families_present:
