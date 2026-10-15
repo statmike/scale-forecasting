@@ -194,3 +194,49 @@
 | `configs/smokes/40_gke_indexed_job.json` | `smoke_40_gke_indexed_job` | `gke` | `deep_learning:gke`, `statistical:gke` | `theta`, `sarimax`, `xgboost`, `tide` |
 | `configs/smokes/41_gke_ray.json` | `smoke_41_gke_ray` | `gke` | `deep_learning:ray`, `ml:gke` | `theta`, `sarimax`, `xgboost`, `tide` |
 | `configs/smokes/42_vertex_automl_tabular_workflow.json` | `smoke_42_vertex_automl_tabular_workflow` | `vertex_automl` | `automl:vertex_automl`, `ml:vertex` | `xgboost`, `vertex_tide`, `arima_plus` |
+
+---
+
+## 7. Auto-Forecaster Exposure Tiers, Scale Regimes & Synthetic DGP Benchmarks
+
+### Observational Exposure Tiers (`EXPOSURE_TIERS` in `auto_policy.py`)
+
+| Tier (`tier`) | Title & Typical Duration | Description |
+| :--- | :--- | :--- |
+| `first_light` | First Light (~20s local / ~55s BQ / ~6m cloud) | Rapid baseline exposure: seasonal naive + fast statistical + gradient boosted trees with a 1-fold backtest to verify data plumbing and establish the FVA baseline. |
+| `wide_field` | Wide Field (~2m local / ~2m BQ / ~7-16m cloud, Default) | Balanced multi-family survey across Statistical, ML Trees, and Zero-Shot Foundation models with 2-fold CV, covariate FVA baselines, and champion selection. |
+| `deep_sky` | Deep Sky (~6m local / ~4.5m BQ / ~12-22m cloud) | Deep cross-series global + local survey adding CatBoost, TiDE/TSMixer neural architectures, 3-fold CV, fleetwide HPO, and multi-branch Tournament DAG autofocus. |
+| `deep_field` | Deep Field (~15m local / ~8m BQ / ~20-35m cloud) | Exhaustive observatory exposure across all eligible families (Statistical, ML, Deep Learning, Foundation, and BigQuery ML SQL), 3-fold CV, Optuna HPO, and learned stacking ensembles. |
+
+### Series-Count Scale Regimes (`SCALE_REGIMES` in `auto_policy.py`)
+
+| Scale Regime (`scale_regime`) | Series Count | Routing Strategy |
+| :--- | :--- | :--- |
+| `micro` | Micro Panel (1–14 series) | Per-series local statistical, tree, and zero-shot foundation models lead; trained @global neural models deferred unless cross-series correlation is high. |
+| `small` | Small Panel (15–199 series) | Hybrid local + @global crossover: runs per-series and pooled models side-by-side to measure empirical pooling FVA. |
+| `medium` | Medium Panel (200–2,499 series) | Global trees, neural nets, and foundation models lead; prunes slow O(T^2) per-series iterative statistical models on local CPU. |
+| `large` | Large Fleet (2,500–24,999 series) | Global neural/foundation + fast linear-time statistical models with multi-worker cloud sharding and top-K ensemble parsimony. |
+| `hyperscale` | Hyperscale Fleet (25,000+ series) | Hyperscale distributed portfolio (Spark Serverless / Ray / Vertex GPU / BigQuery) with 1–2 fold CV and top-3 parsimony ensembling. |
+
+### Ground-Truth Synthetic DGP Benchmarks (18 Panels in `benchmarks.py`)
+
+| Benchmark Name (`benchmark`) | Regime | Freq / H | Ground-Truth Description | Expected `autofocus` Actions |
+| :--- | :--- | :---: | :--- | :--- |
+| `dgp_01_smooth_seasonal` | `smooth` | `D` / `14` | 12 daily series with smooth linear trend, two weekly harmonics, low Gaussian noise (CV ~ 0.10), and strictly positive demand. | `floor=0.0`, `seasonal_harmonics` |
+| `dgp_02_multiplicative_log` | `smooth` | `D` / `14` | 12 daily series with compounding exponential growth where seasonal amplitude and shock variance scale strictly with the series level (sigma proportional to mu). | `inject_transform_log1p`, `champion_selection` |
+| `dgp_03_intermittent_lumpy` | `intermittent` | `D` / `14` | 12 daily integer count series mixing 60% intermittent/lumpy SKUs (ADI > 1.6, CV^2 > 0.6) with 40% smooth/erratic SKUs. | `regime_routing`, `croston_sba_tsb`, `cumulative_round` |
+| `dgp_04_true_vs_decoy_covs` | `smooth` | `D` / `14` | 12 daily retail series driven by true future covariates ('promo_depth', 'price_index') alongside 3 uncorrelated decoy noise columns ('noise_a', 'noise_b', 'noise_c') that degrade unregularized models. | `prune_decoy_covariates`, `retain_true_drivers` |
+| `dgp_05_horizon_crossover` | `smooth` | `D` / `14` | 12 daily series with persistent AR(1) momentum dominating steps 1..5 and deterministic calendar/promo structure dominating steps 6..14. | `inject_direct_horizon_models`, `horizon_specialist_ensemble` |
+| `dgp_06_structural_break_spikes` | `erratic` | `D` / `14` | 12 daily series experiencing a permanent +65% step-change level shift at 65% of history plus 3 isolated one-day anomalous spikes. | `enable_level_shift`, `enable_stl_resid_outlier_scrubbing` |
+| `dgp_07_censored_stockouts` | `smooth` | `D` / `14` | 12 daily series where true latent demand is clipped at a warehouse capacity ceiling on dates flagged by 'stockout_flag == 1'. | `enable_stockout_imputation` |
+| `dgp_08_hierarchical_nonneg` | `smooth` | `D` / `14` | 12 daily series across 3 regions x 4 stores where coherent cross-level aggregation and non-negativity require hierarchical reconciliation. | `enable_hierarchy_reconciliation`, `mint_nonneg` |
+| `dgp_09_cross_series_global` | `smooth` | `D` / `14` | 16 moderate-length daily series sharing a common nonlinear price/promo elasticity surface where global cross-series models outperform per-series local fits. | `prefer_global_pooling`, `include_static_covariates` |
+| `dgp_10_newsvendor_service` | `smooth` | `D` / `14` | 12 daily SKU demand series with 7-day supplier lead time and 9:1 underage/overage cost ratio (critical fractile q* = 0.90). | `quantile_grid_service_level`, `conformal_calibration` |
+| `dgp_11_cold_start_mixed` | `cold_start` | `D` / `14` | 12 mature daily series (T=140) alongside 4 newly launched cold-start series (T=21) requiring short-series fallback and zero-shot/simple baseline routing. | `short_series_fallback`, `regime_routing` |
+| `dgp_12_already_optimal_white_noise` | `smooth` | `D` / `14` | 12 daily series consisting of a clean stationary seasonal wave plus irreducible i.i.d. Gaussian noise. Pass 1 captures 100% of the predictable signal; autofocus must recognize low continuation confidence and stop after Pass 1. | `stop_after_pass_1` |
+| `dgp_13_all_decoy_univariate_wins` | `smooth` | `D` / `14` | 12 daily series driven strictly by trend and weekly harmonics, accompanied by 3 pure-noise decoy covariates ('noise_a', 'noise_b', 'noise_c'). Autofocus must detect zero covariate value, fall back to plain univariate forecasting, and highlight beaten multivariate challengers. | `fallback_to_plain_univariate`, `champion_is_univariate` |
+| `dgp_14_large_hierarchy_intermittent_leaves` | `intermittent` | `D` / `14` | 16 daily count series across 4 regions x 4 stores where bottom-level leaves exhibit sparse intermittent demand while regional and total rollups are smooth. | `enable_hierarchy_reconciliation`, `top_down`, `inject_intermittent_specialists` |
+| `dgp_15_scale_crossover_panel` | `smooth` | `D` / `14` | 24 daily series sharing synchronized seasonal harmonics and macro trend where scale-aware policy activates hybrid local + @global cross-series pooling. | `scale_regime_small`, `global_cross_series_pooling` |
+| `dgp_16_monthly_trading_days` | `smooth` | `MS` / `6` | 12 monthly series (freq='MS', T=48, H=6) where monthly billing totals fluctuate with the number of weekday business days vs. weekend days in each calendar month. | `enable_trading_days` |
+| `dgp_17_missing_gaps_and_leading_zeros` | `smooth` | `D` / `14` | 12 daily series where half of the SKUs have 28 pre-launch leading zeros and internal missing date gaps requiring automatic grid_policy and trim_leading_zeros. | `enable_trim_leading_zeros`, `regularize_grid_policy` |
+| `dgp_18_promo_lag_pullforward` | `smooth` | `D` / `14` | 12 daily series where promotions trigger a +85 unit contemporaneous spike on day t followed by a -52 unit pantry-loading dip on day t+1, requiring exog_lags synthesis. | `synthesize_exog_lags` |

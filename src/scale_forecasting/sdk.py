@@ -172,6 +172,194 @@ class Forecaster:
     def __init__(self, config: RunConfig, *, settings: Settings | None = None) -> None:
         self._config = config
         self._settings = settings
+        self._auto_session: Any = None
+
+    @property
+    def auto_session(self) -> Any:
+        """Return the attached :class:`~scale_forecasting.auto.AutoForecastSession` instance."""
+        return self._auto_session
+
+    @classmethod
+    def profile_data(
+        cls,
+        data: Any,
+        *,
+        horizon: int | None = None,
+        ts_id_col: str | None = None,
+        date_col: str | None = None,
+        target_col: str | None = None,
+        freq: str | None = None,
+        settings: Settings | None = None,
+    ) -> pd.DataFrame:
+        """Run a fast Step 0 Data Profile & Readiness scan on ``data`` (DataFrame or BigQuery table)
+        and return the 7-row readiness ``DataFrame`` without launching any models.
+        """
+        from .auto import inspect_panel_for_auto
+
+        prof = inspect_panel_for_auto(
+            data,
+            horizon=horizon,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+            freq=freq,
+            settings=settings,
+        )
+        return prof.to_df()
+
+    @classmethod
+    def build_config(
+        cls,
+        data: Any,
+        *,
+        tier: str = "wide_field",
+        where: str = "auto",
+        goal: str = "accuracy",
+        allowed_families: Sequence[str] | None = None,
+        base_config: RunConfig | Mapping[str, Any] | str | Path | None = None,
+        overrides: Mapping[str, Any] | None = None,
+        models: Sequence[str] | None = None,
+        include_models: Sequence[str] | None = None,
+        exclude_models: Sequence[str] | None = None,
+        baselines: str | Sequence[str] | None = "auto",
+        holidays: Sequence[str] | str | None = None,
+        decision_metric: str | None = None,
+        n_folds: int | None = None,
+        hpo: bool | Mapping[str, Any] | None = None,
+        ensemble: bool | Sequence[str] | Mapping[str, Any] | None = None,
+        explainability: bool = True,
+        calibration: Any = None,
+        max_minutes: float | None = None,
+        max_wall_clock_minutes: float | None = None,
+        max_usd: float | None = None,
+        only_available_models: bool = True,
+        future_df: pd.DataFrame | None = None,
+        ts_id_col: str | None = None,
+        date_col: str | None = None,
+        target_col: str | None = None,
+        freq: str | None = None,
+        horizon: int | None = None,
+        run_name: str | None = None,
+        settings: Settings | None = None,
+    ) -> Any:
+        """Compile a Glass-Box :class:`~scale_forecasting.auto.ConfigBlueprint` from ``data``."""
+        from .auto import build_config
+
+        return build_config(
+            data,
+            tier=tier,
+            where=where,
+            goal=goal,
+            allowed_families=allowed_families,
+            base_config=base_config,
+            overrides=overrides,
+            models=models,
+            include_models=include_models,
+            exclude_models=exclude_models,
+            baselines=baselines,
+            holidays=holidays,
+            decision_metric=decision_metric,
+            n_folds=n_folds,
+            hpo=hpo,
+            ensemble=ensemble,
+            explainability=explainability,
+            calibration=calibration,
+            max_minutes=max_minutes,
+            max_wall_clock_minutes=max_wall_clock_minutes,
+            max_usd=max_usd,
+            only_available_models=only_available_models,
+            future_df=future_df,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+            freq=freq,
+            horizon=horizon,
+            run_name=run_name,
+            settings=settings,
+        )
+
+    @classmethod
+    def auto(
+        cls,
+        data: Any,
+        *,
+        tier: str = "wide_field",
+        where: str = "auto",
+        goal: str = "accuracy",
+        allowed_families: Sequence[str] | None = None,
+        base_config: RunConfig | Mapping[str, Any] | str | Path | None = None,
+        overrides: Mapping[str, Any] | None = None,
+        models: Sequence[str] | None = None,
+        include_models: Sequence[str] | None = None,
+        exclude_models: Sequence[str] | None = None,
+        baselines: str | Sequence[str] | None = "auto",
+        holidays: Sequence[str] | str | None = None,
+        decision_metric: str | None = None,
+        n_folds: int | None = None,
+        hpo: bool | Mapping[str, Any] | None = None,
+        ensemble: bool | Sequence[str] | Mapping[str, Any] | None = None,
+        explainability: bool = True,
+        calibration: Any = None,
+        autofocus: bool = True,
+        autofocus_mode: str = "dag",
+        max_passes: int | None = None,
+        max_autofocus_passes: int | None = None,
+        max_minutes: float | None = None,
+        max_wall_clock_minutes: float | None = None,
+        max_usd: float | None = None,
+        min_confidence: float = 0.35,
+        step_by_step: bool = False,
+        execute: bool = True,
+        future_df: pd.DataFrame | None = None,
+        ts_id_col: str | None = None,
+        date_col: str | None = None,
+        target_col: str | None = None,
+        freq: str | None = None,
+        horizon: int | None = None,
+        run_name: str | None = None,
+        settings: Settings | None = None,
+    ) -> Forecaster:
+        """Run the Glass-Box Auto-Forecaster with optional closed-loop ``autofocus`` refinement."""
+        from .auto import auto_forecast
+
+        return auto_forecast(
+            data,
+            tier=tier,
+            where=where,
+            goal=goal,
+            allowed_families=allowed_families,
+            base_config=base_config,
+            overrides=overrides,
+            models=models,
+            include_models=include_models,
+            exclude_models=exclude_models,
+            baselines=baselines,
+            holidays=holidays,
+            decision_metric=decision_metric,
+            n_folds=n_folds,
+            hpo=hpo,
+            ensemble=ensemble,
+            explainability=explainability,
+            calibration=calibration,
+            autofocus=autofocus,
+            autofocus_mode=autofocus_mode,
+            max_passes=max_passes,
+            max_autofocus_passes=max_autofocus_passes,
+            max_minutes=max_minutes,
+            max_wall_clock_minutes=max_wall_clock_minutes,
+            max_usd=max_usd,
+            min_confidence=min_confidence,
+            step_by_step=step_by_step,
+            execute=execute,
+            future_df=future_df,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+            freq=freq,
+            horizon=horizon,
+            run_name=run_name,
+            settings=settings,
+        )
 
     @classmethod
     def from_file(cls, path: str | Path, *, settings: Settings | None = None) -> Forecaster:
@@ -224,6 +412,194 @@ class Forecaster:
         """The deterministic run_id for this config (pure hash; no GCP call)."""
         return make_run_id(self._config)
 
+    @property
+    def blueprint(self) -> Any:
+        """The :class:`~scale_forecasting.auto.ConfigBlueprint` when created via :meth:`auto`."""
+        return None if self._auto_session is None else self._auto_session.blueprint
+
+    def predict_duration(
+        self,
+        *,
+        n_series: int | None = None,
+        median_n_obs: float | None = None,
+        where: str | None = None,
+        borrowed_models: Sequence[str] | None = None,
+    ) -> Any:
+        """Predict end-to-end wall-clock duration (`p50`/`p90`) and cloud cost for this config."""
+        from .profiling.duration import predict_run_duration
+
+        return predict_run_duration(
+            self._config,
+            n_series=n_series,
+            median_n_obs=median_n_obs,
+            where=where,
+            borrowed_models=borrowed_models,
+        )
+
+    def autofocus_ledger_df(self) -> pd.DataFrame:
+        """Return the pass-by-pass `autofocus` audit ledger ``DataFrame`` from :meth:`auto`."""
+        import pandas as pd
+
+        if self._auto_session is None:
+            return pd.DataFrame()
+        return self._auto_session.ledger_df()
+
+    def autofocus_diff_df(self) -> pd.DataFrame:
+        """Return a parameter-by-parameter and score diff DataFrame across `autofocus` passes."""
+        import pandas as pd
+
+        if self._auto_session is None:
+            return pd.DataFrame()
+        return self._auto_session.diff_df()
+
+    def explain_auto_decisions_df(self) -> pd.DataFrame:
+        """Return a unified Glass-Box audit ``DataFrame`` combining Pass 1 blueprint rationales
+        (including ``[PINNED]`` user constraints) with every executed `autofocus` mutation and its
+        realized accuracy lift.
+        """
+        import pandas as pd
+
+        if self._auto_session is None:
+            return pd.DataFrame()
+        return self._auto_session.explain_decisions_df()
+
+    def baseline_value_df(self) -> pd.DataFrame:
+        """Return the multi-anchor Baseline Value Ladder ``DataFrame`` from :meth:`auto`.
+
+        Compares the session champion against every configured baseline anchor (such as
+        ``naive_seasonal``, best plain univariate ``theta``/``holtwinters``, and zero-shot
+        foundation baseline ``chronos_bolt``), reporting ``value_added_pct``, Diebold–Mariano
+        ``dm_p_value``, and ``covariate_lift_pct``. When a plain univariate or univariate
+        foundation model wins as the session champion, also appends ``beaten_complex_challenger``
+        rows showing which complex/multivariate/global models and decoy covariates it beat.
+        """
+        import pandas as pd
+
+        if self._auto_session is None:
+            return pd.DataFrame()
+        return self._auto_session.baseline_value_df()
+
+    def hierarchy_value_df(self) -> pd.DataFrame:
+        """Return per-level (Root / Intermediate / Leaf) accuracy and reconciliation lift from
+        :meth:`auto`.
+        """
+        import pandas as pd
+
+        if self._auto_session is None:
+            return pd.DataFrame()
+        return self._auto_session.hierarchy_value_df()
+
+    def profile_df(self) -> pd.DataFrame:
+        """Return the 7-row Step 0 Data Profile & Readiness ``DataFrame`` for this forecaster."""
+        import pandas as pd
+
+        if self._auto_session is not None:
+            return self._auto_session.profile_df()
+        return pd.DataFrame()
+
+    def compare_models(
+        self,
+        model_a: str | None = None,
+        model_b: str | None = None,
+    ) -> pd.DataFrame:
+        """Head-to-head model comparison answering *'Is Model A better than Model B?'*.
+
+        Reports score delta, FVA lift %, series-by-series win rate %, and Diebold–Mariano
+        $p$-value (`dm_pvalue`). When ``model_a`` is ``None``, defaults to the session/run
+        champion; when ``model_b`` is ``None``, compares ``model_a`` against every other model
+        evaluated in the run.
+        """
+        import pandas as pd
+
+        if self._auto_session is not None:
+            return self._auto_session.compare_models(model_a, model_b)
+        return pd.DataFrame()
+
+    def practitioner_assessment_df(self) -> pd.DataFrame:
+        """Return a 7-row Practitioner Trust & Evidence ``DataFrame`` answering the 7 core
+        forecasting questions (model vs. baseline, ensemble lift, covariate value vs. overfitting,
+        global vs. local pooling, hierarchy reconciliation coherence, horizon stability, and
+        production forecast trust).
+        """
+        import pandas as pd
+
+        if self._auto_session is not None:
+            return self._auto_session.practitioner_assessment_df()
+        return pd.DataFrame()
+
+    def assess(self) -> str:
+        """Return a formatted text report combining the Step 0 Data Profile and the 7-Question
+        Practitioner Trust & Evidence Assessment.
+        """
+        if self._auto_session is not None:
+            return self._auto_session.assess()
+        return ""
+
+    def preview_next_loop(self) -> Any:
+        """Preview the next `autofocus` pass ($k+1$) without executing it."""
+        if self._auto_session is None:
+            from .errors import ConfigError
+
+            raise ConfigError(
+                "preview_next_loop() requires a Forecaster created via Forecaster.auto()."
+            )
+        from .auto import build_next_loop_preview
+
+        return build_next_loop_preview(self._auto_session)
+
+    def continue_autofocus(
+        self,
+        *,
+        passes: int = 1,
+        steps: int | None = None,
+        force: bool = False,
+    ) -> Forecaster:
+        """Execute ``passes`` (or ``steps``) additional `autofocus` passes on this session."""
+        if self._auto_session is None:
+            from .errors import ConfigError
+
+            raise ConfigError(
+                "continue_autofocus() requires a Forecaster created via Forecaster.auto()."
+            )
+        from .auto import build_next_loop_preview, execute_one_session_pass
+
+        eff_passes = max(1, int(steps if steps is not None else passes))
+        session = self._auto_session
+        session.max_passes = max(session.max_passes, len(session.passes) + eff_passes)
+        last_f: Forecaster = self
+        for _ in range(eff_passes):
+            preview = build_next_loop_preview(session)
+            if not force and not preview.should_continue:
+                break
+            mut_records = preview.mutations_df.to_dict(orient="records")
+            mut_names = (
+                tuple(str(r["action"]) for r in mut_records)
+                if mut_records
+                else ("manual_continue",)
+            )
+            last_f = execute_one_session_pass(
+                session,
+                preview.proposed_config,
+                pass_index=preview.next_pass_index,
+                mutations_applied=mut_names,
+                mutations_detail=[{str(k): str(v) for k, v in r.items()} for r in mut_records],
+                settings=self._settings,
+            )
+            self._config = last_f.config
+        return self
+
+    def step(
+        self,
+        *,
+        passes: int = 1,
+        steps: int | None = None,
+        force: bool = False,
+    ) -> Forecaster:
+        """Execute ``steps`` (default 1) interactive `autofocus` pass(es) on this session (alias for
+        ``continue_autofocus(passes=passes, steps=steps, force=force)``).
+        """
+        return self.continue_autofocus(passes=passes, steps=steps, force=force)
+
     def dry_run(self) -> DryRunResult:
         """Validate the config and report the planned fan-out + runtime split — touches no GCP.
 
@@ -242,6 +618,59 @@ class Forecaster:
             bq_models=bq_models,
             workload=workload,
         )
+
+    def emit_airflow_dag(
+        self,
+        config_uri: str | Path | None = None,
+        *,
+        out_path: str | Path | None = None,
+        autofocus: bool | None = None,
+        autofocus_mode: str = "dag",
+        max_passes: int = 3,
+        with_retry: bool = False,
+        dag_id: str | None = None,
+    ) -> str:
+        """Render an Apache Airflow / Cloud Composer 3 DAG for this forecaster (offline).
+
+        When ``autofocus`` is ``True`` (or ``None`` on a forecaster created via
+        :meth:`auto` with ``autofocus=True``), emits a multi-pass `autofocus` DAG via
+        :func:`~scale_forecasting.airflow_emit.emit_autofocus_airflow_dag`. Otherwise emits
+        the standard per-family DAG via :func:`~scale_forecasting.airflow_emit.emit_airflow_dag`.
+        """
+        from .airflow_emit import emit_airflow_dag, emit_autofocus_airflow_dag
+
+        use_af = (
+            autofocus
+            if autofocus is not None
+            else bool(self._auto_session is not None and self._auto_session.max_passes > 1)
+        )
+        uri_str = (
+            str(config_uri)
+            if config_uri is not None
+            else f"gs://<warehouse>/staging/{self.run_id}/config.json"
+        )
+        if use_af:
+            tier_name = self.blueprint.tier if self.blueprint is not None else "wide_field"
+            dag_src = emit_autofocus_airflow_dag(
+                self._config,
+                uri_str,
+                tier=tier_name,
+                autofocus_mode=autofocus_mode,
+                max_passes=max_passes,
+                dag_id=dag_id,
+            )
+        else:
+            dag_src = emit_airflow_dag(
+                self._config,
+                uri_str,
+                dag_id=dag_id,
+                with_retry=with_retry,
+            )
+        if out_path is not None:
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(dag_src, encoding="utf-8")
+        return dag_src
 
     def feasibility(self) -> list[str]:
         """Read the source panel's series lengths and report what this run's fold geometry does.
@@ -730,6 +1159,13 @@ class Forecaster:
         Delegates to `review_run` and `review.build_leaderboard_frame`. Pass ``all_metrics=True``
         to include ``mean_<metric>`` and ``p50_<metric>`` for all 21 evaluation metrics.
         """
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return self._auto_session.leaderboard_df.copy()
+
         from .review import build_leaderboard_frame
 
         return build_leaderboard_frame(self.review_run(run_id), all_metrics=all_metrics)
@@ -759,6 +1195,20 @@ class Forecaster:
         """
         from .registry.reads import read_oof, read_predictions, read_series_history
         from .review import build_predictions_frame
+
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            df = self._auto_session.predictions_df.copy()
+            if ts_id is not None:
+                df = df[df["ts_id"] == ts_id]
+            elif ts_ids is not None:
+                df = df[df["ts_id"].isin(list(ts_ids))]
+            if models is not None:
+                df = df[(df["segment"] == "history") | (df["model_type"].isin(list(models)))]
+            return df.reset_index(drop=True)
 
         rid = run_id or self.run_id
         ts_list = [ts_id] if ts_id is not None else (list(ts_ids) if ts_ids is not None else None)
@@ -866,6 +1316,13 @@ class Forecaster:
         from .registry.reads import read_predictions
         from .review import build_hierarchy_frame
 
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return build_hierarchy_frame(self._auto_session.raw_predictions_df.to_dict("records"))
+
         rid = run_id or self.run_id
         rows = read_predictions(rid, limit=limit, settings=self._settings)
         return build_hierarchy_frame(rows)
@@ -886,6 +1343,17 @@ class Forecaster:
         from .review import plot_hierarchy_frame
 
         rid = run_id or self.run_id
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return plot_hierarchy_frame(
+                self._auto_session.raw_predictions_df.to_dict("records"),
+                model_type=model_type,
+                ax=ax,
+                title=title or rid,
+            )
         rows = read_predictions(rid, limit=limit, settings=self._settings)
         return plot_hierarchy_frame(rows, model_type=model_type, ax=ax, title=title or rid)
 
@@ -1094,6 +1562,13 @@ class Forecaster:
         from .registry.reads import read_feature_attributions
         from .review import build_attributions_frame
 
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return self._auto_session.attributions_df.copy()
+
         rid = run_id or self.run_id
         ts_list = [ts_id] if isinstance(ts_id, str) else (list(ts_id) if ts_id else None)
         eff_models = models if models is not None else model_type
@@ -1159,6 +1634,16 @@ class Forecaster:
         from .diagnostics import compute_fva
         from .registry.reads import read_oof
 
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            if baseline is None and metric is None:
+                return self._auto_session.fva_df.copy()
+            eff_metric = metric or self._config.backtest.decision_metric
+            return compute_fva(self._auto_session.oof_df, baseline=baseline, metric=eff_metric)
+
         rid = run_id or self.run_id
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
         oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1195,6 +1680,18 @@ class Forecaster:
 
         from .diagnostics import compute_horizon_decay
         from .registry.reads import read_oof
+
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            if baseline is None and metric is None:
+                return self._auto_session.horizon_decay_df.copy()
+            eff_metric = metric or self._config.backtest.decision_metric
+            return compute_horizon_decay(
+                self._auto_session.oof_df, metric=eff_metric, baseline=baseline
+            )
 
         rid = run_id or self.run_id
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
@@ -1234,6 +1731,17 @@ class Forecaster:
 
         from .diagnostics import compute_bias_report
         from .registry.reads import read_oof
+
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return compute_bias_report(
+                self._auto_session.oof_df,
+                threshold_pct=threshold_pct,
+                tracking_signal_limit=tracking_signal_limit,
+            )
 
         rid = run_id or self.run_id
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
@@ -1320,6 +1828,31 @@ class Forecaster:
 
         rid = run_id or self.run_id
         eff_model = model_name or model_type
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            pred_df = self._auto_session.raw_predictions_df.rename(columns={"forecast_date": "ds"})
+            oof_df = self._auto_session.oof_df
+            return compute_inventory_policy(
+                pred_df,
+                oof_df=oof_df,
+                inventory_df=inventory_df,
+                model_name=eff_model,
+                lead_time=lead_time,
+                lead_time_std=lead_time_std,
+                review_period=review_period,
+                service_level=service_level,
+                fill_rate=fill_rate,
+                on_hand=on_hand,
+                on_order=on_order,
+                backorders=backorders,
+                holding_cost=holding_cost,
+                stockout_cost=stockout_cost,
+                min_order_qty=min_order_qty,
+                order_multiple=order_multiple,
+            )
         model_filter = [eff_model] if eff_model and eff_model not in ("all", "*") else None
         pred_rows = read_predictions(rid, models=model_filter, limit=limit, settings=self._settings)
         oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
@@ -1868,6 +2401,21 @@ class Forecaster:
         from .registry.reads import read_oof, read_predictions
 
         rid = run_id or self.run_id
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            return compute_exceptions_queue(
+                oof_df=self._auto_session.oof_df,
+                predictions_df=self._auto_session.raw_predictions_df.rename(
+                    columns={"forecast_date": "ds"}
+                ),
+                floor=self._config.output.floor,
+                cap=self._config.output.cap,
+                metric=self._config.backtest.decision_metric,
+                top_n=top_n,
+            )
         pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
         pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
@@ -1906,7 +2454,7 @@ class Forecaster:
         from .report import export_report
 
         rid = run_id or self.run_id
-        payload_dict = {
+        payload_dict: dict[str, Any] = {
             "run_id": rid,
             "leaderboard_df": self.leaderboard_df(rid),
             "fva_df": self.fva_df(rid),
@@ -1916,6 +2464,9 @@ class Forecaster:
             "inventory_policy_df": self.inventory_policy_df(rid),
             "predictions_df": self.predictions_df(rid),
         }
+        if self._auto_session is not None:
+            payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
+            payload_dict["blueprint_rationale_df"] = self._auto_session.blueprint.rationale_df
         return export_report(
             payload_dict,
             out_path,
@@ -2051,6 +2602,12 @@ class Registry:
         from .registry import ops
 
         return ops.doctor(settings=self._settings)
+
+    def calibrate_duration_model(self, *, limit_runs: int = 500) -> Any:
+        """Calibrate parametric wall-clock & provisioning priors from this BigQuery registry."""
+        from .profiling.duration import calibrate_duration_from_registry
+
+        return calibrate_duration_from_registry(settings=self._settings, limit_runs=limit_runs)
 
     def runs_df(self, *, limit: int = 25, status: str | None = None) -> pd.DataFrame:
         """Return a ``DataFrame`` of the most recent runs in this registry from ``v_run_summary``,

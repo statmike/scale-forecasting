@@ -41,6 +41,8 @@ from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
+from .auto_policy import EXPOSURE_TIERS, SCALE_REGIMES
+from .benchmarks import BENCHMARK_SPECS, list_benchmarks
 from .config import (
     COMPUTE_FAMILIES,
     LEARNED_STRATEGIES,
@@ -82,6 +84,7 @@ __all__ = [
     "probe_environment",
     "render_llms_full_txt",
     "render_llms_txt",
+    "render_release_notes",
     "render_run_config_json_schema",
     "render_skill_catalog_reference",
     "render_skill_config_reference",
@@ -539,6 +542,14 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
             "path_3_cloud_multi_family_dag_run": cloud_ready,
             "path_4_direct_family_submitters": cloud_ready,
             "path_5_airflow_dag_emission": True,
+        },
+        "auto_forecaster": {
+            "exposure_tiers": list(EXPOSURE_TIERS.keys()),
+            "scale_regimes": list(SCALE_REGIMES.keys()),
+            "where_options": ["auto", "local", "bigquery", "cloud_cpu", "cloud_all"],
+            "optimization_goals": ["accuracy", "probabilistic", "service_level", "fast"],
+            "benchmarks_count": len(list_benchmarks()),
+            "practitioner_questions_count": 7,
         },
         "recommended_actions": recommendations,
     }
@@ -1050,6 +1061,64 @@ def render_skill_catalog_reference(repo_root: Path | None = None) -> str:
                 f"{fam_ov} | {models_preview} |"
             )
 
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 7. Auto-Forecaster Exposure Tiers, Scale Regimes & Synthetic DGP Benchmarks",
+            "",
+            "### Observational Exposure Tiers (`EXPOSURE_TIERS` in `auto_policy.py`)",
+            "",
+            "| Tier (`tier`) | Title & Typical Duration | Description |",
+            "| :--- | :--- | :--- |",
+        ]
+    )
+    for t_name, t_meta in EXPOSURE_TIERS.items():
+        t_desc = str(t_meta["description"]).replace("|", "\\|")
+        lines.append(f"| `{t_name}` | {t_meta['title']} | {t_desc} |")
+
+    lines.extend(
+        [
+            "",
+            "### Series-Count Scale Regimes (`SCALE_REGIMES` in `auto_policy.py`)",
+            "",
+            "| Scale Regime (`scale_regime`) | Series Count | Routing Strategy |",
+            "| :--- | :--- | :--- |",
+        ]
+    )
+    for s_name, s_meta in SCALE_REGIMES.items():
+        s_strat = str(s_meta["strategy"]).replace("|", "\\|")
+        lines.append(f"| `{s_name}` | {s_meta['title']} | {s_strat} |")
+
+    bench_specs = list(BENCHMARK_SPECS.values())
+    lines.extend(
+        [
+            "",
+            (
+                f"### Ground-Truth Synthetic DGP Benchmarks "
+                f"({len(bench_specs)} Panels in `benchmarks.py`)"
+            ),
+            "",
+            (
+                "| Benchmark Name (`benchmark`) | Regime | Freq / H | "
+                "Ground-Truth Description | Expected `autofocus` Actions |"
+            ),
+            "| :--- | :--- | :---: | :--- | :--- |",
+        ]
+    )
+    for b_spec in bench_specs:
+        desc = str(b_spec.description).replace("|", "\\|")
+        acts = (
+            ", ".join(f"`{a}`" for a in b_spec.expected_autofocus_actions)
+            if b_spec.expected_autofocus_actions
+            else "`stop_after_pass_1`"
+        )
+        lines.append(
+            f"| `{b_spec.name}` | `{b_spec.expected_regime}` | "
+            f"`{b_spec.freq}` / `{b_spec.horizon}` | {desc} | {acts} |"
+        )
+
     return "\n".join(lines) + "\n"
 
 
@@ -1293,6 +1362,27 @@ def render_skill_execution_paths_reference() -> str:
                 "`python -m scale_forecasting.report --model holtwinters --output-dir ./report` | "
                 "`Forecaster(cfg).export_report()` / `export_report(bench, './report')` |"
             ),
+            (
+                "| **Glass-Box Auto-Forecaster & `autofocus`** | "
+                "`python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs "
+                "--tier first_light --autofocus --max-passes 3` | "
+                "`Forecaster.profile_data(panel)` / "
+                "`Forecaster.build_config(panel, tier='wide_field')` / "
+                "`Forecaster.auto(panel, tier='first_light', autofocus=True)` |"
+            ),
+            (
+                "| **7-Question Practitioner Assessment & Model Comparison** | "
+                "`python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs "
+                "--autofocus` | "
+                "`f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / "
+                "`f.baseline_value_df()` / `f.hierarchy_value_df()` |"
+            ),
+            (
+                "| **Auto-Forecaster Composer 3 / Airflow DAG Emission** | "
+                "`python -m scale_forecasting.main --auto --table source_series_native "
+                "--tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | "
+                "`bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |"
+            ),
             "",
             "---",
             "",
@@ -1436,6 +1526,15 @@ def render_llms_txt() -> str:
                 "lifecycle governance, and executive HTML/JSON reports."
             ),
             (
+                f"- [Auto-Forecaster & Bounded `autofocus`]({_SITE_BASE}/auto_forecaster/): "
+                "Step 0 data profiling (`Forecaster.profile_data`), observational exposure tiers "
+                f"({', '.join(f'`{t}`' for t in EXPOSURE_TIERS)}), multi-branch `autofocus` "
+                "refinement with cell borrowing, 7-Question Practitioner Assessment "
+                "(`f.practitioner_assessment_df()`, `f.compare_models()`), 7-runtime parametric "
+                f"wall-clock predictor, {len(list_benchmarks())} synthetic DGP benchmarks, and "
+                "AlphaEvolve calibration."
+            ),
+            (
                 f"- [Models Reference (37 Models)]({_SITE_BASE}/models_reference/): All 37 "
                 "models, covariate support, explainability, and granular extras."
             ),
@@ -1461,7 +1560,7 @@ def render_llms_txt() -> str:
             ),
             (
                 f"- [Live Validation Ledger]({_SITE_BASE}/validation/): Proven `run_id` records "
-                "across 42 smokes, 20 demo configs, and 11 notebooks."
+                "across 42 smokes, 20 demo configs, and 12 notebooks."
             ),
             "",
         ]
@@ -1665,6 +1764,78 @@ def bump_version(
     return updated
 
 
+def render_release_notes(version: str, repo_root: Path | None = None) -> str:
+    """Render human-first GitHub Release notes for ``version`` from ``CHANGELOG.md``."""
+    ver = version.strip().lstrip("v")
+    root = repo_root or _default_repo_root()
+    changelog_path = root / "CHANGELOG.md"
+    section_body = ""
+    if changelog_path.is_file():
+        text = changelog_path.read_text(encoding="utf-8")
+        pattern = re.compile(
+            rf"(?ms)^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
+        )
+        m = pattern.search(text)
+        if m:
+            section_body = m.group(1).strip().rstrip("-").strip()
+
+    if not section_body:
+        section_body = f"Release `v{ver}` of `scale-forecasting`."
+
+    # Extract top-level bullet headlines for "Highlights at a Glance"
+    highlights: list[str] = []
+    for line in section_body.splitlines():
+        if line.startswith("- **"):
+            highlights.append(line)
+
+    hl_block = (
+        "\n".join(highlights[:6]) if highlights else f"- Release `v{ver}` of `scale-forecasting`."
+    )
+
+    lines = [
+        f"# `scale-forecasting` v{ver}",
+        "",
+        "## Highlights at a Glance",
+        "",
+        hl_block,
+        "",
+        "## Installation & Upgrade",
+        "",
+        "```bash",
+        (
+            "# Core offline package (playground, 14 statistical/ML models, "
+            "21 metrics, Auto-Forecaster, MCP server)"
+        ),
+        f'pip install --upgrade "scale-forecasting=={ver}"',
+        "",
+        "# With Google Cloud runtimes (BigQuery, Dataproc Spark, Vertex AI, Ray, GCE, GKE)",
+        f'pip install --upgrade "scale-forecasting[gcp]=={ver}"',
+        "",
+        "# Complete installation (all 37 models, all 7 cloud runtimes, notebooks)",
+        f'pip install --upgrade "scale-forecasting[all]=={ver}"',
+        "```",
+        "",
+        "---",
+        "",
+        f"## Detailed Release Notes (`v{ver}`)",
+        "",
+        section_body,
+        "",
+        "---",
+        "",
+        "## Documentation & Quick Links",
+        "",
+        f"- **Documentation Site:** {_SITE_BASE}/",
+        f"- **Auto-Forecaster & Bounded `autofocus`:** {_SITE_BASE}/auto_forecaster/",
+        f"- **Forecaster's Workbench:** {_SITE_BASE}/forecaster_workbench/",
+        f"- **AI Agents, Skills & MCP Guide:** {_SITE_BASE}/agent_and_mcp_guide/",
+        f"- **Live Cloud Validation Ledger:** {_SITE_BASE}/validation/",
+        f"- **Full Changelog:** {_REPO_URL}/blob/main/CHANGELOG.md",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for generating, checking, or probing agent surfaces."""
     configure_cli_logging()
@@ -1693,6 +1864,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="X.Y.Z",
         help="Atomically bump package version across all version-locked files and agent surfaces.",
     )
+    group.add_argument(
+        "--release-notes",
+        metavar="X.Y.Z",
+        help="Render human-readable GitHub Release notes for version X.Y.Z from CHANGELOG.md.",
+    )
     args = parser.parse_args(argv)
 
     if args.probe_env:
@@ -1703,6 +1879,10 @@ def main(argv: list[str] | None = None) -> int:
         updated = bump_version(args.bump_version)
         for path in updated:
             print(f"updated {path}")
+        return 0
+
+    if args.release_notes:
+        print(render_release_notes(args.release_notes), end="")
         return 0
 
     if args.write:

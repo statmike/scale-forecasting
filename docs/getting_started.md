@@ -51,18 +51,22 @@ from scale_forecasting import playground
 # Generate a deterministic 3-series daily panel in memory (same generator used at 100k scale)
 panel = playground.sample_data(n_series=3, history=730)
 
-# Fit and backtest a model on one series using the local playground helper
+# Fit and backtest a single model on one series using the local playground helper
 result = playground.run_one(model="theta", horizon=14, backtest=True)
 print(f"Status: {result.status} | Backtest WAPE: {result.metrics['wape']:.4f}")
+
+# Or let the glass-box auto-forecaster pick models, transforms, and ensembles automatically
+auto_run = sf.Forecaster.auto(panel, tier="first_light", where="local", autofocus=True)
+print(auto_run.leaderboard_df()[["model_type", "wape"]].head())
 ```
 
-Want a guided interactive walkthrough with plots, covariates, feature attributions, and hierarchical reconciliation? Open [`00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb).
+Want a guided interactive walkthrough with plots, covariates, feature attributions, and hierarchical reconciliation? Open [`00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb) or [`11_auto_forecaster_and_autofocus.ipynb`](./notebooks/11_auto_forecaster_and_autofocus.ipynb).
 
 ---
 
-## 3. Author a `RunConfig` and run an offline preflight
+## 3. Author (or auto-compile) a `RunConfig` and run an offline preflight
 
-Every cloud or local experiment is defined by a declarative [`RunConfig`](./configuration_reference.md) JSON file (or Python dictionary). The configuration hashes to a deterministic `<slug>-<12hex>` `run_id` and can be validated and sized completely offline before touching Google Cloud:
+Every cloud or local experiment is defined by a declarative [`RunConfig`](./configuration_reference.md) JSON file (or Python dictionary). You can author one by hand or let [`Forecaster.build_config()`](./auto_forecaster.md) (`python -m scale_forecasting.main --init-config`) generate one from your dataset with a plain-English rationale table. The configuration hashes to a deterministic `<slug>-<12hex>` `run_id` and can be validated and sized completely offline before touching Google Cloud:
 
 ```json
 {
@@ -199,7 +203,8 @@ WHERE run_id = 'YOUR_RUN_ID';
 ## Where to go next
 
 - **[Platform overview](./overview.md):** Conceptual tour of the 7 runtimes, 37 models, 21 metrics, and 5 analytical SQL views.
+- **[Auto-forecaster & `autofocus`](./auto_forecaster.md):** Compile explained configs (`Forecaster.build_config`) or run multi-branch `autofocus=True` tournaments (`Forecaster.auto`).
 - **[Running and reviewing](./running_and_reviewing.md):** Full operator loop — feasibility checks, quota preflight, live monitoring, and re-ensembling.
-- **[Notebook tour](./notebooks/README.md):** 11 end-to-end notebooks (`00`–`10`) across local sandbox, cloud runtimes, covariates/hierarchy/HPO, and operations.
+- **[Notebook tour](./notebooks/README.md):** 12 end-to-end notebooks (`00`–`11`) across local sandbox, auto-forecaster, cloud runtimes, covariates/hierarchy/HPO, and operations.
 - **[Compute runtimes reference](./runtimes_reference.md):** Detailed guide to `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery`.
 - **[Configuration reference](./configuration_reference.md):** Every `RunConfig` section, field, default, and validation rule.

@@ -412,3 +412,331 @@ def delete_spark_cluster(config_uri: str, ti: Any = None) -> None:
             first_error = first_error or exc
     if first_error is not None:
         raise first_error
+
+
+def _apply_autofocus_proposal(
+    prior_dict: dict[str, Any],
+    proposal: dict[str, Any],
+    *,
+    run_suffix: str,
+    prior_run_id: str,
+) -> Any:
+    """Turn a policy proposal dictionary into a validated `RunConfig` with cell borrowing."""
+    from collections.abc import Mapping
+
+    from .config import RunConfig
+
+    next_raw = dict(prior_dict)
+    next_raw["run_name"] = f"{prior_dict.get('run_name', 'auto')}-{run_suffix}"
+    next_raw["models"] = list(proposal.get("models", prior_dict.get("models", [])))
+    next_raw["model_params"] = dict(
+        proposal.get("model_params", prior_dict.get("model_params", {}))
+    )
+    next_raw["features"] = dict(proposal.get("features", prior_dict.get("features", {})))
+    if "output" in proposal:
+        next_raw["output"] = dict(proposal["output"])
+    if "ensemble" in proposal:
+        next_raw["ensemble"] = dict(proposal["ensemble"])
+    if "backtest" in proposal and isinstance(proposal["backtest"], Mapping):
+        next_raw["backtest"] = dict(proposal["backtest"])
+    if "hierarchy" in proposal and isinstance(proposal["hierarchy"], Mapping):
+        next_raw["hierarchy"] = dict(proposal["hierarchy"])
+    if "hpo" in proposal and isinstance(proposal["hpo"], Mapping):
+        next_raw["hpo"] = dict(proposal["hpo"])
+    comp = dict(next_raw.get("compute", {}))
+    comp["reuse_prior_runs"] = True
+    comp["reuse_from_run_id"] = prior_run_id
+    next_raw["compute"] = comp
+    return RunConfig.model_validate(next_raw)
+
+
+def autofocus_pass_1(
+    config_uri: str,
+    *,
+    tier: str = "wide_field",
+    where: str = "auto",
+    goal: str = "accuracy",
+    autofocus_mode: str = "dag",
+    max_passes: int = 3,
+) -> dict[str, Any]:
+    """Run Pass 1 of an `autofocus` tournament in Airflow and return branch proposals for XCom."""
+    from .auto import inspect_panel_for_auto
+    from .auto_policy import propose_autofocus_dag_branches, propose_autofocus_pass
+    from .config import load_config_uri
+    from .models import list_models
+    from .sdk import Forecaster
+
+    cfg = load_config_uri(config_uri)
+    eff_where = where
+    if eff_where == "auto":
+        eff_where = "bigquery" if cfg.python_runtime == "bigquery" else "cloud_all"
+    f_p1 = Forecaster.auto(
+        cfg.data.source_table,
+        base_config=cfg,
+        tier=tier,
+        where=eff_where,
+        goal=goal,
+        autofocus=False,
+        execute=True,
+    )
+    session = f_p1.auto_session
+    if session is None or not session.passes:
+        return {
+            "pass_1_run_id": f_p1.run_id,
+            "pass_1_score": float("nan"),
+            "pass_1_model": "naive_seasonal",
+            "should_continue": False,
+            "proposed_branches": {},
+        }
+    p1 = session.passes[0]
+    prof = session.blueprint.profile or inspect_panel_for_auto(
+        cfg.data.source_table, horizon=cfg.data.horizon
+    )
+    avail = list(list_models())
+    p1_cfg_dict = p1.config.model_dump(mode="json")
+    diag = dict(session.last_diagnostics_summary)
+    proposed_branches: dict[str, dict[str, Any]] = {}
+    if autofocus_mode == "linear":
+        lin_prop = propose_autofocus_pass(
+            prof,
+            p1_cfg_dict,
+            2,
+            diag,
+            tier=tier,
+            where=eff_where,
+            goal=goal,
+            available_models=avail,
+        )
+        if lin_prop.get("mutations"):
+            b_cfg = _apply_autofocus_proposal(
+                p1_cfg_dict,
+                lin_prop,
+                run_suffix="p2",
+                prior_run_id=p1.run_id,
+            )
+            proposed_branches["2"] = {
+                "branch_id": "2",
+                "branch_hypothesis": "linear_refinement",
+                "config_dict": b_cfg.model_dump(mode="json"),
+                "proposal": lin_prop,
+            }
+    else:
+        dag_branches = propose_autofocus_dag_branches(
+            prof,
+            p1_cfg_dict,
+            2,
+            diag,
+            tier=tier,
+            where=eff_where,
+            goal=goal,
+            available_models=avail,
+        )
+        for idx, b_prop in enumerate(dag_branches, start=2):
+            b_id = str(b_prop.get("pass_id", f"2{chr(63 + idx)}"))
+            b_cfg = _apply_autofocus_proposal(
+                p1_cfg_dict,
+                b_prop,
+                run_suffix=b_id.lower(),
+                prior_run_id=p1.run_id,
+            )
+            proposed_branches[b_id] = {
+                "branch_id": b_id,
+                "branch_hypothesis": str(b_prop.get("branch_hypothesis", "branch")),
+                "config_dict": b_cfg.model_dump(mode="json"),
+                "proposal": b_prop,
+            }
+    return {
+        "pass_1_run_id": p1.run_id,
+        "pass_1_score": p1.champion_score,
+        "pass_1_model": p1.champion_model,
+        "decision_metric": session.decision_metric,
+        "tier": tier,
+        "where": eff_where,
+        "goal": goal,
+        "autofocus_mode": autofocus_mode,
+        "max_passes": max_passes,
+        "should_continue": bool(p1.should_continue and proposed_branches),
+        "pass_1_config_dict": p1_cfg_dict,
+        "diagnostics_summary": diag,
+        "proposed_branches": proposed_branches,
+    }
+
+
+def autofocus_branch(
+    config_uri: str,
+    branch_id: str,
+    ti: Any = None,
+    *,
+    pass_1_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one Level-2 `autofocus` hypothesis branch (`2A`, `2B`, `2C`, or `2`) in Airflow."""
+    import math
+
+    from . import main as _main_mod
+    from .config import RunConfig
+    from .registry.ids import make_run_id
+    from .review import review_run
+    from .settings import Settings
+
+    _ = config_uri
+    state = pass_1_state
+    if state is None and ti is not None:
+        state = ti.xcom_pull(task_ids="autofocus_pass_1")
+    if not state or not state.get("should_continue"):
+        return {
+            "branch_id": branch_id,
+            "executed": False,
+            "skipped_reason": "pass_1_early_stopped_or_absent",
+        }
+    branches = state.get("proposed_branches") or {}
+    b_entry = branches.get(branch_id)
+    if not b_entry:
+        return {
+            "branch_id": branch_id,
+            "executed": False,
+            "skipped_reason": "no_mutations_for_branch",
+        }
+    b_cfg = RunConfig.model_validate(b_entry["config_dict"])
+    b_run_id = make_run_id(b_cfg)
+    settings = Settings.resolve()
+    _main_mod.run(b_cfg, settings=settings)
+    rev = review_run(b_run_id, settings=settings)
+    b_score = float("nan")
+    b_model = rev.best_overall.model_type if rev.best_overall is not None else "naive_seasonal"
+    if rev.best_overall is not None and rev.best_overall.score is not None:
+        b_score = float(rev.best_overall.score)
+    elif rev.models and rev.models[0].score is not None:
+        b_score = float(rev.models[0].score)
+        b_model = rev.models[0].model_type
+    p1_score = float(state.get("pass_1_score", float("nan")))
+    beat_p1 = bool(
+        math.isfinite(b_score) and (not math.isfinite(p1_score) or b_score < p1_score - 1e-6)
+    )
+    return {
+        "branch_id": branch_id,
+        "branch_hypothesis": b_entry.get("branch_hypothesis", ""),
+        "executed": True,
+        "run_id": b_run_id,
+        "champion_model": b_model,
+        "champion_score": b_score,
+        "beat_pass_1": beat_p1,
+        "config_dict": b_entry["config_dict"],
+        "proposal": b_entry.get("proposal", {}),
+    }
+
+
+def autofocus_synthesis(
+    config_uri: str,
+    ti: Any = None,
+    *,
+    pass_1_state: dict[str, Any] | None = None,
+    branch_states: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Synthesize winning Level-2 branches (if >=2 improved) and apply the Champion Ratchet."""
+    import math
+
+    from . import main as _main_mod
+    from .auto import inspect_panel_for_auto
+    from .auto_policy import propose_autofocus_synthesis_pass
+    from .config import RunConfig
+    from .registry.ids import make_run_id
+    from .review import review_run
+    from .settings import Settings
+
+    _ = config_uri
+    state = pass_1_state
+    if state is None and ti is not None:
+        state = ti.xcom_pull(task_ids="autofocus_pass_1")
+    if not state:
+        return {"status": "NO_PASS_1_STATE"}
+
+    b_list = branch_states
+    if b_list is None and ti is not None:
+        mode = str(state.get("autofocus_mode", "dag"))
+        t_ids = (
+            ["autofocus_pass_2"]
+            if mode == "linear"
+            else ["autofocus_branch_2a", "autofocus_branch_2b", "autofocus_branch_2c"]
+        )
+        b_list = [x for t_id in t_ids if (x := ti.xcom_pull(task_ids=t_id)) is not None]
+    b_list = b_list or []
+
+    champ_run_id = str(state["pass_1_run_id"])
+    champ_pass_id = "1"
+    champ_model = str(state.get("pass_1_model", "naive_seasonal"))
+    champ_score = float(state.get("pass_1_score", float("nan")))
+    p1_score = champ_score
+
+    branch_outcomes: list[dict[str, Any]] = []
+    for b_res in b_list:
+        if not b_res.get("executed"):
+            continue
+        b_sc = float(b_res.get("champion_score", float("nan")))
+        if math.isfinite(b_sc) and (not math.isfinite(champ_score) or b_sc < champ_score - 1e-6):
+            champ_score = b_sc
+            champ_run_id = str(b_res["run_id"])
+            champ_pass_id = str(b_res["branch_id"])
+            champ_model = str(b_res.get("champion_model", champ_model))
+        if b_res.get("beat_pass_1"):
+            prop = dict(b_res.get("proposal", {}))
+            mut_acts = tuple(str(m.get("action", "refine")) for m in prop.get("mutations", []))
+            branch_outcomes.append(
+                {
+                    "pass_id": str(b_res["branch_id"]),
+                    "best_score": b_sc,
+                    "pass1_score": p1_score,
+                    "config_dict": dict(b_res.get("config_dict", {})),
+                    "mutations_applied": mut_acts,
+                }
+            )
+
+    max_passes = int(state.get("max_passes", 3))
+    if len(branch_outcomes) >= 2 and max_passes >= 3:
+        p1_cfg = RunConfig.model_validate(state["pass_1_config_dict"])
+        prof = inspect_panel_for_auto(p1_cfg.data.source_table, horizon=p1_cfg.data.horizon)
+        synth_prop = propose_autofocus_synthesis_pass(
+            prof,
+            state["pass_1_config_dict"],
+            branch_outcomes,
+            tier=str(state.get("tier", "wide_field")),
+            where=str(state.get("where", "cloud_all")),
+            goal=str(state.get("goal", "accuracy")),
+        )
+        if synth_prop.get("mutations"):
+            s_cfg = _apply_autofocus_proposal(
+                state["pass_1_config_dict"],
+                synth_prop,
+                run_suffix="p3-synth",
+                prior_run_id=champ_run_id,
+            )
+            s_run_id = make_run_id(s_cfg)
+            settings = Settings.resolve()
+            _main_mod.run(s_cfg, settings=settings)
+            rev = review_run(s_run_id, settings=settings)
+            s_score = (
+                float(rev.best_overall.score)
+                if (rev.best_overall is not None and rev.best_overall.score is not None)
+                else float("nan")
+            )
+            if math.isfinite(s_score) and (
+                not math.isfinite(champ_score) or s_score <= champ_score + 1e-6
+            ):
+                champ_score = s_score
+                champ_run_id = s_run_id
+                champ_pass_id = "3"
+                if rev.best_overall is not None:
+                    champ_model = rev.best_overall.model_type
+
+    delta_pct = (
+        round(100.0 * (p1_score - champ_score) / max(1e-9, p1_score), 2)
+        if math.isfinite(p1_score) and math.isfinite(champ_score) and p1_score > 1e-9
+        else 0.0
+    )
+    return {
+        "champion_run_id": champ_run_id,
+        "champion_pass_id": champ_pass_id,
+        "champion_model": champ_model,
+        "champion_score": champ_score,
+        "delta_vs_pass1_pct": delta_pct,
+        "n_winning_branches": len(branch_outcomes),
+    }

@@ -8,10 +8,10 @@
     "team": "cloud-gtm/agentic-data-science",
     "poc": "statmike"
   },
-  "description": "Configure, validate, dry-run, execute, and review massively-parallel time-series forecasting on Google Cloud (37 models, 21 metrics, 7 runtimes).",
+  "description": "Configure, validate, dry-run, execute, and review massively-parallel time-series forecasting on Google Cloud (37 models, 21 metrics, 7 runtimes, Glass-Box Auto-Forecaster, multi-branch autofocus, and 7-Question Practitioner Assessment).",
   "suggestedPrompts": [
-    "Probe my environment and recommend a forecasting model family and runtime",
-    "Run an offline model playground backtest on synthetic daily series",
+    "Run the Glass-Box Auto-Forecaster with multi-branch autofocus on dgp_04_true_vs_decoy_covs and show the 7-Question Practitioner Assessment",
+    "Probe my environment and compile a wide_field RunConfig blueprint with a 4-anchor baseline ladder",
     "Inspect the BigQuery forecast registry health and review the latest run"
   ]
 }

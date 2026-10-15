@@ -615,6 +615,147 @@ def _main(argv: list[str] | None = None) -> None:
         "--run-id",
         help="read the config back out of an existing run's registry header (with --retry)",
     )
+    src.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "synthesize a glass-box RunConfig via the Auto-Forecaster "
+            "(tier=first_light|wide_field|deep_sky|deep_field)"
+        ),
+    )
+    p.add_argument(
+        "--table",
+        default="source_series_wide_native",
+        help="with --auto: BigQuery source table or local CSV/Parquet path",
+    )
+    p.add_argument(
+        "--benchmark",
+        default=None,
+        help="with --auto: synthetic DGP benchmark name (e.g. dgp_01_smooth_seasonal)",
+    )
+    p.add_argument(
+        "--horizon",
+        type=int,
+        default=14,
+        help="with --auto: forecast horizon H in native frequency steps (default: 14)",
+    )
+    p.add_argument(
+        "--tier",
+        default="wide_field",
+        choices=[
+            "first_light",
+            "wide_field",
+            "deep_sky",
+            "deep_field",
+            "glimpse",
+            "starlight",
+            "survey",
+        ],
+        help="with --auto: observational exposure tier (default: wide_field)",
+    )
+    p.add_argument(
+        "--where",
+        default="auto",
+        choices=["auto", "local", "bigquery", "cloud_cpu", "cloud_all"],
+        help="with --auto: execution sandbox envelope (default: auto)",
+    )
+    p.add_argument(
+        "--goal",
+        default="accuracy",
+        choices=["accuracy", "probabilistic", "service_level", "fast"],
+        help="with --auto: optimization objective (default: accuracy)",
+    )
+    p.add_argument(
+        "--autofocus",
+        action="store_true",
+        help=(
+            "with --auto: enable bounded iterative autofocus refinement "
+            "(default max_autofocus_passes=1)"
+        ),
+    )
+    p.add_argument(
+        "--autofocus-mode",
+        default="dag",
+        choices=["dag", "linear"],
+        help="with --auto --autofocus: multi-branch 'dag' or single-path 'linear' (default: dag)",
+    )
+    p.add_argument(
+        "--max-passes",
+        type=int,
+        default=None,
+        help="with --auto --autofocus: maximum total passes including Pass 1 (e.g. 3)",
+    )
+    p.add_argument(
+        "--max-autofocus-passes",
+        type=int,
+        default=1,
+        help="with --auto --autofocus: maximum refinement passes after Pass 1 (default: 1)",
+    )
+    p.add_argument(
+        "--max-minutes",
+        type=float,
+        default=None,
+        help="with --auto: optional hard wall-clock budget in minutes",
+    )
+    p.add_argument(
+        "--max-wall-clock-minutes",
+        type=float,
+        default=None,
+        help="with --auto: optional hard wall-clock budget in minutes",
+    )
+    p.add_argument(
+        "--max-usd",
+        type=float,
+        default=None,
+        help="with --auto: optional cloud spend ceiling in USD",
+    )
+    p.add_argument(
+        "--decision-metric",
+        default=None,
+        help="with --auto: pin a specific decision metric (e.g. wape, mase, rmse)",
+    )
+    p.add_argument(
+        "--n-folds",
+        type=int,
+        default=None,
+        help="with --auto: pin expanding-window backtest fold count",
+    )
+    p.add_argument(
+        "--baselines",
+        default="auto",
+        help="with --auto: baseline anchor policy ('auto', 'none', or comma-separated models)",
+    )
+    p.add_argument(
+        "--holidays",
+        default=None,
+        help="with --auto: comma-separated ISO country codes for holiday features (e.g. US,GB)",
+    )
+    p.add_argument(
+        "--allowed-families",
+        default=None,
+        help="with --auto: comma-separated model families to allow (e.g. statistical,ml)",
+    )
+    p.add_argument(
+        "--models",
+        default=None,
+        help="with --auto: comma-separated exact model shortlist to pin",
+    )
+    p.add_argument(
+        "--include-models",
+        default=None,
+        help="with --auto: comma-separated models to union into the tier shortlist",
+    )
+    p.add_argument(
+        "--exclude-models",
+        default=None,
+        help="with --auto: comma-separated models to remove from the tier shortlist",
+    )
+    p.add_argument(
+        "--init-config",
+        help=(
+            "with --auto: write synthesized RunConfig JSON to this path, print rationale, and exit"
+        ),
+    )
     verbs = p.add_mutually_exclusive_group()
     verbs.add_argument(
         "--dry-run", action="store_true", help="resolve + estimate fanout offline; touch no GCP"
@@ -705,11 +846,136 @@ def _main(argv: list[str] | None = None) -> None:
     # (`--feasibility` turns the plan into a BigQuery read). Everything else reaches the registry or
     # a runtime, so name the extra here, before a `gs://` config or a registry lookup trips over a
     # bare ``ModuleNotFoundError`` further in.
-    offline_verb = (ns.dry_run and not ns.feasibility) or ns.emit_airflow or bool(ns.emit_out)
+    offline_verb = (
+        (ns.dry_run and not ns.feasibility)
+        or ns.emit_airflow
+        or bool(ns.emit_out)
+        or (ns.auto and (bool(ns.init_config) or bool(ns.benchmark) or ns.where == "local"))
+    )
     if not offline_verb:
         require_extra("gcp", purpose="Every `main` verb except --dry-run and --emit-airflow")
 
-    if ns.run_id:
+    if ns.auto:
+        from pathlib import Path
+
+        from .auto import build_config as build_auto_config
+        from .sdk import Forecaster
+
+        def _csv_list(val: str | None) -> list[str] | None:
+            if not val:
+                return None
+            return [item.strip() for item in val.split(",") if item.strip()]
+
+        data_source: object = ns.table
+        future_df_auto: object = None
+        horizon_val: int | None = ns.horizon
+        if ns.benchmark:
+            from .benchmarks import load_benchmark
+
+            ds_bench = load_benchmark(ns.benchmark)
+            data_source = ds_bench.df
+            future_df_auto = ds_bench.future_df if not ds_bench.future_df.empty else None
+            if "--horizon" not in (argv or []):
+                horizon_val = ds_bench.spec.horizon
+        else:
+            table_path = Path(str(ns.table))
+            if table_path.is_file():
+                import pandas as pd
+
+                data_source = (
+                    pd.read_parquet(table_path)
+                    if table_path.suffix.lower() == ".parquet"
+                    else pd.read_csv(table_path)
+                )
+
+        baselines_arg: str | list[str] | None = ns.baselines
+        if isinstance(baselines_arg, str) and "," in baselines_arg:
+            baselines_arg = _csv_list(baselines_arg)
+
+        bp = build_auto_config(
+            data_source,  # type: ignore[arg-type]
+            future_df=future_df_auto,  # type: ignore[arg-type]
+            horizon=horizon_val,
+            tier=ns.tier,
+            where=ns.where,
+            goal=ns.goal,
+            allowed_families=_csv_list(ns.allowed_families),
+            models=_csv_list(ns.models),
+            include_models=_csv_list(ns.include_models),
+            exclude_models=_csv_list(ns.exclude_models),
+            baselines=baselines_arg,
+            holidays=_csv_list(ns.holidays),
+            decision_metric=ns.decision_metric,
+            n_folds=ns.n_folds,
+            max_minutes=ns.max_minutes,
+            max_wall_clock_minutes=ns.max_wall_clock_minutes,
+            max_usd=ns.max_usd,
+            only_available_models=ns.ignore_unavailable_models or ns.where == "local",
+        )
+        print(bp.explain())
+        written_auto_cfg: str | None = None
+        if ns.init_config:
+            written_auto_cfg = str(bp.to_file(ns.init_config))
+            _log.info("wrote synthesized RunConfig JSON: %s", written_auto_cfg)
+            if not (ns.emit_airflow or ns.emit_out):
+                return
+        if ns.emit_airflow or ns.emit_out:
+            max_p = (
+                int(ns.max_passes)
+                if ns.max_passes is not None
+                else max(2, int(ns.max_autofocus_passes) + 1)
+            )
+            default_dag_path = (
+                f"dag_autofocus_{bp.run_id}.py" if ns.autofocus else f"dag_{bp.run_id}.py"
+            )
+            out_dag_path = ns.emit_out or default_dag_path
+            bp.emit_airflow_dag(
+                written_auto_cfg,
+                out_path=out_dag_path,
+                autofocus=bool(ns.autofocus),
+                autofocus_mode=ns.autofocus_mode,
+                max_passes=max_p,
+                with_retry=ns.with_retry,
+            )
+            _log.info("wrote Airflow DAG: %s", out_dag_path)
+            return
+        if ns.autofocus and not ns.dry_run and not ns.feasibility:
+            f_auto = Forecaster.auto(
+                data_source,
+                future_df=future_df_auto,  # type: ignore[arg-type]
+                horizon=horizon_val,
+                tier=ns.tier,
+                where=ns.where,
+                goal=ns.goal,
+                allowed_families=_csv_list(ns.allowed_families),
+                models=_csv_list(ns.models),
+                include_models=_csv_list(ns.include_models),
+                exclude_models=_csv_list(ns.exclude_models),
+                baselines=baselines_arg,
+                holidays=_csv_list(ns.holidays),
+                decision_metric=ns.decision_metric,
+                n_folds=ns.n_folds,
+                autofocus=True,
+                autofocus_mode=ns.autofocus_mode,
+                max_passes=ns.max_passes,
+                max_autofocus_passes=ns.max_autofocus_passes,
+                max_minutes=ns.max_minutes,
+                max_wall_clock_minutes=ns.max_wall_clock_minutes,
+                max_usd=ns.max_usd,
+                execute=True,
+            )
+            print(f_auto.autofocus_ledger_df().to_string(index=False))
+            bv_df = f_auto.baseline_value_df()
+            if not bv_df.empty:
+                print("\nBaseline Value Ladder:")
+                print(bv_df.to_string(index=False))
+            pa_df = f_auto.practitioner_assessment_df()
+            if not pa_df.empty:
+                print("\nPractitioner Trust & Evidence Assessment:")
+                print(pa_df.to_string(index=False))
+            return
+        cfg = bp.config
+    elif ns.run_id:
         # Restricted to --retry on purpose. The other verbs already reach a run through its config's
         # digest, so an id would be a convenience there; here it is the *only* way in for an
         # operator who was handed an id and nothing else, which is the case the flag exists for.

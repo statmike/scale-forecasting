@@ -313,6 +313,8 @@ def build_report_payload(
     realized_df: pd.DataFrame | None = None,
     stability_df: pd.DataFrame | None = None,
     inventory_policy_df: pd.DataFrame | None = None,
+    autofocus_ledger_df: pd.DataFrame | None = None,
+    blueprint_rationale_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
@@ -341,6 +343,8 @@ def build_report_payload(
     real_recs = _df_to_records(realized_df)
     stab_recs = _df_to_records(stability_df)
     inv_recs = _df_to_records(inventory_policy_df)
+    af_recs = _df_to_records(autofocus_ledger_df)
+    bp_recs = _df_to_records(blueprint_rationale_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -376,6 +380,8 @@ def build_report_payload(
         "realized_accuracy": real_recs,
         "revision_stability": stab_recs,
         "inventory_policy": inv_recs,
+        "autofocus_ledger": af_recs,
+        "blueprint_rationale": bp_recs,
         "explorer": explorer,
     }
 
@@ -434,6 +440,8 @@ def render_html_report(
     realized_df: pd.DataFrame | None = None,
     stability_df: pd.DataFrame | None = None,
     inventory_policy_df: pd.DataFrame | None = None,
+    autofocus_ledger_df: pd.DataFrame | None = None,
+    blueprint_rationale_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
@@ -451,6 +459,8 @@ def render_html_report(
         realized_df=realized_df,
         stability_df=stability_df,
         inventory_policy_df=inventory_policy_df,
+        autofocus_ledger_df=autofocus_ledger_df,
+        blueprint_rationale_df=blueprint_rationale_df,
         metric=metric,
     )
     kpis = payload["kpis"]
@@ -471,6 +481,14 @@ def render_html_report(
     inv_html = _html_table(
         payload["inventory_policy"],
         empty_msg="No forward predictions available for inventory policy translation.",
+    )
+    af_html = _html_table(
+        payload["autofocus_ledger"],
+        empty_msg="Single-pass run (no closed-loop autofocus ledger recorded).",
+    )
+    bp_html = _html_table(
+        payload["blueprint_rationale"],
+        empty_msg="Manual RunConfig (no auto-compiler rationale table attached).",
     )
 
     fva_kpi_str = f"{kpis['best_fva_pct']:+.1f}%" if kpis["best_fva_pct"] is not None else "n/a"
@@ -608,6 +626,9 @@ def render_html_report(
   <button class="tab-btn" onclick="switchTab('tab-explorer', this)">
     Interactive Series &amp; Fan Explorer
   </button>
+  <button class="tab-btn" onclick="switchTab('tab-autofocus', this)">
+    Autofocus &amp; Blueprint
+  </button>
 </nav>
 
 <section id="tab-fva" class="tab-panel active">
@@ -678,6 +699,17 @@ def render_html_report(
       </label>
     </div>
     <div id="fan-chart-container"></div>
+  </div>
+</section>
+
+<section id="tab-autofocus" class="tab-panel">
+  <div class="card">
+    <h2>Closed-Loop Autofocus Pass Ledger</h2>
+    {af_html}
+  </div>
+  <div class="card">
+    <h2>Glass-Box Compiler Rationale Table</h2>
+    {bp_html}
   </div>
 </section>
 
@@ -833,6 +865,8 @@ def export_report(
     bias_df: pd.DataFrame | None = None
     exceptions_df: pd.DataFrame | None = None
     inventory_policy_df: pd.DataFrame | None = None
+    autofocus_ledger_df: pd.DataFrame | None = None
+    blueprint_rationale_df: pd.DataFrame | None = None
 
     # 1. BakeOff duck-typing
     if hasattr(target, "leaderboard") and hasattr(target, "predictions") and hasattr(target, "oof"):
@@ -868,6 +902,10 @@ def export_report(
             exceptions_df = target.exceptions_df(run_id)
         if hasattr(target, "inventory_policy_df"):
             inventory_policy_df = target.inventory_policy_df(run_id)
+        if hasattr(target, "autofocus_ledger_df"):
+            autofocus_ledger_df = target.autofocus_ledger_df()
+        if getattr(target, "blueprint", None) is not None:
+            blueprint_rationale_df = target.blueprint.rationale_df
     # 4. Mapping of DataFrames
     elif isinstance(target, dict):
         run_id = str(target.get("run_id", run_id))
@@ -880,6 +918,8 @@ def export_report(
         bias_df = target.get("bias_df")
         exceptions_df = target.get("exceptions_df")
         inventory_policy_df = target.get("inventory_policy_df")
+        autofocus_ledger_df = target.get("autofocus_ledger_df")
+        blueprint_rationale_df = target.get("blueprint_rationale_df")
 
     eff_title = title or f"Scale-Forecasting Executive Report ({run_id})"
     html_str = render_html_report(
@@ -894,6 +934,8 @@ def export_report(
         bias_df=bias_df,
         exceptions_df=exceptions_df,
         inventory_policy_df=inventory_policy_df,
+        autofocus_ledger_df=autofocus_ledger_df,
+        blueprint_rationale_df=blueprint_rationale_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
@@ -911,6 +953,8 @@ def export_report(
             bias_df=bias_df,
             exceptions_df=exceptions_df,
             inventory_policy_df=inventory_policy_df,
+            autofocus_ledger_df=autofocus_ledger_df,
+            blueprint_rationale_df=blueprint_rationale_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")

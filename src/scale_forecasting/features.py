@@ -58,6 +58,7 @@ else:
 VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
     {
         "covariate_mode",
+        "transform",
         "exog",
         "future_covariates",
         "past_covariates",
@@ -474,31 +475,23 @@ def resolve_model_variant(
 
     f = cfg.features
     if variant_tag is not None:
+        declared = set(f.all_covariates)
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
         if inferred_scope is not None and "training_mode" not in variant_explicit:
             raw_params["training_mode"] = inferred_scope
         if inferred_cov is not None and "covariate_mode" not in variant_explicit:
             raw_params["covariate_mode"] = inferred_cov
-        elif (
-            base == "chronos_bolt"
-            and variant_tag in ("tiny", "mini", "small", "base")
-            and "size" not in variant_explicit
-        ):
-            raw_params["size"] = variant_tag
-        elif (
-            base in ("timesfm_torch", "timesfm")
-            and variant_tag in ("v2.0", "2.0", "v2.5", "2.5", "v3.0", "3.0")
-            and "version" not in variant_explicit
-        ):
-            raw_params["version"] = variant_tag.lstrip("v")
-        elif inferred_cov is None and not any(
+
+        # Handle single-column drop/keep tags first so column names with underscores stay intact
+        matched_col_slice = False
+        if inferred_cov is None and not any(
             k in variant_explicit
             for k in ("exog", "future_covariates", "past_covariates", "static_covariates")
         ):
-            declared = set(f.all_covariates)
             if variant_tag.startswith("cov_drop_"):
                 drop_col = variant_tag[len("cov_drop_") :]
                 if drop_col in declared:
+                    matched_col_slice = True
                     raw_params["covariate_mode"] = None
                     raw_params["exog"] = [c for c in f.exog if c != drop_col]
                     raw_params["future_covariates"] = [
@@ -508,9 +501,10 @@ def resolve_model_variant(
                     raw_params["static_covariates"] = [
                         c for c in f.static_covariates if c != drop_col
                     ]
-            elif variant_tag.startswith("cov_"):
+            elif variant_tag.startswith("cov_") and variant_tag not in VALID_COVARIATE_MODES:
                 keep_col = variant_tag[len("cov_") :]
                 if keep_col in declared:
+                    matched_col_slice = True
                     raw_params["covariate_mode"] = None
                     raw_params["exog"] = [c for c in f.exog if c == keep_col]
                     raw_params["future_covariates"] = [
@@ -520,6 +514,52 @@ def resolve_model_variant(
                     raw_params["static_covariates"] = [
                         c for c in f.static_covariates if c == keep_col
                     ]
+
+        if not matched_col_slice:
+            # Composable token parser: supports both single tags (@v2.5, @transform_log1p, @direct)
+            # and compound tags (@v2.5_univariate, @global_v2.5_cov_all, @tiny_global,
+            # @direct_transform_log1p).
+            rem_tag = variant_tag
+            for multi_cov in sorted(VALID_COVARIATE_MODES, key=len, reverse=True):
+                if "_" in multi_cov and multi_cov in rem_tag:
+                    if "covariate_mode" not in variant_explicit:
+                        raw_params["covariate_mode"] = multi_cov
+                    rem_tag = rem_tag.replace(multi_cov, "")
+            for multi_tr, tr_norm in (
+                ("transform_log1p", "log1p"),
+                ("transform_boxcox", "boxcox"),
+                ("transform_none", "none"),
+            ):
+                if multi_tr in rem_tag:
+                    if "transform" not in variant_explicit:
+                        raw_params["transform"] = tr_norm
+                    rem_tag = rem_tag.replace(multi_tr, "")
+
+            for tok in (t for t in rem_tag.split("_") if t):
+                if tok in ("local", "global", "hybrid") and "training_mode" not in variant_explicit:
+                    raw_params["training_mode"] = tok
+                elif tok in VALID_COVARIATE_MODES and "covariate_mode" not in variant_explicit:
+                    raw_params["covariate_mode"] = tok
+                elif (
+                    base == "chronos_bolt"
+                    and tok in ("tiny", "mini", "small", "base")
+                    and "size" not in variant_explicit
+                ):
+                    raw_params["size"] = tok
+                elif (
+                    base in ("timesfm_torch", "timesfm")
+                    and tok in ("v2.0", "2.0", "v2.5", "2.5", "v3.0", "3.0")
+                    and "version" not in variant_explicit
+                ):
+                    raw_params["version"] = tok.lstrip("v")
+                elif tok in ("log1p", "boxcox", "linear") and "transform" not in variant_explicit:
+                    raw_params["transform"] = (
+                        "log1p" if tok == "log1p" else ("boxcox" if tok == "boxcox" else "none")
+                    )
+                elif tok in ("direct", "recursive") and "strategy" not in variant_explicit:
+                    raw_params["strategy"] = tok
+                elif tok in ("sba", "tsb", "classic") and "variant" not in variant_explicit:
+                    raw_params["variant"] = tok
 
     scope_cap = model_cls.scope_capability()
     default_tm = "global" if scope_cap == "global_only" else "local"
@@ -549,6 +589,16 @@ def resolve_model_variant(
         new_fourier = f.fourier
         new_level_shift = f.level_shift
         new_trading_days = f.trading_days
+        new_transform = f.transform
+
+        if "transform" in raw_params and raw_params["transform"] is not None:
+            tr_val = str(raw_params["transform"])
+            if tr_val not in ("none", "log1p", "boxcox"):
+                raise ConfigError(
+                    f"model_params.{model_name}.transform={tr_val!r} is invalid; "
+                    "must be 'none', 'log1p', or 'boxcox'"
+                )
+            new_transform = tr_val  # type: ignore[assignment]
 
         if "covariate_mode" in raw_params and raw_params["covariate_mode"] is not None:
             cm = str(raw_params["covariate_mode"])
@@ -624,6 +674,7 @@ def resolve_model_variant(
         new_lags = {k: list(v) for k, v in new_lags.items() if k in kept_dynamic}
         cand_features = f.model_copy(
             update={
+                "transform": new_transform,
                 "exog": new_exog,
                 "future_covariates": new_future,
                 "past_covariates": new_past,

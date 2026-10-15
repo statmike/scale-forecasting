@@ -1,7 +1,7 @@
 """Unit and protocol tests for the built-in stdio MCP server (`scale_forecasting.mcp`).
 
 Exercises JSON-RPC 2.0 protocol framing (newline-delimited and ``Content-Length`` headers),
-all 7 ``forecast://*`` resources, all 9 tools, and the ``--allow-launch`` safety lock.
+all 7 ``forecast://*`` resources, all 11 tools, and the ``--allow-launch`` safety lock.
 """
 
 from __future__ import annotations
@@ -127,6 +127,8 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         "inspect_registry",
         "review_run",
         "launch_or_repair_run",
+        "build_auto_config",
+        "run_auto_forecast",
     ]
 
     # 1. probe_environment
@@ -135,7 +137,18 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
     assert env_payload["models"]["total"] == 37
 
     # 2. list_catalog across categories and filters
-    for cat in ("all", "models", "metrics", "runtimes", "gpus", "configs", "views", "extras"):
+    for cat in (
+        "all",
+        "models",
+        "metrics",
+        "runtimes",
+        "gpus",
+        "configs",
+        "views",
+        "extras",
+        "benchmarks",
+        "auto_tiers",
+    ):
         is_err, cat_payload = _call_tool(server, "list_catalog", {"category": cat})
         assert not is_err, cat_payload
         assert cat_payload
@@ -256,6 +269,47 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
     )
     assert not is_err
     assert launch_locked["allowed"] is False
+    assert "--allow-launch" in launch_locked["message"]
+
+    # 8. build_auto_config and run_auto_forecast (offline DGP benchmark + cloud safety lock)
+    is_err, auto_bp = _call_tool(
+        server,
+        "build_auto_config",
+        {
+            "benchmark": "dgp_01_smooth_seasonal",
+            "n_series": 3,
+            "tier": "first_light",
+            "where": "local",
+        },
+    )
+    assert not is_err
+    assert auto_bp["tier"] == "first_light"
+    assert len(auto_bp["rationale"]) >= 3
+    assert "duration_estimate" in auto_bp
+
+    is_err, auto_run = _call_tool(
+        server,
+        "run_auto_forecast",
+        {
+            "benchmark": "dgp_01_smooth_seasonal",
+            "n_series": 2,
+            "tier": "first_light",
+            "where": "local",
+            "autofocus": True,
+            "max_passes": 2,
+        },
+    )
+    assert not is_err
+    assert len(auto_run["autofocus_ledger"]) >= 1
+    assert "next_loop_preview" in auto_run
+
+    is_err, auto_cloud_locked = _call_tool(
+        server,
+        "run_auto_forecast",
+        {"source_table": "source_series", "where": "cloud_cpu"},
+    )
+    assert not is_err
+    assert auto_cloud_locked["allowed"] is False
     assert "--allow-launch" in launch_locked["message"]
 
 
