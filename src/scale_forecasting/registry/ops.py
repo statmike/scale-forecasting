@@ -1214,7 +1214,7 @@ def match_reusable_models(
             continue
         if explicit_source is not None and cand_run_id != explicit_source:
             continue
-        if str(hdr.get("status") or "") != "COMPLETED":
+        if str(hdr.get("status") or "") not in ("COMPLETED", "PARTIAL"):
             continue
         cand_snap_raw = hdr.get("snapshot_millis")
         cand_snap = int(str(cand_snap_raw)) if cand_snap_raw is not None else None
@@ -1387,15 +1387,15 @@ def find_reusable_models(
             return {}
 
     if explicit_source is not None:
-        where_clause = "WHERE run_id = @explicit_run_id AND status = 'COMPLETED'"
+        where_clause = "WHERE run_id = @explicit_run_id AND status IN ('COMPLETED', 'PARTIAL')"
     elif snapshot_millis is not None:
         where_clause = (
-            "WHERE run_id != @run_id AND status = 'COMPLETED' "
+            "WHERE run_id != @run_id AND status IN ('COMPLETED', 'PARTIAL') "
             "AND snapshot_millis = @snapshot_millis"
         )
     else:
         where_clause = (
-            "WHERE run_id != @run_id AND status = 'COMPLETED' "
+            "WHERE run_id != @run_id AND status IN ('COMPLETED', 'PARTIAL') "
             "AND snapshot_millis >= @source_last_mod_ms"
         )
     sql_headers = (

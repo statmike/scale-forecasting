@@ -233,7 +233,9 @@ def run(
                 record_borrowed_family_job,
             )
 
-            borrowed = find_reusable_models(cfg, run_id, hdr.snapshot_millis, settings=settings)
+            borrowed = find_reusable_models(
+                cfg, run_id, cfg.data.snapshot_millis, settings=settings
+            )
             if borrowed:
                 borrow_model_results(cfg, run_id, borrowed, settings=settings)
                 try:

@@ -13,9 +13,13 @@ from functools import cache
 from typing import Any
 
 from ..errors import get_logger
-from .rows import METRIC_COLUMNS
+from .rows import METRIC_COLUMNS, _as_date
 
 _log = get_logger(__name__)
+
+_DATE_COLUMNS: frozenset[str] = frozenset(
+    {"forecast_date", "cutoff_date", "first_val_date", "last_val_date"}
+)
 
 
 # The Storage Write API serializes rows as protobuf. Each cell table has a fixed column
@@ -250,6 +254,8 @@ def _encode_rows(
         msg = msg_cls()
         for col, type_char in spec:
             value = row.get(col)
+            if col in _DATE_COLUMNS:
+                value = _as_date(value)
             if value is None:
                 continue
             if type_char == "S":

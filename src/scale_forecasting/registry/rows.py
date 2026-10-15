@@ -230,6 +230,8 @@ def stamp_ensemble_prediction_rows(
         row["ensemble_id"] = ensemble_id
         row["compute_engine"] = "ensemble"
         row["created_at"] = created_at
+        if "forecast_date" in row:
+            row["forecast_date"] = _as_date(row["forecast_date"])
     return rows
 
 
@@ -539,9 +541,13 @@ def _as_json(value: Any) -> str | None:
 
 
 def _as_date(value: Any) -> Any:
-    """Normalize a timestamp-ish value to a ``date`` for BQ DATE columns."""
+    """Normalize a timestamp-ish value to a ``date`` (or ``"YYYY-MM-DD"``) for BQ DATE columns."""
+    if value is None or value != value:  # None, NaN, or pd.NaT
+        return None
     if hasattr(value, "date"):
         return value.date()
+    if isinstance(value, str) and len(value) > 10 and value[10] in ("T", " "):
+        return value[:10]
     return value
 
 
