@@ -16,16 +16,17 @@
 
 ```mermaid
 flowchart LR
-    subgraph PREP["1. Data, Config & Family Router"]
+    subgraph PREP["1. Data, Config & Launch"]
         direction TB
-        SRC["Your Data (BigQuery or DataFrame)<br/>series · timestamps · covariates<br/>hierarchies"]
-        CFG["One RunConfig Contract (JSON)<br/>Hand-crafted OR Auto-Forecaster<br/>(first_light .. deep_field + autofocus)"]
-        R["Parallel Family DAG Router<br/>1 independent job per active family<br/>statistical · ml · deep_learning<br/>automl · native"]
-        SRC --> CFG --> R
+        SRC["Your Data (BigQuery or DataFrame)<br/>series · timestamps · covariates · hierarchies"]
+        CFG["Create a Config File (JSON)<br/>Hand-crafted OR use Auto-Forecaster"]
+        LAUNCH["Launch & Orchestrate<br/>SDK · CLI · Notebooks · Airflow · Batch · MCP"]
+        R["Parallel Family DAG Router<br/>Routes active families (1 job or pool per family)<br/>statistical · ml · deep_learning · automl · native"]
+        SRC --> CFG --> LAUNCH --> R
     end
     subgraph RUN["2. Zero-Idle Compute on Google Cloud (Chosen per Family)"]
         direction LR
-        S["Dataproc Serverless Spark"]
+        S["Serverless Spark or Spark Cluster"]
         RY["Ray on Vertex AI or GKE"]
         V["Vertex AI CustomJob"]
         G["Compute Engine Single VM (Self-Deleting)"]
@@ -33,11 +34,11 @@ flowchart LR
         A["Vertex AI AutoML & Tabular Workflows"]
         B["BigQuery ML (CREATE MODEL · AI.FORECAST)"]
     end
-    subgraph OUT["3. Governed Results & Surfaces"]
+    subgraph OUT["3. Governed Results & Trust in BigQuery"]
         direction TB
         REG["5 BigQuery Registry Tables<br/>forecasts · backtests · metadata<br/>runs · jobs"]
-        VIEWS["5 Analytical SQL Views & Trust<br/>Leaderboards · FVA Ladder<br/>7-Question Assessment"]
-        USE["Notebooks · Python SDK · CLI<br/>Looker · Cloud Composer 3<br/>MCP Server"]
+        VIEWS["5 Analytical SQL Views<br/>Leaderboards · Backtest Coverage<br/>Run & Job Summaries"]
+        USE["Practitioner Trust & Consumption<br/>7-Question Assessment · FVA Ladder<br/>Attributions · SDK · Looker"]
         REG --> VIEWS --> USE
     end
 
@@ -48,7 +49,7 @@ flowchart LR
     classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
     classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
     class SRC,REG,VIEWS,USE data
-    class CFG config
+    class CFG,LAUNCH config
     class R route
     class S,RY,V,G,K,A,B compute
 ```
