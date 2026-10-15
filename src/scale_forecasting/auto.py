@@ -1873,13 +1873,13 @@ def _build_compute_block_for_where(
                     fam_entry["workers"] = default_workers
                 families_block[fam] = fam_entry
     elif where in ("cloud_all", "auto") and "deep_learning" in families_present:
+        compute_cfg["ray_regions"] = ["us-central1", "us-east4", "us-east1", "us-west1"]
         dl_entry: dict[str, Any] = {
             "runtime": "vertex",
             "hardware": "gpu",
-            "gpu_type": "L4",
+            "gpu_type": "T4",
+            "workers": max(2, default_workers),
         }
-        if default_workers > 1:
-            dl_entry["workers"] = default_workers
         families_block["deep_learning"] = dl_entry
     if families_block:
         compute_cfg["families"] = families_block
