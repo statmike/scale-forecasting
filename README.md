@@ -15,39 +15,39 @@
 `37 models` · `5 families` · `21 evaluation metrics` · `7 Google Cloud runtimes` · `5 Analytical SQL Views` · `validated at 100k series`
 
 ```mermaid
-flowchart TD
-    subgraph IN["1. Your Data (BigQuery or DataFrame)"]
-        SRC["Source time series · timestamps · covariates · hierarchies"]
+flowchart LR
+    subgraph PREP["1. Data, Config & Family Router"]
+        direction TB
+        SRC["Your Data (BigQuery or DataFrame)<br/>series · timestamps · covariates<br/>hierarchies"]
+        CFG["One RunConfig Contract (JSON)<br/>Hand-crafted OR Auto-Forecaster<br/>(first_light .. deep_field + autofocus)"]
+        R["Parallel Family DAG Router<br/>1 independent job per active family<br/>statistical · ml · deep_learning<br/>automl · native"]
+        SRC --> CFG --> R
     end
-    subgraph AUTHOR["2. Two Ways to Configure (Same RunConfig Contract)"]
-        CFG["Hand-crafted RunConfig JSON<br/>OR Glass-Box Auto-Forecaster (first_light .. deep_field + autofocus)"]
-    end
-    subgraph ROUTE["3. Parallel Family DAG Router"]
-        R["One independent job per active model family<br/>statistical · ml · deep_learning · automl · native"]
-    end
-    subgraph RUN["4. Zero-Idle Compute on Google Cloud (Chosen per Family)"]
+    subgraph RUN["2. Zero-Idle Compute on Google Cloud (Chosen per Family)"]
+        direction LR
         S["Dataproc Serverless Spark"]
         RY["Ray on Vertex AI or GKE"]
         V["Vertex AI CustomJob"]
         G["Compute Engine Single VM (Self-Deleting)"]
-        K["GKE Indexed Job"]
+        K["GKE (Indexed Job or Ray · Scale-to-Zero)"]
         A["Vertex AI AutoML & Tabular Workflows"]
-        B["BigQuery ML (ARIMA_PLUS · AI.FORECAST)"]
+        B["BigQuery ML (CREATE MODEL · AI.FORECAST)"]
     end
-    subgraph OUT["5. Governed Results & Trust Evidence in BigQuery"]
-        REG["5 Registry Tables · 5 Analytical SQL Views · Practitioner Trust & FVA Ladder"]
+    subgraph OUT["3. Governed Results & Surfaces"]
+        direction TB
+        REG["5 BigQuery Registry Tables<br/>forecasts · backtests · metadata<br/>runs · jobs"]
+        VIEWS["5 Analytical SQL Views & Trust<br/>Leaderboards · FVA Ladder<br/>7-Question Assessment"]
+        USE["Notebooks · Python SDK · CLI<br/>Looker · Cloud Composer 3<br/>MCP Server"]
+        REG --> VIEWS --> USE
     end
-    USE["Notebooks · Python SDK · CLI · Looker · Cloud Composer 3 DAGs · MCP Server"]
 
-    SRC --> CFG --> R
-    R --> S & RY & V & G & K & A & B
-    S & RY & V & G & K & A & B --> REG --> USE
+    PREP --> RUN --> OUT
 
-    classDef data fill:#E8F0FE,stroke:#4285F4,color:#174EA6
-    classDef config fill:#FEF7E0,stroke:#F9AB00,color:#7A5A00
-    classDef route fill:#FCE8E6,stroke:#EA4335,color:#A50E0E
-    classDef compute fill:#E6F4EA,stroke:#34A853,color:#0D652D
-    class SRC,REG,USE data
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    class SRC,REG,VIEWS,USE data
     class CFG config
     class R route
     class S,RY,V,G,K,A,B compute
