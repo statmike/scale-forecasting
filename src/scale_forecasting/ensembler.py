@@ -34,6 +34,7 @@ from scipy.optimize import nnls
 
 from .backtest import holdout_fold_id
 from .calibration import (
+    _calibrate_from_arrays,
     apply_output_constraints,
     apply_quantile_and_cost_rules,
     calibrate_from_oof,
@@ -495,13 +496,18 @@ def combine_oof(
         )
         part = part[~part["yhat"].isna()].reset_index(drop=True)
         if has_output_constraints(cfg.output) and not part.empty:
-            constrained_parts: list[pd.DataFrame] = []
-            for (_tid, _fid), fg in part.groupby(["ts_id", "fold_id"], sort=False, dropna=False):
-                fg_sorted = fg.sort_values("forecast_date").copy()
-                fg_c = apply_output_constraints(fg_sorted[["yhat"]].copy(), cfg.output)
-                fg_sorted["yhat"] = fg_c["yhat"].to_numpy(dtype=float)
-                constrained_parts.append(fg_sorted)
-            part = pd.concat(constrained_parts, ignore_index=True)
+            if cfg.output.integer_rounding != "conserve_sum":
+                part = apply_output_constraints(part, cfg.output)
+            else:
+                constrained_parts: list[pd.DataFrame] = []
+                for (_tid, _fid), fg in part.groupby(
+                    ["ts_id", "fold_id"], sort=False, dropna=False
+                ):
+                    fg_sorted = fg.sort_values("forecast_date").copy()
+                    fg_c = apply_output_constraints(fg_sorted[["yhat"]].copy(), cfg.output)
+                    fg_sorted["yhat"] = fg_c["yhat"].to_numpy(dtype=float)
+                    constrained_parts.append(fg_sorted)
+                part = pd.concat(constrained_parts, ignore_index=True)
         parts.append(part)
     return pd.concat(parts, ignore_index=True)[list(_OOF_BLEND_COLS)] if parts else empty
 
@@ -586,6 +592,14 @@ def _series_oof_wape(wblock: np.ndarray, wtruth: np.ndarray) -> np.ndarray:
     return np.where(has_obs, raw, np.nan)
 
 
+def _group_row_indices(ts_ids: np.ndarray) -> dict[Any, np.ndarray]:
+    """Map each unique ``ts_id`` to its 1-D integer row-index array in $O(N)$ time."""
+    if len(ts_ids) == 0:
+        return {}
+    raw = pd.Series(np.arange(len(ts_ids), dtype=np.intp)).groupby(ts_ids, sort=False).indices
+    return {k: np.asarray(v, dtype=np.intp) for k, v in raw.items()}
+
+
 def _filtered_unweighted_oof_blend(
     strategy: str,
     vals: np.ndarray,
@@ -599,13 +613,12 @@ def _filtered_unweighted_oof_blend(
 ) -> np.ndarray:
     """``mean`` or ``median`` after per-series ``top_k`` and ``parsimony_margin`` pruning."""
     out = np.full(vals.shape[0], np.nan)
-    for tid in np.unique(ts_ids):
-        rows = ts_ids == tid
-        block = vals[rows].copy()
-        weight_rows = rows & fit_rows
-        if not weight_rows.any():
-            weight_rows = rows
-        wape = _series_oof_wape(vals[weight_rows], truth[weight_rows])
+    for idx in _group_row_indices(ts_ids).values():
+        block = vals[idx]
+        fit_idx = idx[fit_rows[idx]]
+        if len(fit_idx) == 0:
+            fit_idx = idx
+        wape = _series_oof_wape(vals[fit_idx], truth[fit_idx])
         w = _select_or_weight_models(
             wape,
             models,
@@ -616,10 +629,10 @@ def _filtered_unweighted_oof_blend(
         active = w > 0.0
         if strategy == "median":
             masked = np.where(active[None, :], block, np.nan)
-            out[rows] = np.nanmedian(masked, axis=1)
+            out[idx] = np.nanmedian(masked, axis=1)
         else:
             uniform_active = np.where(active, 1.0, 0.0)
-            out[rows] = _weighted_blend(block, uniform_active)
+            out[idx] = _weighted_blend(block, uniform_active)
     return out
 
 
@@ -636,13 +649,12 @@ def _inverse_error_blend(
 ) -> np.ndarray:
     """Inverse-WAPE-weighted (or single-winner ``champion``) blend per ``ts_id`` from OOF."""
     out = np.full(vals.shape[0], np.nan)
-    for tid in np.unique(ts_ids):
-        rows = ts_ids == tid
-        block = vals[rows]
-        weight_rows = rows & fit_rows
-        if not weight_rows.any():
-            weight_rows = rows
-        wape = _series_oof_wape(vals[weight_rows], truth[weight_rows])
+    for idx in _group_row_indices(ts_ids).values():
+        block = vals[idx]
+        fit_idx = idx[fit_rows[idx]]
+        if len(fit_idx) == 0:
+            fit_idx = idx
+        wape = _series_oof_wape(vals[fit_idx], truth[fit_idx])
         weights = _select_or_weight_models(
             wape,
             models,
@@ -650,7 +662,7 @@ def _inverse_error_blend(
             parsimony_margin=parsimony_margin,
             champion_only=champion_only,
         )
-        out[rows] = _weighted_blend(block, weights)
+        out[idx] = _weighted_blend(block, weights)
     return out
 
 
@@ -667,12 +679,11 @@ def _horizon_specialist_oof_blend(
 ) -> np.ndarray:
     """Per-``(ts_id, horizon_step)`` inverse-WAPE blend over inner folds."""
     out = np.full(vals.shape[0], np.nan)
-    for tid in np.unique(ts_ids):
-        s_rows = ts_ids == tid
-        s_fit = s_rows & fit_rows
-        if not s_fit.any():
-            s_fit = s_rows
-        fallback_wape = _series_oof_wape(vals[s_fit], truth[s_fit])
+    for idx in _group_row_indices(ts_ids).values():
+        fit_idx = idx[fit_rows[idx]]
+        if len(fit_idx) == 0:
+            fit_idx = idx
+        fallback_wape = _series_oof_wape(vals[fit_idx], truth[fit_idx])
         fallback_w = _select_or_weight_models(
             fallback_wape,
             models,
@@ -680,16 +691,18 @@ def _horizon_specialist_oof_blend(
             parsimony_margin=parsimony_margin,
             champion_only=False,
         )
-        s_steps = steps[s_rows]
+        s_steps = steps[idx]
         if np.all(np.isnan(s_steps)):
-            out[s_rows] = _weighted_blend(vals[s_rows], fallback_w)
+            out[idx] = _weighted_blend(vals[idx], fallback_w)
             continue
+        s_fit = fit_rows[idx]
         for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
-            h_rows = s_rows & (steps == step_val)
-            h_fit = h_rows & fit_rows
-            if not h_fit.any():
-                h_fit = h_rows
-            wape = _series_oof_wape(vals[h_fit], truth[h_fit])
+            step_mask = s_steps == step_val
+            h_idx = idx[step_mask]
+            h_fit_idx = idx[step_mask & s_fit]
+            if len(h_fit_idx) == 0:
+                h_fit_idx = h_idx
+            wape = _series_oof_wape(vals[h_fit_idx], truth[h_fit_idx])
             if np.all(np.isnan(wape)):
                 weights = fallback_w
             else:
@@ -700,10 +713,11 @@ def _horizon_specialist_oof_blend(
                     parsimony_margin=parsimony_margin,
                     champion_only=False,
                 )
-            out[h_rows] = _weighted_blend(vals[h_rows], weights)
-        nan_step_rows = s_rows & np.isnan(steps)
-        if nan_step_rows.any():
-            out[nan_step_rows] = _weighted_blend(vals[nan_step_rows], fallback_w)
+            out[h_idx] = _weighted_blend(vals[h_idx], weights)
+        nan_mask = np.isnan(s_steps)
+        if nan_mask.any():
+            nan_idx = idx[nan_mask]
+            out[nan_idx] = _weighted_blend(vals[nan_idx], fallback_w)
     return out
 
 
@@ -1073,19 +1087,21 @@ def _horizon_specialist_weight_matrix(
     top_k = cfg.ensemble.top_k
     margin = cfg.ensemble.parsimony_margin
     step_weights: dict[tuple[str, int], np.ndarray] = {}
-    for tid in np.unique(oof_ts):
-        s_rows = oof_ts == tid
-        s_steps = steps[s_rows]
+    for tid, idx in _group_row_indices(oof_ts).items():
+        s_steps = steps[idx]
         if np.all(np.isnan(s_steps)):
             continue
+        s_fit = fit_rows[idx]
+        tid_str = str(tid)
         for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
-            h_rows = s_rows & (steps == step_val)
-            h_fit = h_rows & fit_rows
-            if not h_fit.any():
-                h_fit = h_rows
-            wape = _series_oof_wape(vals[h_fit], truth[h_fit])
+            step_mask = s_steps == step_val
+            h_idx = idx[step_mask]
+            h_fit_idx = idx[step_mask & s_fit]
+            if len(h_fit_idx) == 0:
+                h_fit_idx = h_idx
+            wape = _series_oof_wape(vals[h_fit_idx], truth[h_fit_idx])
             if not np.all(np.isnan(wape)):
-                step_weights[(str(tid), round(float(step_val)))] = _select_or_weight_models(
+                step_weights[(tid_str, round(float(step_val)))] = _select_or_weight_models(
                     wape,
                     models,
                     top_k=top_k,
@@ -1158,6 +1174,41 @@ def ensemble_oof_bounds(
     return frame["yhat_lower"].to_numpy(dtype=float), frame["yhat_upper"].to_numpy(dtype=float)
 
 
+def _ensemble_oof_bounds_from_arrays(
+    cell_yhat: np.ndarray,
+    cell_resid: np.ndarray,
+    fold_mask: np.ndarray,
+    cfg: RunConfig,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Fast numpy-array equivalent of `ensemble_oof_bounds` for one fold of a cell."""
+    if not fold_mask.any():
+        return None, None
+    other_mask = ~fold_mask
+    ref_resid = cell_resid[other_mask] if other_mask.any() else cell_resid
+    residuals = ref_resid[np.isfinite(ref_resid)]
+    if len(residuals) == 0:
+        return None, None
+    if len(residuals) == 1:
+        half = max(abs(float(residuals[0])), 1e-6)
+        q10, q90 = -half, half
+    else:
+        q10, q90 = np.percentile(residuals, [10.0, 90.0])
+        if q10 == q90:
+            half = max(abs(float(q10)) * 0.1, 1e-6)
+            q10, q90 = float(q10) - half, float(q90) + half
+
+    yhat = cell_yhat[fold_mask]
+    lo = yhat + float(q10)
+    hi = yhat + float(q90)
+    if has_output_constraints(cfg.output):
+        frame = apply_output_constraints(
+            pd.DataFrame({"yhat": yhat, "yhat_lower": lo, "yhat_upper": hi}),
+            cfg.output,
+        )
+        return frame["yhat_lower"].to_numpy(dtype=float), frame["yhat_upper"].to_numpy(dtype=float)
+    return lo, hi
+
+
 def calibrate_ensemble_predictions(
     pred_rows: list[dict[str, Any]],
     ens_oof: pd.DataFrame,
@@ -1185,74 +1236,127 @@ def calibrate_ensemble_predictions(
     had_quantiles_col = "quantiles" in df.columns
     target_qs = cfg.output.effective_quantiles
     lo_q, hi_q = target_qs[0], target_qs[-1]
-    oof_by_cell: dict[tuple[str, str], pd.DataFrame] = {}
-    if need_cal:
-        for (tid, mtype), g in ens_oof.groupby(["ts_id", "model_type"]):
-            oof_by_cell[(str(tid), str(mtype))] = g
+    emit_quantiles = cfg.output.quantiles is not None or (had_quantiles_col and len(df) <= 50_000)
 
-    emit_quantiles = cfg.output.quantiles is not None or had_quantiles_col
-    out_parts: list[pd.DataFrame] = []
-    for (tid, mtype), group in df.groupby(["ts_id", "model_type"], sort=False):
-        cell_df = group.copy()
-        if (need_constraints or need_q_or_cost) and "yhat_raw" not in cell_df.columns:
-            cell_df["yhat_raw"] = cell_df["yhat"].to_numpy(dtype=float)
-        calibrated_this_cell = False
+    # Fast array-indexed path when no custom per-row quantile JSON or cost-weighted target quantile
+    # is needed (avoiding 2 * n_cells DataFrame allocations on 100k-series panels).
+    if not emit_quantiles and not need_q_or_cost:
+        if need_constraints and "yhat_raw" not in df.columns:
+            df["yhat_raw"] = df["yhat"].to_numpy(dtype=float)
         if need_cal:
-            oof_slice = oof_by_cell.get((str(tid), str(mtype)))
-            if oof_slice is not None and not oof_slice.empty:
-                cal = calibrate_from_oof(oof_slice, target_qs, residual_column="yhat")
+            yhat_arr = df["yhat"].to_numpy(dtype=float).copy()
+            lo_arr = (
+                df["yhat_lower"].to_numpy(dtype=float).copy()
+                if "yhat_lower" in df.columns
+                else np.full(len(df), np.nan, dtype=float)
+            )
+            hi_arr = (
+                df["yhat_upper"].to_numpy(dtype=float).copy()
+                if "yhat_upper" in df.columns
+                else np.full(len(df), np.nan, dtype=float)
+            )
+            oof_resid = (
+                pd.to_numeric(ens_oof["y_true"], errors="coerce")
+                - pd.to_numeric(ens_oof["yhat"], errors="coerce")
+            ).to_numpy(dtype=float)
+            oof_steps = (
+                pd.to_numeric(ens_oof["horizon_step"], errors="coerce").to_numpy(dtype=float)
+                if "horizon_step" in ens_oof.columns
+                else None
+            )
+            oof_indices = ens_oof.groupby(["ts_id", "model_type"], sort=False).indices
+            pred_indices = df.groupby(["ts_id", "model_type"], sort=False).indices
+            q_pair = (lo_q, hi_q)
+            for key, p_idx in pred_indices.items():
+                o_idx = oof_indices.get(key)
+                if o_idx is None or len(o_idx) == 0:
+                    continue
+                r_slice = oof_resid[o_idx]
+                s_slice = oof_steps[o_idx] if oof_steps is not None else None
+                cal = _calibrate_from_arrays(r_slice, s_slice, q_pair)
                 if cal is not None:
-                    calibrated_this_cell = True
-                    yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
-                    qlo_arr = np.array(
-                        [cal.for_step(s).quantiles[lo_q] for s in range(1, len(cell_df) + 1)],
-                        dtype=float,
-                    )
-                    qhi_arr = np.array(
-                        [cal.for_step(s).quantiles[hi_q] for s in range(1, len(cell_df) + 1)],
-                        dtype=float,
-                    )
-                    cell_df["yhat_lower"] = yhat_vals + qlo_arr
-                    cell_df["yhat_upper"] = yhat_vals + qhi_arr
-                    if emit_quantiles:
-                        qjson_rows: list[str] = []
-                        for idx in range(len(cell_df)):
-                            step_q = cal.for_step(idx + 1).quantiles
-                            raw_qmap = {
-                                q: float(yhat_vals[idx] + step_q[q])
-                                for q in target_qs
-                                if q in step_q
-                            }
-                            mono_qmap = rearrange_monotone_quantiles(raw_qmap)
-                            qjson_rows.append(
-                                json.dumps(
-                                    {str(q): v for q, v in mono_qmap.items()}, sort_keys=True
-                                )
-                            )
-                        cell_df["quantiles"] = qjson_rows
-                    if cfg.output.effective_target_quantile is not None:
-                        q_star = cfg.output.effective_target_quantile
-                        qstar_arr = np.array(
-                            [cal.for_step(s).quantiles[q_star] for s in range(1, len(cell_df) + 1)],
+                    n_p = len(p_idx)
+                    if not cal.by_step:
+                        lo_arr[p_idx] = yhat_arr[p_idx] + cal.pooled.quantiles[lo_q]
+                        hi_arr[p_idx] = yhat_arr[p_idx] + cal.pooled.quantiles[hi_q]
+                    else:
+                        qlo_step = np.array(
+                            [cal.for_step(s).quantiles[lo_q] for s in range(1, n_p + 1)],
                             dtype=float,
                         )
-                        cell_df["yhat"] = yhat_vals + qstar_arr
+                        qhi_step = np.array(
+                            [cal.for_step(s).quantiles[hi_q] for s in range(1, n_p + 1)],
+                            dtype=float,
+                        )
+                        lo_arr[p_idx] = yhat_arr[p_idx] + qlo_step
+                        hi_arr[p_idx] = yhat_arr[p_idx] + qhi_step
                 else:
-                    resid = (oof_slice["y_true"] - oof_slice["yhat"]).dropna().to_numpy(dtype=float)
-                    resid = resid[np.isfinite(resid)]
-                    if len(resid) >= 2:
+                    valid_r = r_slice[np.isfinite(r_slice)]
+                    if len(valid_r) >= 2:
+                        qlo, qhi = np.percentile(valid_r, [lo_q * 100.0, hi_q * 100.0])
+                        lo_arr[p_idx] = yhat_arr[p_idx] + float(qlo)
+                        hi_arr[p_idx] = yhat_arr[p_idx] + float(qhi)
+            df["yhat_lower"] = lo_arr
+            df["yhat_upper"] = hi_arr
+        if need_constraints:
+            if cfg.output.integer_rounding != "conserve_sum":
+                df = apply_output_constraints(df, cfg.output)
+            else:
+                c_parts: list[pd.DataFrame] = []
+                for (_tid, _mtype), grp in df.groupby(["ts_id", "model_type"], sort=False):
+                    c_parts.append(apply_output_constraints(grp.copy(), cfg.output))
+                df = pd.concat(c_parts, ignore_index=True)
+        yh_final = df["yhat"].to_numpy(dtype=float)
+        lo_final = df["yhat_lower"].to_numpy(dtype=float)
+        hi_final = df["yhat_upper"].to_numpy(dtype=float)
+        lo_nan = np.isnan(lo_final)
+        hi_nan = np.isnan(hi_final)
+        result_fast: list[dict[str, Any]] = []
+        for i, row in enumerate(pred_rows):
+            rec_fast = dict(row)
+            if need_constraints:
+                rec_fast["yhat"] = float(yh_final[i])
+            rec_fast["yhat_lower"] = None if lo_nan[i] else float(lo_final[i])
+            rec_fast["yhat_upper"] = None if hi_nan[i] else float(hi_final[i])
+            result_fast.append(rec_fast)
+        return result_fast
+    else:
+        oof_by_cell: dict[tuple[str, str], pd.DataFrame] = {}
+        if need_cal:
+            for (tid, mtype), g in ens_oof.groupby(["ts_id", "model_type"]):
+                oof_by_cell[(str(tid), str(mtype))] = g
+
+        out_parts: list[pd.DataFrame] = []
+        for (tid, mtype), group in df.groupby(["ts_id", "model_type"], sort=False):
+            cell_df = group.copy()
+            if (need_constraints or need_q_or_cost) and "yhat_raw" not in cell_df.columns:
+                cell_df["yhat_raw"] = cell_df["yhat"].to_numpy(dtype=float)
+            calibrated_this_cell = False
+            if need_cal:
+                oof_slice = oof_by_cell.get((str(tid), str(mtype)))
+                if oof_slice is not None and not oof_slice.empty:
+                    cal = calibrate_from_oof(oof_slice, target_qs, residual_column="yhat")
+                    if cal is not None:
                         calibrated_this_cell = True
-                        qlo, qhi = np.percentile(resid, [lo_q * 100.0, hi_q * 100.0])
                         yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
-                        cell_df["yhat_lower"] = yhat_vals + float(qlo)
-                        cell_df["yhat_upper"] = yhat_vals + float(qhi)
+                        qlo_arr = np.array(
+                            [cal.for_step(s).quantiles[lo_q] for s in range(1, len(cell_df) + 1)],
+                            dtype=float,
+                        )
+                        qhi_arr = np.array(
+                            [cal.for_step(s).quantiles[hi_q] for s in range(1, len(cell_df) + 1)],
+                            dtype=float,
+                        )
+                        cell_df["yhat_lower"] = yhat_vals + qlo_arr
+                        cell_df["yhat_upper"] = yhat_vals + qhi_arr
                         if emit_quantiles:
-                            q_pcts = np.percentile(resid, [q * 100.0 for q in target_qs])
-                            qjson_rows = []
+                            qjson_rows: list[str] = []
                             for idx in range(len(cell_df)):
+                                step_q = cal.for_step(idx + 1).quantiles
                                 raw_qmap = {
-                                    q: float(yhat_vals[idx] + q_pcts[j])
-                                    for j, q in enumerate(target_qs)
+                                    q: float(yhat_vals[idx] + step_q[q])
+                                    for q in target_qs
+                                    if q in step_q
                                 }
                                 mono_qmap = rearrange_monotone_quantiles(raw_qmap)
                                 qjson_rows.append(
@@ -1262,19 +1366,58 @@ def calibrate_ensemble_predictions(
                                 )
                             cell_df["quantiles"] = qjson_rows
                         if cfg.output.effective_target_quantile is not None:
-                            qstar = float(
-                                np.percentile(resid, cfg.output.effective_target_quantile * 100.0)
+                            q_star = cfg.output.effective_target_quantile
+                            qstar_arr = np.array(
+                                [
+                                    cal.for_step(s).quantiles[q_star]
+                                    for s in range(1, len(cell_df) + 1)
+                                ],
+                                dtype=float,
                             )
-                            cell_df["yhat"] = yhat_vals + qstar
-        if not calibrated_this_cell and need_q_or_cost:
-            cell_df, _ = apply_quantile_and_cost_rules(cell_df, cfg.output)
-            if not emit_quantiles and "quantiles" in cell_df.columns:
-                cell_df = cell_df.drop(columns=["quantiles"])
-        if need_constraints:
-            cell_df = apply_output_constraints(cell_df, cfg.output)
-        out_parts.append(cell_df)
+                            cell_df["yhat"] = yhat_vals + qstar_arr
+                    else:
+                        resid = (
+                            (oof_slice["y_true"] - oof_slice["yhat"]).dropna().to_numpy(dtype=float)
+                        )
+                        resid = resid[np.isfinite(resid)]
+                        if len(resid) >= 2:
+                            calibrated_this_cell = True
+                            qlo, qhi = np.percentile(resid, [lo_q * 100.0, hi_q * 100.0])
+                            yhat_vals = cell_df["yhat"].to_numpy(dtype=float)
+                            cell_df["yhat_lower"] = yhat_vals + float(qlo)
+                            cell_df["yhat_upper"] = yhat_vals + float(qhi)
+                            if emit_quantiles:
+                                q_pcts = np.percentile(resid, [q * 100.0 for q in target_qs])
+                                qjson_rows = []
+                                for idx in range(len(cell_df)):
+                                    raw_qmap = {
+                                        q: float(yhat_vals[idx] + q_pcts[j])
+                                        for j, q in enumerate(target_qs)
+                                    }
+                                    mono_qmap = rearrange_monotone_quantiles(raw_qmap)
+                                    qjson_rows.append(
+                                        json.dumps(
+                                            {str(q): v for q, v in mono_qmap.items()},
+                                            sort_keys=True,
+                                        )
+                                    )
+                                cell_df["quantiles"] = qjson_rows
+                            if cfg.output.effective_target_quantile is not None:
+                                qstar = float(
+                                    np.percentile(
+                                        resid, cfg.output.effective_target_quantile * 100.0
+                                    )
+                                )
+                                cell_df["yhat"] = yhat_vals + qstar
+            if not calibrated_this_cell and need_q_or_cost:
+                cell_df, _ = apply_quantile_and_cost_rules(cell_df, cfg.output)
+                if not emit_quantiles and "quantiles" in cell_df.columns:
+                    cell_df = cell_df.drop(columns=["quantiles"])
+            if need_constraints:
+                cell_df = apply_output_constraints(cell_df, cfg.output)
+            out_parts.append(cell_df)
 
-    merged = pd.concat(out_parts, ignore_index=True)
+        merged = pd.concat(out_parts, ignore_index=True)
     # Restore None for any NaN bounds so BigQuery Write API receives NULL rather than NaN.
     result: list[dict[str, Any]] = []
     for raw_rec in merged.to_dict(orient="records"):

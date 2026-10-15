@@ -186,6 +186,64 @@ def assemble_ensemble_oof_rows(
     bounds are not blended at all (`ensembler.combine_oof` explains why averaging two 80% intervals
     does not give an 80% interval).
     """
+    if getattr(ens_oof, "empty", False):
+        return []
+    cols = set(getattr(ens_oof, "columns", ()))
+    if hasattr(ens_oof, "__len__") and {"ts_id", "model_type"}.issubset(cols):
+        n = len(ens_oof)
+        ts_list = ens_oof["ts_id"].tolist()
+        mt_list = ens_oof["model_type"].tolist()
+        fold_list = (
+            [_as_int(v) for v in ens_oof["fold_id"].tolist()] if "fold_id" in cols else [None] * n
+        )
+        date_cache: dict[Any, Any] = {}
+
+        def _cached_date(val: Any) -> Any:
+            try:
+                if val in date_cache:
+                    return date_cache[val]
+                res = _as_date(val)
+                date_cache[val] = res
+                return res
+            except TypeError:
+                return _as_date(val)
+
+        fd_list = (
+            [_cached_date(v) for v in ens_oof["forecast_date"].tolist()]
+            if "forecast_date" in cols
+            else [None] * n
+        )
+        yt_list = (
+            [_as_float(v) for v in ens_oof["y_true"].tolist()] if "y_true" in cols else [None] * n
+        )
+        yh_list = [_as_float(v) for v in ens_oof["yhat"].tolist()] if "yhat" in cols else [None] * n
+        cd_list = (
+            [_cached_date(v) for v in ens_oof["cutoff_date"].tolist()]
+            if "cutoff_date" in cols
+            else [None] * n
+        )
+        hs_list = (
+            [_as_int(v) for v in ens_oof["horizon_step"].tolist()]
+            if "horizon_step" in cols
+            else [None] * n
+        )
+        return [
+            {
+                "run_id": run_id,
+                "ts_id": ts_list[i],
+                "model_type": mt_list[i],
+                "fold_id": fold_list[i],
+                "forecast_date": fd_list[i],
+                "y_true": yt_list[i],
+                "yhat": yh_list[i],
+                "cutoff_date": cd_list[i],
+                "horizon_step": hs_list[i],
+                "ensemble_id": ensemble_id,
+                "created_at": created_at,
+            }
+            for i in range(n)
+        ]
+
     rows: list[dict[str, Any]] = []
     for rec in ens_oof.to_dict("records"):
         rows.append(
@@ -225,13 +283,23 @@ def stamp_ensemble_prediction_rows(
     ``compute_engine`` is ``"ensemble"`` for both strategy families: a blend runs wherever the
     ensemble node runs, not on the engine that fitted its members.
     """
+    date_cache: dict[Any, Any] = {}
     for row in rows:
         row["run_id"] = run_id
         row["ensemble_id"] = ensemble_id
         row["compute_engine"] = "ensemble"
         row["created_at"] = created_at
         if "forecast_date" in row:
-            row["forecast_date"] = _as_date(row["forecast_date"])
+            fd = row["forecast_date"]
+            try:
+                if fd in date_cache:
+                    row["forecast_date"] = date_cache[fd]
+                else:
+                    norm = _as_date(fd)
+                    date_cache[fd] = norm
+                    row["forecast_date"] = norm
+            except TypeError:
+                row["forecast_date"] = _as_date(fd)
     return rows
 
 

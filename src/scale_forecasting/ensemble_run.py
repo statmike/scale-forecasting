@@ -387,9 +387,9 @@ def _ensemble_batch(
     from .engines import bigquery_engine
     from .engines.bigquery_sql import build_history_query
     from .ensembler import (
+        _ensemble_oof_bounds_from_arrays,
         calibrate_ensemble_predictions,
         combine_oof,
-        ensemble_oof_bounds,
     )
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
@@ -530,34 +530,86 @@ def _ensemble_batch(
                 }
             )
             history, _ = build_hierarchy(history, hist_cfg)
-    hist_by_id = {
-        tid: (pd.to_datetime(g["ds"]).to_numpy(), g["y"].to_numpy())
-        for tid, g in history.groupby("ts_id")
-    }
+    if not history.empty:
+        ds_all = pd.to_datetime(history["ds"]).to_numpy()
+        y_all = history["y"].to_numpy()
+        hist_by_id = {
+            tid: (ds_all[idx], y_all[idx])
+            for tid, idx in history.groupby("ts_id", sort=False).indices.items()
+        }
+    else:
+        hist_by_id = {}
 
     period = seasonal_period(cfg.data.freq)
     # Per-series list of how each base model was actually backtested, for `ensemble_refit_mode`.
-    refit_by_id: dict[str, list[str | None]] = {
-        tid: list(g["backtest_refit"]) for tid, g in metric_df.groupby("ts_id")
+    refit_mode_by_id: dict[str, str | None] = {}
+    if not metric_df.empty:
+        refit_col = metric_df["backtest_refit"].tolist()
+        for tid, idx in metric_df.groupby("ts_id", sort=False).indices.items():
+            refit_mode_by_id[str(tid)] = ensemble_refit_mode([refit_col[i] for i in idx])
+
+    scoring_by_strategy: dict[str, str | None] = {
+        s: ensemble_scoring_basis(s, oof_df, cfg, learned_basis) for s in cfg.ensemble.strategies
     }
+
+    ens_oof_sorted = ens_oof.sort_values(
+        ["model_type", "ts_id", "fold_id", "forecast_date"],
+        kind="mergesort",
+        ignore_index=True,
+    )
+    oof_y_true = pd.to_numeric(ens_oof_sorted["y_true"], errors="coerce").to_numpy(dtype=float)
+    oof_yhat = pd.to_numeric(ens_oof_sorted["yhat"], errors="coerce").to_numpy(dtype=float)
+    oof_resid = oof_y_true - oof_yhat
+    oof_folds = ens_oof_sorted["fold_id"].to_numpy()
+    oof_cutoffs = (
+        ens_oof_sorted["cutoff_date"].tolist() if "cutoff_date" in ens_oof_sorted.columns else None
+    )
+    y_train_cache: dict[tuple[Any, Any], np.ndarray | None] = {}
+
     meta_rows: list[dict[str, Any]] = []
-    for (model_type, ts_id), g in ens_oof.groupby(["model_type", "ts_id"]):
+    for key, c_idx_raw in ens_oof_sorted.groupby(
+        ["model_type", "ts_id"], sort=True
+    ).indices.items():
+        model_type, ts_id = key if isinstance(key, tuple) else (str(key), "")
+        c_idx = np.asarray(c_idx_raw, dtype=np.intp)
         # Score per fold, then roll up (NaN-ignoring mean) — identical to the base-model path
         # (worker.rollup_metrics), so ensemble and base metrics are computed the same way.
         hist = hist_by_id.get(ts_id)
+        c_y_true = oof_y_true[c_idx]
+        c_yhat = oof_yhat[c_idx]
+        c_resid = oof_resid[c_idx]
+        c_folds = oof_folds[c_idx]
         fold_panels: list[dict[str, float]] = []
-        for _fold, fg in g.sort_values("forecast_date").groupby("fold_id"):
-            cutoff = fg["cutoff_date"].min() if "cutoff_date" in fg.columns else None
-            lo, hi = ensemble_oof_bounds(g, _fold, cfg)
+        for _fold in pd.unique(c_folds):
+            f_mask = c_folds == _fold
+            cutoff = None
+            if oof_cutoffs is not None:
+                f_rows = c_idx[f_mask]
+                valid_c = [
+                    oof_cutoffs[int(r)]
+                    for r in f_rows
+                    if oof_cutoffs[int(r)] is not None
+                    and oof_cutoffs[int(r)] == oof_cutoffs[int(r)]
+                ]
+                if valid_c:
+                    cutoff = min(valid_c)
+            lo, hi = _ensemble_oof_bounds_from_arrays(c_yhat, c_resid, f_mask, cfg)
+            if hist is None:
+                y_tr = None
+            else:
+                cache_key = (ts_id, cutoff)
+                if cache_key in y_train_cache:
+                    y_tr = y_train_cache[cache_key]
+                else:
+                    y_tr = training_window(hist[0], hist[1], cutoff, cfg)
+                    y_train_cache[cache_key] = y_tr
             fold_panels.append(
                 compute_metrics(
-                    fg["y_true"].to_numpy(),
-                    fg["yhat"].to_numpy(),
+                    c_y_true[f_mask],
+                    c_yhat[f_mask],
                     lower=lo,
                     upper=hi,
-                    y_train=None
-                    if hist is None
-                    else training_window(hist[0], hist[1], cutoff, cfg),
+                    y_train=y_tr,
                     seasonal_period=period,
                 )
             )
@@ -573,8 +625,11 @@ def _ensemble_batch(
                 artifact_uri=artifact_uris.get(strategy),
                 created_at=created_at,
                 cfg=cfg,
-                ensemble_scoring=ensemble_scoring_basis(strategy, oof_df, cfg, learned_basis),
-                backtest_refit=ensemble_refit_mode(refit_by_id.get(str(ts_id), [])),
+                ensemble_scoring=scoring_by_strategy.get(
+                    strategy,
+                    ensemble_scoring_basis(strategy, oof_df, cfg, learned_basis),
+                ),
+                backtest_refit=refit_mode_by_id.get(str(ts_id)),
             )
         )
     bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)

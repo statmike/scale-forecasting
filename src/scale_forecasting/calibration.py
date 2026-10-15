@@ -244,6 +244,42 @@ def _window_residuals(
     return np.empty(0)
 
 
+def _calibrate_from_arrays(
+    resid: np.ndarray,
+    steps_raw: np.ndarray | None,
+    quantiles: Sequence[float],
+) -> Calibration | None:
+    """Fast numpy-array core of `calibrate_from_oof` (avoids per-cell pandas Series overhead)."""
+    ok = np.isfinite(resid)
+    if int(np.count_nonzero(ok)) < _MIN_RESIDUALS_TOTAL:
+        return None
+
+    pooled = _summarize(resid[ok], quantiles)
+
+    if steps_raw is None:
+        return Calibration(by_step={}, pooled=pooled, source="oof-flat")
+
+    have_steps = ok & np.isfinite(steps_raw)
+    if not bool(np.any(have_steps)):
+        return Calibration(by_step={}, pooled=pooled, source="oof-flat")
+
+    valid_resid = resid[have_steps]
+    valid_steps = steps_raw[have_steps].astype(int)
+    unique_steps = np.unique(valid_steps)
+    grouped: dict[int, np.ndarray] = {int(s): valid_resid[valid_steps == s] for s in unique_steps}
+    steps = [int(s) for s in unique_steps]
+    by_step: dict[int, StepCalibration] = {}
+    for step in steps:
+        sample = _window_residuals(grouped, step, steps)
+        if sample.size:
+            by_step[step] = _summarize(sample, quantiles)
+
+    distinct = {(*sorted(s.quantiles.items()), s.mean) for s in by_step.values()}
+    if not by_step or len(distinct) == 1:
+        return Calibration(by_step={}, pooled=pooled, source="oof-flat")
+    return Calibration(by_step=by_step, pooled=pooled, source="oof-per-step")
+
+
 def calibrate_from_oof(
     oof: pd.DataFrame,
     quantiles: Sequence[float],
@@ -263,44 +299,16 @@ def calibrate_from_oof(
     if not needed.issubset(oof.columns):
         return None
 
-    resid = pd.to_numeric(oof["y_true"], errors="coerce") - pd.to_numeric(
-        oof[residual_column], errors="coerce"
-    )
+    resid = (
+        pd.to_numeric(oof["y_true"], errors="coerce")
+        - pd.to_numeric(oof[residual_column], errors="coerce")
+    ).to_numpy(dtype=float)
     steps_raw = (
-        pd.to_numeric(oof["horizon_step"], errors="coerce")
+        pd.to_numeric(oof["horizon_step"], errors="coerce").to_numpy(dtype=float)
         if "horizon_step" in oof.columns
-        else pd.Series(np.nan, index=oof.index)
+        else None
     )
-    ok = resid.notna()
-    if int(ok.sum()) < _MIN_RESIDUALS_TOTAL:
-        return None
-
-    pooled = _summarize(resid[ok].to_numpy(dtype=float), quantiles)
-
-    # A step column that is absent or all-NaN means the caller has residuals but no idea which
-    # horizon distance produced them — pooled is then the only defensible answer, not a weaker
-    # version of a per-step one.
-    have_steps = ok & steps_raw.notna()
-    if not bool(have_steps.any()):
-        return Calibration(by_step={}, pooled=pooled, source="oof-flat")
-
-    grouped: dict[int, np.ndarray] = {
-        int(step): group.to_numpy(dtype=float)
-        for step, group in resid[have_steps].groupby(steps_raw[have_steps].astype(int))
-    }
-    steps = sorted(grouped)
-    by_step: dict[int, StepCalibration] = {}
-    for step in steps:
-        sample = _window_residuals(grouped, step, steps)
-        if sample.size:
-            by_step[step] = _summarize(sample, quantiles)
-
-    # Every step landing on the identical widened sample means the window opened all the way and
-    # "per-step" would be the pooled band wearing a better label. Say pooled.
-    distinct = {(*sorted(s.quantiles.items()), s.mean) for s in by_step.values()}
-    if not by_step or len(distinct) == 1:
-        return Calibration(by_step={}, pooled=pooled, source="oof-flat")
-    return Calibration(by_step=by_step, pooled=pooled, source="oof-per-step")
+    return _calibrate_from_arrays(resid, steps_raw, quantiles)
 
 
 def apply_calibration(

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -309,6 +310,7 @@ def _state_name(state: Any) -> str:
 
 
 _PROVISIONING_STATES = frozenset({"JOB_STATE_QUEUED", "JOB_STATE_PENDING"})
+_PROVISION_TIMEOUT_SECONDS = 300.0
 
 
 def _wait_for_provisioning(
@@ -317,12 +319,34 @@ def _wait_for_provisioning(
     *,
     region: str,
     poll_interval_s: float = _POLL_INTERVAL_SECONDS,
+    provision_timeout_s: float | None = None,
 ) -> Any:
     """Wait until `job_name` leaves `QUEUED`/`PENDING` so stockouts trigger region hop."""
+    if provision_timeout_s is None:
+        raw_env = os.environ.get("SF_VERTEX_PROVISION_TIMEOUT_S", "").strip()
+        provision_timeout_s = float(raw_env) if raw_env else _PROVISION_TIMEOUT_SECONDS
+    started = time.monotonic()
     while True:
         job = client.get_custom_job(name=job_name)
         state = _state_name(getattr(job, "state", ""))
         if state in _PROVISIONING_STATES:
+            elapsed = time.monotonic() - started
+            if provision_timeout_s > 0 and elapsed >= provision_timeout_s:
+                _log.warning(
+                    "Vertex CustomJob %s in %s stayed in %s for %.0fs (>= %.0fs); "
+                    "cancelling for fallback",
+                    job_name,
+                    region,
+                    state,
+                    elapsed,
+                    provision_timeout_s,
+                )
+                with contextlib.suppress(Exception):
+                    client.cancel_custom_job(name=job_name)
+                raise EngineError(
+                    f"Vertex CustomJob {job_name} in {region} timed out in {state} after "
+                    f"{elapsed:.0f}s (resource exhausted / stockout)"
+                )
             time.sleep(poll_interval_s)
             continue
         if state in _TERMINAL_JOB_STATES and state != "JOB_STATE_SUCCEEDED":
@@ -508,47 +532,76 @@ def submit_vertex(
 
         client = _job_client(region)
         parent = f"projects/{settings.project_id}/locations/{region}"
-        spec_dict = build_custom_job_spec_dict(
-            regional_plan,
-            driver_args,
-            labels={"run_id": run_id[:63], "runtime": "vertex"},
-        )
-        _log.info(
-            "Submitting Vertex CustomJob %s in %s: %d x %s (%s)",
-            regional_plan.display_name,
-            region,
-            regional_plan.worker_count,
-            regional_plan.machine_type,
-            regional_plan.accelerator_type if regional_plan.accelerator_count > 0 else "CPU",
-        )
-        since = launch_window_start()
-        created = client.create_custom_job(parent=parent, custom_job=spec_dict)
-        job_name = created.name
-        handle = ProbeHandle(
-            runtime="vertex",
-            native_id=job_name,
-            region=region,
-            resource_name=job_name,
-        )
+        candidate_plans = [regional_plan]
+        if (
+            wait
+            and regional_plan.hardware == "cpu"
+            and regional_plan.machine_type.startswith("n2-standard-")
+            and cfg.compute.machine_type == "auto"
+            and machine_type in (None, "auto")
+        ):
+            n1_type = regional_plan.machine_type.replace("n2-standard-", "n1-standard-", 1)
+            candidate_plans.append(replace(regional_plan, machine_type=n1_type))
 
-        if job_id is not None:
-            with contextlib.suppress(Exception):
-                update_job(
-                    job_id,
-                    settings=settings,
-                    merge_telemetry={
-                        "probe_handle": handle.to_blob(),
-                        "vertex_custom_job": {
-                            **regional_plan.to_dict(),
-                            "region": region,
-                            "job_name": job_name,
+        last_exc: Exception | None = None
+        for idx, plan_try in enumerate(candidate_plans):
+            spec_dict = build_custom_job_spec_dict(
+                plan_try,
+                driver_args,
+                labels={"run_id": run_id[:63], "runtime": "vertex"},
+            )
+            _log.info(
+                "Submitting Vertex CustomJob %s in %s: %d x %s (%s)",
+                plan_try.display_name,
+                region,
+                plan_try.worker_count,
+                plan_try.machine_type,
+                plan_try.accelerator_type if plan_try.accelerator_count > 0 else "CPU",
+            )
+            since = launch_window_start()
+            created = client.create_custom_job(parent=parent, custom_job=spec_dict)
+            job_name = created.name
+            handle = ProbeHandle(
+                runtime="vertex",
+                native_id=job_name,
+                region=region,
+                resource_name=job_name,
+            )
+
+            if job_id is not None:
+                with contextlib.suppress(Exception):
+                    update_job(
+                        job_id,
+                        settings=settings,
+                        merge_telemetry={
+                            "probe_handle": handle.to_blob(),
+                            "vertex_custom_job": {
+                                **plan_try.to_dict(),
+                                "region": region,
+                                "job_name": job_name,
+                            },
                         },
-                    },
-                )
+                    )
 
-        if wait:
-            _wait_for_provisioning(client, job_name, region=region)
-        return client, job_name, handle, since, region
+            if not wait:
+                return client, job_name, handle, since, region
+            try:
+                _wait_for_provisioning(client, job_name, region=region)
+                return client, job_name, handle, since, region
+            except EngineError as exc:
+                last_exc = exc
+                if idx + 1 < len(candidate_plans) and "resource exhausted" in str(exc).lower():
+                    _log.warning(
+                        "Vertex CPU pool %s stockout in %s; falling back to %s in %s",
+                        plan_try.machine_type,
+                        region,
+                        candidate_plans[idx + 1].machine_type,
+                        region,
+                    )
+                    continue
+                raise
+        assert last_exc is not None
+        raise last_exc
 
     try:
         client, job_name, handle, since, chosen_region = capacity.walk(
