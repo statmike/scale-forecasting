@@ -574,10 +574,15 @@ def _series_oof_wape(wblock: np.ndarray, wtruth: np.ndarray) -> np.ndarray:
 
     Returns ``np.nan`` for any model column that is entirely NaN on ``wblock``.
     """
-    denom = float(np.nansum(np.abs(wtruth)))
-    abs_err = np.abs(wblock - wtruth[:, None])
-    has_obs = np.any(~np.isnan(abs_err), axis=0)
-    raw = np.nansum(abs_err, axis=0) / denom if denom > 0.0 else np.nansum(abs_err, axis=0)
+    truth_f = np.asarray(wtruth, dtype=float)
+    denom = float(np.nansum(np.abs(truth_f)))
+    abs_err = np.abs(wblock - truth_f[:, None])
+    has_obs = np.any(np.isfinite(abs_err), axis=0)
+    raw = (
+        np.nansum(np.where(np.isfinite(abs_err), abs_err, 0.0), axis=0) / denom
+        if denom > 0.0
+        else np.nansum(np.where(np.isfinite(abs_err), abs_err, 0.0), axis=0)
+    )
     return np.where(has_obs, raw, np.nan)
 
 
@@ -728,7 +733,10 @@ def _pivot_oof(oof_df: pd.DataFrame, models: list[str]) -> tuple[np.ndarray, np.
     wide = wide[models].dropna()
 
     truth = oof_df.drop_duplicates(keys).set_index(keys)["y_true"].reindex(wide.index)
-    return wide.to_numpy(dtype=float), truth.to_numpy(dtype=float)
+    X_arr = wide.to_numpy(dtype=float)
+    y_arr = pd.to_numeric(truth, errors="coerce").to_numpy(dtype=float)
+    finite_mask = np.isfinite(X_arr).all(axis=1) & np.isfinite(y_arr)
+    return X_arr[finite_mask], y_arr[finite_mask]
 
 
 def _fit_nnls(X: np.ndarray, y: np.ndarray) -> np.ndarray:

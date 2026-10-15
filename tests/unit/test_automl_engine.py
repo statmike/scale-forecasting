@@ -207,8 +207,8 @@ class TestAutoMLEngineColumnSpecsAndPanels:
         hist_df, fut_df = _make_panel()
         cfg = _make_automl_config()
         train_df = prepare_training_panel(hist_df, cfg)
-        assert "__sf_split__" in train_df.columns
-        assert set(train_df["__sf_split__"]).issubset({"TRAIN", "VALIDATE", "TEST"})
+        assert "sf_split" in train_df.columns
+        assert set(train_df["sf_split"]).issubset({"TRAIN", "VALIDATE", "TEST"})
 
         col_specs, attr_cols, avail_cols, unavail_cols = build_automl_column_specs(cfg, train_df)
         assert set(attr_cols) == {"store_size", "region"}
@@ -334,6 +334,14 @@ class TestTrainingJobModeBindsToTheInstalledSdk:
         plan, cfg = self._plan()
         assert plan.optimization_objective != "minimize-quantile-loss"
         assert training_run_kwargs(plan, cfg, dataset=object())["quantiles"] is None
+
+    def test_split_column_name_does_not_begin_with_underscore(self) -> None:
+        plan, cfg = self._plan()
+        split_col = training_run_kwargs(plan, cfg, dataset=object())["predefined_split_column_name"]
+        assert isinstance(split_col, str) and split_col
+        assert not split_col.startswith("_"), (
+            "Vertex AI TimeSeriesDataset rejects column names beginning with an underscore"
+        )
 
     def test_missing_trainer_class_is_an_error_not_a_substitution(self) -> None:
         sdk_without_seq2seq = SimpleNamespace(AutoMLForecastingTrainingJob=object)
