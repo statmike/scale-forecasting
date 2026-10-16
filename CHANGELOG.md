@@ -11,6 +11,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-10-16
+
+### Added
+
+- **Glass-Box Auto-Forecaster (`Forecaster.build_config()` & `Forecaster.auto()`, [`auto_policy.py`](./src/scale_forecasting/auto_policy.py)):**
+  - Compiles a profiled time-series panel (or BigQuery source table) into a standard, inspectable [`RunConfig`](./src/scale_forecasting/config.py) (`AutoBlueprint.config`) paired with a structured per-parameter evidence ledger (`AutoBlueprint.rationale_df()`), automatic schema-backed column detection (`detect_panel_columns`), automatic regime classification (`smooth`, `intermittent`, `lumpy`, `erratic` via Syntetos-Boylan `ADI` and $\text{CV}^2$), automatic `log1p` target transform (`skewness >= 1.35`), and 5 series-count scale regimes (`micro`, `small`, `medium`, `large`, `hyperscale` up to 100,000+ series).
+  - Supports 4 observational exposure tiers (`first_light`, `wide_field`, `deep_field`, `survey`) and 4 execution targets (`where="local" | "bigquery" | "cloud_cpu" | "cloud_all"`), plus CLI (`python -m scale_forecasting.main --auto ...`) and MCP (`auto_compile_config` and `run_auto_forecaster` tools in [`mcp.py`](./src/scale_forecasting/mcp.py)).
+- **Multi-Branch Bounded `autofocus` Tournament (`autofocus=True`, `autofocus_mode="dag" | "linear"`):**
+  - Explores up to 3 specialized Pass 2 refinement branches (`pass_2_prune_1`, `pass_2_cov_ablation`, `pass_2_transform_probe`) from Pass 1 telemetry (`leaderboard`, `fva_df`, `bias_report_df`, `horizon_decay_df`, `exceptions_df`), followed by a Pass 3 Synthesis Ensemble that borrows all evaluated models (`reuse_prior_runs=True` with snapshot-fingerprint verification) and fits `horizon_specialist`, `champion`, `nnls`, `ridge`, `ensemble_InverseError`, and `trimmed_mean` stackers.
+  - Enforces a strict **non-degradation ratchet**: returns the branch with the lowest out-of-fold backtest error (`MASE` / `WAPE`) across Pass 1, Pass 2, and Pass 3, guaranteeing zero regret relative to Pass 1.
+- **7-Question Practitioner Assessment (`AutoForecastResult.assessment_df()`), 4-Anchor Baseline Value Ladder (`baseline_value_df()`), and Hierarchy Reconciliation Value (`hierarchy_value_df()`):**
+  - Every `Forecaster.auto()` run answers 7 practitioner trust questions from out-of-fold backtest evidence: (1) Baseline Value (`snaive`, `naive`, `historic_average`, `seasonal_window_average`), (2) Ensemble Parsimony (`parsimony_tolerance_pct`), (3) Covariate FVA & Overfitting Check, (4) Global Pooling vs. Local Independence, (5) Horizon Crossover (`horizon_specialist`), (6) Hierarchy Reconciliation Lift, and (7) Operational Readiness & Exceptions.
+- **20-Panel Synthetic DGP & 9-Dataset Public Open-Data Benchmark Suites ([`benchmarks.py`](./src/scale_forecasting/benchmarks.py)):**
+  - Added 20 ground-truth synthetic Data Generating Process (DGP) panels (`dgp_01` through `dgp_20` across `h`, `D`, `W`, `MS` cadences, intermittent/lumpy demand, structural level breaks, true vs. decoy covariates, and 2/3-level hierarchies) via `load_benchmark()`.
+  - Added on-demand fetchers (`fetch_public_benchmark()`, zero repo data bloat) for 9 real-world open-data benchmarks (`m5_walmart`, `favorita_grocery`, `m4_daily`, `m4_weekly`, `m4_monthly`, `monash_tourism_monthly`, `monash_hospital`, `monash_car_parts`, `etth1`), achieving **9/9 non-negative held-out test MAE lift over `SNaive`** (`+14.92%` mean test lift, `+25.18%` mean OOF FVA).
+- **Dynamic 6-Runtime Live Quota Preflight ([`quota.py`](./src/scale_forecasting/quota.py)) & Empirical 7-Runtime Duration Estimator ([`profiling/duration.py`](./src/scale_forecasting/profiling/duration.py)):**
+  - Live Cloud Quotas / Compute Engine regional quota preflight across all 6 compute-provisioning runtimes (`gce`, `vertex`, `ray`, `spark` cluster & Serverless DCU/shuffle guard, `gke`, `vertex_automl`) with automatic worker cap or machine downgrade before submission.
+  - Empirical duration estimator (`predict_run_duration()`) calibrated against 606 completed cloud jobs (`5.59M` evaluated cells).
+- **Interactive Showcase Notebook 11 ([`notebooks/11_auto_forecaster_and_autofocus.ipynb`](./notebooks/11_auto_forecaster_and_autofocus.ipynb)):**
+  - End-to-end walkthrough of `Forecaster.build_config()`, `Forecaster.auto()`, multi-branch `autofocus`, the 4-Anchor Baseline Value Ladder, and the 7-Question Practitioner Assessment across local and cloud execution.
+
+### Changed
+
+- **Physical Annual (`365.25d`) & Multi-Seasonal Sub-Daily (`24h`/`12h`/`168h`) Fourier Harmonics ([`features.py`](./src/scale_forecasting/features.py)) & Frequency-Matched Lags ([`auto_policy.py`](./src/scale_forecasting/auto_policy.py)):**
+  - [`_fourier_terms()`](./src/scale_forecasting/features.py) now normalizes daily, weekly, monthly, and quarterly timestamps by the physical `365.25`-day year and encodes multi-seasonal diurnal ($24\text{h}$), semi-diurnal ($12\text{h}$), and weekly ($168\text{h}$) harmonics for hourly (`h`/`H`) panels.
+  - [`_frequency_matched_lags()`](./src/scale_forecasting/auto_policy.py) aligns tabular lag depths (`lightgbm`, `catboost`, `xgboost`, `ridge`) with hourly (`[1, 2, 3, 6, 12, 24, 48, 168]`) and monthly (`[1, 2, 3, 6, 12]` / `[1, 2, 3, 6, 12, 24]`) cadences while preserving intermittent/lumpy series.
+- **Leave-One-Fold-Out (LOFO) Out-of-Fold Ensemble Selection & Finite-Sample Conformal Bounds ([`ensembler.py`](./src/scale_forecasting/ensembler.py)):**
+  - [`_compute_oof_ensemble_scores()`](./src/scale_forecasting/ensembler.py) evaluates learned stackers (`nnls`, `ridge`, `xgb`, `ensemble_InverseError`) strictly out-of-fold across backtest folds (`n_folds >= 2`) so in-sample weight fitting cannot win `ensemble_champion`, and [`ensemble_oof_bounds()`](./src/scale_forecasting/ensembler.py) uses finite-sample conformal rank quantiles (`_empirical_quantile`).
+- **Vectorized Local & Spark `applyInPandas` Baseline Fast-Path ([`playground.py`](./src/scale_forecasting/playground.py), [`spark_explode.py`](./src/scale_forecasting/engines/spark_explode.py)) & BigQuery Storage Write API Historical Window Fallback ([`write_api.py`](./src/scale_forecasting/registry/write_api.py)):**
+  - Added vectorized NumPy panel evaluation for baseline models (`naive`, `snaive`, `historic_average`, `seasonal_window_average`) in both local `playground` and Spark `applyInPandas` workers, cutting 100,000-series baseline execution from minutes to `< 2.5s`.
+  - [`write_dataframe_storage_api()`](./src/scale_forecasting/registry/write_api.py) automatically routes tables with partition dates outside BigQuery Storage Write API's `[-3650d, +366d]` streaming window to `load_table_from_dataframe` (Parquet batch load).
+
+---
+
 ## [1.2.1] - 2026-10-14
 
 ### Added
