@@ -7,8 +7,9 @@
 
 ```mermaid
 flowchart TD
-    subgraph Track1["Track 1: Local Sandbox & Custom Plugins (Zero GCP Required)"]
+    subgraph Track1["Track 1: Local Sandbox, Auto-Forecaster & Custom Plugins (Zero GCP Required)"]
         NB00["00_model_playground.ipynb<br/>37 Models · 21 Metrics · Local/Global/Hybrid<br/>3-Tier Covariates · 8 FPP3 Reconciliation"]
+        NB11["11_auto_forecaster_and_autofocus.ipynb<br/>Glass-Box Auto-Forecaster · 4 Astronomy Tiers<br/>Bounded autofocus · 18 DGP Benchmarks"]
         NB09["09_custom_models_and_metrics.ipynb<br/>1-File BaseModel & BaseMetric Plugins<br/>+ Zero-Rebuild Dynamic Code Shipping"]
     end
 
@@ -30,13 +31,13 @@ flowchart TD
         NB10["10_registry_operations_and_scale.ipynb<br/>Registry Doctor, Live Probes, Composer DAG & Run Review"]
     end
 
-    NB00 --> NB09
+    NB00 --> NB11 --> NB09
     Track1 --> Track2 --> Track3 --> Track4
 ```
 
 ---
 
-## Eleven Focused & Combination Workflow Notebooks
+## Twelve Focused & Combination Workflow Notebooks
 
 Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-act journey**:
 1. **Setup & Architecture Context:** Bootstrap, `Settings.resolve()`, and visual Mermaid architecture map.
@@ -50,6 +51,7 @@ Every cloud workflow notebook (`01`–`08`) is a **complete, self-contained 5-ac
 | :--- | :--- | :--- |
 | [`00_model_playground.ipynb`](./00_model_playground.ipynb) | Local Python (Offline) | Explore the full 37-model (5-family) and 21-metric catalogs (`model_catalog()`, `metric_catalog()`), generate synthetic panels (`sample_data()`), run 3-fold rolling-origin backtesting and conformal interval calibration (`run_model()`, `bakeoff()`), decompose forecasts into trend, regime level shift, seasonality, and exogenous covariate attribution (`explain_forecast_frame()`, `plot_forecast_explanation()`), inspect Two-Tier Feature Attributions (`build_attributions_frame()`, `plot_attributions()`), compare `local` vs. `global` vs. `hybrid` training modes, run all 8 FPP3 hierarchical reconciliation methods, and evaluate the Forecaster Workbench (`fva_df()`, `horizon_decay_df()`, `bias_report_df()`, `rollup_df()`, `inventory_policy_df()`, `simulate_scenarios()`) with zero cloud credentials. |
 | [`09_custom_models_and_metrics.ipynb`](./09_custom_models_and_metrics.ipynb) | Local Python (Offline) | Author a custom 1-file `BaseModel` subclass (`@register`) and custom `BaseMetric` subclass, test them immediately in `run_model()` and `bakeoff()`, and inspect automatic BigQuery schema migration (`render_migrations`) and zero-rebuild `src.zip` shipping. |
+| [`11_auto_forecaster_and_autofocus.ipynb`](./11_auto_forecaster_and_autofocus.ipynb) | Local Python (Offline) | Explore the **18-panel Synthetic DGP Benchmark Bank** (`list_benchmarks()`, `load_benchmark()`), compile transparent Glass-Box configurations across the **4 observational astronomy exposure tiers** (`first_light`, `wide_field`, `deep_sky`, `deep_field`) and **5 `n_series` scale regimes** (`micro` to `hyperscale`) via `Forecaster.build_config()`, predict wall-clock duration and cloud cost across all **7 runtimes** (`predict_run_duration()`), execute autonomous closed-loop `Forecaster.auto(..., autofocus=True)` with zero-waste cell borrowing (`autofocus_ledger_df()`, `baseline_value_df()`, `hierarchy_value_df()`, `plot_autofocus_progression()`), step through human-in-the-loop `step_by_step=True` (`preview_next_loop()`, `step()`), and verify the white-noise stopping gate on `dgp_12_already_optimal_white_noise`. |
 
 ---
 
@@ -99,7 +101,7 @@ When you deploy the platform via Terraform (`create_colab_runtimes = true`, enab
    uv sync --all-extras
    uv run python -m ipykernel install --user --name scale-forecasting
    ```
-2. Export your deployment's environment variables (not required for `00_model_playground.ipynb` or `09_custom_models_and_metrics.ipynb`):
+2. Export your deployment's environment variables (not required for `00_model_playground.ipynb`, `09_custom_models_and_metrics.ipynb`, or `11_auto_forecaster_and_autofocus.ipynb`):
    ```bash
    eval "$(cd terraform/main && terraform output -raw sf_env_exports)"
    ```
@@ -109,7 +111,7 @@ When you deploy the platform via Terraform (`create_colab_runtimes = true`, enab
 
 ## Automated Verification
 
-All eleven notebooks are verified end-to-end using the headless acceptance test runner:
+All twelve notebooks are verified end-to-end using the headless acceptance test runner:
 
 ```bash
 uv run python -m scale_forecasting.notebook_acceptance --tier all

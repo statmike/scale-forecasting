@@ -3,28 +3,24 @@
 `scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **37 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
 
 ```mermaid
-flowchart TB
+flowchart TD
     subgraph Truth["Single Source of Truth (Python Code & Registries)"]
-        direction LR
-        T1["config.py (RunConfig + 14 Blocks)"]
-        T2["models/* (37) · metrics/* (21)"]
-        T3["resources/catalog.py · registry/views.py"]
-        T4["configs/*.json (20 Demo + 42 Smokes)"]
+        T1["config.py (RunConfig + 14 Blocks) · auto_policy.py · benchmarks.py (20 DGPs + 9 Public)"]
+        T2["models/* (37) · metrics/* (21) · resources/catalog.py · registry/views.py"]
+        T3["configs/*.json (20 Demo + 42 Smokes)"]
     end
 
     subgraph Surfaces["Four Agent-First Surfaces (Zero Extra Dependencies)"]
-        direction LR
-        S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md<br/>+ .agents/skills/ & .agents/skills.json"]
-        S2["2. Built-In MCP Server<br/>python -m scale_forecasting.mcp<br/>(plugin.json · mcp_config.json · .mcp.json)"]
-        S3["3. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json<br/>IDE Autocomplete via $schema"]
-        S4["4. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt<br/>Single-File RAG / Context Bundle"]
+        S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md + .agents/skills/ & .agents/skills.json"]
+        S2["2. Built-In MCP Server (7 Resources, 11 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
+        S3["3. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json (IDE Autocomplete via $schema)"]
+        S4["4. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt (Single-File RAG / Context Bundle)"]
     end
 
     subgraph Guard["Automated Pre-Commit & CI Tripwires"]
-        direction LR
-        G1["make agent-surfaces<br/>(agent_surfaces.py --write/--check)"]
-        G2["test_agent_surfaces.py<br/>(Zero-Drift & Schema Validation)"]
-        G3["test_mcp_server.py<br/>(In-Process + Subprocess stdio Tests)"]
+        G1["make agent-surfaces (agent_surfaces.py --write/--check)"]
+        G2["test_agent_surfaces.py (Zero-Drift & Schema Validation)"]
+        G3["test_mcp_server.py (In-Process + Subprocess stdio Tests)"]
     end
 
     Truth -->|"Introspected by agent_surfaces.py & mcp.py"| Surfaces
@@ -101,6 +97,7 @@ claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 
 ### Example Prompts to Try With Your Agent
 
+- *"Run the Glass-Box Auto-Forecaster with `autofocus=True` on `dgp_04_true_vs_decoy_covs`, show me the Step 0 Data Profile, the 4-anchor Baseline Value Ladder, and the 7-Question Practitioner Assessment (`practitioner_assessment`)."*
 - *"Probe my environment, tell me which model families are installed locally, and run a 14-day backtest of `holtwinters` in the offline playground."*
 - *"Build a validated `RunConfig` for daily retail sales in `my_project.retail.sales` with `promo_flag` as a future covariate, comparing `auto_arima`, `lightgbm`, and `tft` with an `nnls` stacked ensemble, routing `deep_learning` to an `L4` GPU on Vertex AI CustomJob."*
 - *"Dry-run `configs/ensemble_demo.json`, show me the per-family DAG and deterministic `run_id`, and emit a Cloud Composer 3 Airflow DAG with surgical retry enabled."*
@@ -165,12 +162,12 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `forecast://catalog/configs` | `application/json` | All 62 shipped configs (20 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
 | `forecast://catalog/views` | `application/json` | The 4 source tables, 5 registry tables, and 5 analytical SQL views. |
 
-### 9 MCP Tools (`tools/list` & `tools/call`)
+### 11 MCP Tools (`tools/list` & `tools/call`)
 
 | Tool Name | Requires `[gcp]`? | Requires `--allow-launch`? | Purpose |
 | :--- | :---: | :---: | :--- |
-| `probe_environment` | No | No | Inspect installed extras, available models, `SF_*` variables, `.env.infra`, ADC, and 5-path readiness. |
-| `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, or shipped configs. |
+| `probe_environment` | No | No | Inspect installed extras, available models, `SF_*` variables, `.env.infra`, ADC, 5-path readiness, and Auto-Forecaster tiers/benchmarks. |
+| `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, shipped configs, `benchmarks` (20 DGPs), or `auto_tiers` (exposure tiers & scale regimes). |
 | `inspect_config_schema` | No | No | Inspect the top-level `RunConfig` overview or drill into a specific section/class (`compute`, `backtest`, `FamilyCompute`, etc.). |
 | `validate_and_dry_run` | No | No | Validate a `RunConfig` (dict, JSON string, or file path), compute deterministic `run_id`, estimate workload, resolve per-family DAG nodes, and check local model extras. |
 | `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, workbench diagnostics (`include_fva`, `include_horizon_decay`, `include_bias_report`, `include_exceptions`, `include_inventory_policy`, `scenarios`), and sample predictions. |
@@ -178,6 +175,8 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `inspect_registry` | Yes | No | Read-only live BigQuery registry inspection: `doctor`, `recent_runs` (`v_run_summary`), `probe_run` (live runtime reconciliation), or `retry_preview` (surgical cell repair table). |
 | `review_run` | Yes | No | Full data-science and supply-chain evaluation of a `run_id` (`review_run` + `calibration_report` + optional workbench diagnostics including `include_inventory_policy` / `inventory_params`): champion models, ensemble lift, leaderboard, interval coverage, and inventory reorder policies (`SS`, `ROP`, `S`, `EOQ`). |
 | `launch_or_repair_run` | Yes | **Yes** | Safety-gated execution and repair: `run` (launch multi-family DAG), `retry` (submit surgical repair), `settle` (repair stale job rows), `cancel` (stop cloud jobs), or `close_runs`. |
+| `build_auto_config` | Only for BQ table | No | Synthesize a glass-box `RunConfig` and `ConfigBlueprint` (`Forecaster.build_config`) across the 4 exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`) and 5 `n_series` scale regimes; returns Step 0 `profile_table`, `rationale`, `baseline_models`, `duration_estimate`, and optional emitted Airflow DAG. |
+| `run_auto_forecast` | Only for cloud run | Only for cloud run | Execute `Forecaster.auto()` with optional multi-branch `autofocus=True` tournament across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables; returns Step 0 `profile_table`, `autofocus_ledger`, `baseline_value` ladder, `hierarchy_value`, `model_comparison`, and the **7-Question `practitioner_assessment`**. |
 
 ### Safety-By-Default (`--allow-launch`)
 
@@ -254,4 +253,4 @@ Hand-written agent prompts and JSON schemas rot the moment a new model is regist
 3. **Automated Pre-Commit & CI Gate ([`tests/unit/test_agent_surfaces.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_agent_surfaces.py) & [`tests/unit/test_mcp_server.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_mcp_server.py)):**
    - `test_agent_surfaces_zero_drift` calls `check_agent_surfaces()` in `.githooks/pre-commit` and CI. If any of the 6 generated files on disk differs by a single byte from what current code produces, the commit is blocked with instructions to run `make agent-surfaces`.
    - `test_all_shipped_configs_validate_with_schema_key_and_preserve_run_id` validates all 62 shipped configs (plus `"$schema"` round-trip and `run_id` invariance) against `docs/schemas/run_config.schema.json`.
-   - `test_mcp_server.py` exercises all 7 MCP resources and 9 MCP tools both in-process and over a real `python -m scale_forecasting.mcp` subprocess `stdio` pipe using both newline-delimited and `Content-Length` JSON-RPC framing.
+   - `test_mcp_server.py` exercises all 7 MCP resources and 11 MCP tools both in-process and over a real `python -m scale_forecasting.mcp` subprocess `stdio` pipe using both newline-delimited and `Content-Length` JSON-RPC framing.

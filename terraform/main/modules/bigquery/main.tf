@@ -1,17 +1,19 @@
 # bigquery — the dataset and the BigLake connection that the managed-Iceberg source variant needs.
 #
-# NOTE on the table schemas: the six tables' DDL is single-sourced in Python
-# (src/scale_forecasting/registry/ddl.py, snapshot-tested) and created by
+# NOTE on the table schemas: the nine source/registry tables' DDL (4 source tables + 5 registry
+# tables) and five analytical views are single-sourced in Python
+# (src/scale_forecasting/registry/ddl.py and views.py, snapshot-tested) and created by
 # registry.tables.ensure_tables() at run time. We deliberately do NOT re-declare those schemas
 # in HCL — two copies of the DDL would drift. Terraform owns the *containers* (dataset,
 # connection, bucket grant); the app owns the *tables* — one source of truth for the DDL, no HCL/Python drift.
 #
-# Storage split: the four run-collection tables (run_registry, forecast_metadata,
+# Storage split: the five run-collection tables (run_registry, run_jobs, forecast_metadata,
 # forecast_predictions, backtest_oof) are always NATIVE BigQuery — they carry native JSON
 # columns and reseed with WRITE_TRUNCATE, needing no connection. The example input ships in
-# BOTH formats — source_series_iceberg (managed Iceberg, uses the connection below) and
-# source_series_native (plain native) — so a deployment can benchmark either storage. The
-# connection + bucket grant here exist for the Iceberg source variant.
+# BOTH formats — source_series_iceberg / source_series_covariates_iceberg (managed Iceberg, uses
+# the connection below) and source_series_native / source_series_covariates_native (plain native) —
+# so a deployment can benchmark either storage. The connection + bucket grant here exist for the
+# Iceberg source variant.
 
 variable "project_id" {
   type = string

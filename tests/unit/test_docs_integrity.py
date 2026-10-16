@@ -508,7 +508,8 @@ def test_backticked_exception_names_resolve_to_real_classes(markdown_files: list
 
 
 def test_social_card_and_site_url() -> None:
-    """Verify the 1280x640 social preview PNG, its HTML source, Makefile target, and site_url."""
+    """Verify the 1280x640 social preview PNG, hero Mermaid parity, SHA-256 stamp, and site_url."""
+    import hashlib
     import struct
 
     png_path = _REPO_ROOT / "docs" / "assets" / "social_card.png"
@@ -516,6 +517,8 @@ def test_social_card_and_site_url() -> None:
     assets_readme = _REPO_ROOT / "docs" / "assets" / "README.md"
     makefile = (_REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     mkdocs_yml = (_REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    readme_text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    overview_text = (_REPO_ROOT / "docs" / "overview.md").read_text(encoding="utf-8")
 
     assert html_path.is_file(), "Missing docs/assets/social_card.html"
     assert assets_readme.is_file(), "Missing docs/assets/README.md"
@@ -533,6 +536,25 @@ def test_social_card_and_site_url() -> None:
         "(update HTML and run: make social-card)"
     )
 
+    readme_mermaid_m = re.search(r"```mermaid\n(.*?)```", readme_text, flags=re.DOTALL)
+    overview_mermaid_m = re.search(r"```mermaid\n(.*?)```", overview_text, flags=re.DOTALL)
+    html_mermaid_m = re.search(
+        r'<pre class="mermaid">\n(.*?)\n  </pre>', html_text, flags=re.DOTALL
+    )
+    assert readme_mermaid_m, "README.md missing hero ```mermaid block"
+    assert overview_mermaid_m, "docs/overview.md missing hero ```mermaid block"
+    assert html_mermaid_m, 'docs/assets/social_card.html missing <pre class="mermaid"> block'
+
+    readme_mermaid = readme_mermaid_m.group(1).strip()
+    overview_mermaid = overview_mermaid_m.group(1).strip()
+    html_mermaid = html_mermaid_m.group(1).strip()
+    assert overview_mermaid == readme_mermaid, (
+        "docs/overview.md hero Mermaid block drifted from README.md (run: make social-card)"
+    )
+    assert html_mermaid == readme_mermaid, (
+        "docs/assets/social_card.html Mermaid block drifted from README.md (run: make social-card)"
+    )
+
     data = png_path.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "docs/assets/social_card.png is not a valid PNG"
     assert data[12:16] == b"IHDR", "docs/assets/social_card.png missing IHDR chunk"
@@ -540,6 +562,16 @@ def test_social_card_and_site_url() -> None:
     assert (width, height) == (1280, 640), (
         f"docs/assets/social_card.png must be 1280x640, got {width}x{height}"
     )
+
+    expected_digest = hashlib.sha256(
+        (readme_mermaid + "\n" + html_text).encode("utf-8")
+    ).hexdigest()
+    expected_stamp = b"tEXtsf-source-sha256\x00" + expected_digest.encode("ascii")
+    assert expected_stamp in data, (
+        "docs/assets/social_card.png is stale relative to README.md / docs/assets/social_card.html "
+        "for PyPI and OpenGraph rendering (run: make social-card)"
+    )
+
     assert "social-card:" in makefile, "Makefile missing social-card target"
     assert "site_url: https://statmike.github.io/scale-forecasting/" in mkdocs_yml, (
         "mkdocs.yml missing canonical site_url"

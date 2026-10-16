@@ -80,16 +80,19 @@ locals {
   # connection role's value is only known after apply (Terraform requires known keys, apply-time
   # values). Keys read as the role's short name; `connection` is the custom sfConnectionDelegate.
   runner_roles = {
-    "bq.dataEditor"    = "roles/bigquery.dataEditor"      # write registry rows + create tables
-    "bq.jobUser"       = "roles/bigquery.jobUser"         # run queries / load jobs
-    "bq.readSession"   = "roles/bigquery.readSessionUser" # Storage Read API: notebooks/tools read result + leaderboard tables as the runner SA (headless acceptance + human Colab-open both run AS this SA)
-    "connection"       = local.connection_role            # get/use/delegate the BigLake connection
-    "storage.objAdmin" = "roles/storage.objectAdmin"      # warehouse + artifacts + code buckets
-    "dataproc.editor"  = "roles/dataproc.editor"          # submit Dataproc Serverless batches
-    "aiplatform.user"  = "roles/aiplatform.user"          # submit Ray on Vertex jobs (get/list clusters)
-    "ray.cluster"      = local.ray_cluster_role           # create/delete the Ray cluster it runs on
-    "container.admin"  = "roles/container.admin"          # provision ephemeral GKE clusters + dispatch K8s Indexed Jobs / Ray on GKE
-    "composer.worker"  = "roles/composer.worker"          # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
+    "bq.dataEditor"    = "roles/bigquery.dataEditor"            # write registry rows + create tables
+    "bq.jobUser"       = "roles/bigquery.jobUser"               # run queries / load jobs
+    "bq.readSession"   = "roles/bigquery.readSessionUser"       # Storage Read API: notebooks/tools read result + leaderboard tables as the runner SA (headless acceptance + human Colab-open both run AS this SA)
+    "connection"       = local.connection_role                  # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin"            # warehouse + artifacts + code buckets
+    "dataproc.editor"  = "roles/dataproc.editor"                # submit Dataproc Serverless batches & ephemeral clusters
+    "aiplatform.user"  = "roles/aiplatform.user"                # submit Ray on Vertex, Vertex CustomJob, and Vertex AI AutoML jobs
+    "dataflow.dev"     = "roles/dataflow.developer"             # allow Vertex AI Tabular Workflows (automl_mode="tabular_workflow") to launch Dataflow FTE jobs
+    "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1"       # create/delete ephemeral GCE single-VM (runtime="gce") instances + compute.regions.get quota preflight
+    "serviceusage.use" = "roles/serviceusage.serviceUsageConsumer" # read live project quota ceilings (serviceusage.quotas.get) for dynamic 6-runtime preflight
+    "ray.cluster"      = local.ray_cluster_role                 # create/delete the Ray cluster it runs on
+    "container.admin"  = "roles/container.admin"                # provision ephemeral GKE clusters + dispatch K8s Indexed Jobs / Ray on GKE
+    "composer.worker"  = "roles/composer.worker"                # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
   }
   compute_roles = {
     "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results
@@ -101,6 +104,7 @@ locals {
     "dataflow.worker"  = "roles/dataflow.worker"          # Tabular Workflow Feature Transform Engine Dataflow workers
     "dataflow.dev"     = "roles/dataflow.developer"       # Tabular Workflow pipeline step submits/polls Dataflow FTE jobs
     "aiplatform.user"  = "roles/aiplatform.user"          # Tabular Workflow pipeline steps submit Stage-1/2 jobs + upload Model
+    "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1" # allow GCE single-VM guest COS `trap cleanup EXIT` REST API self-delete on completion
     "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
     "gke.nodeSa"       = "roles/container.defaultNodeServiceAccount" # GKE worker node telemetry + system logging/monitoring
   }

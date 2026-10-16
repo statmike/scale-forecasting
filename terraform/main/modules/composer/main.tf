@@ -76,6 +76,7 @@ variable "pypi_packages" {
     "google-cloud-dataproc"   = ""
     "google-cloud-aiplatform" = ""
     "ray"                     = "[default]>=2.52" # extras go in the VALUE — Composer rejects extras in the key (must be a bare PEP-508 name)
+    "kubernetes"              = ">=28.1"          # GKE Indexed Job & Ray-on-GKE submission (gke_submit.py)
     "pydantic"                = ">=2"
     # Feature-engineering that runs ON the launch point (not in a job): the native/BigQuery track
     # builds holiday exog columns in Python on the worker before issuing BQML SQL, so `holidays` is a

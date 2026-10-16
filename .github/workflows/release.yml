@@ -56,6 +56,7 @@ jobs:
           print(f"scale-forecasting {sf.__version__} verified")
           EOF
           /tmp/clean/bin/python -m scale_forecasting.playground --list >/dev/null
+          /tmp/clean/bin/python -m scale_forecasting.agent_surfaces --release-notes "${GITHUB_REF_NAME#v}" >/dev/null
       - uses: actions/upload-artifact@v6
         with:
           name: dist
@@ -103,6 +104,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: actions/download-artifact@v7
         with:
           name: dist
@@ -110,4 +112,8 @@ jobs:
       - name: create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: |
+          uv venv --python 3.11 /tmp/rel
+          uv pip install --python /tmp/rel/bin/python dist/*.whl
+          /tmp/rel/bin/python -m scale_forecasting.agent_surfaces --release-notes "${GITHUB_REF_NAME#v}" > /tmp/release_notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file /tmp/release_notes.md --generate-notes

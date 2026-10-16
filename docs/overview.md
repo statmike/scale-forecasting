@@ -4,38 +4,40 @@
 
 ```mermaid
 flowchart LR
-    subgraph IN["Your data in BigQuery"]
-        SRC["Source table<br/>series · timestamps · covariates"]
+    subgraph PREP["1. Data, Config & Launch"]
+        direction TB
+        SRC["Your Data (BigQuery or DataFrame)<br/>series · timestamps · covariates · hierarchies"]
+        CFG["Create a Config File (JSON)<br/>Hand-crafted OR use Auto-Forecaster"]
+        LAUNCH["Launch & Orchestrate<br/>SDK · CLI · Notebooks · Airflow · Batch · MCP"]
+        R["Parallel Family DAG Router<br/>Routes active families (1 job or pool per family)<br/>statistical · ml · deep_learning · automl · native"]
+        SRC --> CFG --> LAUNCH --> R
     end
-    CFG["One RunConfig (JSON)<br/>what to forecast · horizon · models · metrics"]
-    subgraph ROUTE["Family DAG router"]
-        R["One job per active model family<br/>statistical · ml · deep_learning · automl · native"]
-    end
-    subgraph RUN["Zero-idle compute on Google Cloud (chosen per family)"]
-        S["Dataproc Serverless Spark"]
+    subgraph RUN["2. Zero-Idle Compute on Google Cloud (Chosen per Family)"]
+        direction LR
+        S["Serverless Spark or Spark Cluster"]
         RY["Ray on Vertex AI or GKE"]
         V["Vertex AI CustomJob"]
-        G["Compute Engine single VM<br/>(self-deleting)"]
-        K["GKE Indexed Job"]
-        A["Vertex AI AutoML and<br/>Tabular Workflows"]
-        B["BigQuery ML<br/>ARIMA_PLUS · AI.FORECAST"]
+        G["Compute Engine Single VM (Self-Deleting)"]
+        K["GKE (Indexed Job or Ray · Scale-to-Zero)"]
+        A["Vertex AI AutoML & Tabular Workflows"]
+        B["BigQuery ML (CREATE MODEL · AI.FORECAST)"]
     end
-    subgraph OUT["Results back in BigQuery"]
-        REG["5 registry tables<br/>forecasts · backtests · metadata · runs · jobs"]
-        VIEWS["5 analytical views<br/>leaderboard · coverage · run summary"]
+    subgraph OUT["3. Governed Results & Trust in BigQuery"]
+        direction TB
+        REG["5 BigQuery Registry Tables<br/>forecasts · backtests · metadata<br/>runs · jobs"]
+        VIEWS["5 Analytical SQL Views<br/>Leaderboards · Backtest Coverage<br/>Run & Job Summaries"]
+        USE["Practitioner Trust & Consumption<br/>7-Question Assessment · FVA Ladder<br/>Attributions · SDK · Looker"]
+        REG --> VIEWS --> USE
     end
-    USE["Notebooks · Python SDK · Looker · Cloud Composer DAGs"]
 
-    SRC --> CFG --> R
-    R --> S & RY & V & G & K & A & B
-    S & RY & V & G & K & A & B --> REG --> VIEWS --> USE
+    PREP --> RUN --> OUT
 
-    classDef data fill:#E8F0FE,stroke:#4285F4,color:#174EA6
-    classDef config fill:#FEF7E0,stroke:#F9AB00,color:#7A5A00
-    classDef route fill:#FCE8E6,stroke:#EA4335,color:#A50E0E
-    classDef compute fill:#E6F4EA,stroke:#34A853,color:#0D652D
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
     class SRC,REG,VIEWS,USE data
-    class CFG config
+    class CFG,LAUNCH config
     class R route
     class S,RY,V,G,K,A,B compute
 ```
@@ -57,6 +59,7 @@ Traditional forecasting workflows break down when scaled to tens or hundreds of 
 | **Hierarchical incoherence** | Bottom-level and upper-level forecasts do not add up across regions or categories. | **Coherent forecast reconciliation:** Built-in Hyndman FPP3 reconciliation (`bottom_up`, `top_down`, `middle_out`, `ols`, `wls_struct`, `wls_var`, `mint_shrink`). | [api/reconciliation.md](./api/reconciliation.md) |
 | **Operational opacity** | Disconnected log files and ad-hoc evaluation tables. | **BigQuery registry & explainability:** Streaming ingestion via the Storage Write API, two-tier feature attributions (`attributions_df` / `plot_attributions`), and 5 analytical SQL views. | [output_schemas.md](./output_schemas.md) |
 | **Brittle batch failures** | One failed series aborts an entire multi-hour distributed job. | **Surgical cell repair & live probes:** Re-runs only failed cells without recomputing successful ones and reconciles platform job state automatically. | [operations.md](./operations.md) |
+| **Manual trial-and-error vs. black-box AutoML** | Days of hand-tuning configs or an opaque black box that hides why models were picked. | **Glass-box auto-forecaster & `autofocus`:** `Forecaster.build_config()` and `Forecaster.auto()` (evolved with **AlphaEvolve on Gemini Enterprise** into pure Python) explain every choice, honor user pins, and borrow finished models across passes. | [auto_forecaster.md](./auto_forecaster.md) |
 
 ---
 
@@ -128,12 +131,13 @@ Full field-by-field specification: [Configuration reference](./configuration_ref
 The same orchestration path (`main.run`) drives every launch surface:
 
 ```mermaid
-flowchart LR
-    cfg["RunConfig (JSON or dict)"] --> E1["1. Python SDK<br/>Forecaster.run()"]
-    cfg --> E2["2. CLI<br/>python -m scale_forecasting.main"]
-    cfg --> E3["3. Staged native CLI<br/>launch_plan.stage_run"]
-    cfg --> E4["4. Cloud Composer 3<br/>--emit-airflow DAG"]
-    cfg --> E5["5. Direct cluster embed<br/>make_group_runner / make_chunk_runner"]
+flowchart TD
+    src["Author via Hand-Crafted RunConfig JSON<br/>OR Glass-Box Auto-Forecaster (Forecaster.build_config / Forecaster.auto)"] --> cfg["Validated RunConfig (<slug>-<12hex> run_id)"]
+    cfg --> E1["1. Python SDK (Forecaster.run / Forecaster.auto)"]
+    cfg --> E2["2. CLI (python -m scale_forecasting.main --config / --auto)"]
+    cfg --> E3["3. Staged Native CLI (launch_plan.stage_run)"]
+    cfg --> E4["4. Cloud Composer 3 (--emit-airflow single-pass or autofocus DAG)"]
+    cfg --> E5["5. Direct Cluster Embed (make_group_runner / make_chunk_runner)"]
 ```
 
 1. **Python SDK (`Forecaster`):** High-level facade for notebooks and services (`dry_run()`, `feasibility()`, `run()`, `run_live()`, `review_run()`).
@@ -175,6 +179,7 @@ Every model inherits from [`BaseModel`](https://github.com/statmike/scale-foreca
 - **Two-tier explainability:** All 10 feature-attribution models (`ml`, `automl`, and `arima_plus` via `ML.EXPLAIN_FORECAST`) record global series-level driver importance in `forecast_metadata.fit_diagnostics["feature_attributions"]` (Tier 1) and per-step signed attributions in `forecast_predictions.explanations` (Tier 2), surfaced via `forecaster.attributions_df()` and `forecaster.plot_attributions()`. All 37 models also support structural trend/seasonality/covariate decomposition via `forecaster.explain_forecast()`.
 - **Hierarchical reconciliation:** Setting `hierarchy.enabled: true` builds the aggregation tree from `hierarchy.levels` and reconciles base forecasts with any subset of the 8 Hyndman FPP3 methods (`mint_nonneg`, `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, `middle_out`) so point and interval forecasts sum coherently across levels.
 - **Smart ensembling & re-ensembling:** Blend base models via heuristic/winner rules (`mean`, `median`, `inverse_error`, `champion`, `horizon_specialist`) or out-of-fold stackers (`nnls`, `ridge`, `xgb`) with `top_k` and `parsimony_margin` pruning and full interval propagation. Because ensembles are keyed by `ensemble_id`, you can test new strategies on completed runs (`forecaster.reensemble()`) or across distinct runs (`forecaster.ensemble_runs()`) without refitting base models.
+- **Glass-box auto-forecaster & multi-branch `autofocus`:** Compile a transparent `ConfigBlueprint` with a plain-English rationale table and approximate 7-runtime duration/cost estimate (`Forecaster.build_config()` / `--init-config`), or run a multi-branch `autofocus=True` tournament (`Forecaster.auto()`) across 4 exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`). Evolved with **AlphaEvolve on Gemini Enterprise** across 20 synthetic ground-truth test panels (DGPs) and 9 public open-data benchmarks and compiled into deterministic Python (`auto_policy.py`), `autofocus` tests log transforms, noisy-covariate pruning, and regime specialists in parallel branches while borrowing already-fitted models from Pass 1. See [Auto-forecaster & `autofocus`](./auto_forecaster.md).
 - **Forecaster workbench, econometrics, inventory policy & executive reports:** Enforce physical bounds (`floor`, `cap`, `cumulative_round`), emit monotone multi-percentile fans (`output.quantiles`) and Newsvendor service-level targets (`underage_cost` / `overage_cost`), route intermittent series via Syntetos–Boylan–Croston (SBC) regimes, audit Forecast Value Added (`compute_fva`) with Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano $p$-values, translate forecast bands into $(s, S)$, $(R, S)$, Fill Rate, and Newsvendor replenishment policies (`compute_inventory_policy` / `inventory_policy_df`), run counterfactual promo/price scenarios (`simulate_scenarios`), track live drift & whipsaw stability, triage Top-$N$ exceptions (`exceptions_df`), and export self-contained interactive HTML reports (`export_report`). See [Forecaster workbench](./forecaster_workbench.md).
 - **Modular installation & 1-file plugins:** A bare `pip install scale-forecasting` installs the pure offline layer (15 models on NumPy/SciPy/statsmodels/scikit-learn, all 21 metrics, playground, `--dry-run`); optional extras (`[gcp]`, `[spark]`, `[ray]`, `[notebook]`, `[models]`, `[all]`) add cloud clients and third-party model libraries. Add a custom model in one file with [Adding a model](./adding_a_model.md) — code ships dynamically via `src.zip` with zero container rebuilds.
 
@@ -234,6 +239,6 @@ flowchart TD
     DS --> AR --> OP
 ```
 
-- **11 interactive notebooks across 4 tracks:** From zero-GCP local exploration (`00`, `09`) to cloud runtimes (`01`–`04`), covariates/hierarchy/HPO/ensembles (`05`–`07`), and the multi-family master DAG & registry operations (`08`, `10`). Browse the [Notebook tour](./notebooks/README.md) or the guided [Hands-on workshop](./workshop.md).
+- **12 interactive notebooks across 4 tracks:** From zero-GCP local exploration and glass-box auto-forecasting (`00`, `11`, `09`) to cloud runtimes (`01`–`04`), covariates/hierarchy/HPO/ensembles (`05`–`07`), and the multi-family master DAG & registry operations (`08`, `10`). Browse the [Notebook tour](./notebooks/README.md) or the guided [Hands-on workshop](./workshop.md).
 - **Two-stage Terraform deployment (~15 minutes):** Stage 1 (`terraform/bootstrap`) provisions the remote state bucket; Stage 2 (`terraform/main`) provisions the VPC, service accounts, buckets, BigQuery dataset, container image (Cloud Build + Artifact Registry), Colab Enterprise runtime template, and the 100,000-series seed batch on Dataproc Serverless.
 - **Estimated deployment and runtime cost:** The one-time image build and 100,000-series seed batch typically cost an estimated **~\$0.25–\$1.00** in Cloud Build, Dataproc Serverless, and BigQuery Storage Write API usage. At rest, buckets, datasets, VPC networks, and service accounts have no compute charge (only standard Cloud Storage and BigQuery storage rates for stored bytes). Forecast runs bill per job for the duration of the batch, VM, pod, or query. **Ongoing cost disclosure:** Cloud Composer 3 (`create_composer = false` by default) and standing GKE clusters (`create_gke = false` by default) run continuously while provisioned and incur ongoing environment/cluster charges until disabled (and deleting a Composer environment leaves behind its Cloud Storage bucket until removed manually). See [Cost estimates & controls](./cost_estimates.md), [Choosing a runtime](./choosing_a_runtime.md), [Why Google Cloud](./why_google_cloud.md), [FAQ](./faq.md), [Glossary](./glossary.md), and [Deploying on GCP](./deploying_on_gcp.md).

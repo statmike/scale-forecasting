@@ -116,6 +116,7 @@ nav:
           - notebooks/08_multi_engine_master_workflow.ipynb
           - notebooks/09_custom_models_and_metrics.ipynb
           - notebooks/10_registry_operations_and_scale.ipynb
+          - notebooks/11_auto_forecaster_and_autofocus.ipynb
   - Reference:
       - Architecture: architecture.md
       - Compute runtimes: runtimes_reference.md
@@ -124,6 +125,7 @@ nav:
       - Evaluation metrics: metrics_reference.md
       - Backtesting: backtesting.md
       - Forecaster workbench: forecaster_workbench.md
+      - Auto-forecaster & autofocus: auto_forecaster.md
       - Quota and scale: quota_and_scale.md
       - Reading source data: reading_source_data.md
       - Writing results: writing_results.md
@@ -138,6 +140,8 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Forecaster (SDK): api/sdk.md
+      - Auto-forecaster & autofocus: api/auto.md
+      - Synthetic DGP benchmarks: api/benchmarks.md
       - AI agent surfaces & probe: api/agent_surfaces.md
       - MCP server (stdio): api/mcp.md
       - Run inspection & review: api/review.md

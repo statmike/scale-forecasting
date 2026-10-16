@@ -15,7 +15,7 @@ flowchart LR
         found["Foundation<br/>apis · iam · network · budget"]
         data["Storage & Data<br/>storage · bigquery"]
         build["Runtime Build<br/>container (Cloud Build + packed-venv)"]
-        work["Validation & Interfaces<br/>seed (100k series) · smoke · colab · composer"]
+        work["Validation & Interfaces<br/>seed (100k series) · smoke · colab · composer · gke"]
         found --> data & build
         data & build --> work
     end

@@ -441,6 +441,100 @@ def _stage_config(cfg: RunConfig, run_id: str, infra: BatchInfra) -> str:
     return stage_config(cfg, run_id, infra.code_bucket)
 
 
+def _apply_serverless_quota_preflight(
+    cfg: RunConfig,
+    properties: dict[str, str],
+    sizing: dict[str, Any],
+    max_executors: int | None,
+    *,
+    settings: Settings,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+) -> tuple[dict[str, str], dict[str, Any], int | None]:
+    """Clamp ``maxExecutors`` / ``initialExecutors`` / ``minExecutors`` to regional quota.
+
+    When ``cfg.compute.capacity.preflight`` is ``True``, queries the project's live regional
+    ``disks_total_gb``, ``cpus``, and (for ``hardware="gpu"``) ``nvidia_l4_gpus`` quotas via
+    `quota.preflight_serverless`, scaling shared regional limits across concurrent Serverless Spark
+    batches planned in `dag.plan_dag`. If the regional quota is smaller than the planned executor
+    ceiling, lowers ``spark.dynamicAllocation.maxExecutors`` (and clamps ``initialExecutors`` /
+    ``minExecutors`` to never exceed ``maxExecutors``) so the batch never stalls waiting for shuffle
+    disk or GPU quota that the project does not have.
+    """
+    if not cfg.compute.capacity.preflight:
+        return properties, sizing, max_executors
+
+    from . import quota
+
+    planned_max = (
+        max_executors
+        if max_executors is not None
+        else cfg.compute.max_executors
+        if cfg.compute.max_executors is not None
+        else int(properties["spark.dynamicAllocation.maxExecutors"])
+        if "spark.dynamicAllocation.maxExecutors" in properties
+        else None
+    )
+    if planned_max is None:
+        return properties, sizing, max_executors
+
+    executor_cores = int(properties.get("spark.executor.cores", 4))
+    min_executors = int(properties.get("spark.dynamicAllocation.minExecutors", 2))
+    gpus_per_executor = 1 if hardware == "gpu" else 0
+    total_batches, gpu_batches = quota.serverless_batch_concurrency(cfg)
+
+    try:
+        preflights = quota.preflight_serverless(
+            [settings.region],
+            settings.project_id,
+            max_executors=planned_max,
+            executor_cores=executor_cores,
+            min_executors=min_executors,
+            hardware=hardware,
+            gpu_type=(gpu_type or cfg.compute.gpu_type) if hardware == "gpu" else None,
+            gpus_per_executor=gpus_per_executor,
+            concurrent_batches=total_batches,
+            concurrent_gpu_batches=gpu_batches,
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never sink a launch
+        _log.debug("serverless quota preflight unavailable (non-fatal): %r", exc)
+        return properties, sizing, max_executors
+
+    pf = preflights.get(settings.region)
+    if pf is None:
+        return properties, sizing, max_executors
+
+    for line in pf.render():
+        _log.info("%s", line)
+    if sizing:
+        sizing = dict(sizing)
+        sizing["quota_preflight"] = pf.to_dict()
+
+    granted = quota.clamp_serverless_executors(planned_max, pf, min_executors=min_executors)
+    if granted >= planned_max:
+        return properties, sizing, max_executors
+
+    _log.warning(
+        "serverless quota preflight in %s clamps maxExecutors %d -> %d "
+        "(concurrent_batches=%d, concurrent_gpu_batches=%d)",
+        settings.region,
+        planned_max,
+        granted,
+        total_batches,
+        gpu_batches,
+    )
+    new_props = dict(properties)
+    new_props["spark.dynamicAllocation.maxExecutors"] = str(granted)
+    if "spark.dynamicAllocation.initialExecutors" in new_props:
+        init_exec = min(int(new_props["spark.dynamicAllocation.initialExecutors"]), granted)
+        new_props["spark.dynamicAllocation.initialExecutors"] = str(init_exec)
+    if "spark.dynamicAllocation.minExecutors" in new_props:
+        min_exec = min(int(new_props["spark.dynamicAllocation.minExecutors"]), granted)
+        new_props["spark.dynamicAllocation.minExecutors"] = str(min_exec)
+    new_max = granted if max_executors is not None else None
+    return new_props, sizing, new_max
+
+
 def submit_batch(
     cfg: RunConfig,
     *,
@@ -516,6 +610,15 @@ def submit_batch(
         # that exists rather than against a parallelism cap. Resolved after `with_series_limit`,
         # so an `--n-series` override is treated as the known count it is and no query runs.
         estimated_series=_estimated_series(cfg, settings),
+    )
+    properties, sizing, max_executors = _apply_serverless_quota_preflight(
+        cfg,
+        properties,
+        sizing,
+        max_executors,
+        settings=settings,
+        hardware=hardware,
+        gpu_type=gpu_type,
     )
     batch = build_batch(
         infra=infra,

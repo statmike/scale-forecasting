@@ -78,7 +78,11 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-_SPLIT_COL = "__sf_split__"
+# Vertex AI Managed Datasets (`automl_mode="training_job"`) reject BigQuery column names starting
+# with an underscore (`Invalid column name(s): [__sf_split__]. The column name cannot begin with
+# an underscore`). `sf_split` satisfies both Tabular Workflow (`predefined_split_key`) and
+# Managed TrainingJob (`predefined_split_column_name`).
+_SPLIT_COL = "sf_split"
 
 
 def _future_dates(last_date: pd.Timestamp, horizon: int, freq: str) -> pd.DatetimeIndex:
@@ -248,7 +252,7 @@ def prepare_training_panel(
     horizon: int | None = None,
     train_end_by_series: dict[str, pd.Timestamp] | None = None,
 ) -> pd.DataFrame:
-    """Prepare the BigQuery training table DataFrame with deterministic ``__sf_split__`` (pure).
+    """Prepare the BigQuery training table DataFrame with deterministic ``sf_split`` (pure).
 
     Slices each series to ``<= train_end_by_series[ts_id]`` when provided (backtest fold), sorts
     chronologically, and assigns ``TRAIN``, ``VALIDATE``, and ``TEST`` splits per series so Vertex

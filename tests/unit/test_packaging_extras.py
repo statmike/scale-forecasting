@@ -48,8 +48,12 @@ _GCP_CLIENTS = {
     "db-dtypes",
     "protobuf",
 }
-# The notebooks that drive Google Cloud (everything but the two offline sandboxes).
-_OFFLINE_NOTEBOOKS = {"00_model_playground", "09_custom_models_and_metrics"}
+# The notebooks that drive Google Cloud (everything but the three offline sandboxes).
+_OFFLINE_NOTEBOOKS = {
+    "00_model_playground",
+    "09_custom_models_and_metrics",
+    "11_auto_forecaster_and_autofocus",
+}
 _SELF_EXTRA = re.compile(r"^scale-forecasting\[([a-z0-9,\- ]+)\]$")
 
 

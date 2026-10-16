@@ -13,9 +13,16 @@ from functools import cache
 from typing import Any
 
 from ..errors import get_logger
-from .rows import METRIC_COLUMNS
+from .rows import METRIC_COLUMNS, as_date
 
 _log = get_logger(__name__)
+
+_DATE_COLUMNS: frozenset[str] = frozenset(
+    {"forecast_date", "cutoff_date", "first_val_date", "last_val_date"}
+)
+_JSON_COLUMNS: frozenset[str] = frozenset(
+    {"quantiles", "explanations", "best_params", "fit_diagnostics"}
+)
 
 
 # The Storage Write API serializes rows as protobuf. Each cell table has a fixed column
@@ -250,6 +257,8 @@ def _encode_rows(
         msg = msg_cls()
         for col, type_char in spec:
             value = row.get(col)
+            if col in _DATE_COLUMNS:
+                value = as_date(value)
             if value is None:
                 continue
             if type_char == "S":
@@ -279,6 +288,66 @@ def _chunk_rows(serialized: list[bytes]) -> list[list[bytes]]:
     return batches
 
 
+def _decode_proto_rows(proto_descriptor: Any, serialized: list[bytes]) -> list[dict[str, Any]]:
+    """Decode serialized protobuf rows back into JSON-loadable dicts for batch-load fallback."""
+    import contextlib
+    import json
+
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+    file_dp = descriptor_pb2.FileDescriptorProto()
+    file_dp.name = "fallback_row.proto"
+    file_dp.package = "scale_forecasting.registry.fallback"
+    file_dp.message_type.add().CopyFrom(proto_descriptor)
+    pool = descriptor_pool.DescriptorPool()
+    file_desc = pool.Add(file_dp)
+    msg_cls = message_factory.GetMessageClass(
+        file_desc.message_types_by_name[proto_descriptor.name]
+    )
+
+    out: list[dict[str, Any]] = []
+    for raw in serialized:
+        msg = msg_cls()
+        msg.ParseFromString(raw)
+        d: dict[str, Any] = {}
+        for field_desc, val in msg.ListFields():
+            col = field_desc.name
+            if col in _JSON_COLUMNS and isinstance(val, str) and val:
+                with contextlib.suppress(Exception):
+                    val = json.loads(val)
+            d[col] = val
+        out.append(d)
+    return out
+
+
+def _append_via_batch_load_fallback(
+    project: str,
+    dataset: str,
+    table: str,
+    proto_descriptor: Any,
+    serialized: list[bytes],
+) -> None:
+    """Fallback to a BigQuery batch load job when ``forecast_date`` falls outside the Storage Write
+    API's ``[-3650d, +366d]`` streaming buffer partition window (e.g., >10-year historical
+    benchmarks like M5 Walmart or >1-year long-horizon forecasts).
+    """
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+    from .tables import bigquery_client
+
+    if not serialized:
+        return
+    try:
+        rows = _decode_proto_rows(proto_descriptor, serialized)
+        client = bigquery_client(project)
+        fq = f"{project}.{dataset}.{table}"
+        job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+        client.load_table_from_json(rows, fq, job_config=job_cfg).result()
+    except Exception as exc:
+        raise RegistryError(f"BigQuery batch-load fallback to {table} failed: {exc}") from exc
+
+
 def _append_via_write_api(
     write_client: Any,
     project: str,
@@ -295,9 +364,10 @@ def _append_via_write_api(
 
     Transient service errors (500/503/429/deadline) are retried with exponential backoff — safe
     because the default stream is at-least-once and the registry dedupes-on-read (re-sending the
-    whole append can't double-count). A permanent error (bad schema/data, a response-level row
-    error, or a non-transient API error) is re-raised as `RegistryError` with the real
-    error attached, unchanged.
+    whole append can't double-count). When rows contain ``forecast_date`` partitions outside
+    BigQuery's ``[-3650d, +366d]`` streaming buffer window, transparently falls back to a BigQuery
+    batch load job (`_append_via_batch_load_fallback`). A permanent error is re-raised as
+    `RegistryError` with the real error attached, unchanged.
     """
     from google.api_core.exceptions import (
         DeadlineExceeded,
@@ -350,15 +420,22 @@ def _append_via_write_api(
         try:
             for response in write_client.append_rows(requests=requests()):
                 if response.error.code != 0:
-                    # Surface the per-row detail: the top-level message only says "N Errors
-                    # found"; row_errors names the offending field/index/reason, which is what a
-                    # caller needs to diagnose a data pathology (e.g. a non-finite float) without
-                    # reverse-engineering it from the landed rows. A response-level error is a
-                    # data/schema problem, not a transient blip — fail fast, don't retry.
                     detail = "; ".join(
                         f"row {re.index}: {re.message}"
                         for re in getattr(response, "row_errors", [])
                     )
+                    low_detail = detail.lower()
+                    if "outside the allowed bounds" in low_detail or "3650 days" in low_detail:
+                        _log.info(
+                            "Partition date on %s is outside Storage Write API [-3650d, +366d] "
+                            "streaming window; falling back to BigQuery batch load (%d rows).",
+                            table,
+                            len(serialized),
+                        )
+                        _append_via_batch_load_fallback(
+                            project, dataset, table, proto_descriptor, serialized
+                        )
+                        return
                     raise RegistryError(
                         f"Storage Write API append to {table} failed: "
                         f"{response.error.code} {response.error.message}"

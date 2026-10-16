@@ -53,7 +53,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.2.1"
+    __version__ = "1.3.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -150,6 +150,40 @@ _LAZY: dict[str, tuple[str, str]] = {
     "build_report_payload": (".report", "build_report_payload"),
     "render_html_report": (".report", "render_html_report"),
     "export_report": (".report", "export_report"),
+    # Glass-Box Auto-Forecaster, Duration Predictor & DGP Benchmarks.
+    "EXPOSURE_TIERS": (".auto", "EXPOSURE_TIERS"),
+    "SCALE_REGIMES": (".auto", "SCALE_REGIMES"),
+    "classify_scale_regime": (".auto", "classify_scale_regime"),
+    "select_default_baselines": (".auto", "select_default_baselines"),
+    "select_hierarchy_reconciliation_methods": (
+        ".auto",
+        "select_hierarchy_reconciliation_methods",
+    ),
+    "ConfigBlueprint": (".auto", "ConfigBlueprint"),
+    "AutofocusPassRecord": (".auto", "AutofocusPassRecord"),
+    "NextLoopPreview": (".auto", "NextLoopPreview"),
+    "PanelAutoProfile": (".auto", "PanelAutoProfile"),
+    "inspect_panel_for_auto": (".auto", "inspect_panel_for_auto"),
+    "build_config": (".auto", "build_config"),
+    "auto_forecast": (".auto", "auto_forecast"),
+    "DurationEstimate": (".profiling.duration", "DurationEstimate"),
+    "FamilyDurationBreakdown": (".profiling.duration", "FamilyDurationBreakdown"),
+    "DurationCalibration": (".profiling.duration", "DurationCalibration"),
+    "predict_run_duration": (".profiling.duration", "predict_run_duration"),
+    "calibrate_duration_from_frames": (".profiling.duration", "calibrate_duration_from_frames"),
+    "calibrate_duration_from_registry": (".profiling.duration", "calibrate_duration_from_registry"),
+    "BENCHMARK_NAMES": (".benchmarks", "BENCHMARK_NAMES"),
+    "BenchmarkSpec": (".benchmarks", "BenchmarkSpec"),
+    "BenchmarkDataset": (".benchmarks", "BenchmarkDataset"),
+    "list_benchmarks": (".benchmarks", "list_benchmarks"),
+    "benchmark_catalog": (".benchmarks", "benchmark_catalog"),
+    "load_benchmark": (".benchmarks", "load_benchmark"),
+    "PUBLIC_BENCHMARK_NAMES": (".benchmarks", "PUBLIC_BENCHMARK_NAMES"),
+    "PUBLIC_BENCHMARK_SPECS": (".benchmarks", "PUBLIC_BENCHMARK_SPECS"),
+    "PublicBenchmarkSpec": (".benchmarks", "PublicBenchmarkSpec"),
+    "list_public_benchmarks": (".benchmarks", "list_public_benchmarks"),
+    "public_benchmark_catalog": (".benchmarks", "public_benchmark_catalog"),
+    "fetch_public_benchmark": (".benchmarks", "fetch_public_benchmark"),
 }
 
 __all__ = [
@@ -174,6 +208,34 @@ __all__ = [
 
 if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports (re-exported below)
     from .agent_surfaces import probe_environment  # noqa: F401
+    from .auto import (  # noqa: F401
+        EXPOSURE_TIERS,
+        SCALE_REGIMES,
+        AutofocusPassRecord,
+        ConfigBlueprint,
+        NextLoopPreview,
+        PanelAutoProfile,
+        auto_forecast,
+        build_config,
+        classify_scale_regime,
+        inspect_panel_for_auto,
+        select_default_baselines,
+        select_hierarchy_reconciliation_methods,
+    )
+    from .benchmarks import (  # noqa: F401
+        BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_SPECS,
+        BenchmarkDataset,
+        BenchmarkSpec,
+        PublicBenchmarkSpec,
+        benchmark_catalog,
+        fetch_public_benchmark,
+        list_benchmarks,
+        list_public_benchmarks,
+        load_benchmark,
+        public_benchmark_catalog,
+    )
     from .dag import DagNode  # noqa: F401
     from .diagnostics import (  # noqa: F401
         compute_anomalies,
@@ -205,6 +267,14 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .mcp import McpServer  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
     from .playground import metric_catalog, model_catalog  # noqa: F401
+    from .profiling.duration import (  # noqa: F401
+        DurationCalibration,
+        DurationEstimate,
+        FamilyDurationBreakdown,
+        calibrate_duration_from_frames,
+        calibrate_duration_from_registry,
+        predict_run_duration,
+    )
     from .reconciliation import (  # noqa: F401
         HierarchySpec,
         build_hierarchy,

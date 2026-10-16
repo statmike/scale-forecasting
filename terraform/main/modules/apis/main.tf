@@ -18,13 +18,15 @@ locals {
   # The full set for Spark + Ray + BigQuery + Composer + lineage. Grouped by purpose in the
   # comments so a reader knows why each is here.
   services = [
-    "compute.googleapis.com",            # networking substrate for Dataproc/Vertex/Composer
+    "compute.googleapis.com",            # networking substrate + GCE Single-VM (runtime="gce")
     "storage.googleapis.com",            # GCS: warehouse, artifacts, code buckets
     "bigquery.googleapis.com",           # registry + native models + Iceberg tables
+    "bigquerystorage.googleapis.com",    # BigQuery Storage Read API (worker pushdown) + Storage Write API (streaming results)
     "bigqueryconnection.googleapis.com", # BigLake / Cloud Resource connection for Iceberg
-    "dataproc.googleapis.com",           # Dataproc Serverless (Spark engines + seed job)
-    "aiplatform.googleapis.com",         # Vertex AI (Ray on Vertex + CustomJob + Tabular Workflows)
+    "dataproc.googleapis.com",           # Dataproc Serverless & Clusters (Spark engines + seed job)
+    "aiplatform.googleapis.com",         # Vertex AI (Ray on Vertex + CustomJob + AutoML & Tabular Workflows)
     "dataflow.googleapis.com",           # Dataflow (Vertex AI Tabular Workflow Feature Transform Engine)
+    "pipelines.googleapis.com",          # Vertex AI Pipelines / Kubeflow Pipelines (Tabular Workflows)
     "container.googleapis.com",          # Google Kubernetes Engine (GKE Indexed Jobs + Ray on GKE)
     # The Ray interactive dashboard / job-submission handshake is served through the managed
     # Inverting-Proxy fabric (*.aiplatform-training.googleusercontent.com), which is built on the
@@ -34,7 +36,7 @@ locals {
     "composer.googleapis.com",             # Composer 3 (Airflow) — created only if create_composer
     "artifactregistry.googleapis.com",     # container images for engines / Ray
     "cloudbuild.googleapis.com",           # build those images
-    "serviceusage.googleapis.com",         # enable/disable APIs; also the quota target for the budget
+    "serviceusage.googleapis.com",         # enable/disable APIs + dynamic 6-runtime quota preflight (consumerQuotaMetrics)
     "iam.googleapis.com",                  # service accounts + role grants
     "cloudresourcemanager.googleapis.com", # project-level IAM bindings
     "cloudbilling.googleapis.com",         # link project ↔ billing account

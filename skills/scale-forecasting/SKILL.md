@@ -1,10 +1,10 @@
 ---
 name: scale-forecasting
-description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (37 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, build or validate a RunConfig JSON, choose models/metrics/runtimes/GPUs, run offline model benchmarks in the playground, launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, review model leaderboards or calibration, or surgically repair failed (ts_id, model_type) cells.
+description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (37 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; Glass-Box Auto-Forecaster across 4 exposure tiers, multi-branch autofocus, 20 synthetic DGP benchmarks + 9 public open-data benchmarks, and 7-Question Practitioner Assessment; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, profile a dataset, auto-compile or hand-author a RunConfig JSON, run multi-branch autofocus tournaments, answer practitioner trust questions (baseline lift, ensemble parsimony, covariate overfitting, global vs local, hierarchy reconciliation), launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, or surgically repair failed (ts_id, model_type) cells.
 license: Apache-2.0
 metadata:
   author: statmike
-  version: 1.2.1
+  version: 1.3.0
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide
@@ -18,20 +18,20 @@ metadata:
 Read these companion reference files in [`references/`](./references/) whenever you need exhaustive field-by-field or catalog-level detail:
 
 1. **[`references/config_reference.md`](./references/config_reference.md):** Every field, type, default, constraint, and cross-field rule across `RunConfig` and its 14 nested Pydantic blocks (`data`, `features`, `backtest`, `output`, `hpo`, `ensemble`, `hierarchy`, `compute`, `compute.families.<family>`, `compute.ensemble`, `compute.profile`, `compute.capacity`), GPU-to-VM shape resolution, and `run_id` digest exclusions.
-2. **[`references/catalog_reference.md`](./references/catalog_reference.md):** All **37 models** (with family, runtime, package, `[extra]`, covariate support, explainability, training modes, and GPU capability), **21 evaluation metrics** (16 point + 5 interval), **7 compute runtimes**, **13 dependency extras**, **4 source tables / 5 registry tables / 5 analytical SQL views**, and all **62 shipped configs** (`20` root demos + `42` smoke configs `01`–`42`).
-3. **[`references/execution_paths_and_ops.md`](./references/execution_paths_and_ops.md):** Step-by-step CLI commands and Python SDK patterns for `SF_*` environment variables, **all 5 Execution Paths**, **Pre-Flight Verification** (`--dry-run`, `--feasibility`, `--quota`, `--stage-only`, `--emit-airflow`), **Post-Run Review & Surgical Repair** (`review_run`, `calibration_report`, `retry_run`, `--probe`, `--settle`, `--cancel`), and **Registry Lifecycle Operations** (`scale_forecasting.registry.ops`).
+2. **[`references/catalog_reference.md`](./references/catalog_reference.md):** All **37 models** (with family, runtime, package, `[extra]`, covariate support, explainability, training modes, and GPU capability), **21 evaluation metrics** (16 point + 5 interval), **7 compute runtimes**, **13 dependency extras**, **4 source tables / 5 registry tables / 5 analytical SQL views**, **62 shipped configs** (`20` root demos + `42` smoke configs `01`–`42`), and **Auto-Forecaster exposure tiers, `n_series` scale regimes, all 20 synthetic DGP benchmarks, and 9 public open-data benchmarks**.
+3. **[`references/execution_paths_and_ops.md`](./references/execution_paths_and_ops.md):** Step-by-step CLI commands and Python SDK patterns for `SF_*` environment variables, **all 5 Execution Paths**, **Glass-Box Auto-Forecaster & Multi-Branch `autofocus`**, **7-Question Practitioner Assessment**, **Pre-Flight Verification** (`--dry-run`, `--feasibility`, `--quota`, `--stage-only`, `--emit-airflow`), **Post-Run Review & Surgical Repair** (`review_run`, `calibration_report`, `retry_run`, `--probe`, `--settle`, `--cancel`), and **Registry Lifecycle Operations** (`scale_forecasting.registry.ops`).
 
-> **Built-in MCP Server Available:** If your agent client supports the Model Context Protocol (MCP), run `python -m scale_forecasting.mcp` (or `python -m scale_forecasting.mcp --allow-launch` to unlock cloud job submission and registry repair). It exposes 7 structured `forecast://*` resources and 9 tools directly over `stdio`.
+> **Built-in MCP Server Available:** If your agent client supports the Model Context Protocol (MCP), run `python -m scale_forecasting.mcp` (or `python -m scale_forecasting.mcp --allow-launch` to unlock cloud job submission and registry repair). It exposes 7 structured `forecast://*` resources and 11 tools (including `build_auto_config` and `run_auto_forecast`) directly over `stdio`.
 
 ---
 
 ## Mandatory 4-Step Agent Workflow
 
 ```mermaid
-flowchart LR
-    S0["Step 0: Probe Environment<br/>(Extras · Models · SF_* Env · ADC)"] --> S1["Step 1: Author & Validate RunConfig<br/>(All Config Blocks · Model/Runtime Fit)"]
-    S1 --> S2["Step 2: Pre-Flight & Execute<br/>(5 Execution Paths · Dry-Run/Quota)"]
-    S2 --> S3["Step 3: Review & Repair<br/>(Leaderboards · Calibration · retry_run)"]
+flowchart TD
+    S0["Step 0: Probe Environment & Profile Data<br/>probe_environment() · Forecaster.profile_data()"] --> S1["Step 1: Compile via Auto-Forecaster or Author RunConfig<br/>Forecaster.build_config(tier=...) or manual RunConfig JSON"]
+    S1 --> S2["Step 2: Pre-Flight & Execute (Single Pass or autofocus=True)<br/>5 Execution Paths · Forecaster.auto() · Dry-Run/Quota"]
+    S2 --> S3["Step 3: 7-Question Practitioner Assessment, Review & Repair<br/>f.practitioner_assessment_df() · f.compare_models() · retry_run"]
 ```
 
 ### Step 0: Probe the Environment First (Never Guess Capabilities)
@@ -59,8 +59,30 @@ Use the returned report to route your workflow:
 
 ---
 
-### Step 1: Author & Validate `RunConfig`
+### Step 1: Compile via Glass-Box Auto-Forecaster OR Hand-Author `RunConfig`
 
+You have two co-equal ways to produce a validated `RunConfig`:
+
+#### Option 1A — Glass-Box Auto-Forecaster (`Forecaster.profile_data` & `Forecaster.build_config` / MCP `build_auto_config`)
+When starting on a new DataFrame, BigQuery table, or any of the 20 synthetic DGP benchmarks (`dgp_01_smooth_seasonal` .. `dgp_20_monthly_regime_drift_damped`) or 9 public open-data benchmarks (`fetch_public_benchmark`), let the AlphaEvolve-calibrated compiler inspect the panel across 7 dimensions (`scale_regime`, SBC demand regime, seasonality/`log1p`, structural breaks/spikes, grid hygiene, covariates, hierarchy) and emit a transparent `ConfigBlueprint`:
+```python
+from scale_forecasting import Forecaster, load_benchmark
+
+ds = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=6)
+profile_df = Forecaster.profile_data(ds.panel_df, horizon=14)  # Step 0 7-row readiness scan
+bp = Forecaster.build_config(
+    ds.panel_df,
+    tier="wide_field",  # "first_light" | "wide_field" | "deep_sky" | "deep_field"
+    where="auto",  # "auto" | "local" | "bigquery" | "cloud_cpu" | "cloud_all"
+    goal="accuracy",  # "accuracy" | "probabilistic" | "service_level" | "fast"
+    baselines="auto",  # 4-anchor ladder (naive, univariate stat, foundation, same-model univariate)
+)
+print(bp.explain())  # Plain-English rationale table + P50/P90 runtime & cost estimate
+bp.to_file("/tmp/compiled_config.json")  # Standard editable RunConfig JSON
+```
+- Pin any user constraint (`models`, `include_models`, `exclude_models`, `allowed_families`, `decision_metric`, `n_folds`, `hpo`, `ensemble`, `holidays`, `baselines`, `max_minutes`, `max_usd`) — pinned rules are marked `[PINNED]` and respected across every pass.
+
+#### Option 1B — Hand-Author `RunConfig` Directly
 Always include `"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"` at the top of generated JSON files (it provides IDE autocomplete and is stripped before `run_id` hashing).
 
 #### Key Rules When Constructing a `RunConfig`
@@ -107,7 +129,8 @@ Select the execution path that matches the user's goal and `probe_environment()`
 | **Path 2: Cloud Preflight & Staging** | Checking live BigQuery series lengths against backtest geometry, checking regional CPU/GPU quotas, or staging artifacts to GCS | `python -m scale_forecasting.main --config <path>.json [--dry-run --feasibility \| --quota \| --stage-only]` |
 | **Path 3: Unified Multi-Family DAG (`main.run` / `Forecaster`)** | Running the full parallel multi-family DAG + ensemble node end-to-end from CLI, Python, or notebooks | `python -m scale_forecasting.main --config <path>.json` or `Forecaster.from_file("<path>.json").run()` |
 | **Path 4: Direct Per-Family Submitters** | Submitting a single family or runtime (`submit`, `ray_submit`, `vertex_submit`, `gce_submit`, `gke_submit`, `automl_submit`, `ensemble_run`) | `python -m scale_forecasting.vertex_submit --config <path>.json --family ml` |
-| **Path 5: Cloud Composer 3 / Airflow DAG Emission** | Rendering a self-contained Airflow DAG (`dag_<run_id>.py`) with per-family tasks and optional `--with-retry` repair node | `python -m scale_forecasting.main --config <path>.json --emit-airflow --with-retry` |
+| **Path 5: Cloud Composer 3 / Airflow DAG Emission** | Rendering a self-contained Airflow DAG (`dag_<run_id>.py`) with per-family tasks, optional `--with-retry` repair node, or multi-branch `--auto --autofocus` DAG | `python -m scale_forecasting.main --config <path>.json --emit-airflow --with-retry` or `bp.emit_airflow_dag(autofocus=True)` |
+| **Auto-Forecaster & Multi-Branch `autofocus`** | Automated multi-pass tournament (`Pass 1 -> Branches 2A/2B/2C -> Pass 3 Synthesis`) with `model_spec_hash` cell borrowing and Champion Ratchet across any surface | `Forecaster.auto(source, tier="first_light", autofocus=True)` or `python -m scale_forecasting.main --auto --tier first_light --autofocus` or MCP `run_auto_forecast` |
 
 **Mandatory Pre-Flight Habit Before Any Live Cloud Run:**
 1. Run `--dry-run` (or `Forecaster.dry_run()` / MCP `plan_execution(mode="dry_run")`) to inspect the exact `LaunchPlan`, resolved machine shapes, `run_id`, and idempotency status in `run_registry`.
@@ -122,10 +145,16 @@ Every cloud run persists structured lineage and outputs to 5 BigQuery tables (`r
 1. **Verify Run Completion & Job Telemetry:**
    - Check `run_registry` (or `v_run_summary`) for `status = 'COMPLETED'` and `overhead_seconds`.
    - Inspect `run_jobs` (or `v_run_jobs`) for per-family wall-clock duration, `machine_type`, and `$.sizing` / `$.sizing_executed` JSON telemetry.
-2. **Run the Automated Data-Science Review, Calibration & Supply-Chain Policy Translators:**
+2. **Run the 7-Question Practitioner Assessment, Data-Science Review, Calibration & Supply-Chain Policy Translators:**
    ```python
    from scale_forecasting import Forecaster
    from scale_forecasting.review import calibration_report, review_run
+
+   # For Forecaster.auto() sessions — answer the 7 recurring practitioner trust questions:
+   # (1) model_vs_baseline, (2) ensemble_vs_single, (3) covariates_vs_overfitting,
+   # (4) global_vs_local, (5) hierarchy_reconciliation, (6) horizon_stability, (7) forecast_trust
+   # f_auto.practitioner_assessment_df() | f_auto.assess() | f_auto.compare_models()
+   # f_auto.baseline_value_df() | f_auto.hierarchy_value_df() | f_auto.autofocus_ledger_df()
 
    review = review_run("ensemble-demo-8ca68173be52")
    cal = calibration_report("ensemble-demo-8ca68173be52")

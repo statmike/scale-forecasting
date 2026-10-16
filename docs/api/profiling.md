@@ -5,3 +5,5 @@
 ::: scale_forecasting.profiling.cost
 
 ::: scale_forecasting.profiling.measure
+
+::: scale_forecasting.profiling.duration

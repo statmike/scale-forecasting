@@ -588,6 +588,8 @@ def run_cell(
     model_name: str,
     cfg: RunConfig,
     params: dict[str, Any] | None = None,
+    *,
+    future_df: pd.DataFrame | None = None,
 ) -> CellResult:
     """Fit + (optional backtest) + predict ONE ``(ts_id, model)`` cell.
 
@@ -751,7 +753,7 @@ def run_cell(
         # level-shift step is carried forward, lagged covariates are read off their own source
         # column, and only user-supplied exog falls back to a recency stand-in because it is
         # genuinely unknown.
-        future_exog = build_future_features(y, X, model_cfg)
+        future_exog = build_future_features(y, X, model_cfg, future_covariates_df=future_df)
         eff_qs = cfg.output.effective_quantiles
         predictions = model.predict(model_cfg.data.horizon, future_exog, quantiles=eff_qs)
         explanations = _collect_explanations(
@@ -910,6 +912,8 @@ def run_panel(
     model_name: str,
     cfg: RunConfig,
     params: dict[str, Any] | None = None,
+    *,
+    future_df: pd.DataFrame | None = None,
 ) -> list[CellResult]:
     """Fit + (optional panel backtest) + predict ONE global/hybrid model across a panel.
 
@@ -932,6 +936,10 @@ def run_panel(
     for raw_uid, sub in panel.groupby(id_col, sort=True):
         reg_sub = regularize_series_grid(sub, cfg)
         series_frames[str(raw_uid)] = reg_sub.sort_values(date_col).reset_index(drop=True)
+    future_frames: dict[str, pd.DataFrame] = {}
+    if future_df is not None and not future_df.empty and id_col in future_df.columns:
+        for raw_uid, f_sub in future_df.groupby(id_col, sort=False):
+            future_frames[str(raw_uid)] = f_sub.sort_values(date_col).reset_index(drop=True)
     uids = sorted(series_frames.keys())
     if not uids:
         return []
@@ -1153,7 +1161,12 @@ def run_panel(
                 sub, model_cfg, lams[uid], model_cls.lags_covariates_internally
             )
             full_series_map[uid] = (y_full, X_full)
-            full_futr_map[uid] = build_future_features(y_full, X_full, model_cfg)
+            full_futr_map[uid] = build_future_features(
+                y_full,
+                X_full,
+                model_cfg,
+                future_covariates_df=future_frames.get(uid),
+            )
             train_rows_total += len(y_full)
 
         model = model_cls(resolved, ctx)

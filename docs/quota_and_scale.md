@@ -422,14 +422,24 @@ meters rather than Vertex's, and over the zonal candidate list the Dataproc walk
       the cluster would be built with 4 worker(s), not 8
 ```
 
-Families on Serverless, on BigQuery, and on a cluster you told the run to reuse are named but not
-metered: a reused cluster already exists so nothing is being asked for, a Serverless batch has no
-fixed allocation to pre-read, and BigQuery has no capacity meter at all.
+Families on **Dataproc Serverless Spark** (`spark/serverless`) are metered against all three regional
+Compute Engine quotas that bind Serverless batches — `compute.googleapis.com/disks_total_gb`
+(400 GB primary shuffle disk per driver/executor node), `compute.googleapis.com/cpus`, and (when
+`use_gpu=true`) `compute.googleapis.com/nvidia_l4_gpus`. When multiple model families (`statistical`,
+`ml`, `deep_learning`) dispatch as concurrent Serverless Spark batches in the same run DAG, the
+regional quota ceiling is divided across the active Serverless family batches so concurrent batches
+cannot starve one another for shuffle disk or vCPUs, and `spark.dynamicAllocation.maxExecutors`
+(together with `initialExecutors` and `minExecutors`) is clamped at submit time. **Vertex AI AutoML**
+(`vertex_automl`) is metered against `aiplatform.googleapis.com/custom_model_training_cpus`. Only
+BigQuery (`bigquery`, which uses serverless SQL slots rather than VM/GPU quota) and pre-existing
+reused clusters skip per-job VM quota metering.
 
-The launch path runs the same check by itself, before the first cluster create, on both the Ray and
-the Dataproc-cluster path. A region that cannot host the fleet is recorded as a hard ceiling and
+The launch path runs the same check by itself before creating or submitting jobs across all six
+compute runtimes (Ray, Dataproc cluster, Dataproc Serverless Spark, Vertex AI CustomJob, GCE / GKE,
+and Vertex AI AutoML). A region that cannot host the fleet is recorded as a hard ceiling and
 skipped without spending the ~12 minutes a failed Ray create costs; a region that can host a
-*smaller* fleet has this run's pool ceilings — or its physical worker count, on Dataproc — lowered
+*smaller* fleet has this run's pool ceilings — or its physical worker / executor count, on Dataproc
+cluster and Serverless Spark — lowered
 to fit rather than failing. It never raises a floor: quota is evidence about what you are permitted,
 not about what the work needs. And it never changes `run_id`, so the same config is still the same
 run in a region that grants less. Set `compute.capacity.preflight: false` to skip it (the only

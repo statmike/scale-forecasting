@@ -127,6 +127,24 @@ variable "network_attachment_id" {
   default     = null
 }
 
+variable "venv_archive_uri" {
+  description = "Packed-venv archive URI for Dataproc cluster jobs → SF_VENV_ARCHIVE. From module.container.venv_archive_uri."
+  type        = string
+  default     = null
+}
+
+variable "gpu_image_uri" {
+  description = "Optional custom GPU Dataproc VM image → SF_GPU_IMAGE. From module.container.gpu_image_uri."
+  type        = string
+  default     = null
+}
+
+variable "gke_cluster_name" {
+  description = "Optional standing GKE cluster name → SF_GKE_CLUSTER. From module.gke.cluster_name."
+  type        = string
+  default     = null
+}
+
 variable "machine_type" {
   description = "Machine type for the runtime VM. e2-standard-4 is ample to drive Dataproc/Ray/BigQuery from a notebook."
   type        = string
@@ -217,6 +235,9 @@ locals {
     SF_CONTAINER_IMAGE        = var.container_image
     SF_SUBNETWORK_URI         = var.subnetwork_uri
     SF_RAY_NETWORK_ATTACHMENT = var.network_attachment_id
+    SF_VENV_ARCHIVE           = var.venv_archive_uri
+    SF_GPU_IMAGE              = var.gpu_image_uri
+    SF_GKE_CLUSTER            = var.gke_cluster_name
     # NB01's interactive Spark Connect session reads these: SF_DATAPROC_REGION and SF_DATAPROC_SUBNET
     # (relative form). SF_COMPUTE_SA (above) is the identity the Session runs its runtime AS
     # (mintOAuthToken, a roles/dataproc.worker permission the runner lacks but compute has).

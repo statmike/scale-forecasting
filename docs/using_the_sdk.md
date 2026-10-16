@@ -66,6 +66,9 @@ print(result.views)  # the five registry views — query any of them by run_id
 | `sf.Forecaster.from_file(path)` | a JSON config file (raises `sf.ConfigError` on a bad file) |
 | `sf.Forecaster.from_dict(data)` | an already-parsed dict (raises `sf.ConfigError` on a bad schema) |
 | `sf.Forecaster.from_run_id(run_id)` | the config a past run landed under, read back out of its registry header |
+| `sf.Forecaster.profile_data(source, *, horizon=14, ...)` | run a Step 0 7-dimension Data Profile & Readiness scan on a DataFrame or BigQuery table and return a human-readable `pd.DataFrame` |
+| `sf.Forecaster.build_config(source, *, tier="wide_field", where="auto", ...)` | inspect a DataFrame or BigQuery table and return a glass-box `ConfigBlueprint` (`blueprint.config`, `blueprint.profile_df()`, `blueprint.rationale_df`, `blueprint.duration_estimate`) |
+| `sf.Forecaster.auto(source, *, tier="wide_field", autofocus=True, ...)` | compile and execute a single pass or multi-branch `autofocus=True` tournament with cell borrowing, Champion Ratchet, and 7-Question Practitioner Assessment (see [Auto-forecaster & `autofocus`](./auto_forecaster.md)) |
 
 `from_run_id` is for the case where you inherited a broken run and have its id but not its config
 file — most often to repair it. It refuses rather than guessing: if the registry has no stored
@@ -173,6 +176,15 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.score_realized(actuals_df)` | `pd.DataFrame` | Joins published predictions against newly arrived actuals and flags live accuracy drift (`drift_flagged`) |
 | `forecaster.revision_stability_df([run_1, ...])` | `pd.DataFrame` | Cross-run forecast revision stability (`mar`, `revision_cov`, `whipsaw_flagged`) across overlapping target dates |
 | `forecaster.exceptions_df()` | `pd.DataFrame` | Ranked Top-$N$ operational exception triage queue across 5 failure modes (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) |
+| `forecaster.autofocus_ledger_df()` | `pd.DataFrame` | Pass-by-pass and branch-by-branch tournament ledger for `Forecaster.auto(..., autofocus=True)` runs (`pass_id`, `parent_pass_ids`, `champion_model`, `champion_score`, `fva_vs_univariate_pct`, `fva_vs_foundation_pct`, `covariate_lift_pct`, `reconciliation_lift_pct`, `champion_is_univariate`, `beaten_challengers`, `is_session_champion`) |
+| `forecaster.autofocus_diff_df()` | `pd.DataFrame` | Parameter-by-parameter config diffs across `autofocus` branches (`branch_hypothesis`, `action`, `parameter`, `old_value`, `new_value`, `rationale`) |
+| `forecaster.baseline_value_df()` | `pd.DataFrame` | Multi-baseline value ladder comparing the session champion against every configured baseline (`naive_seasonal`, `theta`, `arima_plus@univariate`, `chronos_bolt` / `timesfm_torch@v2.5_univariate` / `timesfm@univariate`) plus beaten complex challengers when a univariate model wins |
+| `forecaster.compare_models(model_a, model_b)` | `pd.DataFrame` | Head-to-head comparison of any two models (or the session champion against all models) with FVA %, series win rate %, and Diebold–Mariano $p$-values |
+| `forecaster.profile_df()` | `pd.DataFrame` | Step 0 7-dimension Data Profile & Readiness table (`scale_and_shape`, `demand_regime`, `seasonality_and_scaling`, `breaks_and_outliers`, `hygiene_and_calendar`, `covariates`, `hierarchy_topology`) |
+| `forecaster.practitioner_assessment_df()` / `forecaster.assess()` | `pd.DataFrame` / `str` | Answers the 7 recurring practitioner trust questions (`model_vs_baseline`, `ensemble_vs_single`, `covariates_vs_overfitting`, `global_vs_local`, `hierarchy_reconciliation`, `horizon_stability`, `forecast_trust`) with evidence and verdicts |
+| `forecaster.hierarchy_value_df()` | `pd.DataFrame` | Per-level hierarchy reconciliation audit (`Root`, `Intermediate`, `Leaf`) with base vs. reconciled accuracy and reconciliation lift |
+| `forecaster.explain_auto_decisions_df()` | `pd.DataFrame` | Unified end-to-end audit table combining Pass 1 compilation rationales (`[PINNED]` user constraints + tier rules) and all subsequent `autofocus` changes |
+| `forecaster.preview_next_loop()` / `forecaster.step()` | `LoopContinuation` / `Forecaster` | Preview proposed next-pass mutations and advance one interactive step when running with `step_by_step=True` |
 | `forecaster.export_report("report.html")` | `pathlib.Path` | Exports a self-contained, single-file interactive HTML (and optional `.json`) executive report |
 
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the

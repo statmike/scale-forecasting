@@ -323,3 +323,102 @@ def emit_airflow_dag(
     out.append(f"    {_list(leaves)} >> finalize_run")
 
     return "\n".join(out) + "\n"
+
+
+def emit_autofocus_airflow_dag(
+    cfg: RunConfig,
+    config_uri: str,
+    *,
+    tier: str = "wide_field",
+    where: str = "auto",
+    goal: str = "accuracy",
+    autofocus_mode: str = "dag",
+    max_passes: int = 3,
+    dag_id: str | None = None,
+) -> str:
+    """Render a multi-pass `autofocus` tournament as a native Airflow ``dag_<run_id>.py`` string.
+
+    Emits an Airflow DAG that runs Pass 1 (`autofocus_pass_1`), fans out across the 3 Level-2
+    hypothesis branches (`autofocus_branch_2a`, `autofocus_branch_2b`, `autofocus_branch_2c`) with
+    automatic cross-run model borrowing (`reuse_prior_runs=True`), and joins into the Level-3
+    synthesis & Champion Ratchet task (`autofocus_pass_3_synthesis`).
+    """
+    from .registry.ids import make_run_id
+
+    run_id = make_run_id(cfg)
+    dag_id = dag_id or f"scale_forecasting_autofocus_{run_id}"
+    out: list[str] = [
+        _PREAMBLE.format(
+            run_id=run_id,
+            run_id_lit=_str(run_id),
+            config_uri_lit=_str(config_uri),
+            dag_id_lit=_str(dag_id),
+        )
+    ]
+
+    out.append("    # --- Pass 1: Glass-Box Tier Baseline & Residual Diagnostics -----------")
+    out.append(
+        "    autofocus_pass_1 = PythonOperator(\n"
+        '        task_id="autofocus_pass_1",\n'
+        "        python_callable=airflow_tasks.autofocus_pass_1,\n"
+        "        op_kwargs={\n"
+        '            "config_uri": CONFIG_URI,\n'
+        f'            "tier": {_str(tier)},\n'
+        f'            "where": {_str(where)},\n'
+        f'            "goal": {_str(goal)},\n'
+        f'            "autofocus_mode": {_str(autofocus_mode)},\n'
+        f'            "max_passes": {int(max_passes)},\n'
+        "        },\n"
+        "    )"
+    )
+
+    if autofocus_mode == "linear":
+        out.append("\n    # --- Pass 2: Sequential Linear Refinement + Champion Ratchet ----------")
+        out.append(
+            "    autofocus_pass_2 = PythonOperator(\n"
+            '        task_id="autofocus_pass_2",\n'
+            "        python_callable=airflow_tasks.autofocus_branch,\n"
+            '        op_kwargs={"config_uri": CONFIG_URI, "branch_id": "2"},\n'
+            "    )"
+        )
+        out.append("\n    # --- Pass 3: Final Champion Ratchet & Audit Summary -------------------")
+        out.append(
+            "    autofocus_pass_3_synthesis = PythonOperator(\n"
+            '        task_id="autofocus_pass_3_synthesis",\n'
+            "        python_callable=airflow_tasks.autofocus_synthesis,\n"
+            '        op_kwargs={"config_uri": CONFIG_URI},\n'
+            '        trigger_rule="all_done",\n'
+            "    )"
+        )
+        out.append("\n    # --- dependencies ----------------------------------------------------")
+        out.append("    autofocus_pass_1 >> autofocus_pass_2 >> autofocus_pass_3_synthesis")
+    else:
+        out.append("\n    # --- Level 2: Parallel Hypothesis Branches (Borrowing Pass 1 Models) --")
+        for b_id, b_slug in (
+            ("2A", "autofocus_branch_2a"),
+            ("2B", "autofocus_branch_2b"),
+            ("2C", "autofocus_branch_2c"),
+        ):
+            out.append(
+                f"    {b_slug} = PythonOperator(\n"
+                f"        task_id={_str(b_slug)},\n"
+                "        python_callable=airflow_tasks.autofocus_branch,\n"
+                f'        op_kwargs={{"config_uri": CONFIG_URI, "branch_id": {_str(b_id)}}},\n'
+                "    )"
+            )
+        out.append("\n    # --- Level 3: Synthesis of Winning Branches & Champion Ratchet --------")
+        out.append(
+            "    autofocus_pass_3_synthesis = PythonOperator(\n"
+            '        task_id="autofocus_pass_3_synthesis",\n'
+            "        python_callable=airflow_tasks.autofocus_synthesis,\n"
+            '        op_kwargs={"config_uri": CONFIG_URI},\n'
+            '        trigger_rule="all_done",\n'
+            "    )"
+        )
+        out.append("\n    # --- dependencies ----------------------------------------------------")
+        out.append(
+            "    autofocus_pass_1 >> [autofocus_branch_2a, autofocus_branch_2b, "
+            "autofocus_branch_2c] >> autofocus_pass_3_synthesis"
+        )
+
+    return "\n".join(out) + "\n"

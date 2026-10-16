@@ -12,8 +12,9 @@ the module comment (next to the resource) wins.
 - **Terraform lives in** [`terraform/`](https://github.com/statmike/scale-forecasting/tree/main/terraform); the operator runbook is
   [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md).
 - **One rule to keep in mind:** Terraform owns the *containers* (project, dataset, buckets,
-  connection, network, service accounts, roles). The **application** owns the *tables* — the six
-  registry/data tables are defined once in `src/scale_forecasting/registry/ddl.py` and created by
+  connection, network, service accounts, roles). The **application** owns the *tables* — the nine
+  source/registry tables (`4` source + `5` registry) and five analytical SQL views are defined once in
+  `src/scale_forecasting/registry/ddl.py` and `views.py` and created by
   `registry.tables.ensure_tables()` at run time, so there is a single source of truth for the DDL and no
   HCL↔Python drift.
 
@@ -30,9 +31,9 @@ flowchart LR
     end
     subgraph Stage2["Stage 2 · terraform/main/ (Remote State in GCS)"]
         M_API["apis"] --> M_IAM["iam"] & M_STO["storage"] & M_BQ["bigquery"] & M_BUD["budget"] & M_NET["network"] & M_CON["container"]
-        M_IAM & M_STO & M_BQ & M_NET & M_CON --> M_SEED["seed (100k series)"]
+        M_IAM & M_STO & M_BQ & M_NET & M_CON --> M_SEED["seed (100k series) · smoke"]
         M_IAM & M_STO & M_NET --> M_COLAB["colab (sf-main)"]
-        M_IAM & M_STO & M_NET --> M_COMP["composer (optional)"]
+        M_IAM & M_STO & M_NET --> M_COMP["composer · gke (optional)"]
     end
     Stage1 --> Stage2
 ```
@@ -285,9 +286,11 @@ attach it to worker jobs — again, no keys.
 | `roles/dataproc.editor` | Submit Dataproc Serverless batches and manage ephemeral Dataproc clusters | predefined |
 | `roles/aiplatform.user` | Submit Ray-on-Vertex jobs, Vertex AI `CustomJob`s, and Vertex AI AutoML `PipelineJob` / `BatchPredictionJob`s | predefined |
 | `roles/dataflow.developer` | Allow Vertex AI Tabular Workflows (`automl_mode="tabular_workflow"`) to launch Dataflow feature-transform jobs | predefined |
-| `roles/compute.instanceAdmin.v1` | Create and delete ephemeral single-VM Compute Engine (`runtime="gce"`) instances | predefined |
+| `roles/compute.instanceAdmin.v1` | Create and delete ephemeral single-VM Compute Engine (`runtime="gce"`) instances and read regional Compute Engine quotas (`compute.regions.get`) | predefined |
+| `roles/serviceusage.serviceUsageConsumer` | Read live Service Usage consumer quota limits (`serviceusage.quotas.get`) across `compute`, `aiplatform`, and `dataproc` for dynamic 6-runtime preflight before job launch | predefined |
 | `roles/container.admin` | Create/delete ephemeral GKE clusters and submit Kubernetes `Job`/`Deployment` manifests (`runtime="gke"`) | predefined |
 | **`sfRayClusterManager`** | Create + delete + get + list the Ray cluster it runs on | **custom** |
+| `roles/composer.worker` | Allow Cloud Composer 3 environment workers to run as `scale-forecasting-runner` when `create_composer = true` | predefined |
 
 ### Compute SA roles
 
@@ -301,7 +304,9 @@ attach it to worker jobs — again, no keys.
 | `roles/dataproc.worker` | Batch runtime SA: logs, metrics, staging | predefined |
 | `roles/aiplatform.user` | Execute Vertex AI Pipeline components (`tabular_workflow`) and `BatchPredictionJob` steps | predefined |
 | `roles/dataflow.developer` + `roles/dataflow.worker` | Launch and execute Dataflow workers inside Vertex AI Tabular Workflows (`feature_transform_engine`) | predefined |
+| `roles/compute.instanceAdmin.v1` | Allow GCE single-VM (`runtime="gce"`) guest COS `trap cleanup EXIT` REST API self-delete on completion | predefined |
 | `roles/artifactregistry.reader` | Pull the shared runtime image | predefined |
+| `roles/container.defaultNodeServiceAccount` | GKE worker node telemetry and system logging/monitoring | predefined |
 
 ### Why three custom roles instead of predefined ones
 

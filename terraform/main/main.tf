@@ -207,6 +207,9 @@ module "colab" {
   compute_sa            = module.iam.compute_email
   container_image       = "${module.container.image_repo_path}:${var.seed_image_tag}"
   network_attachment_id = module.network.network_attachment_id
+  venv_archive_uri      = module.container.venv_archive_uri
+  gpu_image_uri         = module.container.gpu_image_uri
+  gke_cluster_name      = module.gke.cluster_name
 
   depends_on = [module.apis, module.iam, module.storage, module.network, module.bigquery, module.container]
 }

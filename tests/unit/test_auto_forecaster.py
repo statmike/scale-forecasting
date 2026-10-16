@@ -1,0 +1,1145 @@
+"""Unit and contract tests for Track G:
+- Synthetic DGP Benchmark Suite (`scale_forecasting.benchmarks`)
+- 7-Runtime Parametric Wall-Clock Duration Predictor (`scale_forecasting.profiling.duration`)
+- Glass-Box Auto-Forecaster, Astronomy Exposure Tiers & Closed-Loop `autofocus`
+  (`scale_forecasting.auto`, `scale_forecasting.auto_policy`)
+- Human-first release notes generator (`scale_forecasting.agent_surfaces.render_release_notes`)
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from scale_forecasting import (
+    BENCHMARK_NAMES,
+    EXPOSURE_TIERS,
+    SCALE_REGIMES,
+    Forecaster,
+    RunConfig,
+    auto_forecast,
+    benchmark_catalog,
+    build_config,
+    calibrate_duration_from_frames,
+    classify_scale_regime,
+    inspect_panel_for_auto,
+    list_benchmarks,
+    load_benchmark,
+    predict_run_duration,
+    select_default_baselines,
+    select_hierarchy_reconciliation_methods,
+)
+from scale_forecasting.agent_surfaces import render_release_notes
+from scale_forecasting.errors import ConfigError
+
+
+def test_benchmark_suite_all_20_dgp_panels() -> None:
+    names = list_benchmarks()
+    assert len(names) == 20
+    assert tuple(names) == BENCHMARK_NAMES
+
+    cat = benchmark_catalog()
+    assert len(cat) == 20
+    assert {"name", "title", "expected_regime", "true_covariates", "decoy_covariates"}.issubset(
+        cat.columns
+    )
+
+    for b_name in BENCHMARK_NAMES:
+        ds = load_benchmark(b_name, n_series=3)
+        assert ds.spec.name == b_name
+        assert not ds.df.empty
+        assert not ds.panel_df.empty
+        assert {"ts_id", "ds", "y"}.issubset(ds.df.columns)
+        summary = ds.summary_dict()
+        assert summary["name"] == b_name
+        assert summary["n_series"] >= 3
+
+    with pytest.raises(ValueError, match="Unknown benchmark"):
+        load_benchmark("dgp_99_nonexistent")
+
+
+def test_predict_run_duration_all_7_runtimes_and_calibration() -> None:
+    runtimes_and_modes = [
+        ("spark", {}),
+        ("ray", {"ray_mode": "vertex"}),
+        ("vertex", {}),
+        ("gce", {"workers": 1}),
+        ("gke", {"gke_mode": "job"}),
+        ("vertex_automl", {"automl_mode": "training_job"}),
+    ]
+    for rt, extra in runtimes_and_modes:
+        models = ["vertex_tide"] if rt == "vertex_automl" else ["theta", "lightgbm"]
+        fam_block = (
+            {"automl": {"runtime": rt, **extra}}
+            if rt == "vertex_automl"
+            else {
+                "statistical": {"runtime": rt, **extra},
+                "ml": {"runtime": rt, **extra},
+            }
+        )
+        cfg = RunConfig.model_validate(
+            {
+                "run_name": f"dur-{rt}",
+                "data": {"source_table": "source_series", "horizon": 14},
+                "models": models,
+                "compute": {
+                    "families": fam_block,
+                },
+            }
+        )
+        est = predict_run_duration(cfg, n_series=100, median_n_obs=365.0)
+        assert est.total_p50_seconds > 0.0
+        assert est.total_p90_seconds >= est.total_p50_seconds
+        assert est.critical_path_family in {b.family for b in est.family_breakdowns}
+        d = est.to_dict()
+        assert d["n_series"] == 100
+        assert "family_breakdowns" in d
+
+    # Native BigQuery runtime
+    bq_cfg = RunConfig.model_validate(
+        {
+            "run_name": "dur-bq",
+            "data": {"source_table": "source_series", "horizon": 14},
+            "models": ["arima_plus", "timesfm"],
+        }
+    )
+    bq_est = predict_run_duration(bq_cfg, n_series=200)
+    assert bq_est.critical_path_family == "native"
+    assert bq_est.total_p50_seconds > 10.0
+
+    # Local in-process execution with borrowed models discount
+    local_cfg = RunConfig.model_validate(
+        {
+            "run_name": "dur-local",
+            "data": {"source_table": "dataframe_panel", "horizon": 14},
+            "models": ["naive_seasonal", "theta", "lightgbm"],
+        }
+    )
+    est_full = predict_run_duration(local_cfg, n_series=10, where="local")
+    est_borrowed = predict_run_duration(
+        local_cfg,
+        n_series=10,
+        where="local",
+        borrowed_models=["naive_seasonal", "theta"],
+    )
+    assert est_borrowed.execute_p50_seconds < est_full.execute_p50_seconds
+
+    # Empirical calibration from telemetry frames
+    jobs_df = pd.DataFrame(
+        [
+            {"runtime": "vertex", "provision_seconds": 175.0},
+            {"runtime": "vertex", "provision_seconds": 195.0},
+            {"runtime": "spark", "provision_seconds": 70.0},
+        ]
+    )
+    cells_df = pd.DataFrame(
+        [
+            {"model_type": "theta", "fit_seconds": 0.05, "n_obs": 365},
+            {"model_type": "theta", "fit_seconds": 0.06, "n_obs": 365},
+            {"model_type": "lightgbm", "fit_seconds": 0.25, "n_obs": 365},
+        ]
+    )
+    cal = calibrate_duration_from_frames(jobs_df, cells_df, project_id="demo-proj")
+    assert cal.n_jobs_analyzed == 3
+    assert cal.n_cells_analyzed == 3
+    assert "vertex" in cal.provisioning_priors
+    assert "theta" in cal.model_fit_priors
+
+
+def test_build_config_tiers_sandboxes_goals_and_budgets(tmp_path: Path) -> None:
+    assert tuple(EXPOSURE_TIERS.keys()) == ("first_light", "wide_field", "deep_sky", "deep_field")
+
+    ds = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=4)
+    profile = inspect_panel_for_auto(ds.panel_df)
+    assert profile.n_series == 4
+    assert "promo_depth" in profile.future_covariates
+
+    for tier in ("first_light", "wide_field", "deep_sky", "deep_field"):
+        bp = Forecaster.build_config(
+            ds.panel_df,
+            tier=tier,
+            where="local",
+            goal="accuracy",
+        )
+        assert bp.tier == tier
+        assert bp.where == "local"
+        assert len(bp.config.models) >= 2
+        assert not bp.rationale_df.empty
+        assert bp.estimated_minutes_p50 > 0.0
+        assert "Glass-Box Blueprint" in bp.explain()
+
+    # Service-level goal + cost/time budget clamping + file serialization
+    bp_sl = build_config(
+        ds.panel_df,
+        tier="deep_sky",
+        where="cloud_cpu",
+        goal="service_level",
+        max_minutes=0.01,
+        max_usd=0.01,
+        only_available_models=False,
+    )
+    assert bp_sl.config.backtest.decision_metric == "pinball"
+    assert 0.95 in bp_sl.config.output.quantiles
+    assert any(bp_sl.rationale_df["category"] == "budget_guardrail")
+
+    cfg_path = tmp_path / "compiled_auto.json"
+    bp_sl.to_file(cfg_path)
+    loaded = RunConfig.model_validate_json(cfg_path.read_text(encoding="utf-8"))
+    assert loaded.run_name == bp_sl.config.run_name
+    assert json.loads(bp_sl.to_json())["run_name"] == bp_sl.config.run_name
+    assert bp_sl.to_dict()["tier"] == "deep_sky"
+
+    with pytest.raises(ConfigError, match="Unknown exposure tier"):
+        build_config(ds.panel_df, tier="invalid_tier")
+    with pytest.raises(ConfigError, match="Unknown where"):
+        build_config(ds.panel_df, where="invalid_where")
+    with pytest.raises(ConfigError, match="Unknown goal"):
+        build_config(ds.panel_df, goal="invalid_goal")
+
+
+def test_forecaster_auto_closed_loop_autofocus_and_early_stopping() -> None:
+    # 1. White-noise panel stops cleanly after Pass 1 (zero wasted passes)
+    ds_wn = load_benchmark("dgp_12_already_optimal_white_noise", n_series=3)
+    f_wn = Forecaster.auto(ds_wn.panel_df, tier="first_light", autofocus=True, max_passes=2)
+    assert f_wn.auto_session is not None
+    assert len(f_wn.auto_session.passes) == 1
+    prev_wn = f_wn.preview_next_loop()
+    assert prev_wn.should_continue is False
+
+    # 2. Multiplicative log panel triggers @transform_log1p in Pass 2 and improves WAPE
+    ds_log = load_benchmark("dgp_02_multiplicative_log", n_series=3)
+    f_log = Forecaster.auto(ds_log.panel_df, tier="first_light", autofocus=True, max_passes=2)
+    assert f_log.auto_session is not None
+    assert len(f_log.auto_session.passes) == 2
+    p1_log, p2_log = f_log.auto_session.passes
+    assert p2_log.best_score < p1_log.best_score
+    assert p2_log.models_borrowed >= 2
+    assert any("inject_transform_log1p" in m for m in p2_log.mutations_applied)
+
+    # 3. Decoy covariate panel prunes noise covariates in Pass 2 and improves WAPE
+    ds_cov = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=3)
+    f_cov = auto_forecast(
+        ds_cov.panel_df,
+        tier="first_light",
+        autofocus=True,
+        autofocus_mode="linear",
+        max_passes=2,
+    )
+    assert f_cov.auto_session is not None
+    assert len(f_cov.auto_session.passes) == 2
+    p1_cov, p2_cov = f_cov.auto_session.passes
+    assert p2_cov.best_score < p1_cov.best_score
+    assert set(p2_cov.config.features.future_covariates) == {"promo_depth", "price_index"}
+
+    ledger_df = f_cov.autofocus_ledger_df()
+    assert len(ledger_df) == 2
+    assert list(ledger_df["pass_index"]) == [1, 2]
+    assert f_cov.blueprint is not None
+    assert not f_cov.leaderboard_df().empty
+    assert not f_cov.predictions_df().empty
+
+    # 4. Step-by-step interactive continuation (`step_by_step=True` + `step()`)
+    f_step = Forecaster.auto(
+        ds_log.panel_df,
+        tier="first_light",
+        autofocus=True,
+        step_by_step=True,
+        max_passes=2,
+    )
+    assert len(f_step.autofocus_ledger_df()) == 1
+    preview = f_step.preview_next_loop()
+    assert preview.should_continue is True
+    assert preview.confidence >= 0.35
+    f_step2 = f_step.step(steps=1)
+    assert len(f_step2.autofocus_ledger_df()) == 2
+    assert not f_step2.autofocus_diff_df().empty
+    assert not f_step2.explain_auto_decisions_df().empty
+
+
+def test_user_constraint_pinning_and_blueprint_overrides() -> None:
+    ds = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=3)
+
+    # Pin models, decision_metric, n_folds, hpo, ensemble, calibration, explainability
+    bp = Forecaster.build_config(
+        ds.panel_df,
+        tier="wide_field",
+        where="local",
+        models=["theta", "lightgbm"],
+        include_models=["regression_lags"],
+        exclude_models=["xgboost"],
+        decision_metric="mase",
+        n_folds=3,
+        hpo=True,
+        ensemble=["inverse_error", "nnls"],
+        explainability=False,
+        calibration=False,
+        overrides={"run_name": "pinned-custom-run"},
+    )
+    assert bp.config.run_name == "pinned-custom-run"
+    assert bp.config.models == ["theta", "lightgbm", "regression_lags"]
+    assert bp.config.backtest.decision_metric == "mase"
+    assert bp.config.backtest.n_folds == 3
+    assert bp.config.hpo.enabled is True
+    assert bp.config.ensemble.strategies == ["inverse_error", "nnls"]
+    assert bp.config.output.point_forecast == "raw"
+    assert "user_constraint" in set(bp.rationale_df["category"])
+
+    # Fluent ConfigBlueprint.with_overrides()
+    bp2 = bp.with_overrides(run_name="overridden-run", backtest={"n_folds": 2})
+    assert bp2.config.run_name == "overridden-run"
+    assert bp2.config.backtest.n_folds == 2
+
+    # Pinned models respected across autofocus passes
+    f_pinned = Forecaster.auto(
+        ds.panel_df,
+        tier="first_light",
+        models=["theta", "lightgbm"],
+        decision_metric="mase",
+        autofocus=True,
+        autofocus_mode="linear",
+        max_passes=2,
+    )
+    assert f_pinned.config.backtest.decision_metric == "mase"
+    for m in f_pinned.config.models:
+        base_m = m.split("@")[0]
+        assert base_m in {"naive_seasonal", "theta", "lightgbm"}
+
+
+def test_multi_branch_dag_autofocus_and_all_4_specialist_regimes() -> None:
+    from scale_forecasting.reconciliation import build_hierarchy, verify_coherence
+
+    # 1. Multi-branch DAG (`1 -> 2A -> 2B -> 3`) on `dgp_04_true_vs_decoy_covs`
+    ds_04 = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=3)
+    f_04 = Forecaster.auto(
+        ds_04.panel_df,
+        tier="first_light",
+        autofocus=True,
+        autofocus_mode="dag",
+        max_passes=3,
+    )
+    assert f_04.auto_session is not None
+    pass_ids_04 = [p.pass_id for p in f_04.auto_session.passes]
+    assert pass_ids_04 == ["1", "2A", "2B", "3"]
+    champ_04 = f_04.auto_session.champion_record()
+    assert champ_04.is_session_champion is True
+    assert champ_04.best_score < f_04.auto_session.passes[0].best_score
+    diff_df = f_04.autofocus_diff_df()
+    assert not diff_df.empty
+    assert {
+        "pass_id",
+        "parent_pass_ids",
+        "branch_hypothesis",
+        "action",
+        "parameter",
+        "old_value",
+        "new_value",
+        "delta_vs_pass1_pct",
+        "is_session_champion",
+    }.issubset(diff_df.columns)
+
+    # 2. Intermittent lumpy (`dgp_03`) escalates in Pass 2 and improves MASE
+    ds_03 = load_benchmark("dgp_03_intermittent_lumpy", n_series=4)
+    f_03 = Forecaster.auto(ds_03.panel_df, tier="first_light", autofocus=True, max_passes=2)
+    assert f_03.auto_session is not None
+    assert len(f_03.auto_session.passes) >= 2
+    assert f_03.auto_session.champion_record().best_score < f_03.auto_session.passes[0].best_score
+
+    # 3. Hierarchical non-negative (`dgp_08`) preserves exact additive coherence == 0.0
+    ds_08 = load_benchmark("dgp_08_hierarchical_nonneg", n_series=6)
+    f_08 = Forecaster.auto(ds_08.panel_df, tier="first_light", autofocus=True, max_passes=3)
+    assert f_08.auto_session is not None
+    champ_08 = f_08.auto_session.champion_record()
+    assert champ_08.best_score < f_08.auto_session.passes[0].best_score
+    _, hspec = build_hierarchy(ds_08.df, champ_08.config)
+    champ_preds = f_08.auto_session.raw_predictions_df
+    assert champ_preds is not None
+    champ_preds = champ_preds[champ_preds["model_type"] == champ_08.best_model]
+    assert float(verify_coherence(champ_preds, hspec)) < 1e-6
+
+    # 4. Newsvendor service-level (`dgp_10`) populates pinball metric and improves score
+    ds_10 = load_benchmark("dgp_10_newsvendor_service", n_series=4)
+    f_10 = Forecaster.auto(
+        ds_10.panel_df,
+        tier="first_light",
+        goal="service_level",
+        autofocus=True,
+        max_passes=2,
+    )
+    assert f_10.auto_session is not None
+    champ_10 = f_10.auto_session.champion_record()
+    assert champ_10.decision_metric == "pinball"
+    assert champ_10.best_score < f_10.auto_session.passes[0].best_score
+    assert champ_10.fva_vs_naive_pct > 0.0
+
+    # 5. Cold-start mixed (`dgp_11`) escalates to cross-series pooling and improves WAPE
+    ds_11 = load_benchmark("dgp_11_cold_start_mixed", n_series=4)
+    f_11 = Forecaster.auto(ds_11.panel_df, tier="first_light", autofocus=True, max_passes=2)
+    assert f_11.auto_session is not None
+    assert f_11.auto_session.champion_record().best_score < f_11.auto_session.passes[0].best_score
+
+
+def test_round3_scale_regimes_baselines_hierarchy_and_compound_variants() -> None:
+    from dataclasses import replace
+
+    from scale_forecasting.features import resolve_model_variant
+
+    # 1. Scale regimes across 1 .. 50,000 series
+    assert tuple(SCALE_REGIMES.keys()) == ("micro", "small", "medium", "large", "hyperscale")
+    assert classify_scale_regime(5) == "micro"
+    assert classify_scale_regime(50) == "small"
+    assert classify_scale_regime(500) == "medium"
+    assert classify_scale_regime(5000) == "large"
+    assert classify_scale_regime(50000) == "hyperscale"
+
+    ds_15 = load_benchmark("dgp_15_scale_crossover_panel", n_series=16)
+    prof_15 = inspect_panel_for_auto(ds_15.panel_df)
+    assert prof_15.scale_regime == "small"
+    assert prof_15.cross_series_corr > 0.35
+
+    # Simulate large and hyperscale profiles to verify O(T^2) pruning, worker sharding, and top_k
+    prof_large = replace(prof_15, n_series=3500, source_table="proj.ds.tbl")
+    bp_large = Forecaster.build_config(
+        prof_large, tier="deep_sky", where="cloud_cpu", only_available_models=False
+    )
+    assert bp_large.config.ensemble.top_k == 5
+    assert "autoets" not in bp_large.config.models
+    assert "stl_bagging" not in bp_large.config.models
+    assert any(bp_large.rationale_df["category"] == "scale_guardrail")
+
+    prof_hyper = replace(prof_15, n_series=30000, source_table="proj.ds.tbl")
+    bp_hyper = Forecaster.build_config(
+        prof_hyper, tier="deep_field", where="cloud_all", only_available_models=False
+    )
+    assert bp_hyper.config.ensemble.top_k == 3
+    assert bp_hyper.config.backtest.n_folds <= 2
+    assert bp_hyper.config.hpo.enabled is False
+
+    # Micro panel on deep_field selects per_series HPO granularity
+    prof_micro = replace(prof_15, n_series=4)
+    bp_micro = Forecaster.build_config(
+        prof_micro, tier="deep_field", where="local", only_available_models=False
+    )
+    assert bp_micro.config.hpo.granularity == "per_series"
+    assert bp_micro.config.features.fourier is True
+
+    # 2. Composable compound @<tag> syntax for dual-mode foundation & ML models
+    base_cfg = RunConfig.model_validate(
+        {
+            "run_name": "compound-test",
+            "data": {"source_table": "source_series", "horizon": 14},
+            "models": [
+                "timesfm_torch@v2.5_univariate",
+                "timesfm_torch@global_v2.5_cov_all",
+                "chronos_bolt@tiny_global",
+                "chronos2@global_univariate",
+                "lightgbm@direct_transform_log1p",
+                "arima_plus@univariate",
+                "timesfm@univariate",
+            ],
+            "features": {
+                "future_covariates": ["promo_depth", "price_index"],
+                "static_covariates": ["category"],
+            },
+        }
+    )
+    v_tfm_uni = resolve_model_variant(base_cfg, "timesfm_torch@v2.5_univariate")
+    assert v_tfm_uni.base_model == "timesfm_torch"
+    assert v_tfm_uni.clean_params["version"] == "2.5"
+    assert v_tfm_uni.is_univariate is True
+    assert list(v_tfm_uni.effective_cfg.features.future_covariates) == []
+
+    v_tfm_multi = resolve_model_variant(base_cfg, "timesfm_torch@global_v2.5_cov_all")
+    assert v_tfm_multi.training_mode == "global"
+    assert v_tfm_multi.clean_params["version"] == "2.5"
+    assert v_tfm_multi.is_univariate is False
+    assert list(v_tfm_multi.effective_cfg.features.future_covariates) == [
+        "promo_depth",
+        "price_index",
+    ]
+
+    v_cb = resolve_model_variant(base_cfg, "chronos_bolt@tiny_global")
+    assert v_cb.clean_params["size"] == "tiny"
+    assert v_cb.training_mode == "global"
+
+    v_lgb = resolve_model_variant(base_cfg, "lightgbm@direct_transform_log1p")
+    assert v_lgb.clean_params["strategy"] == "direct"
+    assert v_lgb.effective_cfg.features.transform == "log1p"
+
+    # 3. All-Decoy Covariates -> Fallback to Plain Univariate & Beaten Challenger Highlighting
+    ds_13 = load_benchmark("dgp_13_all_decoy_univariate_wins", n_series=3)
+    f_13 = Forecaster.auto(
+        ds_13.panel_df,
+        tier="first_light",
+        baselines=["naive_seasonal", "theta"],
+        autofocus=True,
+        autofocus_mode="linear",
+        max_passes=2,
+    )
+    assert f_13.auto_session is not None
+    assert len(f_13.auto_session.passes) == 2
+    p2_13 = f_13.auto_session.passes[-1]
+    assert list(p2_13.config.features.future_covariates) == []
+    assert "fallback_to_plain_univariate" in p2_13.mutations_applied
+    bval_13 = f_13.baseline_value_df()
+    assert not bval_13.empty
+    assert {
+        "baseline_model",
+        "baseline_role",
+        "champion_model",
+        "champion_is_univariate",
+        "fva_vs_baseline_pct",
+    }.issubset(bval_13.columns)
+    assert any(bval_13["baseline_role"] == "beaten_complex_challenger")
+
+    # 4. Scale-aware hierarchy reconciliation methods & hierarchy_value_df()
+    ds_14 = load_benchmark("dgp_14_large_hierarchy_intermittent_leaves", n_series=8)
+    prof_14 = inspect_panel_for_auto(ds_14.panel_df)
+    assert prof_14.hierarchy_node_count > 8
+    rec_14 = select_hierarchy_reconciliation_methods(prof_14, tier="wide_field")
+    assert "top_down" in rec_14
+    rec_large = select_hierarchy_reconciliation_methods(
+        replace(prof_14, hierarchy_node_count=800), tier="wide_field"
+    )
+    assert rec_large == ["wls_var", "wls_struct", "bottom_up", "top_down"]
+
+    f_14 = Forecaster.auto(ds_14.panel_df, tier="first_light", autofocus=False)
+    hval_14 = f_14.hierarchy_value_df()
+    assert not hval_14.empty
+    assert "hierarchy_level" in hval_14.columns
+    assert "All Hierarchy Nodes" in set(hval_14["hierarchy_level"])
+    assert not f_14.hierarchy_df().empty
+
+    # 5. Monthly trading days, holidays, leading-zero trimming, grid_policy, and exog_lags
+    ds_16 = load_benchmark("dgp_16_monthly_trading_days", n_series=3)
+    bp_16 = Forecaster.build_config(ds_16.panel_df, tier="wide_field", holidays=["US"])
+    assert bp_16.config.features.trading_days is True
+    assert bp_16.config.features.holidays == ["US"]
+
+    ds_17 = load_benchmark("dgp_17_missing_gaps_and_leading_zeros", n_series=4)
+    bp_17 = Forecaster.build_config(ds_17.panel_df, tier="wide_field")
+    assert bp_17.config.data.trim_leading_zeros is True
+    assert bp_17.config.data.grid_policy in ("linear", "fill_zero")
+
+    ds_18 = load_benchmark("dgp_18_promo_lag_pullforward", n_series=3)
+    f_18 = Forecaster.auto(
+        ds_18.panel_df,
+        tier="first_light",
+        autofocus=True,
+        autofocus_mode="linear",
+        max_passes=2,
+    )
+    assert f_18.auto_session is not None
+    p2_18 = f_18.auto_session.passes[-1]
+    assert "synthesize_exog_lags" in p2_18.mutations_applied
+    assert "promo_flag" in p2_18.config.features.exog_lags
+
+    # Verify default baseline ladder helper directly
+    ladder = select_default_baselines(
+        inspect_panel_for_auto(load_benchmark("dgp_04_true_vs_decoy_covs", n_series=3).panel_df),
+        where="local",
+        available_models=["naive_seasonal", "theta", "chronos_bolt", "lightgbm"],
+        selected_models=["naive_seasonal", "theta", "lightgbm"],
+    )
+    roles = [b["baseline_role"] for b in ladder]
+    assert "naive_anchor" in roles
+    assert "plain_univariate_stat" in roles
+    assert "zero_shot_foundation" in roles
+    assert "same_model_univariate" in roles
+
+
+def test_release_notes_generator() -> None:
+    notes = render_release_notes("1.2.1")
+    assert "## Installation & Upgrade" in notes
+    assert "pip install --upgrade" in notes
+    assert "## Highlights at a Glance" in notes
+    assert "## Detailed Release Notes (`v1.2.1`)" in notes
+
+
+def test_auto_forecaster_all_run_paths_cli_airflow_sdk_mcp(tmp_path) -> None:
+    import ast
+
+    from scale_forecasting import main as main_mod
+    from scale_forecasting.airflow_emit import emit_autofocus_airflow_dag
+    from scale_forecasting.mcp import McpServer
+
+    ds = load_benchmark("dgp_01_smooth_seasonal", n_series=3)
+    bp = Forecaster.build_config(ds.panel_df, tier="first_light")
+
+    # 1. Blueprint & Forecaster Airflow DAG emission (single-pass tier & multi-branch autofocus)
+    dag_single = bp.emit_airflow_dag(autofocus=False)
+    ast.parse(dag_single)
+    assert "begin_run" in dag_single
+
+    dag_af = bp.emit_airflow_dag(autofocus=True, autofocus_mode="dag", max_passes=3)
+    ast.parse(dag_af)
+    assert "autofocus_pass_1" in dag_af
+    assert "autofocus_branch_2a" in dag_af
+    assert "autofocus_pass_3_synthesis" in dag_af
+
+    dag_linear = emit_autofocus_airflow_dag(
+        bp.config,
+        "gs://bkt/staging/cfg.json",
+        tier="wide_field",
+        autofocus_mode="linear",
+        max_passes=3,
+    )
+    ast.parse(dag_linear)
+    assert "autofocus_pass_1 >> autofocus_pass_2 >> autofocus_pass_3_synthesis" in dag_linear
+
+    # 2. CLI `--auto --benchmark ... --init-config` and `--auto --autofocus --emit-airflow`
+    cfg_out = tmp_path / "auto_cfg.json"
+    dag_out = tmp_path / "dag_autofocus.py"
+    main_mod._main(
+        [
+            "--auto",
+            "--benchmark",
+            "dgp_01_smooth_seasonal",
+            "--tier",
+            "first_light",
+            "--autofocus",
+            "--autofocus-mode",
+            "dag",
+            "--max-passes",
+            "3",
+            "--init-config",
+            str(cfg_out),
+            "--emit-out",
+            str(dag_out),
+        ]
+    )
+    assert cfg_out.is_file()
+    assert dag_out.is_file()
+    assert "autofocus_branch_2a" in dag_out.read_text(encoding="utf-8")
+
+    # 3. Forecaster.emit_airflow_dag() on an executed autofocus session
+    f_auto = Forecaster.auto(ds.panel_df, tier="first_light", autofocus=True, max_passes=2)
+    f_dag_src = f_auto.emit_airflow_dag()
+    ast.parse(f_dag_src)
+    assert "autofocus_pass_1" in f_dag_src
+
+    # 4. MCP Server `build_auto_config` (with emit_airflow_path) and `run_auto_forecast`
+    mcp = McpServer(allow_launch=False)
+    mcp_dag_out = tmp_path / "mcp_autofocus_dag.py"
+    res_bp = mcp._dispatch_tool(
+        "build_auto_config",
+        {
+            "benchmark": "dgp_01_smooth_seasonal",
+            "tier": "first_light",
+            "baselines": ["naive_seasonal", "theta"],
+            "emit_airflow_path": str(mcp_dag_out),
+            "autofocus": True,
+        },
+    )
+    assert res_bp["emitted_airflow_path"] == str(mcp_dag_out)
+    assert mcp_dag_out.is_file()
+
+    res_run = mcp._dispatch_tool(
+        "run_auto_forecast",
+        {
+            "benchmark": "dgp_01_smooth_seasonal",
+            "tier": "first_light",
+            "autofocus": True,
+            "max_passes": 2,
+            "n_series": 3,
+        },
+    )
+    assert "baseline_value" in res_run
+    assert len(res_run["baseline_value"]) >= 1
+    assert "autofocus_ledger" in res_run
+    assert "profile_table" in res_run
+    assert len(res_run["profile_table"]) == 7
+    assert "practitioner_assessment" in res_run
+    assert len(res_run["practitioner_assessment"]) == 7
+
+    # 5. Step 0 Data Profile & 7-Question Practitioner Assessment on SDK & Blueprint
+    prof_df = Forecaster.profile_data(ds.panel_df, horizon=14)
+    assert len(prof_df) == 7
+    assert list(prof_df["dimension"]) == [
+        "scale_and_shape",
+        "demand_regime",
+        "seasonality_and_scaling",
+        "breaks_and_outliers",
+        "hygiene_and_calendar",
+        "covariates",
+        "hierarchy_topology",
+    ]
+    assert len(bp.profile_df()) == 7
+    assert len(f_auto.profile_df()) == 7
+
+    assess_df = f_auto.practitioner_assessment_df()
+    assert len(assess_df) == 7
+    assert list(assess_df["question_id"]) == [
+        "model_vs_baseline",
+        "ensemble_vs_single",
+        "covariates_vs_overfitting",
+        "global_vs_local",
+        "hierarchy_reconciliation",
+        "horizon_stability",
+        "forecast_trust",
+    ]
+    assess_str = f_auto.assess()
+    assert "Practitioner Trust & Evidence Assessment" in assess_str
+    assert "Step 0 Data Profile" in assess_str
+
+    cmp_df = f_auto.compare_models()
+    assert not cmp_df.empty
+    assert "lift_pct" in cmp_df.columns
+    assert "verdict" in cmp_df.columns
+    cmp_pair = f_auto.compare_models("theta", "naive_seasonal")
+    assert len(cmp_pair) == 1
+    assert cmp_pair.iloc[0]["model_a"] == "theta"
+    assert cmp_pair.iloc[0]["model_b"] == "naive_seasonal"
+
+
+def test_step0_schema_backed_column_detection_and_type_safety() -> None:
+    import pandas as pd
+
+    from scale_forecasting.auto import _infer_columns_and_freq, _resolve_bq_table_columns
+    from scale_forecasting.errors import DataError
+
+    # 1. Custom 3-column names resolved deterministically by dtype elimination
+    custom_df = pd.DataFrame(
+        {
+            "custom_sku": ["A", "A", "A", "A"],
+            "trading_day": pd.date_range("2025-01-01", periods=4, freq="D"),
+            "units_sold": [10.0, 12.0, 15.0, 14.0],
+        }
+    )
+    ts_c, dt_c, y_c, fq = _infer_columns_and_freq(custom_df)
+    assert (ts_c, dt_c, y_c, fq) == ("custom_sku", "trading_day", "units_sold", "D")
+
+    # 2. Ambiguous multiple numeric columns without a canonical target name raises DataError
+    ambig_df = pd.DataFrame(
+        {
+            "ts_id": ["A", "A", "A"],
+            "ds": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "metric_alpha": [1.0, 2.0, 3.0],
+            "metric_beta": [4.0, 5.0, 6.0],
+        }
+    )
+    with pytest.raises(DataError, match="Could not unambiguously infer target_col"):
+        _infer_columns_and_freq(ambig_df)
+
+    # 3. Non-temporal date_col or non-numeric target_col raises DataError
+    bad_df = pd.DataFrame(
+        {
+            "ts_id": ["A", "A", "A"],
+            "ds": [1.23, 4.56, 7.89],
+            "y": ["not_a_number", "bad", "vals"],
+        }
+    )
+    with pytest.raises(DataError, match="date_col"):
+        _infer_columns_and_freq(bad_df)
+
+    # 4. BigQuery schema metadata inspection resolves non-default column names (0 bytes scanned)
+    class _FakeField:
+        def __init__(self, name: str, field_type: str) -> None:
+            self.name = name
+            self.field_type = field_type
+
+    class _FakeTable:
+        def __init__(self) -> None:
+            self.schema = [
+                _FakeField("unique_id", "STRING"),
+                _FakeField("date", "DATE"),
+                _FakeField("sales", "FLOAT64"),
+                _FakeField("onpromotion", "INT64"),
+            ]
+
+    class _FakeBQClient:
+        def get_table(self, fq_table: str) -> _FakeTable:
+            return _FakeTable()
+
+    b_ts, b_dt, b_y = _resolve_bq_table_columns(_FakeBQClient(), "proj.ds.favorita")
+    assert (b_ts, b_dt, b_y) == ("unique_id", "date", "sales")
+
+
+def test_public_benchmark_catalog_and_monash_tsf_parser() -> None:
+    import io
+    import zipfile
+
+    import scale_forecasting as sf
+    from scale_forecasting.benchmarks import (
+        PUBLIC_BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_SPECS,
+        _parse_monash_tsf_zip,
+        list_public_benchmarks,
+        public_benchmark_catalog,
+    )
+
+    assert len(PUBLIC_BENCHMARK_NAMES) == 9
+    assert list_public_benchmarks() == list(PUBLIC_BENCHMARK_NAMES)
+    cat = public_benchmark_catalog()
+    assert len(cat) == 9
+    assert {
+        "m5_walmart",
+        "favorita_grocery",
+        "m4_daily",
+        "monash_tourism_monthly",
+        "etth1",
+    }.issubset(set(cat["name"]))
+    assert sf.list_public_benchmarks() == list(PUBLIC_BENCHMARK_NAMES)
+
+    # Verify Monash .tsf zip parser offline
+    buf = io.BytesIO()
+    vals_str = ",".join(str(100 + i) for i in range(60))
+    tsf_text = (
+        "@relation Test\n"
+        "@attribute series_name string\n"
+        "@attribute start_timestamp date\n"
+        "@frequency monthly\n"
+        "@horizon 12\n"
+        "@data\n"
+        f"T1:2018-01-01 00-00-00:{vals_str}\n"
+        f"T2:2018-01-01 00-00-00:{vals_str}\n"
+    )
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("sample.tsf", tsf_text)
+
+    ds = _parse_monash_tsf_zip(
+        buf.getvalue(),
+        pub_spec=PUBLIC_BENCHMARK_SPECS["monash_hospital"],
+        n_series=2,
+        history_limit=48,
+    )
+    assert ds.spec.n_series == 2
+    assert len(ds.df) == 2 * 48
+    assert len(ds.oracle_future_df) == 2 * 12
+
+
+def test_write_api_proto_decode_for_old_partition_fallback() -> None:
+    from datetime import date
+
+    from scale_forecasting.registry.write_api import (
+        _OOF_SPEC,
+        _PRED_SPEC,
+        _decode_proto_rows,
+        _encode_rows,
+        _proto_for,
+    )
+
+    msg_cls, proto_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    raw_oof = [
+        {
+            "run_id": "r-m5",
+            "ts_id": "FOODS_1_001_CA_1",
+            "model_type": "arima_plus",
+            "fold_id": 0,
+            "forecast_date": date(2016, 3, 28),
+            "y_true": 12.0,
+            "yhat": 11.5,
+        }
+    ]
+    serialized = _encode_rows(msg_cls, _OOF_SPEC, raw_oof)
+    decoded = _decode_proto_rows(proto_desc, serialized)
+    assert len(decoded) == 1
+    assert decoded[0]["forecast_date"] == "2016-03-28"
+    assert decoded[0]["fold_id"] == 0
+    assert decoded[0]["yhat"] == 11.5
+
+    p_cls, p_desc = _proto_for("forecast_predictions", _PRED_SPEC)
+    raw_pred = [
+        {
+            "run_id": "r-m5",
+            "ts_id": "FOODS_1_001_CA_1",
+            "model_type": "arima_plus",
+            "forecast_date": date(2016, 5, 23),
+            "yhat": 10.0,
+            "quantiles": '{"0.1": 5.0, "0.9": 15.0}',
+        }
+    ]
+    dec_pred = _decode_proto_rows(p_desc, _encode_rows(p_cls, _PRED_SPEC, raw_pred))
+    assert dec_pred[0]["quantiles"] == {"0.1": 5.0, "0.9": 15.0}
+
+
+def test_hourly_and_monthly_dgp_19_20_fourier_and_lags() -> None:
+    import numpy as np
+
+    from scale_forecasting.features import _fourier_terms
+
+    # 1. Verify hourly multi-seasonality Fourier terms (24h diurnal k=1,2 + 168h weekly k=3)
+    h_idx = pd.date_range("2026-01-01", periods=169, freq="h")
+    f_h = _fourier_terms(h_idx, "h", order=3)
+    # fourier_sin_1 has period 24h -> index[0] and index[24] match
+    assert f_h["fourier_sin_1"][0] == pytest.approx(f_h["fourier_sin_1"][24], abs=1e-6)
+    # fourier_sin_3 has period 168h -> index[0] and index[168] match, but index[24] differs
+    assert f_h["fourier_sin_3"][0] == pytest.approx(f_h["fourier_sin_3"][168], abs=1e-6)
+    assert not np.isclose(f_h["fourier_sin_3"][0], f_h["fourier_sin_3"][24])
+
+    # 2. Verify dgp_19 (hourly) and dgp_20 (monthly) build_config sets frequency-matched lags
+    ds19 = load_benchmark("dgp_19_hourly_diurnal_weekly_load", n_series=3)
+    bp19 = build_config(ds19.full_panel_with_future_covariates, tier="wide_field", where="local")
+    assert bp19.config.features.fourier is True
+    assert 24 in bp19.config.model_params["lightgbm"]["lags"]
+    assert 168 in bp19.config.model_params["lightgbm"]["lags"]
+
+    ds20 = load_benchmark("dgp_20_monthly_regime_drift_damped", n_series=3)
+    bp20 = build_config(ds20.panel_df, tier="wide_field", where="local")
+    assert bp20.config.features.trading_days is True
+    assert 12 in bp20.config.model_params["lightgbm"]["lags"]
+    assert 28 not in bp20.config.model_params["lightgbm"]["lags"]
+
+
+def test_public_benchmarks_quota_and_sdk_auto_session_coverage(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import zipfile
+    from pathlib import Path
+    from types import SimpleNamespace
+    from typing import Any
+
+    tmp_path = Path(str(tmp_path))
+
+    from scale_forecasting.benchmarks import (
+        _main as benchmarks_main,
+    )
+    from scale_forecasting.benchmarks import (
+        fetch_public_benchmark,
+        list_public_benchmarks,
+        public_benchmark_catalog,
+    )
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.quota import (
+        automl_demands,
+        clamp_serverless_executors,
+        gke_demands,
+        preflight_automl,
+        preflight_gke,
+        preflight_serverless,
+        serverless_batch_concurrency,
+        serverless_demands,
+    )
+    from scale_forecasting.registry.write_api import (
+        _OOF_SPEC,
+        _append_via_batch_load_fallback,
+        _encode_rows,
+        _proto_for,
+    )
+    from scale_forecasting.sdk import Forecaster
+
+    # 1. Public benchmark catalog & CLI
+    pub_names = list_public_benchmarks()
+    assert len(pub_names) == 9
+    pub_cat = public_benchmark_catalog()
+    assert len(pub_cat) == 9
+    assert benchmarks_main(["--list"]) == 0
+    assert benchmarks_main(["--list", "--json"]) == 0
+    assert benchmarks_main(["--name", "dgp_01_smooth_seasonal"]) == 0
+    assert benchmarks_main(["--name", "dgp_01_smooth_seasonal", "--json"]) == 0
+
+    with pytest.raises(ValueError, match="Unknown public benchmark"):
+        fetch_public_benchmark("unknown_bench", cache_dir=str(tmp_path))
+
+    # Mock cached files for fetch_public_benchmark across all 5 parser families
+    # (a) Monash .tsf zip
+    monash_dir = tmp_path / "monash_hospital"
+    monash_dir.mkdir(parents=True, exist_ok=True)
+    tsf_vals = ",".join(str(10 + (i % 12)) for i in range(48))
+    tsf_content = f"@relation hospital\n@data\nT1:2000-01-01 00-00-00:{tsf_vals}\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("hospital.tsf", tsf_content)
+    (monash_dir / "monash_hospital.zip").write_bytes(buf.getvalue())
+    ds_monash = fetch_public_benchmark(
+        "monash_hospital", n_series=1, history_limit=36, cache_dir=str(tmp_path)
+    )
+    assert ds_monash.spec.n_series == 1
+    assert not ds_monash.df.empty
+
+    # (b) ETTh1 CSV
+    etth_dir = tmp_path / "etth1"
+    etth_dir.mkdir(parents=True, exist_ok=True)
+    etth_dates = pd.date_range("2016-07-01", periods=60, freq="h")
+    pd.DataFrame({"date": etth_dates, "OT": range(60), "HUFL": range(10, 70)}).to_csv(
+        etth_dir / "ETTh1.csv", index=False
+    )
+    ds_etth = fetch_public_benchmark("etth1", n_series=2, history_limit=36, cache_dir=str(tmp_path))
+    assert ds_etth.spec.n_series == 2
+
+    # (c) M4 CSVs
+    m4_dir = tmp_path / "m4_daily"
+    m4_dir.mkdir(parents=True, exist_ok=True)
+    tr_cols = ["V1"] + [f"V{i}" for i in range(2, 45)]
+    te_cols = ["V1"] + [f"V{i}" for i in range(2, 16)]
+    pd.DataFrame([["D1"] + [100.0 + i for i in range(43)]], columns=tr_cols).to_csv(
+        m4_dir / "m4_daily_train_subset.csv", index=False
+    )
+    pd.DataFrame([["D1"] + [150.0 + i for i in range(14)]], columns=te_cols).to_csv(
+        m4_dir / "m4_daily_test_subset.csv", index=False
+    )
+    ds_m4 = fetch_public_benchmark(
+        "m4_daily", n_series=1, history_limit=30, cache_dir=str(tmp_path)
+    )
+    assert ds_m4.spec.n_series == 1
+
+    # (d) M5 Walmart CSVs
+    m5_dir = tmp_path / "m5_walmart"
+    m5_dir.mkdir(parents=True, exist_ok=True)
+    m5_days = [f"d_{i}" for i in range(1, 95)]
+    m5_dates = pd.date_range("2016-01-01", periods=94, freq="D")
+    pd.DataFrame(
+        {
+            "d": m5_days,
+            "date": m5_dates.strftime("%Y-%m-%d"),
+            "wm_yr_wk": [11601] * 94,
+            "event_name_1": [None] * 94,
+            "snap_CA": [1, 0] * 47,
+            "snap_TX": [0, 1] * 47,
+            "snap_WI": [0, 0] * 47,
+        }
+    ).to_csv(m5_dir / "calendar.csv", index=False)
+    sales_row = {
+        "id": "FOODS_1_001_CA_1_evaluation",
+        "item_id": "FOODS_1_001",
+        "dept_id": "FOODS_1",
+        "cat_id": "FOODS",
+        "store_id": "CA_1",
+        "state_id": "CA",
+    }
+    for idx_d, d_col in enumerate(m5_days):
+        sales_row[d_col] = 5 + (idx_d % 7)
+    pd.DataFrame([sales_row]).to_csv(m5_dir / "sales_train_evaluation.csv", index=False)
+    pd.DataFrame(
+        [{"store_id": "CA_1", "item_id": "FOODS_1_001", "wm_yr_wk": 11601, "sell_price": 2.5}]
+    ).to_csv(m5_dir / "sell_prices.csv", index=False)
+    ds_m5 = fetch_public_benchmark(
+        "m5_walmart", n_series=1, history_limit=60, cache_dir=str(tmp_path)
+    )
+    assert ds_m5.spec.n_series == 1
+    assert "snap_active" in ds_m5.future_df.columns
+
+    # (e) Favorita CSVs
+    fav_dir = tmp_path / "favorita_grocery"
+    fav_dir.mkdir(parents=True, exist_ok=True)
+    fav_dates = pd.date_range("2016-06-01", periods=60, freq="D").strftime("%Y-%m-%d")
+    pd.DataFrame(
+        {
+            "date": fav_dates,
+            "store_nbr": [1] * 60,
+            "family": ["GROCERY I"] * 60,
+            "sales": [120.0 + (i % 7) * 10 for i in range(60)],
+            "onpromotion": [i % 2 for i in range(60)],
+        }
+    ).to_csv(fav_dir / "train.csv", index=False)
+    pd.DataFrame({"store_nbr": [1], "city": ["Quito"], "state": ["Pichincha"]}).to_csv(
+        fav_dir / "stores.csv", index=False
+    )
+    pd.DataFrame({"date": fav_dates, "dcoilwtico": [46.5] * 60}).to_csv(
+        fav_dir / "oil.csv", index=False
+    )
+    pd.DataFrame({"date": [fav_dates[5]], "transferred": [False]}).to_csv(
+        fav_dir / "holidays_events.csv", index=False
+    )
+    ds_fav = fetch_public_benchmark(
+        "favorita_grocery", n_series=1, history_limit=40, cache_dir=str(tmp_path)
+    )
+    assert ds_fav.spec.n_series == 1
+
+    # 2. Quota preflight for GKE, Serverless Spark (CPU + GPU), and Vertex AutoML
+    def fake_fetch(_service: str, _metric: str) -> dict[str, Any]:
+        return {
+            "consumerQuotaLimits": [
+                {
+                    "quotaBuckets": [
+                        {"dimensions": {"region": "us-central1"}, "effectiveLimit": "2400"}
+                    ]
+                }
+            ]
+        }
+
+    gke_plan = SimpleNamespace(
+        worker_count=4,
+        gpu_type="T4",
+        accelerator_type="NVIDIA_TESLA_T4",
+        accelerator_count=1,
+        machine_type="g2-standard-8",
+    )
+    assert len(gke_demands(gke_plan, "us-central1")) == 2
+    pf_gke = preflight_gke(gke_plan, ["us-central1"], "proj-1", fetch=fake_fetch)
+    assert not pf_gke["us-central1"].blocked
+
+    cfg_srv = RunConfig.model_validate(
+        {
+            "run_name": "test-srv",
+            "python_runtime": "spark",
+            "data": {"source_table": "s", "horizon": 7},
+            "models": ["naive_seasonal", "lightgbm"],
+        }
+    )
+    tot_b, gpu_b = serverless_batch_concurrency(cfg_srv)
+    assert tot_b == 2 and gpu_b == 1
+    assert (
+        len(serverless_demands("us-central1", max_executors=10, hardware="gpu", gpu_type="L4")) == 3
+    )
+    pf_srv = preflight_serverless(
+        ["us-central1"],
+        "proj-1",
+        max_executors=10,
+        hardware="gpu",
+        gpu_type="L4",
+        concurrent_batches=2,
+        concurrent_gpu_batches=1,
+        fetch=fake_fetch,
+    )
+    clamped_execs = clamp_serverless_executors(10, pf_srv["us-central1"])
+    assert 1 <= clamped_execs <= 2
+
+    assert len(automl_demands("us-central1", hardware="gpu", gpu_type="T4")) == 3
+    pf_aml = preflight_automl(
+        ["us-central1"], "proj-1", hardware="gpu", gpu_type="T4", fetch=fake_fetch
+    )
+    assert not pf_aml["us-central1"].blocked
+
+    # 3. Write API batch-load fallback
+    loaded_calls: list[Any] = []
+
+    class _FakeBQClient:
+        def load_table_from_json(self, rows: Any, fq: str, job_config: Any = None) -> Any:
+            loaded_calls.append((rows, fq, job_config))
+            return SimpleNamespace(result=lambda: None)
+
+    monkeypatch.setattr(
+        "scale_forecasting.registry.tables.bigquery_client", lambda *_a, **_kw: _FakeBQClient()
+    )
+    msg_cls, proto_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    ser = _encode_rows(
+        msg_cls,
+        _OOF_SPEC,
+        [
+            {
+                "run_id": "r1",
+                "ts_id": "s1",
+                "model_type": "snaive",
+                "fold_id": 0,
+                "cutoff_date": "2015-01-01",
+                "forecast_date": "2015-01-02",
+                "horizon_step": 1,
+                "yhat": 5.0,
+                "y_true": 6.0,
+            }
+        ],
+    )
+    _append_via_batch_load_fallback("proj-1", "ds", "backtest_oof", proto_desc, ser)
+    assert len(loaded_calls) == 1
+
+    # 4. Forecaster.auto() local session methods
+    ds_h = load_benchmark("dgp_08_hierarchical_nonneg", n_series=4)
+    f = Forecaster.auto(ds_h.panel_df, tier="first_light", where="local", autofocus=False)
+    assert not f.leaderboard_df().empty
+    assert not f.predictions_df(
+        ts_id=str(ds_h.panel_df["ts_id"].iloc[0]), models=["naive_seasonal"]
+    ).empty
+    assert not f.fva_df().empty
+    assert not f.fva_cascade_df().empty
+    assert not f.horizon_decay_df().empty
+    assert not f.bias_report_df().empty
+    assert isinstance(f.exceptions_df(), pd.DataFrame)
+    assert isinstance(f.attributions_df(), pd.DataFrame)
+    assert not f.hierarchy_df().empty
+    rep_path = tmp_path / "auto_report.html"
+    f.export_report(rep_path, write_json=True)
+    assert rep_path.is_file()

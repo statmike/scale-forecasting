@@ -1,6 +1,6 @@
 """Headless notebook acceptance — run every notebook on its Colab Enterprise template.
 
-The 11 notebooks in ``notebooks/`` (`00`–`10`) are first-class run drivers, and Terraform ships
+The 12 notebooks in ``notebooks/`` (`00`–`11`) are first-class run drivers, and Terraform ships
 Colab Enterprise runtime templates that carry the full ``SF_*`` run identity in their env (see
 ``terraform/main/modules/colab``). This module is the repeatable way to *prove* each notebook runs
 green on the right template — and to re-prove it whenever a notebook changes — without a human
@@ -81,6 +81,7 @@ REGISTRY: dict[str, NotebookSpec] = {
         NotebookSpec("01_bigquery_native_sql", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("09_custom_models_and_metrics", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("10_registry_operations_and_scale", TEMPLATE_MAIN, TIER_SMOKE, 900),
+        NotebookSpec("11_auto_forecaster_and_autofocus", TEMPLATE_MAIN, TIER_SMOKE, 900),
         NotebookSpec("02_vertex_and_gce_vms", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("03_spark_serverless_and_connect", TEMPLATE_MAIN, TIER_BATCH, 3600),
         NotebookSpec("05_covariates_and_global_models", TEMPLATE_MAIN, TIER_BATCH, 3600),

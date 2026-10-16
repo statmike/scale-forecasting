@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import zlib
 from abc import abstractmethod
 from collections import OrderedDict
@@ -36,10 +37,11 @@ DECILE_GRID: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 _LOCAL_UID = "__local__"
 _DEFAULT_MAX_CACHED_PIPELINES = 4
 
-# Bounded LRU per-process foundation pipeline cache. Keeps active foundation checkpoints
-# resident across cells/folds while evicting the least-recently-used entry (and running
-# gc.collect() + torch.cuda.empty_cache()) whenever capacity is reached or OOM occurs.
+# Bounded LRU per-process foundation pipeline cache and re-entrant thread lock. Keeps active
+# foundation checkpoints resident across cells/folds while serializing `from_pretrained` (which
+# uses process-wide PyTorch `meta`-device hooks) and module inference across worker threads.
 _PIPELINE_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+_FOUNDATION_THREAD_LOCK = threading.RLock()
 
 
 def _has_c_compiler() -> bool:
@@ -170,9 +172,10 @@ def _release_accelerator_memory() -> None:
 
 def clear_foundation_cache() -> None:
     """Evict all cached foundation model pipelines and release host/device memory."""
-    if _PIPELINE_CACHE:
-        _PIPELINE_CACHE.clear()
-        _release_accelerator_memory()
+    with _FOUNDATION_THREAD_LOCK:
+        if _PIPELINE_CACHE:
+            _PIPELINE_CACHE.clear()
+            _release_accelerator_memory()
 
 
 def get_or_load_foundation_pipeline(
@@ -183,32 +186,33 @@ def get_or_load_foundation_pipeline(
 ) -> Any:
     """Return the cached foundation pipeline for ``cache_key``, or load with LRU eviction."""
     cap = max(1, int(max_entries))
-    if cache_key in _PIPELINE_CACHE:
-        _PIPELINE_CACHE.move_to_end(cache_key)
-        return _PIPELINE_CACHE[cache_key]
-    evicted = False
-    while len(_PIPELINE_CACHE) >= cap:
-        _PIPELINE_CACHE.popitem(last=False)
-        evicted = True
-    if evicted:
-        _release_accelerator_memory()
+    with _FOUNDATION_THREAD_LOCK:
+        if cache_key in _PIPELINE_CACHE:
+            _PIPELINE_CACHE.move_to_end(cache_key)
+            return _PIPELINE_CACHE[cache_key]
+        evicted = False
+        while len(_PIPELINE_CACHE) >= cap:
+            _PIPELINE_CACHE.popitem(last=False)
+            evicted = True
+        if evicted:
+            _release_accelerator_memory()
 
-    hf_home = _ensure_writable_hf_cache()
-    _ensure_torch_runtime_ready()
-    with _checkpoint_load_lock(hf_home):
-        try:
-            obj = loader()
-        except MemoryError:
-            clear_foundation_cache()
-            obj = loader()
-        except RuntimeError as exc:
-            if "out of memory" in str(exc).lower() and _PIPELINE_CACHE:
+        hf_home = _ensure_writable_hf_cache()
+        _ensure_torch_runtime_ready()
+        with _checkpoint_load_lock(hf_home):
+            try:
+                obj = loader()
+            except MemoryError:
                 clear_foundation_cache()
                 obj = loader()
-            else:
-                raise
-    _PIPELINE_CACHE[cache_key] = obj
-    return obj
+            except RuntimeError as exc:
+                if "out of memory" in str(exc).lower() and _PIPELINE_CACHE:
+                    clear_foundation_cache()
+                    obj = loader()
+                else:
+                    raise
+        _PIPELINE_CACHE[cache_key] = obj
+        return obj
 
 
 @dataclass(frozen=True)
@@ -440,7 +444,10 @@ class FoundationBaseModel(BaseModel):
             X_futr=full_exog,
             static_covs=self.ctx.static_covariates if self.supports_static_covariates else None,
         )
-        point_all, deciles_all = self._predict_batch_raw(pipeline, [item], steps, is_panel=False)[0]
+        with _FOUNDATION_THREAD_LOCK:
+            point_all, deciles_all = self._predict_batch_raw(
+                pipeline, [item], steps, is_panel=False
+            )[0]
         point = np.asarray(point_all[-horizon:], dtype=float)
         deciles = np.asarray(deciles_all[-horizon:, :], dtype=float)
 
@@ -511,7 +518,8 @@ class FoundationBaseModel(BaseModel):
                 )
             )
 
-        batch_preds = self._predict_batch_raw(pipeline, items, horizon, is_panel=True)
+        with _FOUNDATION_THREAD_LOCK:
+            batch_preds = self._predict_batch_raw(pipeline, items, horizon, is_panel=True)
         t = self.ctx.transform
         out: dict[str, pd.DataFrame] = {}
         for uid, (point_all, deciles_all) in zip(uids, batch_preds, strict=True):

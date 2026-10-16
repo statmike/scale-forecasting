@@ -471,12 +471,14 @@ def _oof_row(
     ``row`` is one record of `bigquery_sql.build_eval_query`'s output — the fold forecast joined to
     actuals — so this is the seam where that query's column names become table columns.
     """
+    from ..registry.rows import _as_date
+
     return {
         "run_id": run_id,
         "ts_id": ts_id,
         "model_type": model_name,
         "fold_id": fold_id,
-        "forecast_date": row["forecast_date"],
+        "forecast_date": _as_date(row["forecast_date"]),
         "y_true": row["y_true"],
         "yhat": row["yhat"],
         # `build_eval_query` has always selected these — ML.FORECAST returns them and the metric
@@ -493,7 +495,7 @@ def _oof_row(
         # The fold's real geometry, not its ordinal. `cutoff_date` is what an ensemble joins on
         # across engines — this path's fold `k` and the Python path's fold `k` are the same window
         # only when every series ends on the same date. See `ensembler._fold_key`.
-        "cutoff_date": row.get("cutoff_date"),
+        "cutoff_date": _as_date(row.get("cutoff_date")),
         "horizon_step": row.get("horizon_step"),
         # The write's clock, so a re-scored fold beats the fold it re-scored on any dedupe-on-read.
         # See `registry.rows.cell_dedup_key`.

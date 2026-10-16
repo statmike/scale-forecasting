@@ -46,6 +46,8 @@ from .agent_surfaces import (
     probe_environment,
     render_run_config_json_schema,
 )
+from .auto_policy import EXPOSURE_TIERS, SCALE_REGIMES
+from .benchmarks import benchmark_catalog
 from .config import RunConfig, estimate_workload, load_config
 from .dag import dag_nodes, group_models_by_family, plan_dag
 from .errors import PACKAGE_LOGGER, MissingExtraError, ScaleForecastError
@@ -308,7 +310,7 @@ class McpServer:
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
-        """Return the 9 MCP tools exposed by this server."""
+        """Return the 11 MCP tools exposed by this server."""
         return [
             {
                 "name": "probe_environment",
@@ -328,7 +330,9 @@ class McpServer:
                 "name": "list_catalog",
                 "description": (
                     "Query the canonical catalogs of models (37), metrics (21), runtimes (7), "
-                    "GPUs (4), dependency extras (13), BigQuery views (5), or shipped configs (62)."
+                    "GPUs (4), dependency extras (13), BigQuery views (5), shipped configs (62), "
+                    "synthetic DGP benchmarks (18), or Auto-Forecaster exposure tiers & scale "
+                    "regimes."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -344,6 +348,8 @@ class McpServer:
                                 "extras",
                                 "views",
                                 "configs",
+                                "benchmarks",
+                                "auto_tiers",
                             ],
                             "default": "all",
                         },
@@ -710,6 +716,308 @@ class McpServer:
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": "build_auto_config",
+                "description": (
+                    "Synthesize a glass-box RunConfig and ConfigBlueprint via the Auto-Forecaster "
+                    "(`Forecaster.build_config`) across the 4 observational exposure tiers "
+                    "('first_light', 'wide_field', 'deep_sky', 'deep_field') and 5 n_series "
+                    "scale regimes ('micro' to 'hyperscale'). Accepts any of the 18 synthetic "
+                    "DGP benchmark names ('dgp_01_smooth_seasonal' .. "
+                    "'dgp_18_promo_lag_pullforward'), 'playground' sample data, a local "
+                    "CSV/Parquet path, or a BigQuery table name. Returns the Step 0 7-dimension "
+                    "data profile (`profile_table`), validated RunConfig JSON, deterministic "
+                    "run_id, field-by-field rationale table, 4-anchor baseline ladder, and "
+                    "parametric wall-clock duration estimate."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "default": "playground",
+                            "description": (
+                                "Data source: 'playground', a synthetic benchmark name "
+                                "('dgp_01_smooth_seasonal' .. "
+                                "'dgp_18_promo_lag_pullforward'), a local CSV/Parquet file "
+                                "path, or a BigQuery table name."
+                            ),
+                        },
+                        "benchmark": {
+                            "type": "string",
+                            "description": (
+                                "Optional alias for source when selecting a DGP benchmark."
+                            ),
+                        },
+                        "source_table": {
+                            "type": "string",
+                            "description": "Optional BigQuery source table name.",
+                        },
+                        "n_series": {
+                            "type": "integer",
+                            "default": 4,
+                            "description": (
+                                "Series count when generating sample or DGP benchmark data."
+                            ),
+                        },
+                        "horizon": {
+                            "type": "integer",
+                            "default": 14,
+                            "description": "Forecast horizon H in native frequency steps.",
+                        },
+                        "tier": {
+                            "type": "string",
+                            "enum": [
+                                "first_light",
+                                "wide_field",
+                                "deep_sky",
+                                "deep_field",
+                                "glimpse",
+                                "starlight",
+                                "survey",
+                            ],
+                            "default": "wide_field",
+                            "description": "Observational exposure tier.",
+                        },
+                        "where": {
+                            "type": "string",
+                            "enum": ["auto", "local", "bigquery", "cloud_cpu", "cloud_all"],
+                            "default": "auto",
+                            "description": "Execution sandbox envelope.",
+                        },
+                        "goal": {
+                            "type": "string",
+                            "enum": ["accuracy", "probabilistic", "service_level", "fast"],
+                            "default": "accuracy",
+                            "description": "Optimization objective.",
+                        },
+                        "max_minutes": {
+                            "type": "number",
+                            "description": "Optional hard wall-clock budget in minutes.",
+                        },
+                        "max_wall_clock_minutes": {
+                            "type": "number",
+                            "description": "Optional hard wall-clock budget in minutes.",
+                        },
+                        "max_usd": {
+                            "type": "number",
+                            "description": "Optional cloud cost budget in USD.",
+                        },
+                        "only_available_models": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Filter synthesized models to those installed in the active "
+                                "environment."
+                            ),
+                        },
+                        "baselines": {
+                            "description": (
+                                "Baseline anchor policy ('auto', 'none', or array of model names)."
+                            ),
+                        },
+                        "holidays": {
+                            "description": (
+                                "Optional ISO country code or array of country codes (e.g. ['US'])."
+                            ),
+                        },
+                        "decision_metric": {
+                            "type": "string",
+                            "description": "Optional pinned decision metric (e.g. 'wape', 'mase').",
+                        },
+                        "n_folds": {
+                            "type": "integer",
+                            "description": "Optional pinned expanding-window backtest fold count.",
+                        },
+                        "allowed_families": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of allowed model families.",
+                        },
+                        "models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional exact model shortlist to pin.",
+                        },
+                        "include_models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional models to union into the tier shortlist.",
+                        },
+                        "exclude_models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional models to remove from the tier shortlist.",
+                        },
+                        "write_config_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.json) to write the synthesized RunConfig."
+                            ),
+                        },
+                        "emit_airflow_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.py) to write an Airflow / Composer 3 DAG."
+                            ),
+                        },
+                        "autofocus": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "With emit_airflow_path: emit a multi-pass autofocus Airflow DAG."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "run_auto_forecast",
+                "description": (
+                    "Run the Glass-Box Auto-Forecaster (`auto_forecast` / `Forecaster.auto`) "
+                    "on any of the 18 synthetic DGP benchmarks ('dgp_01_smooth_seasonal' .. "
+                    "'dgp_18_promo_lag_pullforward'), 'playground' sample panel, local "
+                    "CSV/Parquet file, or BigQuery table (with --allow-launch), with multi-branch "
+                    "autofocus refinement (`autofocus=True`, `autofocus_mode='dag'`). Returns "
+                    "the Step 0 data profile (`profile_table`), pass-by-pass `autofocus_ledger`, "
+                    "4-anchor `baseline_value` ladder (plus beaten complex challengers when a "
+                    "univariate model wins), per-level `hierarchy_value`, head-to-head "
+                    "`model_comparison`, and the 7-Question `practitioner_assessment`."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "default": "playground",
+                            "description": (
+                                "Offline data source: 'playground', a synthetic benchmark name "
+                                "('dgp_01_smooth_seasonal' .. "
+                                "'dgp_18_promo_lag_pullforward'), or a local CSV/Parquet "
+                                "file path."
+                            ),
+                        },
+                        "benchmark": {
+                            "type": "string",
+                            "description": (
+                                "Optional DGP benchmark name ('dgp_01_smooth_seasonal' ..)."
+                            ),
+                        },
+                        "source_table": {
+                            "type": "string",
+                            "description": (
+                                "Optional BigQuery source table name (requires --allow-launch)."
+                            ),
+                        },
+                        "horizon": {
+                            "type": "integer",
+                            "default": 14,
+                            "description": "Forecast horizon H in native frequency steps.",
+                        },
+                        "tier": {
+                            "type": "string",
+                            "enum": [
+                                "first_light",
+                                "wide_field",
+                                "deep_sky",
+                                "deep_field",
+                                "glimpse",
+                                "starlight",
+                                "survey",
+                            ],
+                            "default": "wide_field",
+                            "description": "Initial observational exposure tier.",
+                        },
+                        "where": {
+                            "type": "string",
+                            "enum": ["auto", "local", "bigquery", "cloud_cpu", "cloud_all"],
+                            "default": "local",
+                            "description": "Execution sandbox envelope.",
+                        },
+                        "goal": {
+                            "type": "string",
+                            "enum": ["accuracy", "probabilistic", "service_level", "fast"],
+                            "default": "accuracy",
+                            "description": "Optimization objective.",
+                        },
+                        "autofocus": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "When true, run bounded residual-driven autofocus refinement "
+                                "(reusing passing cells from Pass 0)."
+                            ),
+                        },
+                        "autofocus_mode": {
+                            "type": "string",
+                            "enum": ["dag", "linear"],
+                            "default": "dag",
+                            "description": "Multi-branch 'dag' or single-path 'linear' autofocus.",
+                        },
+                        "max_passes": {
+                            "type": "integer",
+                            "description": "Maximum total passes (including Pass 1).",
+                        },
+                        "max_autofocus_passes": {
+                            "type": "integer",
+                            "default": 1,
+                            "description": "Maximum refinement passes after Pass 0.",
+                        },
+                        "baselines": {
+                            "description": (
+                                "Baseline anchor policy ('auto', 'none', or array of model names)."
+                            ),
+                        },
+                        "holidays": {
+                            "description": (
+                                "Optional ISO country code or array of country codes (e.g. ['US'])."
+                            ),
+                        },
+                        "decision_metric": {
+                            "type": "string",
+                            "description": "Optional pinned decision metric (e.g. 'wape', 'mase').",
+                        },
+                        "n_folds": {
+                            "type": "integer",
+                            "description": "Optional pinned expanding-window backtest fold count.",
+                        },
+                        "allowed_families": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of allowed model families.",
+                        },
+                        "models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional exact model shortlist to pin.",
+                        },
+                        "include_models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional models to union into the tier shortlist.",
+                        },
+                        "exclude_models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional models to remove from the tier shortlist.",
+                        },
+                        "n_series": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Series count when source='playground' or benchmark.",
+                        },
+                        "export_report_path": {
+                            "type": "string",
+                            "description": (
+                                "Optional file path (.html) to export a self-contained "
+                                "interactive HTML report including the Autofocus & Blueprint tab."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -772,6 +1080,15 @@ class McpServer:
                 "extras": extras_list,
                 "views": _build_views_catalog(),
                 "configs": _build_configs_catalog(self.repo_root),
+                "benchmarks": benchmark_catalog().to_dict(orient="records"),
+                "auto_tiers": {
+                    "exposure_tiers": [{"tier": t, **meta} for t, meta in EXPOSURE_TIERS.items()],
+                    "scale_regimes": [
+                        {"scale_regime": s, **meta} for s, meta in SCALE_REGIMES.items()
+                    ],
+                    "where_options": ["auto", "local", "bigquery", "cloud_cpu", "cloud_all"],
+                    "optimization_goals": ["accuracy", "probabilistic", "service_level", "fast"],
+                },
             }
             if category == "all":
                 return catalog_map
@@ -1272,6 +1589,205 @@ class McpServer:
                 }
 
             raise ValueError(f"Unknown launch_or_repair_run action: {action!r}")
+
+        if name == "build_auto_config":
+            import pandas as pd
+
+            from . import playground
+            from .auto import build_config as build_auto_cfg
+            from .benchmarks import BENCHMARK_NAMES, load_benchmark
+
+            src_arg = str(
+                args.get("benchmark")
+                or args.get("source_table")
+                or args.get("source", "playground")
+            )
+            n_series_bp = int(args.get("n_series", 4))
+            horizon_auto = int(args.get("horizon", 14))
+            tier_auto = str(args.get("tier", "wide_field"))
+            where_auto = str(args.get("where", "auto"))
+            goal_auto = str(args.get("goal", "accuracy"))
+            max_wc = args.get("max_minutes") or args.get("max_wall_clock_minutes")
+            max_usd_auto = args.get("max_usd")
+            only_avail = bool(args.get("only_available_models", True))
+
+            data_input: Any
+            if src_arg == "playground":
+                data_input = playground.sample_data(n_series=n_series_bp, with_exog=True)
+            elif src_arg in BENCHMARK_NAMES:
+                ds_bench = load_benchmark(src_arg, n_series=n_series_bp)
+                data_input = ds_bench.panel_df
+                if "horizon" not in args:
+                    horizon_auto = ds_bench.spec.horizon
+            else:
+                cand_path = Path(src_arg)
+                if not cand_path.is_file():
+                    cand_path = self.repo_root / src_arg
+                if cand_path.is_file():
+                    data_input = (
+                        pd.read_parquet(cand_path)
+                        if cand_path.suffix.lower() == ".parquet"
+                        else pd.read_csv(cand_path)
+                    )
+                else:
+                    data_input = src_arg
+
+            bp = build_auto_cfg(
+                data_input,
+                horizon=horizon_auto,
+                tier=tier_auto,
+                where=where_auto,
+                goal=goal_auto,
+                baselines=args.get("baselines", "auto"),
+                holidays=args.get("holidays"),
+                decision_metric=args.get("decision_metric"),
+                n_folds=int(args["n_folds"]) if args.get("n_folds") is not None else None,
+                allowed_families=args.get("allowed_families"),
+                models=args.get("models"),
+                include_models=args.get("include_models"),
+                exclude_models=args.get("exclude_models"),
+                max_minutes=float(max_wc) if max_wc is not None else None,
+                max_usd=float(max_usd_auto) if max_usd_auto is not None else None,
+                only_available_models=only_avail,
+            )
+            written_cfg_path: str | None = None
+            if args.get("write_config_path"):
+                written_cfg_path = str(bp.to_file(str(args["write_config_path"])))
+            emitted_airflow_path: str | None = None
+            if args.get("emit_airflow_path"):
+                emitted_airflow_path = str(args["emit_airflow_path"])
+                bp.emit_airflow_dag(
+                    written_cfg_path,
+                    out_path=emitted_airflow_path,
+                    autofocus=bool(args.get("autofocus", False)),
+                )
+            return {
+                "run_id": bp.run_id,
+                "tier": bp.tier,
+                "where": bp.where,
+                "goal": bp.goal,
+                "estimated_minutes_p50": bp.estimated_minutes_p50,
+                "estimated_minutes_p90": bp.estimated_minutes_p90,
+                "duration_estimate": bp.duration_estimate.to_dict(),
+                "profile_table": bp.profile_df().to_dict(orient="records"),
+                "rationale": dict(bp.rationale),
+                "explain": bp.explain(),
+                "written_config_path": written_cfg_path,
+                "emitted_airflow_path": emitted_airflow_path,
+                "config": bp.config.model_dump(mode="json"),
+            }
+
+        if name == "run_auto_forecast":
+            import pandas as pd
+
+            from . import playground
+            from .benchmarks import BENCHMARK_NAMES, load_benchmark
+            from .sdk import Forecaster
+
+            where_run = str(args.get("where", "local"))
+            if (
+                args.get("source_table") or where_run not in ("local", "auto")
+            ) and not self.allow_launch:
+                return {
+                    "allowed": False,
+                    "message": (
+                        "Cloud auto-forecast execution is locked by default. Start the MCP "
+                        "server with `python -m scale_forecasting.mcp --allow-launch` to submit "
+                        "cloud runs."
+                    ),
+                }
+
+            src_run = str(
+                args.get("benchmark")
+                or args.get("source_table")
+                or args.get("source", "playground")
+            )
+            horizon_run = int(args.get("horizon", 14))
+            tier_run = str(args.get("tier", "wide_field"))
+            goal_run = str(args.get("goal", "accuracy"))
+            autofocus_run = bool(args.get("autofocus", True))
+            autofocus_mode_run = str(args.get("autofocus_mode", "dag"))
+            max_passes_Arg = args.get("max_passes")
+            max_af_passes_run = int(args.get("max_autofocus_passes", 1))
+            n_series_run = int(args.get("n_series", 3))
+
+            panel_run: Any
+            fut_run: pd.DataFrame | None = None
+            if src_run == "playground":
+                panel_run = playground.sample_data(n_series=n_series_run, with_exog=True)
+            elif src_run in BENCHMARK_NAMES:
+                ds_b = load_benchmark(src_run, n_series=n_series_run)
+                panel_run = ds_b.df
+                fut_run = ds_b.future_df if not ds_b.future_df.empty else None
+                if "horizon" not in args:
+                    horizon_run = ds_b.spec.horizon
+            elif args.get("source_table"):
+                panel_run = str(args["source_table"])
+            else:
+                c_path = Path(src_run)
+                if not c_path.is_file():
+                    c_path = self.repo_root / src_run
+                if not c_path.is_file():
+                    raise FileNotFoundError(
+                        f"Offline source {src_run!r} not found; pass 'playground', a benchmark "
+                        f"in {list(BENCHMARK_NAMES)}, or a valid CSV/Parquet file path."
+                    )
+                panel_run = (
+                    pd.read_parquet(c_path)
+                    if c_path.suffix.lower() == ".parquet"
+                    else pd.read_csv(c_path)
+                )
+
+            f_res = Forecaster.auto(
+                panel_run,
+                future_df=fut_run,
+                horizon=horizon_run,
+                tier=tier_run,
+                where=where_run,
+                goal=goal_run,
+                baselines=args.get("baselines", "auto"),
+                holidays=args.get("holidays"),
+                decision_metric=args.get("decision_metric"),
+                n_folds=int(args["n_folds"]) if args.get("n_folds") is not None else None,
+                allowed_families=args.get("allowed_families"),
+                models=args.get("models"),
+                include_models=args.get("include_models"),
+                exclude_models=args.get("exclude_models"),
+                autofocus=autofocus_run,
+                autofocus_mode=autofocus_mode_run,
+                max_passes=int(max_passes_Arg) if max_passes_Arg is not None else None,
+                max_autofocus_passes=max_af_passes_run if max_passes_Arg is None else None,
+                execute=True,
+            )
+            sess = f_res.auto_session
+            assert sess is not None
+            preview = f_res.preview_next_loop()
+            report_written: str | None = None
+            if args.get("export_report_path"):
+                report_written = str(f_res.export_report(str(args["export_report_path"])))
+            ledger_records = f_res.autofocus_ledger_df().to_dict(orient="records")
+            baseline_records = f_res.baseline_value_df().to_dict(orient="records")
+            hierarchy_records = f_res.hierarchy_value_df().to_dict(orient="records")
+            assess_records = f_res.practitioner_assessment_df().to_dict(orient="records")
+            compare_records = f_res.compare_models().to_dict(orient="records")
+            return {
+                "run_id": sess.run_id,
+                "tier": sess.blueprint.tier,
+                "best_model": sess.best_model,
+                "best_metric": sess.best_metric,
+                "decision_metric": sess.decision_metric,
+                "profile_table": f_res.profile_df().to_dict(orient="records"),
+                "autofocus_ledger": ledger_records,
+                "autofocus_passes": [dataclasses.asdict(p) for p in sess.passes],
+                "baseline_value": baseline_records,
+                "hierarchy_value": hierarchy_records,
+                "practitioner_assessment": assess_records,
+                "model_comparison": compare_records,
+                "next_loop_preview": preview.to_dict(),
+                "leaderboard": sess.leaderboard_df.to_dict(orient="records"),
+                "sample_predictions": sess.predictions_df.head(10).to_dict(orient="records"),
+                "report_path": report_written,
+            }
 
         raise ValueError(f"Unknown tool: {name!r}")
 

@@ -625,3 +625,23 @@ def test_the_ensemble_blends_both_models_on_the_short_series_of_a_ragged_panel()
     # `fold_id` is still written, because it is the ordinal a reader recognises and the ensemble
     # rows sit in the same table as the base rows. It is carried, not joined on.
     assert blended["fold_id"].notna().all()
+
+
+def test_fit_learned_and_combine_oof_ignore_nan_truth_rows() -> None:
+    """When a series has missing observation blocks in y_true (e.g. dgp_08_missing_blocks_outliers),
+    _pivot_oof and _series_oof_wape drop non-finite y_true rows before fitting NNLS/Ridge/XGB."""
+    cfg = RunConfig(
+        run_name="ens nan truth",
+        data={"source_table": "t"},
+        models=["theta", "arima_plus"],
+        ensemble={"enabled": True, "strategies": ["nnls", "ridge", "inverse_error"]},
+        backtest={"enabled": True, "n_folds": _N_FOLDS, "decision_metric": "wape"},
+    )
+    oof = _ragged_two_engine_oof().copy()
+    oof.loc[oof.index[:3], "y_true"] = np.nan
+    weights, _artifacts, _basis = fit_learned(oof, cfg)
+    assert "nnls" in weights
+    assert "ridge" in weights
+    assert all(np.isfinite(list(w.values())).all() for w in weights.values())
+    blended = combine_oof(oof, cfg, learned_weights=weights)
+    assert not blended.empty
