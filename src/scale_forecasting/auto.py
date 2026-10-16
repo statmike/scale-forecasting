@@ -1532,6 +1532,8 @@ def inspect_panel_for_auto(
     target transformations, SBC demand regime routing, and hierarchical reconciliation.
     """
     source_table_name = "dataframe_panel"
+    true_total_series: int | None = None
+    true_total_rows: int | None = None
     if isinstance(data, str):
         from .errors import require_extra
         from .registry.tables import bigquery_client
@@ -1547,17 +1549,30 @@ def inspect_panel_for_auto(
         id_col_guess = ts_id_col or "ts_id"
         date_col_guess = date_col or "ds"
         sql = f"""
-        WITH sampled_ids AS (
+        WITH table_stats AS (
+          SELECT COUNT(DISTINCT {id_col_guess}) AS _sf_total_series, COUNT(*) AS _sf_total_rows
+          FROM `{fq_table}`
+        ),
+        sampled_ids AS (
           SELECT DISTINCT {id_col_guess}
           FROM `{fq_table}`
           LIMIT 150
         )
-        SELECT t.*
+        SELECT t.*, s_tot._sf_total_series, s_tot._sf_total_rows
         FROM `{fq_table}` t
         JOIN sampled_ids s USING ({id_col_guess})
+        CROSS JOIN table_stats s_tot
         ORDER BY t.{id_col_guess}, t.{date_col_guess}
         """
         df = client.query(sql).to_dataframe()
+        if "_sf_total_series" in df.columns:
+            if not df.empty and pd.notna(df["_sf_total_series"].iloc[0]):
+                true_total_series = int(df["_sf_total_series"].iloc[0])
+            df = df.drop(columns=["_sf_total_series"])
+        if "_sf_total_rows" in df.columns:
+            if not df.empty and pd.notna(df["_sf_total_rows"].iloc[0]):
+                true_total_rows = int(df["_sf_total_rows"].iloc[0])
+            df = df.drop(columns=["_sf_total_rows"])
     else:
         df = data.copy()
 
@@ -1699,8 +1714,9 @@ def inspect_panel_for_auto(
                 bool(np.max(resid) > 6.5 * rob_mad and np.mean(resid > 5.0 * rob_mad) < 0.06)
             )
 
-    n_series = max(1, len(obs_counts))
-    regime_shares = {k: round(v / n_series, 4) for k, v in regime_counts.items()}
+    sampled_n_series = max(1, len(obs_counts))
+    n_series = max(sampled_n_series, true_total_series or sampled_n_series)
+    regime_shares = {k: round(v / sampled_n_series, 4) for k, v in regime_counts.items()}
     dominant_regime = max(regime_shares.items(), key=lambda kv: kv[1])[0]
 
     # Classify extra columns into censored_col, hierarchy_id_cols, static, future, past covariates
@@ -1786,7 +1802,7 @@ def inspect_panel_for_auto(
         freq=eff_freq,
         horizon=eff_horizon,
         n_series=n_series,
-        n_rows=len(hist_df),
+        n_rows=max(len(hist_df), true_total_rows or len(hist_df)),
         median_n_obs=int(np.median(obs_counts)) if obs_counts else 0,
         min_n_obs=int(np.min(obs_counts)) if obs_counts else 0,
         max_n_obs=int(np.max(obs_counts)) if obs_counts else 0,
@@ -1853,14 +1869,13 @@ def _build_compute_block_for_where(
     families_present = {get_model(base_model_name(m)).family for m in models}
     families_block: dict[str, Any] = {}
 
-    if (
-        s_regime in ("large", "massive")
-        and where in ("cloud_cpu", "cloud_all", "auto")
-        and (families_present & {"statistical", "ml"})
-    ):
-        compute_cfg["persist_models"] = False
-        compute_cfg["bucket_target_cells"] = 200
-        compute_cfg["max_executors"] = 20
+    if where in ("cloud_cpu", "cloud_all", "auto") and (families_present & {"statistical", "ml"}):
+        if s_regime in ("large", "massive"):
+            compute_cfg["persist_models"] = False
+            compute_cfg["bucket_target_cells"] = 200
+            compute_cfg["max_executors"] = 12
+        else:
+            compute_cfg["max_executors"] = 8
 
     if where == "cloud_cpu":
         for fam in ("statistical", "ml", "deep_learning"):
@@ -2288,9 +2303,10 @@ def build_config(
             }
         )
 
-    min_train_obs = max(
-        14, min(180, max(14, profile.min_n_obs - profile.horizon * eff_n_folds - 2))
+    eff_min_obs = (
+        int(profile.min_n_obs * 0.55) if policy_out.get("trim_leading_zeros") else profile.min_n_obs
     )
+    min_train_obs = max(14, min(180, max(14, eff_min_obs - profile.horizon * eff_n_folds - 2)))
     backtest_cfg: dict[str, Any] = {
         "enabled": eff_n_folds >= 1,
         "n_folds": max(1, eff_n_folds),
@@ -3166,29 +3182,42 @@ def _execute_local_panel_pass(
     # Build ensembles across the panel if enabled
     ens_pred_df = pd.DataFrame()
     ens_oof_df = pd.DataFrame()
-    if (
-        exec_cfg.ensemble.enabled
-        and not base_pred_df.empty
-        and exec_cfg.models
-        and len(exec_cfg.models) >= 2
-    ):
+    avail_pred_models = (
+        set(base_pred_df["model_type"].astype(str).unique()) if not base_pred_df.empty else set()
+    )
+    avail_oof_models = (
+        set(oof_df["model_type"].astype(str).unique()) if not oof_df.empty else avail_pred_models
+    )
+    avail_ens_models = [
+        m
+        for m in exec_cfg.models
+        if m in avail_pred_models and (oof_df.empty or m in avail_oof_models)
+    ]
+    if exec_cfg.ensemble.enabled and not base_pred_df.empty and len(avail_ens_models) >= 2:
+        ens_cfg = (
+            exec_cfg.model_copy(update={"models": avail_ens_models})
+            if avail_ens_models != list(exec_cfg.models)
+            else exec_cfg
+        )
         ens_pred_rows: list[dict[str, Any]] = list(
-            combine_calculated(base_pred_df, exec_cfg, metric_df, oof_df)
+            combine_calculated(base_pred_df, ens_cfg, metric_df, oof_df)
         )
         learned_weights: dict[str, dict[str, float]] = {}
         if not oof_df.empty and any(
-            s in ("nnls", "ridge", "xgb") for s in exec_cfg.ensemble.strategies
+            s in ("nnls", "ridge", "xgb") for s in ens_cfg.ensemble.strategies
         ):
-            learned_weights, _, _ = fit_learned(oof_df, exec_cfg)
+            with contextlib.suppress(Exception):
+                learned_weights, _, _ = fit_learned(oof_df, ens_cfg)
             for strategy, wmap in learned_weights.items():
                 ens_pred_rows.extend(
-                    _apply_learned_weights(base_pred_df, wmap, exec_cfg.run_name, strategy)
+                    _apply_learned_weights(base_pred_df, wmap, ens_cfg.run_name, strategy)
                 )
 
         if not oof_df.empty:
-            ens_oof_df = combine_oof(oof_df, exec_cfg, learned_weights)
+            with contextlib.suppress(Exception):
+                ens_oof_df = combine_oof(oof_df, ens_cfg, learned_weights)
         if ens_pred_rows:
-            ens_pred_rows = calibrate_ensemble_predictions(ens_pred_rows, ens_oof_df, exec_cfg)
+            ens_pred_rows = calibrate_ensemble_predictions(ens_pred_rows, ens_oof_df, ens_cfg)
             ens_pred_df = pd.DataFrame(ens_pred_rows)
 
         # When hierarchy is enabled, reconcile ensemble predictions & OOF in-place so winning

@@ -444,6 +444,10 @@ class Forecaster:
             return pd.DataFrame()
         return self._auto_session.ledger_df()
 
+    def autofocus_history_df(self) -> pd.DataFrame:
+        """Alias for :meth:`autofocus_ledger_df` returning the pass-by-pass `autofocus` ledger."""
+        return self.autofocus_ledger_df()
+
     def autofocus_diff_df(self) -> pd.DataFrame:
         """Return a parameter-by-parameter and score diff DataFrame across `autofocus` passes."""
         import pandas as pd

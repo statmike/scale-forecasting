@@ -29,8 +29,8 @@ whose models are 100% borrowed skips cluster provisioning entirely ($T_f \\appro
 Empirical Provenance
 --------------------
 The default coefficients in :data:`EMPIRICAL_PROVISIONING_PRIORS` and
-:data:`EMPIRICAL_MODEL_FIT_PRIORS` were calibrated from **368 completed multi-runtime runs** and
-**5,495,569 fitted `(ts_id, model_type)` cells** in the reference dataset
+:data:`EMPIRICAL_MODEL_FIT_PRIORS` were calibrated from **606 completed multi-runtime runs** and
+**5,595,569 fitted `(ts_id, model_type)` cells** in the reference dataset
 (`statmike-scale-forecasting.scale_forecasting`). Enterprise operators can re-calibrate these
 coefficients against their own BigQuery registry via :func:`calibrate_duration_from_registry` or
 ``Registry.calibrate_duration_model()``.
@@ -67,25 +67,25 @@ _REF_N_OBS = 365.0
 _REF_HORIZON = 28.0
 
 # Empirical provisioning priors (p50_seconds, p90_seconds) keyed by (runtime, mode, hardware).
-# Calibrated from 423 completed jobs across all 7 runtimes in the reference BigQuery registry.
+# Calibrated from 661 completed jobs across all 7 runtimes in the reference BigQuery registry.
 EMPIRICAL_PROVISIONING_PRIORS: dict[tuple[str, str, str], tuple[float, float]] = {
     ("local", "in_process", "cpu"): (0.0, 0.0),
     ("local", "in_process", "gpu"): (0.0, 0.0),
-    ("bigquery", "sql", "cpu"): (14.0, 67.3),
-    ("spark", "serverless", "cpu"): (64.7, 72.0),
+    ("bigquery", "sql", "cpu"): (13.1, 74.7),
+    ("spark", "serverless", "cpu"): (64.4, 67.0),
     ("spark", "serverless", "gpu"): (78.0, 96.0),
     ("spark", "cluster", "cpu"): (145.0, 185.0),
-    ("spark", "cluster", "gpu"): (175.0, 220.0),
+    ("spark", "cluster", "gpu"): (415.8, 812.8),
     ("spark", "connect", "cpu"): (2.0, 5.0),
-    ("gce", "single_vm", "cpu"): (238.0, 280.0),
-    ("gce", "single_vm", "gpu"): (238.0, 295.0),
-    ("vertex", "custom_job", "cpu"): (240.0, 409.6),
-    ("vertex", "custom_job", "gpu"): (249.1, 308.7),
-    ("gke", "job", "cpu"): (79.8, 212.6),
+    ("gce", "single_vm", "cpu"): (239.5, 242.7),
+    ("gce", "single_vm", "gpu"): (116.6, 238.0),
+    ("vertex", "custom_job", "cpu"): (142.5, 409.6),
+    ("vertex", "custom_job", "gpu"): (196.4, 249.1),
+    ("gke", "job", "cpu"): (79.8, 425.0),
     ("gke", "job", "gpu"): (227.3, 418.0),
     ("gke", "ephemeral_cluster", "cpu"): (380.0, 440.0),
     ("gke", "ephemeral_cluster", "gpu"): (418.0, 480.0),
-    ("ray", "vertex", "cpu"): (245.2, 832.0),
+    ("ray", "vertex", "cpu"): (221.3, 790.4),
     ("ray", "vertex", "gpu"): (404.1, 880.0),
     ("ray", "warm_cluster", "cpu"): (12.0, 25.0),
     ("ray", "warm_cluster", "gpu"): (15.0, 30.0),
