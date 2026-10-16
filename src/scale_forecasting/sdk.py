@@ -1654,6 +1654,21 @@ class Forecaster:
         eff_metric = metric or self._config.backtest.decision_metric
         return compute_fva(oof_df, baseline=baseline, metric=eff_metric)
 
+    def fva_cascade_df(
+        self,
+        run_id: str | None = None,
+        *,
+        baseline: str | None = None,
+        metric: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Return the Forecast Value Added (FVA) cascade or baseline value ladder DataFrame."""
+        if self._auto_session is not None and (run_id is None or run_id == self.run_id):
+            bv = self._auto_session.baseline_value_df()
+            if not bv.empty:
+                return bv
+        return self.fva_df(run_id, baseline=baseline, metric=metric, limit=limit)
+
     def plot_fva(
         self,
         run_id: str | None = None,

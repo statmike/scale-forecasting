@@ -13,7 +13,7 @@ from functools import cache
 from typing import Any
 
 from ..errors import get_logger
-from .rows import METRIC_COLUMNS, _as_date
+from .rows import METRIC_COLUMNS, as_date
 
 _log = get_logger(__name__)
 
@@ -255,7 +255,7 @@ def _encode_rows(
         for col, type_char in spec:
             value = row.get(col)
             if col in _DATE_COLUMNS:
-                value = _as_date(value)
+                value = as_date(value)
             if value is None:
                 continue
             if type_char == "S":

@@ -387,9 +387,9 @@ def _ensemble_batch(
     from .engines import bigquery_engine
     from .engines.bigquery_sql import build_history_query
     from .ensembler import (
-        _ensemble_oof_bounds_from_arrays,
         calibrate_ensemble_predictions,
         combine_oof,
+        ensemble_oof_bounds_from_arrays,
     )
     from .metrics import compute_metrics
     from .registry.artifacts import upload_artifact_bytes
@@ -526,12 +526,12 @@ def _ensemble_batch(
         and int(ens_oof["ts_id"].nunique()) >= 2000
     )
     if use_sql_scales:
-        from .engines.bigquery_sql import _series_filter, _snapshot_clause, source_ref
+        from .engines.bigquery_sql import series_filter, snapshot_clause, source_ref
 
         source = source_ref(cfg, dataset)
         idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
-        snap = _snapshot_clause(cfg.data.snapshot_millis)
-        sfilter = _series_filter(cfg, source, idc, snapshot_millis=cfg.data.snapshot_millis)
+        snap = snapshot_clause(cfg.data.snapshot_millis)
+        sfilter = series_filter(cfg, source, idc, snapshot_millis=cfg.data.snapshot_millis)
         dm_expr = (
             f"ABS(CAST({targetc} AS FLOAT64) - LAG(CAST({targetc} AS FLOAT64), {period}) "
             f"OVER (PARTITION BY {idc} ORDER BY {datec}))"
@@ -613,9 +613,9 @@ def _ensemble_batch(
         s: ensemble_scoring_basis(s, oof_df, cfg, learned_basis) for s in cfg.ensemble.strategies
     }
 
-    from .registry.ids import _canonical_config
+    from .registry.ids import canonical_config
 
-    canonical_cfg = _canonical_config(cfg)
+    canonical_cfg = canonical_config(cfg)
     ens_oof_sorted = ens_oof.sort_values(
         ["model_type", "ts_id", "fold_id", "forecast_date"],
         kind="mergesort",
@@ -657,7 +657,7 @@ def _ensemble_batch(
                 ]
                 if valid_c:
                     cutoff = min(valid_c)
-            lo, hi = _ensemble_oof_bounds_from_arrays(c_yhat, c_resid, f_mask, cfg)
+            lo, hi = ensemble_oof_bounds_from_arrays(c_yhat, c_resid, f_mask, cfg)
             if use_sql_scales:
                 f_panel = compute_metrics(
                     c_y_true[f_mask],

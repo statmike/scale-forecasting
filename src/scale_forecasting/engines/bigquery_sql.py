@@ -69,7 +69,7 @@ def _freq(cfg: RunConfig) -> tuple[str, str]:
     return _FREQ_MAP.get(cfg.data.freq.upper(), ("DAILY", "DAY"))
 
 
-def _snapshot_clause(snapshot_millis: int | None) -> str:
+def snapshot_clause(snapshot_millis: int | None) -> str:
     """The ``FOR SYSTEM_TIME AS OF`` clause pinning a source read to the run's snapshot (else "").
 
     Appended immediately *after* each backtick-quoted source-table reference so every native SQL
@@ -82,6 +82,9 @@ def _snapshot_clause(snapshot_millis: int | None) -> str:
     if snapshot_millis is None:
         return ""
     return f" FOR SYSTEM_TIME AS OF TIMESTAMP_MILLIS({snapshot_millis})"
+
+
+_snapshot_clause = snapshot_clause
 
 
 def series_filter(

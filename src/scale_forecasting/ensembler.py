@@ -34,9 +34,9 @@ from scipy.optimize import nnls
 
 from .backtest import holdout_fold_id
 from .calibration import (
-    _calibrate_from_arrays,
     apply_output_constraints,
     apply_quantile_and_cost_rules,
+    calibrate_from_arrays,
     calibrate_from_oof,
     has_output_constraints,
     rearrange_monotone_quantiles,
@@ -1174,7 +1174,7 @@ def ensemble_oof_bounds(
     return frame["yhat_lower"].to_numpy(dtype=float), frame["yhat_upper"].to_numpy(dtype=float)
 
 
-def _ensemble_oof_bounds_from_arrays(
+def ensemble_oof_bounds_from_arrays(
     cell_yhat: np.ndarray,
     cell_resid: np.ndarray,
     fold_mask: np.ndarray,
@@ -1207,6 +1207,9 @@ def _ensemble_oof_bounds_from_arrays(
         )
         return frame["yhat_lower"].to_numpy(dtype=float), frame["yhat_upper"].to_numpy(dtype=float)
     return lo, hi
+
+
+_ensemble_oof_bounds_from_arrays = ensemble_oof_bounds_from_arrays
 
 
 def calibrate_ensemble_predictions(
@@ -1273,7 +1276,7 @@ def calibrate_ensemble_predictions(
                     continue
                 r_slice = oof_resid[o_idx]
                 s_slice = oof_steps[o_idx] if oof_steps is not None else None
-                cal = _calibrate_from_arrays(r_slice, s_slice, q_pair)
+                cal = calibrate_from_arrays(r_slice, s_slice, q_pair)
                 if cal is not None:
                     n_p = len(p_idx)
                     if not cal.by_step:

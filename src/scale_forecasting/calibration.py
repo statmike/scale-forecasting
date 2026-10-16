@@ -244,7 +244,7 @@ def _window_residuals(
     return np.empty(0)
 
 
-def _calibrate_from_arrays(
+def calibrate_from_arrays(
     resid: np.ndarray,
     steps_raw: np.ndarray | None,
     quantiles: Sequence[float],
@@ -278,6 +278,9 @@ def _calibrate_from_arrays(
     if not by_step or len(distinct) == 1:
         return Calibration(by_step={}, pooled=pooled, source="oof-flat")
     return Calibration(by_step=by_step, pooled=pooled, source="oof-per-step")
+
+
+_calibrate_from_arrays = calibrate_from_arrays
 
 
 def calibrate_from_oof(

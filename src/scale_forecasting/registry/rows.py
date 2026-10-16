@@ -608,7 +608,7 @@ def _as_json(value: Any) -> str | None:
     return json.dumps(value, sort_keys=True)
 
 
-def _as_date(value: Any) -> Any:
+def as_date(value: Any) -> Any:
     """Normalize a timestamp-ish value to a ``date`` (or ``"YYYY-MM-DD"``) for BQ DATE columns."""
     if value is None or value != value:  # None, NaN, or pd.NaT
         return None
@@ -617,6 +617,9 @@ def _as_date(value: Any) -> Any:
     if isinstance(value, str) and len(value) > 10 and value[10] in ("T", " "):
         return value[:10]
     return value
+
+
+_as_date = as_date
 
 
 def _as_int(value: Any) -> int | None:

@@ -1861,6 +1861,8 @@ def _build_compute_block_for_where(
 ) -> dict[str, Any]:
     """Build the `compute` dictionary matching the user's `where` sandbox envelope and scale."""
     compute_cfg: dict[str, Any] = {}
+    if where != "local":
+        compute_cfg["reuse_prior_runs"] = True
     if max_usd is not None:
         compute_cfg["budget_usd"] = max(1.0, float(max_usd))
 

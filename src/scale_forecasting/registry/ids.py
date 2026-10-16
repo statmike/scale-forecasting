@@ -208,7 +208,7 @@ def _descend(payload: dict[str, Any], path: Sequence[str]) -> dict[str, Any] | N
     return node if isinstance(node, dict) else None
 
 
-def _canonical_config(cfg: RunConfig) -> str:
+def canonical_config(cfg: RunConfig) -> str:
     """Serialize a config to a stable, order-independent JSON string.
 
     ``sort_keys`` makes the bytes insensitive to field ordering, so the hash depends
@@ -267,6 +267,9 @@ def _canonical_config(cfg: RunConfig) -> str:
                     if fam_cfg.get(k) is None:
                         fam_cfg.pop(k, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+_canonical_config = canonical_config
 
 
 def make_run_id(cfg: RunConfig) -> str:

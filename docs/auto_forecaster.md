@@ -350,7 +350,7 @@ Because `scale-forecasting` launches **one independent job per active model fami
 
 $$\text{Total Time} \approx \max_{\text{family}} \big( \text{Provisioning Startup} + \text{Container/SQL Setup} + \text{Model Fitting Time} \big) + \text{Ensemble Step}$$
 
-To give you practical ballparks out of the box, [`predict_run_duration()`](api/profiling.md) uses median (P50) and 90th-percentile (P90) startup and execution timings measured across **423 completed jobs (`v_run_jobs`)** in our reference environment:
+To give you practical ballparks out of the box, [`predict_run_duration()`](api/profiling.md) uses median (P50) and 90th-percentile (P90) startup and execution timings measured across **606 completed jobs (`5.59M` fitted cells in `v_run_jobs`)** in our reference environment:
 
 | Runtime (`where` / `runtime`) | Typical Startup / Provisioning (P50 / P90) | Typical Setup & I/O Overhead (P50) | Observed Reference Job Totals (P50 / P90) | Approximate Compute Rate Used for Guardrails* |
 | :--- | :---: | :---: | :---: | :---: |
@@ -420,6 +420,7 @@ Instead of hand-picking the thresholds and starting model lists in [`scale_forec
 | **Generation 1 — Smart Early Stopping** | `34.08` | `+18.25%` | `+2.26%` | `0.00` | Added a residual white-noise stop gate so `autofocus` stops right after Pass 1 when no learnable pattern remains. |
 | **Generation 2 — Lean Pass 1 + Pass 2 Upgrades** | `52.86` | `+19.65%` | `+11.61%` | `0.00` | Keeping Pass 1 lean (`naive_seasonal`, `theta`, `lightgbm`) and saving `@transform_log1p` and `@direct` for Pass 2 boosted Pass 2 gains more than $5\times$. |
 | **Generation 3 — Single-Fold Overfit Guard** | `56.03` | `+20.63%` | `+12.46%` | `0.00` | Using `"best_single"` selection when `n_folds=1` (and per-series `"champion"` only when `n_folds >= 2`) eliminated 1-fold overfitting. |
-| **Round 2 — Multi-Branch DAG + Domain Specialists** | **`74.82`** | **`+41.96%`** | **`+24.16%`** | **`0.00`** | Splitting Pass 2 into parallel branches (`2A`, `2B`, `2C`) + Level 3 synthesis (`3`) and adding intermittent, cold-start, hierarchy (`mint_nonneg`), and stockout specialists solved all 12 test regimes. |
+| **Round 2 — Multi-Branch DAG + Domain Specialists** | `74.82` | `+41.96%` | `+24.16%` | `0.00` | Splitting Pass 2 into parallel branches (`2A`, `2B`, `2C`) + Level 3 synthesis (`3`) and adding intermittent, cold-start, hierarchy (`mint_nonneg`), and stockout specialists solved all 12 test regimes. |
+| **Round 3A & 3B — 18-DGP Scale-Crossover & Cloud Holdouts (`300` Generations)** | **`71.07`** *(18-DGP scale-aware score)* | **`+45.40%`** | **`+25.60%` regret reduction** | **`0.00`** | Evolved `n_series` scale-regime cutoffs (`micro=9`, `small=99`, `medium=999`, `large=9,999`), multi-anchor baseline rules (`100%` rule accuracy across `18/18` DGPs), and hierarchical reconciliation ladders; verified on `60/60` multi-branch tournaments and unseen cloud holdouts up to `25,000` series (`+50.07%` MASE lift / `+45.04%` WAPE reduction on `holdout_25000`). |
 
 Want to run these experiments interactively with visual plots? Open **[`notebooks/11_auto_forecaster_and_autofocus.ipynb`](notebooks/11_auto_forecaster_and_autofocus.ipynb)**.
