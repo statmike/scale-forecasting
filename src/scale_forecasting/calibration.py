@@ -188,7 +188,7 @@ class Calibration:
         return self.by_step.get(step, self.pooled)
 
 
-def _empirical_quantile(sorted_residuals: np.ndarray, q: float) -> float:
+def empirical_quantile(sorted_residuals: np.ndarray, q: float) -> float:
     """A residual quantile that does not systematically under-cover on a small sample.
 
     `np.quantile` interpolates *between* order statistics, which makes it a fine point estimate and
@@ -214,6 +214,9 @@ def _empirical_quantile(sorted_residuals: np.ndarray, q: float) -> float:
         return float(np.quantile(sorted_residuals, q))
     rank = math.ceil((n + 1) * q) if q > 0.5 else math.floor((n + 1) * q)
     return float(sorted_residuals[min(max(rank - 1, 0), n - 1)])
+
+
+_empirical_quantile = empirical_quantile
 
 
 def _summarize(residuals: np.ndarray, quantiles: Sequence[float]) -> StepCalibration:

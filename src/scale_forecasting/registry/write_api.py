@@ -334,12 +334,13 @@ def _append_via_batch_load_fallback(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
+    from .tables import bigquery_client
 
     if not serialized:
         return
     try:
         rows = _decode_proto_rows(proto_descriptor, serialized)
-        client = bigquery.Client(project=project)
+        client = bigquery_client(project)
         fq = f"{project}.{dataset}.{table}"
         job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
         client.load_table_from_json(rows, fq, job_config=job_cfg).result()

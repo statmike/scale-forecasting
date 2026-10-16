@@ -881,3 +881,265 @@ def test_hourly_and_monthly_dgp_19_20_fourier_and_lags() -> None:
     assert bp20.config.features.trading_days is True
     assert 12 in bp20.config.model_params["lightgbm"]["lags"]
     assert 28 not in bp20.config.model_params["lightgbm"]["lags"]
+
+
+def test_public_benchmarks_quota_and_sdk_auto_session_coverage(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import zipfile
+    from pathlib import Path
+    from types import SimpleNamespace
+    from typing import Any
+
+    tmp_path = Path(str(tmp_path))
+
+    from scale_forecasting.benchmarks import (
+        _main as benchmarks_main,
+    )
+    from scale_forecasting.benchmarks import (
+        fetch_public_benchmark,
+        list_public_benchmarks,
+        public_benchmark_catalog,
+    )
+    from scale_forecasting.config import RunConfig
+    from scale_forecasting.quota import (
+        automl_demands,
+        clamp_serverless_executors,
+        gke_demands,
+        preflight_automl,
+        preflight_gke,
+        preflight_serverless,
+        serverless_batch_concurrency,
+        serverless_demands,
+    )
+    from scale_forecasting.registry.write_api import (
+        _OOF_SPEC,
+        _append_via_batch_load_fallback,
+        _encode_rows,
+        _proto_for,
+    )
+    from scale_forecasting.sdk import Forecaster
+
+    # 1. Public benchmark catalog & CLI
+    pub_names = list_public_benchmarks()
+    assert len(pub_names) == 9
+    pub_cat = public_benchmark_catalog()
+    assert len(pub_cat) == 9
+    assert benchmarks_main(["--list"]) == 0
+    assert benchmarks_main(["--list", "--json"]) == 0
+    assert benchmarks_main(["--name", "dgp_01_smooth_seasonal"]) == 0
+    assert benchmarks_main(["--name", "dgp_01_smooth_seasonal", "--json"]) == 0
+
+    with pytest.raises(ValueError, match="Unknown public benchmark"):
+        fetch_public_benchmark("unknown_bench", cache_dir=str(tmp_path))
+
+    # Mock cached files for fetch_public_benchmark across all 5 parser families
+    # (a) Monash .tsf zip
+    monash_dir = tmp_path / "monash_hospital"
+    monash_dir.mkdir(parents=True, exist_ok=True)
+    tsf_vals = ",".join(str(10 + (i % 12)) for i in range(48))
+    tsf_content = f"@relation hospital\n@data\nT1:2000-01-01 00-00-00:{tsf_vals}\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("hospital.tsf", tsf_content)
+    (monash_dir / "monash_hospital.zip").write_bytes(buf.getvalue())
+    ds_monash = fetch_public_benchmark(
+        "monash_hospital", n_series=1, history_limit=36, cache_dir=str(tmp_path)
+    )
+    assert ds_monash.spec.n_series == 1
+    assert not ds_monash.df.empty
+
+    # (b) ETTh1 CSV
+    etth_dir = tmp_path / "etth1"
+    etth_dir.mkdir(parents=True, exist_ok=True)
+    etth_dates = pd.date_range("2016-07-01", periods=60, freq="h")
+    pd.DataFrame({"date": etth_dates, "OT": range(60), "HUFL": range(10, 70)}).to_csv(
+        etth_dir / "ETTh1.csv", index=False
+    )
+    ds_etth = fetch_public_benchmark("etth1", n_series=2, history_limit=36, cache_dir=str(tmp_path))
+    assert ds_etth.spec.n_series == 2
+
+    # (c) M4 CSVs
+    m4_dir = tmp_path / "m4_daily"
+    m4_dir.mkdir(parents=True, exist_ok=True)
+    tr_cols = ["V1"] + [f"V{i}" for i in range(2, 45)]
+    te_cols = ["V1"] + [f"V{i}" for i in range(2, 16)]
+    pd.DataFrame([["D1"] + [100.0 + i for i in range(43)]], columns=tr_cols).to_csv(
+        m4_dir / "m4_daily_train_subset.csv", index=False
+    )
+    pd.DataFrame([["D1"] + [150.0 + i for i in range(14)]], columns=te_cols).to_csv(
+        m4_dir / "m4_daily_test_subset.csv", index=False
+    )
+    ds_m4 = fetch_public_benchmark(
+        "m4_daily", n_series=1, history_limit=30, cache_dir=str(tmp_path)
+    )
+    assert ds_m4.spec.n_series == 1
+
+    # (d) M5 Walmart CSVs
+    m5_dir = tmp_path / "m5_walmart"
+    m5_dir.mkdir(parents=True, exist_ok=True)
+    m5_days = [f"d_{i}" for i in range(1, 95)]
+    m5_dates = pd.date_range("2016-01-01", periods=94, freq="D")
+    pd.DataFrame(
+        {
+            "d": m5_days,
+            "date": m5_dates.strftime("%Y-%m-%d"),
+            "wm_yr_wk": [11601] * 94,
+            "event_name_1": [None] * 94,
+            "snap_CA": [1, 0] * 47,
+            "snap_TX": [0, 1] * 47,
+            "snap_WI": [0, 0] * 47,
+        }
+    ).to_csv(m5_dir / "calendar.csv", index=False)
+    sales_row = {
+        "id": "FOODS_1_001_CA_1_evaluation",
+        "item_id": "FOODS_1_001",
+        "dept_id": "FOODS_1",
+        "cat_id": "FOODS",
+        "store_id": "CA_1",
+        "state_id": "CA",
+    }
+    for idx_d, d_col in enumerate(m5_days):
+        sales_row[d_col] = 5 + (idx_d % 7)
+    pd.DataFrame([sales_row]).to_csv(m5_dir / "sales_train_evaluation.csv", index=False)
+    pd.DataFrame(
+        [{"store_id": "CA_1", "item_id": "FOODS_1_001", "wm_yr_wk": 11601, "sell_price": 2.5}]
+    ).to_csv(m5_dir / "sell_prices.csv", index=False)
+    ds_m5 = fetch_public_benchmark(
+        "m5_walmart", n_series=1, history_limit=60, cache_dir=str(tmp_path)
+    )
+    assert ds_m5.spec.n_series == 1
+    assert "snap_active" in ds_m5.future_df.columns
+
+    # (e) Favorita CSVs
+    fav_dir = tmp_path / "favorita_grocery"
+    fav_dir.mkdir(parents=True, exist_ok=True)
+    fav_dates = pd.date_range("2016-06-01", periods=60, freq="D").strftime("%Y-%m-%d")
+    pd.DataFrame(
+        {
+            "date": fav_dates,
+            "store_nbr": [1] * 60,
+            "family": ["GROCERY I"] * 60,
+            "sales": [120.0 + (i % 7) * 10 for i in range(60)],
+            "onpromotion": [i % 2 for i in range(60)],
+        }
+    ).to_csv(fav_dir / "train.csv", index=False)
+    pd.DataFrame({"store_nbr": [1], "city": ["Quito"], "state": ["Pichincha"]}).to_csv(
+        fav_dir / "stores.csv", index=False
+    )
+    pd.DataFrame({"date": fav_dates, "dcoilwtico": [46.5] * 60}).to_csv(
+        fav_dir / "oil.csv", index=False
+    )
+    pd.DataFrame({"date": [fav_dates[5]], "transferred": [False]}).to_csv(
+        fav_dir / "holidays_events.csv", index=False
+    )
+    ds_fav = fetch_public_benchmark(
+        "favorita_grocery", n_series=1, history_limit=40, cache_dir=str(tmp_path)
+    )
+    assert ds_fav.spec.n_series == 1
+
+    # 2. Quota preflight for GKE, Serverless Spark (CPU + GPU), and Vertex AutoML
+    def fake_fetch(_service: str, _metric: str) -> dict[str, Any]:
+        return {
+            "consumerQuotaLimits": [
+                {
+                    "quotaBuckets": [
+                        {"dimensions": {"region": "us-central1"}, "effectiveLimit": "2400"}
+                    ]
+                }
+            ]
+        }
+
+    gke_plan = SimpleNamespace(
+        worker_count=4,
+        gpu_type="T4",
+        accelerator_type="NVIDIA_TESLA_T4",
+        accelerator_count=1,
+        machine_type="g2-standard-8",
+    )
+    assert len(gke_demands(gke_plan, "us-central1")) == 2
+    pf_gke = preflight_gke(gke_plan, ["us-central1"], "proj-1", fetch=fake_fetch)
+    assert not pf_gke["us-central1"].blocked
+
+    cfg_srv = RunConfig.model_validate(
+        {
+            "run_name": "test-srv",
+            "python_runtime": "spark",
+            "data": {"source_table": "s", "horizon": 7},
+            "models": ["naive_seasonal", "lightgbm"],
+        }
+    )
+    tot_b, gpu_b = serverless_batch_concurrency(cfg_srv)
+    assert tot_b == 2 and gpu_b == 1
+    assert (
+        len(serverless_demands("us-central1", max_executors=10, hardware="gpu", gpu_type="L4")) == 3
+    )
+    pf_srv = preflight_serverless(
+        ["us-central1"],
+        "proj-1",
+        max_executors=10,
+        hardware="gpu",
+        gpu_type="L4",
+        concurrent_batches=2,
+        concurrent_gpu_batches=1,
+        fetch=fake_fetch,
+    )
+    clamped_execs = clamp_serverless_executors(10, pf_srv["us-central1"])
+    assert 1 <= clamped_execs <= 2
+
+    assert len(automl_demands("us-central1", hardware="gpu", gpu_type="T4")) == 3
+    pf_aml = preflight_automl(
+        ["us-central1"], "proj-1", hardware="gpu", gpu_type="T4", fetch=fake_fetch
+    )
+    assert not pf_aml["us-central1"].blocked
+
+    # 3. Write API batch-load fallback
+    loaded_calls: list[Any] = []
+
+    class _FakeBQClient:
+        def load_table_from_json(self, rows: Any, fq: str, job_config: Any = None) -> Any:
+            loaded_calls.append((rows, fq, job_config))
+            return SimpleNamespace(result=lambda: None)
+
+    monkeypatch.setattr(
+        "scale_forecasting.registry.tables.bigquery_client", lambda *_a, **_kw: _FakeBQClient()
+    )
+    msg_cls, proto_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    ser = _encode_rows(
+        msg_cls,
+        _OOF_SPEC,
+        [
+            {
+                "run_id": "r1",
+                "ts_id": "s1",
+                "model_type": "snaive",
+                "fold_id": 0,
+                "cutoff_date": "2015-01-01",
+                "forecast_date": "2015-01-02",
+                "horizon_step": 1,
+                "yhat": 5.0,
+                "y_true": 6.0,
+            }
+        ],
+    )
+    _append_via_batch_load_fallback("proj-1", "ds", "backtest_oof", proto_desc, ser)
+    assert len(loaded_calls) == 1
+
+    # 4. Forecaster.auto() local session methods
+    ds_h = load_benchmark("dgp_08_hierarchical_nonneg", n_series=4)
+    f = Forecaster.auto(ds_h.panel_df, tier="first_light", where="local", autofocus=False)
+    assert not f.leaderboard_df().empty
+    assert not f.predictions_df(
+        ts_id=str(ds_h.panel_df["ts_id"].iloc[0]), models=["naive_seasonal"]
+    ).empty
+    assert not f.fva_df().empty
+    assert not f.fva_cascade_df().empty
+    assert not f.horizon_decay_df().empty
+    assert not f.bias_report_df().empty
+    assert isinstance(f.exceptions_df(), pd.DataFrame)
+    assert isinstance(f.attributions_df(), pd.DataFrame)
+    assert not f.hierarchy_df().empty
+    rep_path = tmp_path / "auto_report.html"
+    f.export_report(rep_path, write_json=True)
+    assert rep_path.is_file()

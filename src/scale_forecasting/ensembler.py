@@ -34,11 +34,11 @@ from scipy.optimize import nnls
 
 from .backtest import holdout_fold_id
 from .calibration import (
-    _empirical_quantile,
     apply_output_constraints,
     apply_quantile_and_cost_rules,
     calibrate_from_arrays,
     calibrate_from_oof,
+    empirical_quantile,
     has_output_constraints,
     rearrange_monotone_quantiles,
 )
@@ -1210,8 +1210,8 @@ def ensemble_oof_bounds(
         q10, q90 = -half, half
     else:
         ordered = np.sort(residuals)
-        q10 = _empirical_quantile(ordered, 0.10)
-        q90 = _empirical_quantile(ordered, 0.90)
+        q10 = empirical_quantile(ordered, 0.10)
+        q90 = empirical_quantile(ordered, 0.90)
         if q10 == q90:
             half = max(abs(float(q10)) * 0.1, 1e-6)
             q10, q90 = float(q10) - half, float(q90) + half
@@ -1248,8 +1248,8 @@ def ensemble_oof_bounds_from_arrays(
         q10, q90 = -half, half
     else:
         ordered = np.sort(residuals)
-        q10 = _empirical_quantile(ordered, 0.10)
-        q90 = _empirical_quantile(ordered, 0.90)
+        q10 = empirical_quantile(ordered, 0.10)
+        q90 = empirical_quantile(ordered, 0.90)
         if q10 == q90:
             half = max(abs(float(q10)) * 0.1, 1e-6)
             q10, q90 = float(q10) - half, float(q90) + half
