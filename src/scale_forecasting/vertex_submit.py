@@ -533,15 +533,25 @@ def submit_vertex(
         client = _job_client(region)
         parent = f"projects/{settings.project_id}/locations/{region}"
         candidate_plans = [regional_plan]
+        family_auto_machine = all(
+            getattr(cfg.compute.families, fam).machine_type in (None, "auto")
+            for fam in pool_families(python_models)
+            if hasattr(cfg.compute.families, fam)
+        )
         if (
             wait
             and regional_plan.hardware == "cpu"
             and regional_plan.machine_type.startswith("n2-standard-")
             and cfg.compute.machine_type == "auto"
-            and machine_type in (None, "auto")
+            and family_auto_machine
+            and machine_type in (None, "auto", regional_plan.machine_type)
         ):
             n1_type = regional_plan.machine_type.replace("n2-standard-", "n1-standard-", 1)
-            candidate_plans.append(replace(regional_plan, machine_type=n1_type))
+            n1_plan = replace(regional_plan, machine_type=n1_type)
+            if os.environ.get("SF_VERTEX_CPU_PREFER_N1", "").strip() in ("1", "true", "yes"):
+                candidate_plans = [n1_plan, regional_plan]
+            else:
+                candidate_plans.append(n1_plan)
 
         last_exc: Exception | None = None
         for idx, plan_try in enumerate(candidate_plans):
