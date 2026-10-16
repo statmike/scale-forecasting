@@ -68,6 +68,8 @@ BENCHMARK_NAMES: tuple[str, ...] = (
     "dgp_16_monthly_trading_days",
     "dgp_17_missing_gaps_and_leading_zeros",
     "dgp_18_promo_lag_pullforward",
+    "dgp_19_hourly_diurnal_weekly_load",
+    "dgp_20_monthly_regime_drift_damped",
 )
 
 
@@ -490,6 +492,43 @@ _SPECS: dict[str, BenchmarkSpec] = {
         expected_autofocus_actions=("synthesize_exog_lags",),
         seed=118,
     ),
+    "dgp_19_hourly_diurnal_weekly_load": BenchmarkSpec(
+        name="dgp_19_hourly_diurnal_weekly_load",
+        title="Hourly Transformer Load with Diurnal (24h) + Weekly (168h) Multi-Seasonality",
+        description=(
+            "12 hourly series (freq='h', T=336, H=24) exhibiting dual 24-hour diurnal double-peak "
+            "and 168-hour weekend load cycles plus ambient temperature cooling load."
+        ),
+        freq="h",
+        horizon=24,
+        n_series=12,
+        history_length=336,
+        expected_regime="smooth",
+        non_negative=True,
+        true_covariates=("ambient_temp",),
+        expected_autofocus_actions=("fourier_multi_seasonal", "frequency_matched_lags"),
+        seed=119,
+    ),
+    "dgp_20_monthly_regime_drift_damped": BenchmarkSpec(
+        name="dgp_20_monthly_regime_drift_damped",
+        title="Monthly Macro/Tourism Series with 12-Month Seasonality & Damped Regime Drift",
+        description=(
+            "12 monthly series (freq='MS', T=60, H=12) with 12-month annual harmonics, a "
+            "mid-history structural slope shift, and damped long-horizon trend requiring "
+            "frequency-matched monthly lags."
+        ),
+        freq="MS",
+        horizon=12,
+        n_series=12,
+        history_length=60,
+        expected_regime="smooth",
+        non_negative=True,
+        has_structural_break=True,
+        has_horizon_crossover=True,
+        crossover_step=4,
+        expected_autofocus_actions=("enable_level_shift", "inject_direct_horizon_models"),
+        seed=120,
+    ),
 }
 
 
@@ -815,7 +854,7 @@ def load_benchmark(
                 lead_z = min(24, max(6, eff_t // 5))
                 y_all[:lead_z] = 0.0
 
-        else:  # dgp_18_promo_lag_pullforward
+        elif name == "dgp_18_promo_lag_pullforward":
             base_level = float(rng.uniform(100.0, 140.0))
             promo_flag = np.zeros(total_len, dtype=np.float64)
             for t_p in range(5, total_len, 9):
@@ -827,6 +866,41 @@ def load_benchmark(
             )
             y_all = np.maximum(0.0, mu + rng.normal(0.0, 2.2, size=total_len))
             extra_cols = {"promo_flag": promo_flag}
+
+        elif name == "dgp_19_hourly_diurnal_weekly_load":
+            base_level = float(rng.uniform(220.0, 340.0))
+            diurnal = 42.0 * np.sin(2.0 * np.pi * t_idx / 24.0 + phase) + 18.0 * np.cos(
+                4.0 * np.pi * t_idx / 24.0 + phase
+            )
+            weekly_168 = 26.0 * np.sin(2.0 * np.pi * t_idx / 168.0) - 14.0 * np.cos(
+                2.0 * np.pi * t_idx / 168.0
+            )
+            ambient_temp = np.round(
+                22.0
+                + 7.5 * np.sin(2.0 * np.pi * (t_idx - 6.0) / 24.0)
+                + rng.normal(0.0, 0.9, size=total_len),
+                2,
+            )
+            cooling_load = 4.2 * np.maximum(0.0, ambient_temp - 20.0)
+            mu = np.maximum(20.0, base_level + 0.04 * t_idx + diurnal + weekly_168 + cooling_load)
+            y_all = np.maximum(0.0, mu + rng.normal(0.0, 3.8, size=total_len))
+            extra_cols = {"ambient_temp": ambient_temp}
+
+        else:  # dgp_20_monthly_regime_drift_damped
+            base_level = float(rng.uniform(140.0, 220.0))
+            annual = 32.0 * np.sin(2.0 * np.pi * t_idx / 12.0 + phase) + 11.0 * np.cos(
+                4.0 * np.pi * t_idx / 12.0 + phase
+            )
+            break_t = max(18, round(0.55 * eff_t))
+            regime_shift = np.where(t_idx >= break_t, 48.0, 0.0)
+            # Damped trend after cutoff so naive linear extrapolation overshoots long horizons
+            damped_trend = np.where(
+                t_idx < eff_t,
+                1.15 * t_idx,
+                1.15 * eff_t + 0.45 * (t_idx - eff_t),
+            )
+            mu = np.maximum(15.0, base_level + damped_trend + regime_shift + annual)
+            y_all = np.maximum(0.0, mu + rng.normal(0.0, 3.2, size=total_len))
 
         hist_slice = slice(start_idx, eff_t)
         fut_slice = slice(eff_t, total_len)

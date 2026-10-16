@@ -5,7 +5,7 @@
 ```mermaid
 flowchart TD
     subgraph Truth["Single Source of Truth (Python Code & Registries)"]
-        T1["config.py (RunConfig + 14 Blocks) · auto_policy.py · benchmarks.py (18 DGPs)"]
+        T1["config.py (RunConfig + 14 Blocks) · auto_policy.py · benchmarks.py (20 DGPs + 9 Public)"]
         T2["models/* (37) · metrics/* (21) · resources/catalog.py · registry/views.py"]
         T3["configs/*.json (20 Demo + 42 Smokes)"]
     end
@@ -167,7 +167,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | Tool Name | Requires `[gcp]`? | Requires `--allow-launch`? | Purpose |
 | :--- | :---: | :---: | :--- |
 | `probe_environment` | No | No | Inspect installed extras, available models, `SF_*` variables, `.env.infra`, ADC, 5-path readiness, and Auto-Forecaster tiers/benchmarks. |
-| `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, shipped configs, `benchmarks` (18 DGPs), or `auto_tiers` (exposure tiers & scale regimes). |
+| `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, shipped configs, `benchmarks` (20 DGPs), or `auto_tiers` (exposure tiers & scale regimes). |
 | `inspect_config_schema` | No | No | Inspect the top-level `RunConfig` overview or drill into a specific section/class (`compute`, `backtest`, `FamilyCompute`, etc.). |
 | `validate_and_dry_run` | No | No | Validate a `RunConfig` (dict, JSON string, or file path), compute deterministic `run_id`, estimate workload, resolve per-family DAG nodes, and check local model extras. |
 | `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, workbench diagnostics (`include_fva`, `include_horizon_decay`, `include_bias_report`, `include_exceptions`, `include_inventory_policy`, `scenarios`), and sample predictions. |
@@ -176,7 +176,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `review_run` | Yes | No | Full data-science and supply-chain evaluation of a `run_id` (`review_run` + `calibration_report` + optional workbench diagnostics including `include_inventory_policy` / `inventory_params`): champion models, ensemble lift, leaderboard, interval coverage, and inventory reorder policies (`SS`, `ROP`, `S`, `EOQ`). |
 | `launch_or_repair_run` | Yes | **Yes** | Safety-gated execution and repair: `run` (launch multi-family DAG), `retry` (submit surgical repair), `settle` (repair stale job rows), `cancel` (stop cloud jobs), or `close_runs`. |
 | `build_auto_config` | Only for BQ table | No | Synthesize a glass-box `RunConfig` and `ConfigBlueprint` (`Forecaster.build_config`) across the 4 exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`) and 5 `n_series` scale regimes; returns Step 0 `profile_table`, `rationale`, `baseline_models`, `duration_estimate`, and optional emitted Airflow DAG. |
-| `run_auto_forecast` | Only for cloud run | Only for cloud run | Execute `Forecaster.auto()` with optional multi-branch `autofocus=True` tournament across any of the 18 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables; returns Step 0 `profile_table`, `autofocus_ledger`, `baseline_value` ladder, `hierarchy_value`, `model_comparison`, and the **7-Question `practitioner_assessment`**. |
+| `run_auto_forecast` | Only for cloud run | Only for cloud run | Execute `Forecaster.auto()` with optional multi-branch `autofocus=True` tournament across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables; returns Step 0 `profile_table`, `autofocus_ledger`, `baseline_value` ladder, `hierarchy_value`, `model_comparison`, and the **7-Question `practitioner_assessment`**. |
 
 ### Safety-By-Default (`--allow-launch`)
 

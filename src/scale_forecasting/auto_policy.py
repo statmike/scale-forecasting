@@ -552,13 +552,13 @@ def evolved_policy_thresholds() -> dict[str, Any]:
     """Return calibrated decision thresholds and action weights for `auto_policy`.
 
     Evolved via Mode A AlphaEvolve (`gemini-3.8-flash` + `gemini-4-argon`) across the
-    18 canonical synthetic DGP benchmarks and multi-scale empirical cell bank.
+    20 canonical synthetic DGP benchmarks and multi-scale empirical cell bank.
     """
     return {
         "intermittent_share_min": 0.165,
         "log1p_level_vol_corr_min": 0.635,
         "log1p_growth_ratio_min": 1.336,
-        "resid_hetero_min": 0.3,
+        "resid_hetero_min": 0.30,
         "structural_break_share_min": 0.251,
         "outlier_spike_share_min": 0.195,
         "direct_horizon_decay_ratio_min": 1.323,
@@ -567,7 +567,7 @@ def evolved_policy_thresholds() -> dict[str, Any]:
         "white_noise_growth_tol": 0.179,
         "white_noise_acf_season_max": 0.17,
         "require_white_noise_stop": True,
-        "pass_decay_factor": 0.7,
+        "pass_decay_factor": 0.70,
         "first_light_include_regression_lags": True,
         "first_light_selection_rule": "best_single",
         "first_light_ensemble_strategies": ["inverse_error", "mean"],
@@ -594,6 +594,58 @@ def evolved_policy_thresholds() -> dict[str, Any]:
 
 
 # EVOLVE-BLOCK-END
+
+
+def _frequency_matched_lags(
+    profile: PanelAutoProfile,
+    *,
+    n_folds: int = 2,
+) -> list[int] | None:
+    r"""Return frequency-matched target lag depths for non-daily (or short) panels, or ``None``.
+
+    Default `_lag_forecaster.LAGS = (1, 2, 3, 7, 14, 28)` is calibrated for daily series ($m=7$).
+    On non-intermittent panels:
+    - Hourly (`h`/`H`): `[1, 2, 3, 6, 12, 24, 48, 168]` on long panels ($\ge 300$ obs with $\le 2$
+      covariates) to capture diurnal and weekly harmonics.
+    - Monthly (`MS`/`ME`/`M`) with $\le 48$ training observations: `[1, 2, 3, 6, 12, 24]` captures
+      semi-annual, annual, and 2-year harmonics without discarding 28 months of initial history.
+    - Weekly (`W`) with $\le 40$ training observations: `[1, 2, 4, 8, 13]`.
+    - Quarterly (`QS`/`QE`/`Q`): `[1, 2, 4, 8]` captures 1-year and 2-year quarterly cycles.
+    """
+    if profile.zero_fraction >= 0.20 or profile.dominant_regime in ("intermittent", "lumpy"):
+        return None
+
+    f_norm = str(profile.freq).strip().upper()
+    min_train_obs = max(8, profile.min_n_obs - max(1, n_folds) * profile.horizon)
+    max_lag = max(3, min_train_obs - profile.horizon - 8)
+
+    if f_norm in ("H", "1H", "BH"):
+        if profile.min_n_obs >= 336:
+            cand = [1, 2, 3, 6, 12, 24, 48, 168]
+        else:
+            return None
+    elif f_norm.startswith("M"):
+        if profile.min_n_obs <= 64:
+            cand = [1, 2, 3, 6, 12]
+        elif min_train_obs <= 48:
+            cand = [1, 2, 3, 6, 12, 24]
+        else:
+            return None
+    elif f_norm.startswith("W"):
+        if min_train_obs <= 40:
+            cand = [1, 2, 4, 8, 13]
+        else:
+            return None
+    elif f_norm.startswith("Q"):
+        cand = [1, 2, 4, 8]
+    else:
+        if min_train_obs <= 35:
+            cand = [1, 2, 3, 7, 14]
+        else:
+            return None
+
+    filtered = [lag for lag in cand if lag <= max_lag]
+    return filtered if filtered else [1, 2, 3]
 
 
 def select_tier_models_and_features(
@@ -1059,10 +1111,14 @@ def select_tier_models_and_features(
             }
         )
 
+    f_norm = str(profile.freq).strip().upper()
     fourier = bool(
-        tier in ("deep_sky", "deep_field")
-        and profile.median_acf_season >= 0.40
-        and profile.median_n_obs >= 2 * max(7, profile.horizon)
+        (
+            tier in ("deep_sky", "deep_field")
+            and profile.median_acf_season >= 0.40
+            and profile.median_n_obs >= 2 * max(7, profile.horizon)
+        )
+        or (tier != "first_light" and f_norm in ("H", "1H", "BH") and profile.median_n_obs >= 336)
     )
     if fourier:
         rationales.append(
@@ -1070,10 +1126,13 @@ def select_tier_models_and_features(
                 "category": "features",
                 "parameter": "features.fourier",
                 "value": "True",
-                "evidence": f"median_acf_season={profile.median_acf_season:.2f}, tier='{tier}'",
+                "evidence": (
+                    f"freq='{profile.freq}', median_acf_season={profile.median_acf_season:.2f}, "
+                    f"tier='{tier}'"
+                ),
                 "rationale": (
-                    "Strong periodic autocorrelation warrants harmonic sine/cosine Fourier terms "
-                    "for tree and linear lag learners."
+                    "Strong periodic autocorrelation or sub-daily multi-seasonality warrants "
+                    "harmonic sine/cosine Fourier terms for tree and linear lag learners."
                 ),
             }
         )
@@ -1241,6 +1300,28 @@ def select_tier_models_and_features(
         for tree_m in ("lightgbm", "xgboost"):
             if any(m.split("@", 1)[0] == tree_m for m in models):
                 model_params[tree_m] = {"n_estimators": n_est_fast}
+
+    freq_lags = _frequency_matched_lags(profile, n_folds=n_folds)
+    if freq_lags is not None:
+        lag_models_present: list[str] = []
+        for lag_m in ("lightgbm", "xgboost", "catboost", "random_forest", "regression_lags"):
+            if any(m.split("@", 1)[0] == lag_m for m in models):
+                model_params.setdefault(lag_m, {})["lags"] = list(freq_lags)
+                lag_models_present.append(lag_m)
+        if lag_models_present:
+            rationales.append(
+                {
+                    "category": "models",
+                    "parameter": "model_params.*.lags",
+                    "value": str(freq_lags),
+                    "evidence": f"freq='{profile.freq}', min_n_obs={profile.min_n_obs}",
+                    "rationale": (
+                        f"Configured frequency-matched target lags {freq_lags} across "
+                        f"{', '.join(lag_models_present)} to align lag depths with "
+                        f"'{profile.freq}' seasonality and available training history."
+                    ),
+                }
+            )
 
     return {
         "models": models,
@@ -1906,6 +1987,12 @@ def propose_autofocus_pass(
                     ),
                 }
             )
+
+    freq_lags_p2 = _frequency_matched_lags(profile, n_folds=n_folds)
+    if freq_lags_p2 is not None:
+        for lag_m in ("lightgbm", "xgboost", "catboost", "random_forest", "regression_lags"):
+            if any(m.split("@", 1)[0] == lag_m for m in current_models):
+                model_params.setdefault(lag_m, {}).setdefault("lags", list(freq_lags_p2))
 
     return {
         "models": current_models,

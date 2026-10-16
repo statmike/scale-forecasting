@@ -1441,12 +1441,39 @@ def build_future_features(
 
 
 def _fourier_terms(index: pd.DatetimeIndex, freq: str, order: int) -> dict[str, np.ndarray]:
-    """Sine/cosine Fourier features for a yearly seasonal period (pure)."""
-    period = periods_per_year(freq)
-    # Position within the seasonal cycle, from the day count since epoch.
+    """Sine/cosine Fourier features for seasonal cycles (pure).
+
+    Computes ``t`` in days since epoch (`nanos / (24 * 3600 * 1e9)`):
+    - Daily, weekly, monthly, and quarterly frequencies use the physical annual period in days
+      (`365.25` days) so harmonics $k = 1 \\dots \\text{order}$ represent true annual, semi-annual,
+      and 4-month cycles regardless of sampling cadence.
+    - Sub-daily hourly frequencies (`h` / `H`) encode multi-seasonal harmonics across the ``order``
+      pairs: diurnal $24\\text{h}$ fundamental ($P_d = 1.0$ day, $k = 1$), semi-diurnal
+      $12\\text{h}$ double-peak ($P_d = 1.0$ day, $k = 2$), and weekly $168\\text{h}$ cycle
+      ($P_w = 7.0$ days).
+    """
     nanos = index.to_numpy(dtype="datetime64[ns]").astype("int64")
     t = nanos.astype(float) / (24 * 3600 * 1e9)
+    f_norm = str(freq).strip().upper()
     out: dict[str, np.ndarray] = {}
+    if f_norm in ("H", "1H", "BH"):
+        harmonic_specs = (
+            (1.0, 1.0),  # 24h diurnal fundamental
+            (2.0, 1.0),  # 12h semi-diurnal double-peak
+            (1.0, 7.0),  # 168h weekly cycle
+        )
+        for k in range(1, order + 1):
+            mult, period_days = (
+                harmonic_specs[k - 1] if k <= len(harmonic_specs) else (float(k), 7.0)
+            )
+            ang = 2.0 * np.pi * mult * t / period_days
+            out[f"fourier_sin_{k}"] = np.sin(ang)
+            out[f"fourier_cos_{k}"] = np.cos(ang)
+        return out
+
+    period = (
+        365.25 if f_norm.startswith(("D", "B", "W", "M", "Q")) else float(periods_per_year(freq))
+    )
     for k in range(1, order + 1):
         ang = 2.0 * np.pi * k * t / period
         out[f"fourier_sin_{k}"] = np.sin(ang)

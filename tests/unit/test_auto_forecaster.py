@@ -36,13 +36,13 @@ from scale_forecasting.agent_surfaces import render_release_notes
 from scale_forecasting.errors import ConfigError
 
 
-def test_benchmark_suite_all_18_dgp_panels() -> None:
+def test_benchmark_suite_all_20_dgp_panels() -> None:
     names = list_benchmarks()
-    assert len(names) == 18
+    assert len(names) == 20
     assert tuple(names) == BENCHMARK_NAMES
 
     cat = benchmark_catalog()
-    assert len(cat) == 18
+    assert len(cat) == 20
     assert {"name", "title", "expected_regime", "true_covariates", "decoy_covariates"}.issubset(
         cat.columns
     )
@@ -853,3 +853,31 @@ def test_write_api_proto_decode_for_old_partition_fallback() -> None:
     ]
     dec_pred = _decode_proto_rows(p_desc, _encode_rows(p_cls, _PRED_SPEC, raw_pred))
     assert dec_pred[0]["quantiles"] == {"0.1": 5.0, "0.9": 15.0}
+
+
+def test_hourly_and_monthly_dgp_19_20_fourier_and_lags() -> None:
+    import numpy as np
+
+    from scale_forecasting.features import _fourier_terms
+
+    # 1. Verify hourly multi-seasonality Fourier terms (24h diurnal k=1,2 + 168h weekly k=3)
+    h_idx = pd.date_range("2026-01-01", periods=169, freq="h")
+    f_h = _fourier_terms(h_idx, "h", order=3)
+    # fourier_sin_1 has period 24h -> index[0] and index[24] match
+    assert f_h["fourier_sin_1"][0] == pytest.approx(f_h["fourier_sin_1"][24], abs=1e-6)
+    # fourier_sin_3 has period 168h -> index[0] and index[168] match, but index[24] differs
+    assert f_h["fourier_sin_3"][0] == pytest.approx(f_h["fourier_sin_3"][168], abs=1e-6)
+    assert not np.isclose(f_h["fourier_sin_3"][0], f_h["fourier_sin_3"][24])
+
+    # 2. Verify dgp_19 (hourly) and dgp_20 (monthly) build_config sets frequency-matched lags
+    ds19 = load_benchmark("dgp_19_hourly_diurnal_weekly_load", n_series=3)
+    bp19 = build_config(ds19.full_panel_with_future_covariates, tier="wide_field", where="local")
+    assert bp19.config.features.fourier is True
+    assert 24 in bp19.config.model_params["lightgbm"]["lags"]
+    assert 168 in bp19.config.model_params["lightgbm"]["lags"]
+
+    ds20 = load_benchmark("dgp_20_monthly_regime_drift_damped", n_series=3)
+    bp20 = build_config(ds20.panel_df, tier="wide_field", where="local")
+    assert bp20.config.features.trading_days is True
+    assert 12 in bp20.config.model_params["lightgbm"]["lags"]
+    assert 28 not in bp20.config.model_params["lightgbm"]["lags"]

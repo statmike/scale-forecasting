@@ -127,7 +127,7 @@ def test_probe_environment_structure_and_cli(
     assert env["models"]["available_count"] >= 14
     assert env["execution_paths_ready"]["path_1_offline_playground_and_dry_run"] is True
     assert env["execution_paths_ready"]["path_5_airflow_dag_emission"] is True
-    assert env["auto_forecaster"]["benchmarks_count"] == 18
+    assert env["auto_forecaster"]["benchmarks_count"] == 20
     assert env["auto_forecaster"]["practitioner_questions_count"] == 7
     assert "first_light" in env["auto_forecaster"]["exposure_tiers"]
     assert "hyperscale" in env["auto_forecaster"]["scale_regimes"]

@@ -34,6 +34,7 @@ from scipy.optimize import nnls
 
 from .backtest import holdout_fold_id
 from .calibration import (
+    _empirical_quantile,
     apply_output_constraints,
     apply_quantile_and_cost_rules,
     calibrate_from_arrays,
@@ -731,7 +732,8 @@ def _horizon_specialist_oof_blend(
             continue
         s_fit = fit_rows[idx]
         finite_steps = np.unique(s_steps[~np.isnan(s_steps)])
-        radius = max(1, int(np.ceil(len(finite_steps) / 4.0)))
+        small_step_grid = len(finite_steps) <= 3
+        radius = 0 if small_step_grid else max(1, int(np.ceil(len(finite_steps) / 4.0)))
         for step_val in finite_steps:
             step_mask = s_steps == step_val
             h_idx = idx[step_mask]
@@ -741,9 +743,12 @@ def _horizon_specialist_oof_blend(
             else:
                 # Single inner fold: exclude the exact step_val point so Fold 0 is not scored
                 # on a weight fitted to its own single observation.
-                win_mask = (np.abs(s_steps - step_val) <= radius) & (s_steps != step_val) & s_fit
+                nbr_radius = max(1, radius)
+                win_mask = (
+                    (np.abs(s_steps - step_val) <= nbr_radius) & (s_steps != step_val) & s_fit
+                )
                 if not np.any(win_mask):
-                    win_mask = (np.abs(s_steps - step_val) <= radius) & s_fit
+                    win_mask = (np.abs(s_steps - step_val) <= nbr_radius) & s_fit
             h_fit_idx = idx[win_mask]
             if len(h_fit_idx) == 0:
                 h_fit_idx = fit_idx
@@ -758,7 +763,7 @@ def _horizon_specialist_oof_blend(
                     parsimony_margin=parsimony_margin,
                     champion_only=False,
                 )
-                weights = 0.5 * step_w + 0.5 * fallback_w
+                weights = step_w if small_step_grid else 0.5 * step_w + 0.5 * fallback_w
             out[h_idx] = _weighted_blend(vals[h_idx], weights)
         nan_mask = np.isnan(s_steps)
         if nan_mask.any():
@@ -987,7 +992,7 @@ def combine_calculated(
     champ_weights: np.ndarray | None = None
     if "champion" in calculated:
         champ_weights = _inverse_error_weight_matrix(
-            present, cfg, metric_df, ts_ids_arr, champion_only=True
+            present, cfg, metric_df, ts_ids_arr, champion_only=True, oof_df=oof_df
         )
 
     hs_weights: np.ndarray | None = None
@@ -1035,6 +1040,7 @@ def _inverse_error_weight_matrix(
     ts_ids: np.ndarray,
     *,
     champion_only: bool = False,
+    oof_df: pd.DataFrame | None = None,
 ) -> np.ndarray:
     """Inverse-error (or ``champion``) weights per prediction row, estimated **per series**."""
     n = len(models)
@@ -1060,16 +1066,16 @@ def _inverse_error_weight_matrix(
         .unstack("model_type")
         .reindex(columns=models)
     )
-    per_series = {
-        str(ts_id): _select_or_weight_models(
-            np.array([loss_of(metric, float(v)) for v in row], dtype=float),
+    per_series: dict[str, np.ndarray] = {}
+    for ts_id, row in zip(mean_by_series.index, mean_by_series.to_numpy(), strict=True):
+        losses = np.array([loss_of(metric, float(v)) for v in row], dtype=float)
+        per_series[str(ts_id)] = _select_or_weight_models(
+            losses,
             models,
             top_k=top_k,
             parsimony_margin=margin,
             champion_only=champion_only,
         )
-        for ts_id, row in zip(mean_by_series.index, mean_by_series.to_numpy(), strict=True)
-    }
     return np.array([per_series.get(str(t), uniform) for t in ts_ids], dtype=float)
 
 
@@ -1131,13 +1137,16 @@ def _horizon_specialist_weight_matrix(
     top_k = cfg.ensemble.top_k
     margin = cfg.ensemble.parsimony_margin
     step_weights: dict[tuple[str, int], np.ndarray] = {}
+    small_step_grid_by_ts: dict[str, bool] = {}
     for tid, idx in _group_row_indices(oof_ts).items():
         s_steps = steps[idx]
         if np.all(np.isnan(s_steps)):
             continue
         finite_steps = np.unique(s_steps[~np.isnan(s_steps)])
-        radius = max(1, int(np.ceil(len(finite_steps) / 4.0)))
+        small_step_grid = len(finite_steps) <= 3
         tid_str = str(tid)
+        small_step_grid_by_ts[tid_str] = small_step_grid
+        radius = 0 if small_step_grid else max(1, int(np.ceil(len(finite_steps) / 4.0)))
         for step_val in finite_steps:
             win_mask = np.abs(s_steps - step_val) <= radius
             h_fit_idx = idx[win_mask]
@@ -1166,7 +1175,7 @@ def _horizon_specialist_weight_matrix(
         step_counter[tid_str] = step_idx
         w = step_weights.get((tid_str, step_idx))
         if w is not None:
-            out[i] = 0.5 * w + 0.5 * fallback[i]
+            out[i] = w if small_step_grid_by_ts.get(tid_str, False) else 0.5 * w + 0.5 * fallback[i]
     return out
 
 
@@ -1200,7 +1209,9 @@ def ensemble_oof_bounds(
         half = max(abs(float(residuals[0])), 1e-6)
         q10, q90 = -half, half
     else:
-        q10, q90 = np.percentile(residuals, [10.0, 90.0])
+        ordered = np.sort(residuals)
+        q10 = _empirical_quantile(ordered, 0.10)
+        q90 = _empirical_quantile(ordered, 0.90)
         if q10 == q90:
             half = max(abs(float(q10)) * 0.1, 1e-6)
             q10, q90 = float(q10) - half, float(q90) + half
@@ -1236,7 +1247,9 @@ def ensemble_oof_bounds_from_arrays(
         half = max(abs(float(residuals[0])), 1e-6)
         q10, q90 = -half, half
     else:
-        q10, q90 = np.percentile(residuals, [10.0, 90.0])
+        ordered = np.sort(residuals)
+        q10 = _empirical_quantile(ordered, 0.10)
+        q90 = _empirical_quantile(ordered, 0.90)
         if q10 == q90:
             half = max(abs(float(q10)) * 0.1, 1e-6)
             q10, q90 = float(q10) - half, float(q90) + half

@@ -218,7 +218,7 @@
 | `large` | Large Fleet (2,500–24,999 series) | Global neural/foundation + fast linear-time statistical models with multi-worker cloud sharding and top-K ensemble parsimony. |
 | `hyperscale` | Hyperscale Fleet (25,000+ series) | Hyperscale distributed portfolio (Spark Serverless / Ray / Vertex GPU / BigQuery) with 1–2 fold CV and top-3 parsimony ensembling. |
 
-### Ground-Truth Synthetic DGP Benchmarks (18 Panels in `benchmarks.py`)
+### Ground-Truth Synthetic DGP Benchmarks (20 Panels in `benchmarks.py`)
 
 | Benchmark Name (`benchmark`) | Regime | Freq / H | Ground-Truth Description | Expected `autofocus` Actions |
 | :--- | :--- | :---: | :--- | :--- |
@@ -240,6 +240,8 @@
 | `dgp_16_monthly_trading_days` | `smooth` | `MS` / `6` | 12 monthly series (freq='MS', T=48, H=6) where monthly billing totals fluctuate with the number of weekday business days vs. weekend days in each calendar month. | `enable_trading_days` |
 | `dgp_17_missing_gaps_and_leading_zeros` | `smooth` | `D` / `14` | 12 daily series where half of the SKUs have 28 pre-launch leading zeros and internal missing date gaps requiring automatic grid_policy and trim_leading_zeros. | `enable_trim_leading_zeros`, `regularize_grid_policy` |
 | `dgp_18_promo_lag_pullforward` | `smooth` | `D` / `14` | 12 daily series where promotions trigger a +85 unit contemporaneous spike on day t followed by a -52 unit pantry-loading dip on day t+1, requiring exog_lags synthesis. | `synthesize_exog_lags` |
+| `dgp_19_hourly_diurnal_weekly_load` | `smooth` | `h` / `24` | 12 hourly series (freq='h', T=336, H=24) exhibiting dual 24-hour diurnal double-peak and 168-hour weekend load cycles plus ambient temperature cooling load. | `fourier_multi_seasonal`, `frequency_matched_lags` |
+| `dgp_20_monthly_regime_drift_damped` | `smooth` | `MS` / `12` | 12 monthly series (freq='MS', T=60, H=12) with 12-month annual harmonics, a mid-history structural slope shift, and damped long-horizon trend requiring frequency-matched monthly lags. | `enable_level_shift`, `inject_direct_horizon_models` |
 
 ### Public Open-Data Benchmarks (9 Real-World Datasets in `benchmarks.py` via `fetch_public_benchmark`)
 

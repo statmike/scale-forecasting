@@ -24,7 +24,7 @@
 
 - [Configuration Reference (`RunConfig`)](https://statmike.github.io/scale-forecasting/configuration_reference/): Complete JSON configuration guide.
 - [Forecaster's Workbench](https://statmike.github.io/scale-forecasting/forecaster_workbench/): Physical bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, scenarios, lifecycle governance, and executive HTML/JSON reports.
-- [Auto-Forecaster & Bounded `autofocus`](https://statmike.github.io/scale-forecasting/auto_forecaster/): Step 0 data profiling (`Forecaster.profile_data`), observational exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`), multi-branch `autofocus` refinement with cell borrowing, 7-Question Practitioner Assessment (`f.practitioner_assessment_df()`, `f.compare_models()`), 7-runtime parametric wall-clock predictor, 18 synthetic DGP benchmarks, and AlphaEvolve calibration.
+- [Auto-Forecaster & Bounded `autofocus`](https://statmike.github.io/scale-forecasting/auto_forecaster/): Step 0 data profiling (`Forecaster.profile_data`), observational exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`), multi-branch `autofocus` refinement with cell borrowing, 7-Question Practitioner Assessment (`f.practitioner_assessment_df()`, `f.compare_models()`), 7-runtime parametric wall-clock predictor, 20 synthetic DGP benchmarks, and AlphaEvolve calibration.
 - [Models Reference (37 Models)](https://statmike.github.io/scale-forecasting/models_reference/): All 37 models, covariate support, explainability, and granular extras.
 - [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
 - [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
@@ -599,7 +599,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `large` | Large Fleet (2,500–24,999 series) | Global neural/foundation + fast linear-time statistical models with multi-worker cloud sharding and top-K ensemble parsimony. |
 | `hyperscale` | Hyperscale Fleet (25,000+ series) | Hyperscale distributed portfolio (Spark Serverless / Ray / Vertex GPU / BigQuery) with 1–2 fold CV and top-3 parsimony ensembling. |
 
-### Ground-Truth Synthetic DGP Benchmarks (18 Panels in `benchmarks.py`)
+### Ground-Truth Synthetic DGP Benchmarks (20 Panels in `benchmarks.py`)
 
 | Benchmark Name (`benchmark`) | Regime | Freq / H | Ground-Truth Description | Expected `autofocus` Actions |
 | :--- | :--- | :---: | :--- | :--- |
@@ -621,6 +621,8 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `dgp_16_monthly_trading_days` | `smooth` | `MS` / `6` | 12 monthly series (freq='MS', T=48, H=6) where monthly billing totals fluctuate with the number of weekday business days vs. weekend days in each calendar month. | `enable_trading_days` |
 | `dgp_17_missing_gaps_and_leading_zeros` | `smooth` | `D` / `14` | 12 daily series where half of the SKUs have 28 pre-launch leading zeros and internal missing date gaps requiring automatic grid_policy and trim_leading_zeros. | `enable_trim_leading_zeros`, `regularize_grid_policy` |
 | `dgp_18_promo_lag_pullforward` | `smooth` | `D` / `14` | 12 daily series where promotions trigger a +85 unit contemporaneous spike on day t followed by a -52 unit pantry-loading dip on day t+1, requiring exog_lags synthesis. | `synthesize_exog_lags` |
+| `dgp_19_hourly_diurnal_weekly_load` | `smooth` | `h` / `24` | 12 hourly series (freq='h', T=336, H=24) exhibiting dual 24-hour diurnal double-peak and 168-hour weekend load cycles plus ambient temperature cooling load. | `fourier_multi_seasonal`, `frequency_matched_lags` |
+| `dgp_20_monthly_regime_drift_damped` | `smooth` | `MS` / `12` | 12 monthly series (freq='MS', T=60, H=12) with 12-month annual harmonics, a mid-history structural slope shift, and damped long-horizon trend requiring frequency-matched monthly lags. | `enable_level_shift`, `inject_direct_horizon_models` |
 
 ### Public Open-Data Benchmarks (9 Real-World Datasets in `benchmarks.py` via `fetch_public_benchmark`)
 

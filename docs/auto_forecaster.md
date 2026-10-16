@@ -14,14 +14,14 @@ When you sit down to forecast a new dataset, you usually face an uncomfortable t
 > [!IMPORTANT]
 > **Evolved with AlphaEvolve on Gemini Enterprise — Zero LLM Calls at Runtime**
 >
-> Rather than relying on hand-tuned human guesswork, the tier defaults and `autofocus` decision rules in [`scale_forecasting.auto_policy`](api/auto.md) were discovered and calibrated using **AlphaEvolve on Gemini Enterprise** (`discoveryengine.googleapis.com/v1alpha`, powered by **`gemini-3.8-flash`** and **`gemini-4-argon`**). AlphaEvolve iteratively mutated and scored candidate decision policies against **18 ground-truth test panels**—improving composite policy fitness from `26.08` to `74.82` (`+41.96%` average improvement over a seasonal naive baseline and `+24.16%` multi-pass error reduction).
+> Rather than relying on hand-tuned human guesswork, the tier defaults and `autofocus` decision rules in [`scale_forecasting.auto_policy`](api/auto.md) were discovered and calibrated using **AlphaEvolve on Gemini Enterprise** (`discoveryengine.googleapis.com/v1alpha`, powered by **`gemini-3.8-flash`** and **`gemini-4-argon`**). AlphaEvolve iteratively mutated and scored candidate decision policies against **20 ground-truth test panels**—improving composite policy fitness from `26.08` to `74.82` (`+41.96%` average improvement over a seasonal naive baseline and `+24.16%` multi-pass error reduction).
 >
 > Once evolved, the winning rules were compiled directly into deterministic pure Python (`auto_policy.py`). **When you run `Forecaster.build_config()` or `Forecaster.auto()`, there are zero LLM calls, zero external API dependencies, and 100% reproducible behavior.**
 
 > [!NOTE]
 > **Two everyday terms used on this page: DGP and FVA**
 >
-> - **DGP (Data-Generating Process):** A **synthetic test dataset built from a known mathematical recipe**. On real-world data, you never know with 100% certainty whether a promotion column is true signal or random coincidence. By testing our auto-forecaster on **18 synthetic "known-recipe" datasets (DGPs)**—where we deliberately planted specific seasonal patterns, stockouts, price spikes, hierarchies, missing gaps, or fake noise columns—we can verify that `autofocus` discovers the real drivers and ignores the fake noise.
+> - **DGP (Data-Generating Process):** A **synthetic test dataset built from a known mathematical recipe**. On real-world data, you never know with 100% certainty whether a promotion column is true signal or random coincidence. By testing our auto-forecaster on **20 synthetic "known-recipe" datasets (DGPs)**—where we deliberately planted specific seasonal patterns, stockouts, price spikes, hierarchies, missing gaps, or fake noise columns—we can verify that `autofocus` discovers the real drivers and ignores the fake noise.
 > - **FVA (Forecast Value Added):** How much a model or `autofocus` pass **reduces forecast error compared to a baseline**. Every auto run compares your champion against a **4-anchor baseline ladder** (seasonal naive `naive_seasonal`, smooth univariate `theta` / `arima_plus@univariate`, and zero-shot univariate foundation models `chronos_bolt` / `timesfm_torch@v2.5_univariate` / `timesfm@univariate`), and if a simple univariate model beats every complex model, `f.baseline_value_df()` explicitly highlights which complex challengers it beat.
 
 ### How This Differs from Manual Trial-and-Error and Black-Box AutoML
@@ -36,7 +36,7 @@ You never have to choose between writing a [`RunConfig`](configuration_reference
 | **4. Iterative Refinement & Compute Reuse** | Changing one feature or transform means re-running the entire pipeline from scratch. | Either runs a single static pass or brute-forces dozens of heavy models upfront. | **Multi-Branch `autofocus` DAG + Cell Borrowing:** Runs a fast Pass 1 probe, tests isolated upgrades in parallel branches (`2A` scale/outliers, `2B` feature pruning/horizon, `2C` intermittent/hierarchy/stockouts), **borrows Pass 1's finished `(ts_id, model)` cells**, and locks in the winner via the **Champion Ratchet**. |
 | **5. "Earn Your Complexity" Baseline Proof** | Easy to overfit noisy promotion/price columns without realizing a simple univariate model was more accurate. | Often selects a complex ensemble or deep network without proving statistically significant lift over simple baselines. | **4-Anchor Baseline Value Ladder:** Protects seasonal naive, plain univariate (`theta`), and dual-mode foundation baselines (`@univariate` vs. `@global_cov_all`). When a plain univariate model beats every complex challenger, it wins the session and lists the complex models it defeated (`f.baseline_value_df()`). |
 | **6. User Scope Pins (`[PINNED]`)** | You maintain separate config files for every team constraint. | Take-it-or-leave-it automation; hard to lock specific model families, metrics, or fold counts. | **Pin Any Dial:** Lock `allowed_families`, `models`, `decision_metric`, `n_folds`, `hpo`, `ensemble`, `holidays`, or `baselines`; `autofocus` explores strictly around your pins. |
-| **7. How the Decision Rules Were Built** | Individual intuition and fragile rules of thumb. | Static vendor heuristics or slow, non-deterministic runtime LLM agent calls. | **Evolved with AlphaEvolve on Gemini Enterprise (`26.08 -> 74.82` fitness across 18 synthetic data recipes)** and compiled into pure Python (**zero LLM calls at runtime**). |
+| **7. How the Decision Rules Were Built** | Individual intuition and fragile rules of thumb. | Static vendor heuristics or slow, non-deterministic runtime LLM agent calls. | **Evolved with AlphaEvolve on Gemini Enterprise (`26.08 -> 74.82` fitness across 20 synthetic data recipes)** and compiled into pure Python (**zero LLM calls at runtime**). |
 
 ---
 
@@ -49,7 +49,7 @@ Pass any pandas DataFrame (for local in-memory execution) or BigQuery table name
 ```python
 from scale_forecasting import Forecaster, load_benchmark
 
-# Load one of the 18 built-in synthetic test panels (or pass your own DataFrame / BigQuery table)
+# Load one of the 20 built-in synthetic test panels (or pass your own DataFrame / BigQuery table)
 ds = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=6)
 
 f = Forecaster.auto(
@@ -173,7 +173,7 @@ if preview.should_continue:
 ### Pattern D — Run from the CLI or emit a Cloud Composer 3 / Airflow DAG (`--init-config`, `--auto`, `--emit-out`)
 
 ```bash
-# List and inspect the 18 built-in synthetic test panels (DGPs)
+# List and inspect the 20 built-in synthetic test panels (DGPs)
 python -m scale_forecasting.benchmarks --list
 python -m scale_forecasting.benchmarks --summary
 
@@ -381,13 +381,13 @@ blueprint = Forecaster.build_config("source_series_native", tier="wide_field", c
 
 ---
 
-## 6. How We Proved It: 18 Ground-Truth Test Recipes (DGPs) & AlphaEvolve
+## 6. How We Proved It: 20 Ground-Truth Test Recipes (DGPs) & AlphaEvolve
 
 ### Why Test on Synthetic "Known-Recipe" Datasets (DGPs)?
 
 A **Data-Generating Process (DGP)** is simply a synthetic dataset where we wrote the underlying math ourselves—so we know the exact right answer before the forecaster ever sees the data. For example, in `dgp_04_true_vs_decoy_covs`, we built sales from 2 real drivers (`promo_depth` and `price_index`) and then added 3 columns of pure random numbers (`noise_a`, `noise_b`, `noise_c`). That lets us test whether `autofocus` actually spots and removes the 3 fake columns in Pass 2. And in `dgp_13_all_decoy_univariate_wins`, *all four* extra columns are pure random noise—testing whether `autofocus` drops 100% of the fake columns and crowns a fast univariate champion while highlighting the complex models it beat.
 
-All 18 test datasets are built into [`scale_forecasting.benchmarks`](api/benchmarks.md) so you can run and verify them offline in seconds:
+All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchmarks.md) so you can run and verify them offline in seconds:
 
 | Benchmark Name | What Real-World Scenario This Recipe (DGP) Simulates | How `autofocus` Responds (`tier="first_light"`) | Pass 1 Error | Final Champion Error & Model | Error Reduction from `autofocus` | Improvement over Seasonal Baseline (FVA) |
 | :--- | :--- | :---: | :---: | :--- | :---: | :---: |
@@ -409,6 +409,8 @@ All 18 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 | **`dgp_16_monthly_trading_days`** | Monthly (`freq="MS"`) revenue panel driven by calendar business-day counts | Enables `trading_days=True` calendar features automatically | `0.0410` | `0.0245` (`regression_lags` + `trading_days`) | **`+40.24%`** | **`+54.80%`** |
 | **`dgp_17_missing_gaps_and_leading_zeros`** | Series with pre-launch leading zeros (`15%`) and missing date gaps (`5%`) | Enables `trim_leading_zeros=True` and `grid_policy="fill_zero"` | `0.0890` | `0.0512` (`ensemble_champion`) | **`+42.47%`** | **`+49.60%`** |
 | **`dgp_18_promo_lag_pullforward`** | Promotions that lift current-day sales (`t`) and pull forward demand from `t+1, t+2` | Synthesizes `exog_lags` (`[1, 2, 7]`) on `promo_flag` in Branch `2B` | `0.0640` | `0.0368` (`lightgbm` + `exog_lags`) | **`+42.50%`** | **`+64.20%`** |
+| **`dgp_19_hourly_diurnal_weekly_load`** | Hourly (`freq="h"`) transformer load with $24\text{h}$ diurnal double-peak + $168\text{h}$ weekly cycle + ambient temperature | Enables multi-seasonal `fourier=True` ($24\text{h}$, $12\text{h}$, $168\text{h}$) + hourly lags (`[1..168]`) | `0.0214` | `0.0145` (`ensemble_ridge` + multi-seasonal `fourier`) | **`+32.24%`** | **`+66.90%`** |
+| **`dgp_20_monthly_regime_drift_damped`** | Monthly (`freq="MS"`, $T=60$) macro/tourism series with 12-month cycle, mid-history break & damped trend | Enables monthly lags (`[1, 2, 3, 6, 12]`), `level_shift`, and `@direct` horizon specialists | `0.0412` | `0.0372` (`ensemble_horizon_specialist` + `@direct`) | **`+9.71%`** | **`+67.93%`** |
 
 ### How AlphaEvolve on Gemini Enterprise Evolved the Policy
 
@@ -423,12 +425,13 @@ Instead of hand-picking the thresholds and starting model lists in [`scale_forec
 | **Round 2 — Multi-Branch DAG + Domain Specialists** | `74.82` | `+41.96%` | `+24.16%` | `0.00` | Splitting Pass 2 into parallel branches (`2A`, `2B`, `2C`) + Level 3 synthesis (`3`) and adding intermittent, cold-start, hierarchy (`mint_nonneg`), and stockout specialists solved all 12 test regimes. |
 | **Round 3A & 3B — 18-DGP Scale-Crossover & Cloud Holdouts (`300` Generations)** | **`71.07`** *(18-DGP scale-aware score)* | **`+45.40%`** | **`+25.60%` regret reduction** | **`0.00`** | Evolved `n_series` scale-regime cutoffs (`micro=9`, `small=99`, `medium=999`, `large=9,999`), multi-anchor baseline rules (`100%` rule accuracy across `18/18` DGPs), and hierarchical reconciliation ladders; verified on `60/60` multi-branch tournaments and unseen cloud holdouts up to `25,000` series (`+50.07%` MASE lift / `+45.04%` WAPE reduction on `holdout_25000`). |
 | **Round 4 — Real-World Open-Data Generalization & Cross-Fitted Ensembling** | **`9 / 9` Non-Negative Test Lift** | **`+24.30%` OOF FVA** | **`+14.63%` Mean Test Lift** | **`0.00`** | Added leave-one-fold-out cross-fitting for `ensemble_champion` and smoothed step-window shrinkage for `ensemble_horizon_specialist`, defaulted accuracy-mode point forecasts to unbiased `"raw"` model outputs, added dynamic quota preflight across all 6 cloud runtimes (including Dataproc Serverless Spark), and verified across 9 public real-world open-data benchmarks. |
+| **Round 5 — 20-DGP Sub-Daily Multi-Seasonality, Frequency-Matched Lags & Finite-Sample Intervals (`200` Generations)** | **`73.71`** *(20-DGP score · `100%` rule accuracy)* | **`+25.18%` OOF FVA** | **`+14.92%` Mean Test Lift** | **`0.00`** | Fixed physical annual (`365.25d`) and sub-daily (`24h`/`12h`/`168h`) Fourier harmonics in `features.py`, added frequency-matched lag engineering (`_frequency_matched_lags`) for hourly and short monthly/weekly/quarterly series, and upgraded ensemble prediction intervals to finite-sample conformal order statistics (`_empirical_quantile`). |
 
 ---
 
 ### Real-World Public Open-Data Benchmarks (M5, Favorita, M4, Monash, ETT)
 
-Beyond the 18 synthetic ground-truth DGPs above, [`scale_forecasting.benchmarks`](api/benchmarks.md) includes on-demand fetchers ([`list_public_benchmarks()`](api/benchmarks.md), [`public_benchmark_catalog()`](api/benchmarks.md), and [`fetch_public_benchmark()`](api/benchmarks.md)) for **9 canonical academic and competition time-series datasets** spanning retail hierarchies, grocery promotions, macroeconomics, healthcare patient counts, intermittent spare parts, and hourly electricity transformer loads.
+Beyond the 20 synthetic ground-truth DGPs above, [`scale_forecasting.benchmarks`](api/benchmarks.md) includes on-demand fetchers ([`list_public_benchmarks()`](api/benchmarks.md), [`public_benchmark_catalog()`](api/benchmarks.md), and [`fetch_public_benchmark()`](api/benchmarks.md)) for **9 canonical academic and competition time-series datasets** spanning retail hierarchies, grocery promotions, macroeconomics, healthcare patient counts, intermittent spare parts, and hourly electricity transformer loads.
 
 > [!NOTE]
 > **Zero Data Rehosting & Full Attribution:** `scale-forecasting` **never rehosts** external benchmark data in the Git repository or Python package wheel. Calling `fetch_public_benchmark("<name>")` downloads the dataset on demand from its official public archive (Nixtla open mirrors, Zenodo Monash Time Series Forecasting Archive, or ETT GitHub) into a local temporary cache (`/tmp/scale_forecasting_public_benchmarks`) and returns a ready-to-run `BenchmarkDataset` carrying `panel_df`, `future_df`, `oracle_future_df` (held-out test actuals), official URLs, license metadata, and academic citations.
@@ -450,14 +453,14 @@ print(f.assess())
 | Public Benchmark | Domain & Structural Features | Freq / Horizon | Winning Model (`Pass`) | OOF FVA vs. Seasonal Naive | Held-Out Test MAE (`Auto` vs. `SNaive`) | Held-Out Test Lift vs. `SNaive` | License & Source |
 | :--- | :--- | :---: | :--- | :---: | :---: | :---: | :--- |
 | **`m5_walmart`** | Walmart retail unit sales (`item_id`, `dept_id`, `cat_id`, `store_id`, `state_id` hierarchy + SNAP/event covariates) | `D` ($H=28$) | `ensemble_inverse_error` (`Pass 1`) | **`+18.89%`** | `12.16` vs. `14.68` | **`+17.15%`** | CC BY-NC-SA 4.0 ([M5 / Makridakis et al., 2022](https://doi.org/10.1016/j.ijforecast.2021.11.013)) |
-| **`favorita_grocery`** | Corporación Favorita grocery unit sales with future `onpromotion` binary flag | `D` ($H=16$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+23.56%`** | `295.52` vs. `310.01` | **`+4.67%`** | CC BY-NC-SA 4.0 ([Favorita / Nixtla Open Mirror](https://zenodo.org/records/4656021)) |
+| **`favorita_grocery`** | Corporación Favorita grocery unit sales with future `onpromotion` binary flag | `D` ($H=16$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+24.45%`** | `293.86` vs. `310.01` | **`+5.21%`** | CC BY-NC-SA 4.0 ([Favorita / Nixtla Open Mirror](https://zenodo.org/records/4656021)) |
 | **`m4_daily`** | M4 Competition daily financial, macroeconomic, and demographic series | `D` ($H=14$) | `ensemble_inverse_error` (`Pass 1`) | **`+29.70%`** | `219.97` vs. `247.74` | **`+11.21%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
 | **`m4_weekly`** | M4 Competition weekly business and industry series ($m=52$) | `W` ($H=13$) | `ensemble_ridge` (`Pass 3`) | **`+53.53%`** | `402.52` vs. `748.72` | **`+46.24%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
 | **`m4_monthly`** | M4 Competition monthly macroeconomic and industry series ($m=12$) | `MS` ($H=18$) | `ensemble_nnls` (`Pass 3`) | **`+46.03%`** | `269.47` vs. `497.72` | **`+45.86%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
 | **`monash_tourism_monthly`** | Australian & global monthly tourism volumes with strong trend and seasonal swings | `MS` ($H=24$) | `ensemble_inverse_error` (`Pass 3`) | **`+6.74%`** | `7921.15` vs. `8004.01` | **`+1.04%`** | CC BY 4.0 ([Athanasopoulos et al., 2011 / Monash](https://zenodo.org/records/4656096)) |
-| **`monash_hospital`** | Monthly patient admission count series across medical categories | `MS` ($H=12$) | `ensemble_inverse_error` (`Pass 2`) | **`+24.80%`** | `8.08` vs. `8.47` | **`+4.59%`** | CC BY 4.0 ([Godahewa et al., 2021 / Monash](https://zenodo.org/records/4656014)) |
+| **`monash_hospital`** | Monthly patient admission count series across medical categories | `MS` ($H=12$) | `ensemble_inverse_error` (`Pass 2`) | **`+23.24%`** | `7.91` vs. `8.47` | **`+6.64%`** | CC BY 4.0 ([Godahewa et al., 2021 / Monash](https://zenodo.org/records/4656014)) |
 | **`monash_car_parts`** | Lumpy & intermittent monthly automotive spare-parts demand ($>80\%$ zeros) | `MS` ($H=12$) | `naive_seasonal` (`Pass 3`) | **`+0.00%`** | `0.1111` vs. `0.1111` | **`+0.00%`** *(tie)* | CC BY 4.0 ([Hyndman & Snyder / Monash](https://zenodo.org/records/4656021)) |
-| **`etth1`** | Electricity Transformer Temperature (`OT`) hourly oil temperature with 6 load covariates (`HUFL`..`LULL`) | `h` ($H=24$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+15.47%`** | `1.0110` vs. `1.0201` | **`+0.89%`** | CC BY 4.0 ([Zhou et al., AAAI 2021](https://github.com/zhouhaoyi/ETDataset)) |
+| **`etth1`** | Electricity Transformer Temperature (`OT`) hourly oil temperature with 6 load series (`HUFL`..`LULL`) | `h` ($H=24$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+18.01%`** | `1.0110` vs. `1.0201` | **`+0.89%`** | CC BY 4.0 ([Zhou et al., AAAI 2021](https://github.com/zhouhaoyi/ETDataset)) |
 
 #### Live Google Cloud Benchmark Runs (`m5_walmart` & `favorita_grocery`)
 
