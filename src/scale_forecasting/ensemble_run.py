@@ -512,35 +512,96 @@ def _ensemble_batch(
         len(oof_rows),
     )
 
-    # y_train (for MASE/RMSSE scale) is per-series history; the base OOF has no in-sample rows, so
-    # read the full series history once, matching the natives' history read. The dates come with it
-    # because the scale denominator is the *fold's* training window, not the whole series — see
-    # `backtest.training_window`. `build_history_query` orders by ts_id, ds, so groups are sorted.
-    history = _query(build_history_query(cfg, dataset)).to_dataframe()
-    if cfg.hierarchy.enabled and not history.empty:
-        hier_cols = {col for level in cfg.hierarchy.levels for col in level}
-        if hier_cols and hier_cols.issubset(history.columns):
-            from .reconciliation import build_hierarchy
-
-            hist_cfg = cfg.model_copy(
-                update={
-                    "data": cfg.data.model_copy(
-                        update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
-                    )
-                }
-            )
-            history, _ = build_hierarchy(history, hist_cfg)
-    if not history.empty:
-        ds_all = pd.to_datetime(history["ds"]).to_numpy()
-        y_all = history["y"].to_numpy()
-        hist_by_id = {
-            tid: (ds_all[idx], y_all[idx])
-            for tid, idx in history.groupby("ts_id", sort=False).indices.items()
-        }
-    else:
-        hist_by_id = {}
-
     period = seasonal_period(cfg.data.freq)
+    raw_cutoffs = (
+        sorted({str(c) for c in ens_oof["cutoff_date"].dropna().unique()})
+        if "cutoff_date" in ens_oof.columns
+        else []
+    )
+    scales_by_id_cutoff: dict[tuple[str, str], tuple[float, float, float]] = {}
+    use_sql_scales = (
+        not cfg.hierarchy.enabled
+        and cfg.backtest.scheme != "sliding"
+        and 0 < len(raw_cutoffs) <= 5
+        and int(ens_oof["ts_id"].nunique()) >= 2000
+    )
+    if use_sql_scales:
+        from .engines.bigquery_sql import _series_filter, _snapshot_clause, source_ref
+
+        source = source_ref(cfg, dataset)
+        idc, datec, targetc = cfg.data.ts_id_col, cfg.data.date_col, cfg.data.target_col
+        snap = _snapshot_clause(cfg.data.snapshot_millis)
+        sfilter = _series_filter(cfg, source, idc, snapshot_millis=cfg.data.snapshot_millis)
+        dm_expr = (
+            f"ABS(CAST({targetc} AS FLOAT64) - LAG(CAST({targetc} AS FLOAT64), {period}) "
+            f"OVER (PARTITION BY {idc} ORDER BY {datec}))"
+            if period is not None and period >= 1
+            else "CAST(NULL AS FLOAT64)"
+        )
+        for c_str in raw_cutoffs:
+            where_parts = [f"DATE({datec}) <= DATE('{c_str}')"]
+            if sfilter:
+                where_parts.append(sfilter)
+            if ts_ids is not None:
+                where_parts.append(f"CAST({idc} AS STRING) IN UNNEST(@ts_ids)")
+            scale_sql = (
+                "WITH diffs AS (\n"
+                f"  SELECT CAST({idc} AS STRING) AS ts_id,\n"
+                f"    ABS(CAST({targetc} AS FLOAT64) - LAG(CAST({targetc} AS FLOAT64), 1) "
+                f"OVER (PARTITION BY {idc} ORDER BY {datec})) AS d1,\n"
+                f"    POW(CAST({targetc} AS FLOAT64) - LAG(CAST({targetc} AS FLOAT64), 1) "
+                f"OVER (PARTITION BY {idc} ORDER BY {datec}), 2) AS d1_sq,\n"
+                f"    {dm_expr} AS dm\n"
+                f"  FROM `{source}`{snap}\n"
+                f"  WHERE {' AND '.join(where_parts)}\n"
+                ")\n"
+                "SELECT ts_id, AVG(d1) AS s1, SQRT(AVG(d1_sq)) AS s2, AVG(dm) AS sm\n"
+                "FROM diffs\n"
+                "GROUP BY ts_id"
+            )
+            scale_df = _query(scale_sql).to_dataframe()
+            for tid, s1, s2, sm in zip(
+                scale_df["ts_id"].tolist(),
+                scale_df["s1"].tolist(),
+                scale_df["s2"].tolist(),
+                scale_df["sm"].tolist(),
+                strict=True,
+            ):
+                scales_by_id_cutoff[(str(tid), c_str)] = (
+                    0.0 if s1 is None or s1 != s1 else float(s1),
+                    0.0 if s2 is None or s2 != s2 else float(s2),
+                    0.0 if sm is None or sm != sm else float(sm),
+                )
+        hist_by_id = {}
+    else:
+        # y_train (for MASE/RMSSE scale) is per-series history; the base OOF has no in-sample
+        # rows, so read the full series history once, matching the natives' history read. The
+        # dates come with it because the scale denominator is the *fold's* training window,
+        # not the whole series — see `backtest.training_window`.
+        history = _query(build_history_query(cfg, dataset)).to_dataframe()
+        if cfg.hierarchy.enabled and not history.empty:
+            hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+            if hier_cols and hier_cols.issubset(history.columns):
+                from .reconciliation import build_hierarchy
+
+                hist_cfg = cfg.model_copy(
+                    update={
+                        "data": cfg.data.model_copy(
+                            update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                        )
+                    }
+                )
+                history, _ = build_hierarchy(history, hist_cfg)
+        if not history.empty:
+            ds_all = pd.to_datetime(history["ds"]).to_numpy()
+            y_all = history["y"].to_numpy()
+            hist_by_id = {
+                tid: (ds_all[idx], y_all[idx])
+                for tid, idx in history.groupby("ts_id", sort=False).indices.items()
+            }
+        else:
+            hist_by_id = {}
+
     # Per-series list of how each base model was actually backtested, for `ensemble_refit_mode`.
     refit_mode_by_id: dict[str, str | None] = {}
     if not metric_df.empty:
@@ -552,6 +613,9 @@ def _ensemble_batch(
         s: ensemble_scoring_basis(s, oof_df, cfg, learned_basis) for s in cfg.ensemble.strategies
     }
 
+    from .registry.ids import _canonical_config
+
+    canonical_cfg = _canonical_config(cfg)
     ens_oof_sorted = ens_oof.sort_values(
         ["model_type", "ts_id", "fold_id", "forecast_date"],
         kind="mergesort",
@@ -594,26 +658,52 @@ def _ensemble_batch(
                 if valid_c:
                     cutoff = min(valid_c)
             lo, hi = _ensemble_oof_bounds_from_arrays(c_yhat, c_resid, f_mask, cfg)
-            if hist is None:
-                y_tr = None
-            else:
-                cache_key = (ts_id, cutoff)
-                if cache_key in y_train_cache:
-                    y_tr = y_train_cache[cache_key]
-                else:
-                    y_tr = training_window(hist[0], hist[1], cutoff, cfg)
-                    y_train_cache[cache_key] = y_tr
-            fold_panels.append(
-                compute_metrics(
+            if use_sql_scales:
+                f_panel = compute_metrics(
                     c_y_true[f_mask],
                     c_yhat[f_mask],
                     lower=lo,
                     upper=hi,
-                    y_train=y_tr,
+                    y_train=None,
                     seasonal_period=period,
                 )
-            )
+                s_tuple = scales_by_id_cutoff.get((str(ts_id), str(cutoff)))
+                if s_tuple is not None:
+                    s1, s2, sm = s_tuple
+                    if s1 > 0.0:
+                        f_panel["mase"] = f_panel["mae"] / s1
+                    if s2 > 0.0:
+                        f_panel["rmsse"] = f_panel["rmse"] / s2
+                        f_panel["msse"] = f_panel["mse"] / (s2 * s2)
+                    if sm > 0.0:
+                        f_panel["mase_seasonal"] = f_panel["mae"] / sm
+                        f_panel["msis"] = f_panel["interval_score"] / sm
+                fold_panels.append(f_panel)
+            else:
+                if hist is None:
+                    y_tr = None
+                else:
+                    cache_key = (ts_id, cutoff)
+                    if cache_key in y_train_cache:
+                        y_tr = y_train_cache[cache_key]
+                    else:
+                        y_tr = training_window(hist[0], hist[1], cutoff, cfg)
+                        y_train_cache[cache_key] = y_tr
+                fold_panels.append(
+                    compute_metrics(
+                        c_y_true[f_mask],
+                        c_yhat[f_mask],
+                        lower=lo,
+                        upper=hi,
+                        y_train=y_tr,
+                        seasonal_period=period,
+                    )
+                )
         strategy = str(model_type).removeprefix("ensemble_")
+        if strategy not in scoring_by_strategy:
+            scoring_by_strategy[strategy] = ensemble_scoring_basis(
+                strategy, oof_df, cfg, learned_basis
+            )
         meta_rows.append(
             _ensemble_meta_row(
                 run_id=run_id,
@@ -625,11 +715,9 @@ def _ensemble_batch(
                 artifact_uri=artifact_uris.get(strategy),
                 created_at=created_at,
                 cfg=cfg,
-                ensemble_scoring=scoring_by_strategy.get(
-                    strategy,
-                    ensemble_scoring_basis(strategy, oof_df, cfg, learned_basis),
-                ),
+                ensemble_scoring=scoring_by_strategy[strategy],
                 backtest_refit=refit_mode_by_id.get(str(ts_id)),
+                _canonical=canonical_cfg,
             )
         )
     bigquery_engine._append_rows(settings, "forecast_metadata", _META_SPEC, meta_rows)
@@ -703,6 +791,7 @@ def _ensemble_meta_row(
     cfg: RunConfig,
     ensemble_scoring: str | None,
     backtest_refit: str | None,
+    _canonical: str | None = None,
 ) -> dict[str, Any]:
     """Assemble one ``forecast_metadata`` row for an ``ensemble_<strategy>`` pseudo-model (pure).
 
@@ -728,7 +817,7 @@ def _ensemble_meta_row(
         "ts_id": ts_id,
         "model_type": model_type,
         "compute_engine": "ensemble",
-        "model_hash": make_model_hash(run_id, ts_id, model_type, cfg),
+        "model_hash": make_model_hash(run_id, ts_id, model_type, cfg, _canonical=_canonical),
         "ensemble_id": ensemble_id,
         "fold_id": None,
         # Through `_as_float` like every other metric write: an unscored or non-finite metric is

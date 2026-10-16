@@ -280,14 +280,22 @@ def make_run_id(cfg: RunConfig) -> str:
     return f"{slug}-{digest}"
 
 
-def make_model_hash(run_id: str, ts_id: str, model_type: str, cfg: RunConfig) -> str:
+def make_model_hash(
+    run_id: str,
+    ts_id: str,
+    model_type: str,
+    cfg: RunConfig,
+    *,
+    _canonical: str | None = None,
+) -> str:
     """Return the deterministic hash identifying one ``(run, ts_id, model)`` cell.
 
     Mixes the run_id, the series id, the model name, and the canonical config so a
     cell's identity is fully reproducible from its own inputs (not merely trusted to
     match run_id's derivation). This is the idempotency key for registry writes.
     """
-    payload = "\x1f".join([run_id, ts_id, model_type, _canonical_config(cfg)])
+    canon = _canonical if _canonical is not None else _canonical_config(cfg)
+    payload = "\x1f".join([run_id, ts_id, model_type, canon])
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
