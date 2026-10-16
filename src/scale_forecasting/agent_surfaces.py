@@ -42,7 +42,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from .auto_policy import EXPOSURE_TIERS, SCALE_REGIMES
-from .benchmarks import BENCHMARK_SPECS, list_benchmarks
+from .benchmarks import BENCHMARK_SPECS, PUBLIC_BENCHMARK_SPECS, list_benchmarks
 from .config import (
     COMPUTE_FAMILIES,
     LEARNED_STRATEGIES,
@@ -1117,6 +1117,26 @@ def render_skill_catalog_reference(repo_root: Path | None = None) -> str:
         lines.append(
             f"| `{b_spec.name}` | `{b_spec.expected_regime}` | "
             f"`{b_spec.freq}` / `{b_spec.horizon}` | {desc} | {acts} |"
+        )
+
+    pub_specs = list(PUBLIC_BENCHMARK_SPECS.values())
+    lines.extend(
+        [
+            "",
+            (
+                f"### Public Open-Data Benchmarks "
+                f"({len(pub_specs)} Real-World Datasets in `benchmarks.py` via "
+                f"`fetch_public_benchmark`)"
+            ),
+            "",
+            ("| Benchmark Name (`name`) | Domain | Freq / H | License | Official Source URL |"),
+            "| :--- | :--- | :---: | :--- | :--- |",
+        ]
+    )
+    for p_spec in pub_specs:
+        lines.append(
+            f"| `{p_spec.name}` | `{p_spec.domain}` | "
+            f"`{p_spec.freq}` / `{p_spec.horizon}` | {p_spec.license} | {p_spec.homepage_url} |"
         )
 
     return "\n".join(lines) + "\n"

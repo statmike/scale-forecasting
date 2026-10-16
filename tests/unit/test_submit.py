@@ -1263,7 +1263,7 @@ def _submit_capturing_properties(
     not about the precedence chain that produces it (`test_profiling` owns that). ``profile=None``
     is the no-evidence case; pass one to exercise the other half.
     """
-    from scale_forecasting import batch_telemetry, submit
+    from scale_forecasting import batch_telemetry, quota, submit
     from scale_forecasting.profiling import source as profile_source
 
     captured: dict[str, str] = {}
@@ -1285,6 +1285,10 @@ def _submit_capturing_properties(
     monkeypatch.setattr(batch_telemetry, "_batch_client", lambda region: _FakeClient())
     monkeypatch.setattr(batch_telemetry, "_stamp_job_telemetry", lambda *a, **k: None)
     monkeypatch.setattr(profile_source, "profile_for_run", lambda cfg, **kw: profile)
+    if "preflight_serverless" not in kwargs:
+        monkeypatch.setattr(quota, "preflight_serverless", lambda *a, **k: {})
+    else:
+        monkeypatch.setattr(quota, "preflight_serverless", kwargs.pop("preflight_serverless"))
     submit.submit_batch(cfg, settings=_settings(), infra=_infra(), **kwargs)
     return captured
 
@@ -1413,3 +1417,36 @@ def test_the_echoed_telemetry_carries_the_memory_the_batch_was_actually_given() 
     # Absent when the batch left Serverless' own defaults standing — itself the answer to
     # "what sized this".
     assert extract_job_telemetry(_FakeBatch())["executor_memory"] is None
+
+
+def test_submit_batch_clamps_max_and_initial_executors_to_serverless_disk_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a project's regional DISKS_TOTAL_GB quota cannot hold the sized executor ceiling across
+    concurrent Serverless batches, submit_batch lowers maxExecutors and initialExecutors to fit."""
+    from scale_forecasting import quota
+
+    real_preflight = quota.preflight_serverless
+
+    def fake_preflight(regions: list[str], project_id: str, **kw: Any) -> Any:
+        def fetch(service: str, metric: str) -> dict[str, Any]:
+            if metric.endswith("disks_total_gb"):
+                return {
+                    "consumerQuotaLimits": [
+                        {
+                            "quotaBuckets": [
+                                {"dimensions": {"region": "us-central1"}, "effectiveLimit": "4800"}
+                            ]
+                        }
+                    ]
+                }
+            return {}
+
+        return real_preflight(regions, project_id, fetch=fetch, **kw)
+
+    # _cfg has statistical + ml (2 concurrent Serverless batches): 4800 // 2 = 2400 GB per batch
+    # -> (2400 - 400 driver) // 400 = 5 executors per batch (clamped down from 25).
+    cfg = _cfg(data={"source_table": "t", "series_limit": 1000})
+    props = _submit_capturing_properties(monkeypatch, cfg, preflight_serverless=fake_preflight)
+    assert props["spark.dynamicAllocation.maxExecutors"] == "5"
+    assert int(props["spark.dynamicAllocation.initialExecutors"]) <= 5

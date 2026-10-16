@@ -178,6 +178,12 @@ _LAZY: dict[str, tuple[str, str]] = {
     "list_benchmarks": (".benchmarks", "list_benchmarks"),
     "benchmark_catalog": (".benchmarks", "benchmark_catalog"),
     "load_benchmark": (".benchmarks", "load_benchmark"),
+    "PUBLIC_BENCHMARK_NAMES": (".benchmarks", "PUBLIC_BENCHMARK_NAMES"),
+    "PUBLIC_BENCHMARK_SPECS": (".benchmarks", "PUBLIC_BENCHMARK_SPECS"),
+    "PublicBenchmarkSpec": (".benchmarks", "PublicBenchmarkSpec"),
+    "list_public_benchmarks": (".benchmarks", "list_public_benchmarks"),
+    "public_benchmark_catalog": (".benchmarks", "public_benchmark_catalog"),
+    "fetch_public_benchmark": (".benchmarks", "fetch_public_benchmark"),
 }
 
 __all__ = [
@@ -218,11 +224,17 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     )
     from .benchmarks import (  # noqa: F401
         BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_SPECS,
         BenchmarkDataset,
         BenchmarkSpec,
+        PublicBenchmarkSpec,
         benchmark_catalog,
+        fetch_public_benchmark,
         list_benchmarks,
+        list_public_benchmarks,
         load_benchmark,
+        public_benchmark_catalog,
     )
     from .dag import DagNode  # noqa: F401
     from .diagnostics import (  # noqa: F401

@@ -26,6 +26,7 @@ Public surface: ``BENCHMARK_NAMES``, ``BenchmarkSpec``, ``BenchmarkDataset``, ``
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -35,11 +36,17 @@ import pandas as pd
 __all__ = [
     "BENCHMARK_NAMES",
     "BENCHMARK_SPECS",
+    "PUBLIC_BENCHMARK_NAMES",
+    "PUBLIC_BENCHMARK_SPECS",
     "BenchmarkDataset",
     "BenchmarkSpec",
+    "PublicBenchmarkSpec",
     "benchmark_catalog",
+    "fetch_public_benchmark",
     "list_benchmarks",
+    "list_public_benchmarks",
     "load_benchmark",
+    "public_benchmark_catalog",
 ]
 
 BENCHMARK_NAMES: tuple[str, ...] = (
@@ -879,6 +886,733 @@ def load_benchmark(
         future_df=future_df,
         oracle_future_df=oracle_future_df,
     )
+
+
+# ---------------------------------------------------------------------------
+# Public Real-World Open-Data Benchmark Suite (Zero Data Rehosting)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PublicBenchmarkSpec:
+    """Metadata, citation, license, and source URLs for a public open-data benchmark.
+
+    Raw external datasets are **never** rehosted in this repository; `fetch_public_benchmark`
+    downloads them on demand into an ephemeral local cache
+    (`/tmp/scale_forecasting_public_benchmarks`) and converts them into a standard
+    :class:`BenchmarkDataset` with held-out ground truth in ``oracle_future_df``.
+    """
+
+    name: str
+    title: str
+    domain: str
+    freq: str
+    horizon: int
+    default_n_series: int
+    license: str
+    citation: str
+    homepage_url: str
+    source_urls: tuple[str, ...]
+    future_covariates: tuple[str, ...] = ()
+    past_covariates: tuple[str, ...] = ()
+    static_covariates: tuple[str, ...] = ()
+    hierarchy_id_cols: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a JSON-friendly dictionary."""
+        raw = asdict(self)
+        for k, v in list(raw.items()):
+            if isinstance(v, tuple):
+                raw[k] = list(v)
+        return raw
+
+
+PUBLIC_BENCHMARK_NAMES: tuple[str, ...] = (
+    "m5_walmart",
+    "favorita_grocery",
+    "m4_daily",
+    "m4_weekly",
+    "m4_monthly",
+    "monash_tourism_monthly",
+    "monash_hospital",
+    "monash_car_parts",
+    "etth1",
+)
+
+PUBLIC_BENCHMARK_SPECS: dict[str, PublicBenchmarkSpec] = {
+    "m5_walmart": PublicBenchmarkSpec(
+        name="m5_walmart",
+        title="M5 Forecasting — Accuracy (Walmart Hierarchical Retail Demand)",
+        domain="Retail / Hierarchical Intermittent & Smooth SKU Demand",
+        freq="D",
+        horizon=28,
+        default_n_series=24,
+        license="M5 Competition Academic & Research Terms (MOFC / Kaggle)",
+        citation=(
+            "Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2022). "
+            "M5 accuracy competition: Results, findings, and conclusions. "
+            "International Journal of Forecasting, 38(4), 1346-1364."
+        ),
+        homepage_url="https://github.com/Mcompetitions/M5-methods",
+        source_urls=(
+            "https://huggingface.co/datasets/kashif/M5/resolve/main/calendar.csv",
+            "https://huggingface.co/datasets/kashif/M5/resolve/main/sales_train_evaluation.csv",
+            "https://huggingface.co/datasets/kashif/M5/resolve/main/sell_prices.csv",
+        ),
+        future_covariates=("snap_active", "is_event", "sell_price"),
+        static_covariates=("cat_id", "dept_id", "store_id", "state_id"),
+        hierarchy_id_cols=("state_id", "store_id", "cat_id"),
+    ),
+    "favorita_grocery": PublicBenchmarkSpec(
+        name="favorita_grocery",
+        title="Corporación Favorita Store Sales (Promotions, Holidays & Oil Covariates)",
+        domain="Grocery Retail / Promotional & Macroeconomic Covariates",
+        freq="D",
+        horizon=16,
+        default_n_series=24,
+        license="Competition Research Terms (Corporación Favorita / Kaggle)",
+        citation=(
+            "Corporación Favorita Grocery Sales Forecasting Benchmark (2018); "
+            "adopted in Lim et al. (2021) Temporal Fusion Transformers, Int. J. Forecasting."
+        ),
+        homepage_url="https://www.kaggle.com/competitions/store-sales-time-series-forecasting",
+        source_urls=(
+            "https://huggingface.co/datasets/t4tiana/store-sales-time-series-forecasting/resolve/main/train.csv",
+            "https://huggingface.co/datasets/t4tiana/store-sales-time-series-forecasting/resolve/main/stores.csv",
+            "https://huggingface.co/datasets/t4tiana/store-sales-time-series-forecasting/resolve/main/oil.csv",
+            "https://huggingface.co/datasets/t4tiana/store-sales-time-series-forecasting/resolve/main/holidays_events.csv",
+        ),
+        future_covariates=("onpromotion", "is_holiday"),
+        past_covariates=("dcoilwtico",),
+        static_covariates=("state", "city", "store_id", "family"),
+        hierarchy_id_cols=("state", "store_id"),
+    ),
+    "m4_daily": PublicBenchmarkSpec(
+        name="m4_daily",
+        title="M4 Competition — Daily Series (Finance, Macro, Micro & Demographic)",
+        domain="Multi-Domain Daily (M4 Competition)",
+        freq="D",
+        horizon=14,
+        default_n_series=24,
+        license="CC-BY-4.0 (Mcompetitions)",
+        citation=(
+            "Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2020). "
+            "The M4 Competition: 100,000 time series and 61 forecasting methods. "
+            "International Journal of Forecasting, 36(1), 54-74."
+        ),
+        homepage_url="https://github.com/Mcompetitions/M4-methods",
+        source_urls=(
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Train/Daily-train.csv",
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Test/Daily-test.csv",
+        ),
+    ),
+    "m4_weekly": PublicBenchmarkSpec(
+        name="m4_weekly",
+        title="M4 Competition — Weekly Series",
+        domain="Multi-Domain Weekly (M4 Competition)",
+        freq="W",
+        horizon=13,
+        default_n_series=24,
+        license="CC-BY-4.0 (Mcompetitions)",
+        citation=(
+            "Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2020). "
+            "The M4 Competition: 100,000 time series and 61 forecasting methods. "
+            "International Journal of Forecasting, 36(1), 54-74."
+        ),
+        homepage_url="https://github.com/Mcompetitions/M4-methods",
+        source_urls=(
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Train/Weekly-train.csv",
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Test/Weekly-test.csv",
+        ),
+    ),
+    "m4_monthly": PublicBenchmarkSpec(
+        name="m4_monthly",
+        title="M4 Competition — Monthly Series",
+        domain="Multi-Domain Monthly (M4 Competition)",
+        freq="MS",
+        horizon=18,
+        default_n_series=24,
+        license="CC-BY-4.0 (Mcompetitions)",
+        citation=(
+            "Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2020). "
+            "The M4 Competition: 100,000 time series and 61 forecasting methods. "
+            "International Journal of Forecasting, 36(1), 54-74."
+        ),
+        homepage_url="https://github.com/Mcompetitions/M4-methods",
+        source_urls=(
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Train/Monthly-train.csv",
+            "https://raw.githubusercontent.com/Mcompetitions/M4-methods/master/Dataset/Test/Monthly-test.csv",
+        ),
+    ),
+    "monash_tourism_monthly": PublicBenchmarkSpec(
+        name="monash_tourism_monthly",
+        title="Monash Archive — Tourism Monthly (Athanasopoulos et al. 2011)",
+        domain="Tourism / Strong Multiplicative Seasonality",
+        freq="MS",
+        horizon=24,
+        default_n_series=24,
+        license="CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive)",
+        citation=(
+            "Athanasopoulos, G., Hyndman, R. J., Song, H., & Wu, D. C. (2011). "
+            "The tourism forecasting competition. Int. J. Forecasting, 27(3), 822-844; "
+            "Godahewa et al. (2021) Monash Time Series Forecasting Archive, NeurIPS."
+        ),
+        homepage_url="https://zenodo.org/records/4656096",
+        source_urls=(
+            "https://zenodo.org/api/records/4656096/files/tourism_monthly_dataset.zip/content",
+        ),
+    ),
+    "monash_hospital": PublicBenchmarkSpec(
+        name="monash_hospital",
+        title="Monash Archive — Hospital Patient Counts (Hyndman et al. 2008)",
+        domain="Healthcare / Monthly Patient Count Series",
+        freq="MS",
+        horizon=12,
+        default_n_series=24,
+        license="CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive)",
+        citation=(
+            "Godahewa, R., Bergmeir, C., Webb, G. I., Hyndman, R. J., & Montero-Manso, P. (2021). "
+            "Monash Time Series Forecasting Archive. NeurIPS Datasets and Benchmarks."
+        ),
+        homepage_url="https://zenodo.org/records/4656014",
+        source_urls=("https://zenodo.org/api/records/4656014/files/hospital_dataset.zip/content",),
+    ),
+    "monash_car_parts": PublicBenchmarkSpec(
+        name="monash_car_parts",
+        title="Monash Archive — Car Parts Intermittent Demand (Hyndman & Snyder 2008)",
+        domain="Automotive / Sparse Intermittent Spare Parts",
+        freq="MS",
+        horizon=12,
+        default_n_series=24,
+        license="CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive)",
+        citation=(
+            "Godahewa, R., Bergmeir, C., Webb, G. I., Hyndman, R. J., & Montero-Manso, P. (2021). "
+            "Monash Time Series Forecasting Archive. NeurIPS Datasets and Benchmarks."
+        ),
+        homepage_url="https://zenodo.org/records/4656021",
+        source_urls=(
+            "https://zenodo.org/api/records/4656021/files/car_parts_dataset_without_missing_values.zip/content",
+        ),
+    ),
+    "etth1": PublicBenchmarkSpec(
+        name="etth1",
+        title="Electricity Transformer Temperature Hourly (ETTh1, Informer Benchmark)",
+        domain="Energy / Hourly Transformer Load & Oil Temperature",
+        freq="h",
+        horizon=24,
+        default_n_series=7,
+        license="Apache-2.0 (zhouhaoyi/ETDataset)",
+        citation=(
+            "Zhou, H., Zhang, S., Peng, J., Zhang, S., Li, J., Xiong, H., & Zhang, W. (2021). "
+            "Informer: Beyond Efficient Transformer for Long Sequence Time-Series "
+            "Forecasting. AAAI."
+        ),
+        homepage_url="https://github.com/zhouhaoyi/ETDataset",
+        source_urls=(
+            "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv",
+        ),
+    ),
+}
+
+
+def list_public_benchmarks() -> list[str]:
+    """Return all registered public open-data benchmark names."""
+    return list(PUBLIC_BENCHMARK_NAMES)
+
+
+def public_benchmark_catalog() -> pd.DataFrame:
+    """Return a tidy DataFrame summarizing all registered public open-data benchmarks."""
+    rows = [spec.to_dict() for spec in PUBLIC_BENCHMARK_SPECS.values()]
+    return pd.DataFrame(rows)
+
+
+def _download_cached_bytes(url: str, dest: Any) -> bytes:
+    """Download ``url`` into ``dest`` if not already cached and return its raw bytes."""
+    import urllib.request
+    from pathlib import Path
+
+    path = Path(dest)
+    if path.is_file() and path.stat().st_size > 0:
+        return path.read_bytes()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "scale-forecasting/1.2"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+    path.write_bytes(data)
+    return data
+
+
+def _parse_monash_tsf_zip(
+    zip_bytes: bytes,
+    *,
+    pub_spec: PublicBenchmarkSpec,
+    n_series: int,
+    history_limit: int,
+) -> BenchmarkDataset:
+    """Parse a Monash `.tsf` zip archive into a :class:`BenchmarkDataset`."""
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        tsf_name = next(name for name in zf.namelist() if name.endswith(".tsf"))
+        lines = zf.read(tsf_name).decode("latin-1").splitlines()
+
+    data_idx = next(i for i, line in enumerate(lines) if line.strip().lower().startswith("@data"))
+    hist_frames: list[pd.DataFrame] = []
+    oracle_frames: list[pd.DataFrame] = []
+    h = pub_spec.horizon
+    picked = 0
+
+    for line in lines[data_idx + 1 :]:
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        parts = raw.split(":")
+        if len(parts) < 2:
+            continue
+        ts_id = parts[0].strip()
+        start_str = parts[1].strip().split()[0] if len(parts) >= 3 else "2000-01-01"
+        vals = [
+            float(v)
+            for v in parts[-1].split(",")
+            if v.strip() and v.strip() != "?" and v.strip().lower() != "nan"
+        ]
+        if len(vals) < h + 24:
+            continue
+        vals_arr = np.asarray(vals[-(history_limit + h) :], dtype=np.float64)
+        # Skip degenerate all-zero series on car_parts so every sampled series has nonzero demand
+        if np.count_nonzero(vals_arr[:-h] > 0) < 4:
+            continue
+        dates = pd.date_range(start=start_str, periods=len(vals), freq=pub_spec.freq)[
+            -(len(vals_arr)) :
+        ]
+        hist_vals = vals_arr[:-h]
+        test_vals = vals_arr[-h:]
+        hist_dates = dates[:-h]
+        test_dates = dates[-h:]
+
+        hist_frames.append(
+            pd.DataFrame({"ts_id": ts_id, "ds": hist_dates, "y": np.round(hist_vals, 4)})
+        )
+        oracle_frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": ts_id,
+                    "ds": test_dates,
+                    "horizon_step": np.arange(1, h + 1, dtype=np.int64),
+                    "oracle_yhat": np.round(test_vals, 4),
+                    "y_realized": np.round(test_vals, 4),
+                }
+            )
+        )
+        picked += 1
+        if picked >= n_series:
+            break
+
+    df = pd.concat(hist_frames, ignore_index=True)
+    oracle_df = pd.concat(oracle_frames, ignore_index=True)
+    spec = BenchmarkSpec(
+        name=pub_spec.name,
+        title=pub_spec.title,
+        description=f"{pub_spec.citation} ({pub_spec.license})",
+        freq=pub_spec.freq,
+        horizon=h,
+        n_series=picked,
+        history_length=int(len(df) // max(1, picked)),
+        expected_regime="intermittent" if "car_parts" in pub_spec.name else "smooth",
+        non_negative=True,
+        integer_valued="car_parts" in pub_spec.name or "hospital" in pub_spec.name,
+    )
+    return BenchmarkDataset(spec=spec, df=df, future_df=pd.DataFrame(), oracle_future_df=oracle_df)
+
+
+def fetch_public_benchmark(
+    name: str,
+    *,
+    n_series: int | None = None,
+    history_limit: int = 365,
+    cache_dir: str | None = None,
+) -> BenchmarkDataset:
+    """Download and prepare a public real-world benchmark on demand (zero repo data rehosting).
+
+    Fetches official public files into ``cache_dir`` (default
+    ``/tmp/scale_forecasting_public_benchmarks/<name>``) and splits each series into historical
+    observations (`dataset.df`), future exogenous covariates (`dataset.future_df`), and held-out
+    ground-truth test actuals (`dataset.oracle_future_df`).
+    """
+    import csv
+    import io
+    import urllib.request
+    from pathlib import Path
+
+    if name not in PUBLIC_BENCHMARK_SPECS:
+        raise ValueError(
+            f"Unknown public benchmark {name!r}; expected one of {PUBLIC_BENCHMARK_NAMES}"
+        )
+    pub_spec = PUBLIC_BENCHMARK_SPECS[name]
+    eff_n = int(n_series or pub_spec.default_n_series)
+    h = pub_spec.horizon
+    root = Path(cache_dir or "/tmp/scale_forecasting_public_benchmarks") / name
+    root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Monash Archive (.tsf inside .zip on Zenodo)
+    if name.startswith("monash_"):
+        zip_bytes = _download_cached_bytes(pub_spec.source_urls[0], root / f"{name}.zip")
+        return _parse_monash_tsf_zip(
+            zip_bytes, pub_spec=pub_spec, n_series=eff_n, history_limit=history_limit
+        )
+
+    # 2. ETTh1 (zhouhaoyi/ETDataset on GitHub)
+    if name == "etth1":
+        csv_bytes = _download_cached_bytes(pub_spec.source_urls[0], root / "ETTh1.csv")
+        raw_df = pd.read_csv(io.BytesIO(csv_bytes))
+        raw_df["date"] = pd.to_datetime(raw_df["date"])
+        raw_df = raw_df.tail(history_limit + h).reset_index(drop=True)
+        series_cols = [c for c in raw_df.columns if c != "date"][:eff_n]
+        hist_frames: list[pd.DataFrame] = []
+        oracle_frames: list[pd.DataFrame] = []
+        for col in series_cols:
+            vals = pd.to_numeric(raw_df[col], errors="coerce").to_numpy(dtype=np.float64)
+            dates = raw_df["date"]
+            hist_frames.append(
+                pd.DataFrame({"ts_id": col, "ds": dates.iloc[:-h], "y": np.round(vals[:-h], 4)})
+            )
+            oracle_frames.append(
+                pd.DataFrame(
+                    {
+                        "ts_id": col,
+                        "ds": dates.iloc[-h:].to_numpy(),
+                        "horizon_step": np.arange(1, h + 1, dtype=np.int64),
+                        "oracle_yhat": np.round(vals[-h:], 4),
+                        "y_realized": np.round(vals[-h:], 4),
+                    }
+                )
+            )
+        df = pd.concat(hist_frames, ignore_index=True)
+        oracle_df = pd.concat(oracle_frames, ignore_index=True)
+        spec = BenchmarkSpec(
+            name=name,
+            title=pub_spec.title,
+            description=f"{pub_spec.citation} ({pub_spec.license})",
+            freq=pub_spec.freq,
+            horizon=h,
+            n_series=len(series_cols),
+            history_length=history_limit,
+            expected_regime="erratic",
+            non_negative=False,
+        )
+        return BenchmarkDataset(
+            spec=spec, df=df, future_df=pd.DataFrame(), oracle_future_df=oracle_df
+        )
+
+    # 3. M4 Competition (Daily, Weekly, Monthly from Mcompetitions/M4-methods)
+    if name.startswith("m4_"):
+        train_url, test_url = pub_spec.source_urls
+        train_cache = root / f"{name}_train_subset.csv"
+        test_cache = root / f"{name}_test_subset.csv"
+        if not train_cache.is_file() or not test_cache.is_file():
+            for url, out_path in ((train_url, train_cache), (test_url, test_cache)):
+                req = urllib.request.Request(url, headers={"User-Agent": "scale-forecasting/1.2"})
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    lines_collected: list[str] = []
+                    for raw_line in resp:
+                        lines_collected.append(raw_line.decode("utf-8", errors="ignore"))
+                        if len(lines_collected) >= max(eff_n + 5, 105):
+                            break
+                out_path.write_text("".join(lines_collected), encoding="utf-8")
+
+        hist_frames = []
+        oracle_frames = []
+        with (
+            train_cache.open("r", encoding="utf-8") as f_tr,
+            test_cache.open("r", encoding="utf-8") as f_te,
+        ):
+            r_tr = csv.reader(f_tr)
+            r_te = csv.reader(f_te)
+            next(r_tr, None)
+            next(r_te, None)
+            for idx, (row_tr, row_te) in enumerate(zip(r_tr, r_te, strict=False)):
+                if idx >= eff_n:
+                    break
+                ts_id = row_tr[0].strip()
+                tr_vals = [float(v) for v in row_tr[1:] if v.strip()]
+                te_vals = [float(v) for v in row_te[1 : h + 1] if v.strip()]
+                if len(te_vals) < h or len(tr_vals) < 20:
+                    continue
+                tr_vals = tr_vals[-history_limit:]
+                total_len = len(tr_vals) + h
+                m4_dates = pd.date_range("2015-01-01", periods=total_len, freq=pub_spec.freq)
+                hist_frames.append(
+                    pd.DataFrame(
+                        {
+                            "ts_id": ts_id,
+                            "ds": m4_dates[:-h],
+                            "y": np.round(np.asarray(tr_vals, dtype=np.float64), 4),
+                        }
+                    )
+                )
+                oracle_frames.append(
+                    pd.DataFrame(
+                        {
+                            "ts_id": ts_id,
+                            "ds": m4_dates[-h:],
+                            "horizon_step": np.arange(1, h + 1, dtype=np.int64),
+                            "oracle_yhat": np.round(np.asarray(te_vals, dtype=np.float64), 4),
+                            "y_realized": np.round(np.asarray(te_vals, dtype=np.float64), 4),
+                        }
+                    )
+                )
+        df = pd.concat(hist_frames, ignore_index=True)
+        oracle_df = pd.concat(oracle_frames, ignore_index=True)
+        spec = BenchmarkSpec(
+            name=name,
+            title=pub_spec.title,
+            description=f"{pub_spec.citation} ({pub_spec.license})",
+            freq=pub_spec.freq,
+            horizon=h,
+            n_series=len(hist_frames),
+            history_length=int(len(df) // max(1, len(hist_frames))),
+            expected_regime="smooth",
+            non_negative=True,
+        )
+        return BenchmarkDataset(
+            spec=spec, df=df, future_df=pd.DataFrame(), oracle_future_df=oracle_df
+        )
+
+    # 4. M5 Walmart Hierarchical Retail (calendar + sales_train_evaluation + sell_prices)
+    if name == "m5_walmart":
+        cal_url, eval_url, price_url = pub_spec.source_urls
+        cal_bytes = _download_cached_bytes(cal_url, root / "calendar.csv")
+        cal_df = pd.read_csv(io.BytesIO(cal_bytes))
+        cal_df["ds"] = pd.to_datetime(cal_df["date"])
+        cal_df["is_event"] = cal_df["event_name_1"].notna().astype(np.int64)
+
+        eval_path = root / "sales_train_evaluation.csv"
+        if not eval_path.is_file() or eval_path.stat().st_size == 0:
+            _download_cached_bytes(eval_url, eval_path)
+        price_path = root / "sell_prices.csv"
+        if not price_path.is_file() or price_path.stat().st_size == 0:
+            _download_cached_bytes(price_url, price_path)
+
+        # Stratified selection across CA_1, CA_2, TX_1, WI_1 and FOODS, HOUSEHOLD, HOBBIES
+        sales_df = pd.read_csv(eval_path)
+        d_cols = [c for c in sales_df.columns if c.startswith("d_")][-(history_limit + h) :]
+        sales_df["_total_vol"] = sales_df[d_cols[-90:]].sum(axis=1)
+        active_df = sales_df[sales_df["_total_vol"] >= 30].copy()
+        per_group = max(1, math.ceil(eff_n / 6))
+        picked_rows = (
+            active_df.sort_values("_total_vol", ascending=False)
+            .groupby(["state_id", "cat_id"], as_index=False)
+            .head(per_group)
+            .head(eff_n)
+        )
+        wanted_pairs = set(zip(picked_rows["store_id"], picked_rows["item_id"], strict=False))
+
+        # Filter sell_prices for selected (store_id, item_id) pairs
+        price_chunks: list[pd.DataFrame] = []
+        for chunk in pd.read_csv(price_path, chunksize=250_000):
+            mask = chunk["store_id"].isin(picked_rows["store_id"].unique()) & chunk["item_id"].isin(
+                picked_rows["item_id"].unique()
+            )
+            if mask.any():
+                price_chunks.append(chunk.loc[mask])
+        prices_sub = (
+            pd.concat(price_chunks, ignore_index=True)
+            if price_chunks
+            else pd.DataFrame(columns=["store_id", "item_id", "wm_yr_wk", "sell_price"])
+        )
+        _ = wanted_pairs
+
+        cal_sub = cal_df[
+            ["d", "ds", "wm_yr_wk", "is_event", "snap_CA", "snap_TX", "snap_WI"]
+        ].set_index("d")
+
+        hist_frames = []
+        fut_frames: list[pd.DataFrame] = []
+        oracle_frames = []
+        for _, srow in picked_rows.iterrows():
+            ts_id = str(srow["id"]).replace("_evaluation", "")
+            state_id = str(srow["state_id"])
+            store_id = str(srow["store_id"])
+            cat_id = str(srow["cat_id"])
+            dept_id = str(srow["dept_id"])
+            item_id = str(srow["item_id"])
+            snap_col = f"snap_{state_id}" if f"snap_{state_id}" in cal_sub.columns else "snap_CA"
+
+            s_cal = cal_sub.loc[d_cols].copy()
+            s_cal["y"] = srow[d_cols].to_numpy(dtype=np.float64)
+            s_cal["snap_active"] = s_cal[snap_col].to_numpy(dtype=np.int64)
+            item_prices = prices_sub[
+                (prices_sub["store_id"] == store_id) & (prices_sub["item_id"] == item_id)
+            ][["wm_yr_wk", "sell_price"]].drop_duplicates("wm_yr_wk")
+            s_cal = s_cal.merge(item_prices, on="wm_yr_wk", how="left")
+            s_cal["sell_price"] = s_cal["sell_price"].ffill().bfill().fillna(1.0)
+            s_cal["ts_id"] = ts_id
+            s_cal["state_id"] = state_id
+            s_cal["store_id"] = store_id
+            s_cal["cat_id"] = cat_id
+            s_cal["dept_id"] = dept_id
+
+            cols_keep = [
+                "ts_id",
+                "ds",
+                "y",
+                "snap_active",
+                "is_event",
+                "sell_price",
+                "state_id",
+                "store_id",
+                "cat_id",
+                "dept_id",
+            ]
+            hist_part = s_cal.iloc[:-h][cols_keep].copy()
+            test_part = s_cal.iloc[-h:].copy()
+            hist_frames.append(hist_part)
+            fut_frames.append(
+                test_part[["ts_id", "ds", "snap_active", "is_event", "sell_price"]].copy()
+            )
+            oracle_frames.append(
+                pd.DataFrame(
+                    {
+                        "ts_id": ts_id,
+                        "ds": test_part["ds"].to_numpy(),
+                        "horizon_step": np.arange(1, h + 1, dtype=np.int64),
+                        "oracle_yhat": np.round(test_part["y"].to_numpy(dtype=np.float64), 4),
+                        "y_realized": np.round(test_part["y"].to_numpy(dtype=np.float64), 4),
+                    }
+                )
+            )
+        df = pd.concat(hist_frames, ignore_index=True)
+        fut_df = pd.concat(fut_frames, ignore_index=True)
+        oracle_df = pd.concat(oracle_frames, ignore_index=True)
+        spec = BenchmarkSpec(
+            name=name,
+            title=pub_spec.title,
+            description=f"{pub_spec.citation} ({pub_spec.license})",
+            freq=pub_spec.freq,
+            horizon=h,
+            n_series=len(hist_frames),
+            history_length=history_limit,
+            expected_regime="smooth",
+            non_negative=True,
+            integer_valued=True,
+            true_covariates=pub_spec.future_covariates,
+            static_covariates=pub_spec.static_covariates,
+            hierarchy_id_cols=pub_spec.hierarchy_id_cols,
+        )
+        return BenchmarkDataset(spec=spec, df=df, future_df=fut_df, oracle_future_df=oracle_df)
+
+    # 5. Corporación Favorita Grocery Sales (train + stores + oil + holidays_events)
+    train_url, stores_url, oil_url, hol_url = pub_spec.source_urls
+    stores_df = pd.read_csv(io.BytesIO(_download_cached_bytes(stores_url, root / "stores.csv")))
+    oil_df = pd.read_csv(io.BytesIO(_download_cached_bytes(oil_url, root / "oil.csv")))
+    hol_df = pd.read_csv(io.BytesIO(_download_cached_bytes(hol_url, root / "holidays_events.csv")))
+
+    train_path = root / "train.csv"
+    if not train_path.is_file() or train_path.stat().st_size == 0:
+        _download_cached_bytes(train_url, train_path)
+
+    target_stores = [1, 2, 3, 44, 45, 47, 48, 49]
+    target_families = [
+        "GROCERY I",
+        "BEVERAGES",
+        "PRODUCE",
+        "CLEANING",
+        "DAIRY",
+        "BREAD/BAKERY",
+    ]
+    sub_chunks: list[pd.DataFrame] = []
+    for chunk in pd.read_csv(
+        train_path,
+        usecols=["date", "store_nbr", "family", "sales", "onpromotion"],
+        chunksize=500_000,
+    ):
+        m = (
+            chunk["store_nbr"].isin(target_stores)
+            & chunk["family"].isin(target_families)
+            & (chunk["date"] >= "2016-06-01")
+        )
+        if m.any():
+            sub_chunks.append(chunk.loc[m])
+    raw_fav = pd.concat(sub_chunks, ignore_index=True)
+    raw_fav["ds"] = pd.to_datetime(raw_fav["date"])
+    oil_df["ds"] = pd.to_datetime(oil_df["date"])
+    oil_sub = oil_df[["ds", "dcoilwtico"]].drop_duplicates("ds").sort_values("ds")
+    oil_sub["dcoilwtico"] = oil_sub["dcoilwtico"].ffill().bfill().fillna(45.0)
+
+    hol_df["ds"] = pd.to_datetime(hol_df["date"])
+    nat_hols = set(
+        hol_df.loc[hol_df["transferred"].fillna(False) == False, "ds"].unique()  # noqa: E712
+    )
+
+    raw_fav = raw_fav.merge(stores_df[["store_nbr", "city", "state"]], on="store_nbr", how="left")
+    raw_fav = raw_fav.merge(oil_sub, on="ds", how="left")
+    raw_fav["dcoilwtico"] = raw_fav["dcoilwtico"].ffill().bfill().fillna(45.0)
+    raw_fav["is_holiday"] = raw_fav["ds"].isin(nat_hols).astype(np.int64)
+    raw_fav["store_id"] = "store_" + raw_fav["store_nbr"].astype(str)
+    raw_fav["ts_id"] = (
+        raw_fav["store_id"] + "__" + raw_fav["family"].str.replace(" ", "_").str.replace("/", "_")
+    )
+
+    unique_ids = sorted(raw_fav["ts_id"].unique())[:eff_n]
+    raw_fav = raw_fav[raw_fav["ts_id"].isin(unique_ids)].sort_values(["ts_id", "ds"])
+
+    hist_frames = []
+    fut_frames = []
+    oracle_frames = []
+    for raw_tid, grp in raw_fav.groupby("ts_id", sort=False):
+        ts_id = str(raw_tid)
+        g = grp.tail(history_limit + h).copy()
+        if len(g) < h + 30:
+            continue
+        g["y"] = np.round(pd.to_numeric(g["sales"], errors="coerce").fillna(0.0).to_numpy(), 4)
+        g["onpromotion"] = pd.to_numeric(g["onpromotion"], errors="coerce").fillna(0.0).to_numpy()
+        cols_keep = [
+            "ts_id",
+            "ds",
+            "y",
+            "onpromotion",
+            "is_holiday",
+            "dcoilwtico",
+            "state",
+            "city",
+            "store_id",
+            "family",
+        ]
+        hist_part = g.iloc[:-h][cols_keep].copy()
+        test_part = g.iloc[-h:].copy()
+        hist_frames.append(hist_part)
+        fut_frames.append(test_part[["ts_id", "ds", "onpromotion", "is_holiday"]].copy())
+        oracle_frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": str(ts_id),
+                    "ds": test_part["ds"].to_numpy(),
+                    "horizon_step": np.arange(1, h + 1, dtype=np.int64),
+                    "oracle_yhat": np.round(test_part["y"].to_numpy(dtype=np.float64), 4),
+                    "y_realized": np.round(test_part["y"].to_numpy(dtype=np.float64), 4),
+                }
+            )
+        )
+
+    df = pd.concat(hist_frames, ignore_index=True)
+    fut_df = pd.concat(fut_frames, ignore_index=True)
+    oracle_df = pd.concat(oracle_frames, ignore_index=True)
+    spec = BenchmarkSpec(
+        name=name,
+        title=pub_spec.title,
+        description=f"{pub_spec.citation} ({pub_spec.license})",
+        freq=pub_spec.freq,
+        horizon=h,
+        n_series=len(hist_frames),
+        history_length=int(len(df) // max(1, len(hist_frames))),
+        expected_regime="smooth",
+        non_negative=True,
+        true_covariates=pub_spec.future_covariates,
+        static_covariates=pub_spec.static_covariates,
+        hierarchy_id_cols=pub_spec.hierarchy_id_cols,
+    )
+    return BenchmarkDataset(spec=spec, df=df, future_df=fut_df, oracle_future_df=oracle_df)
 
 
 def _main(argv: list[str] | None = None) -> int:

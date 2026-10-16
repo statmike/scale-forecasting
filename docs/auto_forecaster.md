@@ -422,5 +422,49 @@ Instead of hand-picking the thresholds and starting model lists in [`scale_forec
 | **Generation 3 — Single-Fold Overfit Guard** | `56.03` | `+20.63%` | `+12.46%` | `0.00` | Using `"best_single"` selection when `n_folds=1` (and per-series `"champion"` only when `n_folds >= 2`) eliminated 1-fold overfitting. |
 | **Round 2 — Multi-Branch DAG + Domain Specialists** | `74.82` | `+41.96%` | `+24.16%` | `0.00` | Splitting Pass 2 into parallel branches (`2A`, `2B`, `2C`) + Level 3 synthesis (`3`) and adding intermittent, cold-start, hierarchy (`mint_nonneg`), and stockout specialists solved all 12 test regimes. |
 | **Round 3A & 3B — 18-DGP Scale-Crossover & Cloud Holdouts (`300` Generations)** | **`71.07`** *(18-DGP scale-aware score)* | **`+45.40%`** | **`+25.60%` regret reduction** | **`0.00`** | Evolved `n_series` scale-regime cutoffs (`micro=9`, `small=99`, `medium=999`, `large=9,999`), multi-anchor baseline rules (`100%` rule accuracy across `18/18` DGPs), and hierarchical reconciliation ladders; verified on `60/60` multi-branch tournaments and unseen cloud holdouts up to `25,000` series (`+50.07%` MASE lift / `+45.04%` WAPE reduction on `holdout_25000`). |
+| **Round 4 — Real-World Open-Data Generalization & Cross-Fitted Ensembling** | **`9 / 9` Non-Negative Test Lift** | **`+24.30%` OOF FVA** | **`+14.63%` Mean Test Lift** | **`0.00`** | Added leave-one-fold-out cross-fitting for `ensemble_champion` and smoothed step-window shrinkage for `ensemble_horizon_specialist`, defaulted accuracy-mode point forecasts to unbiased `"raw"` model outputs, added dynamic quota preflight across all 6 cloud runtimes (including Dataproc Serverless Spark), and verified across 9 public real-world open-data benchmarks. |
+
+---
+
+### Real-World Public Open-Data Benchmarks (M5, Favorita, M4, Monash, ETT)
+
+Beyond the 18 synthetic ground-truth DGPs above, [`scale_forecasting.benchmarks`](api/benchmarks.md) includes on-demand fetchers ([`list_public_benchmarks()`](api/benchmarks.md), [`public_benchmark_catalog()`](api/benchmarks.md), and [`fetch_public_benchmark()`](api/benchmarks.md)) for **9 canonical academic and competition time-series datasets** spanning retail hierarchies, grocery promotions, macroeconomics, healthcare patient counts, intermittent spare parts, and hourly electricity transformer loads.
+
+> [!NOTE]
+> **Zero Data Rehosting & Full Attribution:** `scale-forecasting` **never rehosts** external benchmark data in the Git repository or Python package wheel. Calling `fetch_public_benchmark("<name>")` downloads the dataset on demand from its official public archive (Nixtla open mirrors, Zenodo Monash Time Series Forecasting Archive, or ETT GitHub) into a local temporary cache (`/tmp/scale_forecasting_public_benchmarks`) and returns a ready-to-run `BenchmarkDataset` carrying `panel_df`, `future_df`, `oracle_future_df` (held-out test actuals), official URLs, license metadata, and academic citations.
+
+```python
+from scale_forecasting import Forecaster, fetch_public_benchmark, public_benchmark_catalog
+
+# 1. Inspect the 9 public open-data benchmarks, licenses, and citations
+print(public_benchmark_catalog()[["name", "domain", "freq", "horizon", "license"]])
+
+# 2. Fetch M5 Walmart or Corporación Favorita on demand and run multi-branch autofocus
+ds = fetch_public_benchmark("m5_walmart", n_series=16)
+f = Forecaster.auto(ds.panel_df, future_df=ds.future_df, tier="wide_field", autofocus=True)
+print(f.assess())
+```
+
+#### Local Held-Out Test & OOF Evaluation Across All 9 Real-World Datasets (`tier="wide_field"`, `autofocus=True`)
+
+| Public Benchmark | Domain & Structural Features | Freq / Horizon | Winning Model (`Pass`) | OOF FVA vs. Seasonal Naive | Held-Out Test MAE (`Auto` vs. `SNaive`) | Held-Out Test Lift vs. `SNaive` | License & Source |
+| :--- | :--- | :---: | :--- | :---: | :---: | :---: | :--- |
+| **`m5_walmart`** | Walmart retail unit sales (`item_id`, `dept_id`, `cat_id`, `store_id`, `state_id` hierarchy + SNAP/event covariates) | `D` ($H=28$) | `ensemble_inverse_error` (`Pass 1`) | **`+18.89%`** | `12.16` vs. `14.68` | **`+17.15%`** | CC BY-NC-SA 4.0 ([M5 / Makridakis et al., 2022](https://doi.org/10.1016/j.ijforecast.2021.11.013)) |
+| **`favorita_grocery`** | Corporación Favorita grocery unit sales with future `onpromotion` binary flag | `D` ($H=16$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+23.56%`** | `295.52` vs. `310.01` | **`+4.67%`** | CC BY-NC-SA 4.0 ([Favorita / Nixtla Open Mirror](https://zenodo.org/records/4656021)) |
+| **`m4_daily`** | M4 Competition daily financial, macroeconomic, and demographic series | `D` ($H=14$) | `ensemble_inverse_error` (`Pass 1`) | **`+29.70%`** | `219.97` vs. `247.74` | **`+11.21%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
+| **`m4_weekly`** | M4 Competition weekly business and industry series ($m=52$) | `W` ($H=13$) | `ensemble_ridge` (`Pass 3`) | **`+53.53%`** | `402.52` vs. `748.72` | **`+46.24%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
+| **`m4_monthly`** | M4 Competition monthly macroeconomic and industry series ($m=12$) | `MS` ($H=18$) | `ensemble_nnls` (`Pass 3`) | **`+46.03%`** | `269.47` vs. `497.72` | **`+45.86%`** | CC BY 4.0 ([M4 / Makridakis et al., 2020](https://doi.org/10.1016/j.ijforecast.2019.04.014)) |
+| **`monash_tourism_monthly`** | Australian & global monthly tourism volumes with strong trend and seasonal swings | `MS` ($H=24$) | `ensemble_inverse_error` (`Pass 3`) | **`+6.74%`** | `7921.15` vs. `8004.01` | **`+1.04%`** | CC BY 4.0 ([Athanasopoulos et al., 2011 / Monash](https://zenodo.org/records/4656096)) |
+| **`monash_hospital`** | Monthly patient admission count series across medical categories | `MS` ($H=12$) | `ensemble_inverse_error` (`Pass 2`) | **`+24.80%`** | `8.08` vs. `8.47` | **`+4.59%`** | CC BY 4.0 ([Godahewa et al., 2021 / Monash](https://zenodo.org/records/4656014)) |
+| **`monash_car_parts`** | Lumpy & intermittent monthly automotive spare-parts demand ($>80\%$ zeros) | `MS` ($H=12$) | `naive_seasonal` (`Pass 3`) | **`+0.00%`** | `0.1111` vs. `0.1111` | **`+0.00%`** *(tie)* | CC BY 4.0 ([Hyndman & Snyder / Monash](https://zenodo.org/records/4656021)) |
+| **`etth1`** | Electricity Transformer Temperature (`OT`) hourly oil temperature with 6 load covariates (`HUFL`..`LULL`) | `h` ($H=24$) | `ensemble_horizon_specialist` (`Pass 2`) | **`+15.47%`** | `1.0110` vs. `1.0201` | **`+0.89%`** | CC BY 4.0 ([Zhou et al., AAAI 2021](https://github.com/zhouhaoyi/ETDataset)) |
+
+#### Live Google Cloud Benchmark Runs (`m5_walmart` & `favorita_grocery`)
+
+| Benchmark | Cloud Sandbox (`where`) | Verified `run_id` | Winning Model (`Pass`) | Decision Metric (`WAPE`) | FVA vs. Seasonal Baseline | Wall-Clock Time |
+| :--- | :--- | :--- | :--- | :---: | :---: | :---: |
+| **`m5_walmart`** | **`bigquery`** (`ARIMA_PLUS_XREG` $\rightarrow$ `TimesFM` `AI.FORECAST`) | `r4-m5-walmart-bigquery-p2-ba55284e942a` | `ensemble_horizon_specialist` (`Pass 2`) | `0.2573` | **`+24.54%`** | `310.0s` |
+| **`m5_walmart`** | **`cloud_cpu`** (Dataproc Serverless Spark + dynamic quota preflight) | `r4-m5-walmart-cloud-cpu-505cb1271dd3` | `lightgbm` (`Pass 1`) | `0.2669` | **`+24.86%`** | `475.3s` |
+| **`favorita_grocery`** | **`bigquery`** (`ARIMA_PLUS_XREG` $\rightarrow$ `TimesFM` `AI.FORECAST`) | `r4-favorita-grocery-bigquery-p2-f35b95b9cc3b` | `ensemble_horizon_specialist` (`Pass 2`) | `0.0703` | **`+35.22%`** | `269.3s` |
 
 Want to run these experiments interactively with visual plots? Open **[`notebooks/11_auto_forecaster_and_autofocus.ipynb`](notebooks/11_auto_forecaster_and_autofocus.ipynb)**.

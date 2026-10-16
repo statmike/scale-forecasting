@@ -1451,6 +1451,204 @@ class AutoForecastSession:
         return f"{prof_str}\n\n{head}\n\n{assess_df.to_string(index=False)}"
 
 
+_TS_ID_CANDIDATES: tuple[str, ...] = (
+    "ts_id",
+    "series_id",
+    "unique_id",
+    "id",
+    "item_id",
+    "sku",
+    "store_id",
+    "entity_id",
+)
+_DATE_CANDIDATES: tuple[str, ...] = (
+    "ds",
+    "date",
+    "timestamp",
+    "datetime",
+    "time",
+    "week",
+    "month",
+    "period",
+)
+_TARGET_CANDIDATES: tuple[str, ...] = (
+    "y",
+    "target",
+    "value",
+    "sales",
+    "demand",
+    "revenue",
+    "qty",
+    "quantity",
+    "count",
+    "ot",
+)
+_BQ_TEMPORAL_TYPES: frozenset[str] = frozenset({"DATE", "DATETIME", "TIMESTAMP"})
+_BQ_NUMERIC_TYPES: frozenset[str] = frozenset(
+    {"FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC", "INT64", "INTEGER"}
+)
+
+
+def _is_temporal_column(s: pd.Series) -> bool:
+    """Return True if Series ``s`` holds calendar dates or timestamps (never raw floats/bools)."""
+    if pd.api.types.is_datetime64_any_dtype(s) or isinstance(s.dtype, pd.PeriodDtype):
+        return True
+    if pd.api.types.is_bool_dtype(s) or pd.api.types.is_float_dtype(s):
+        return False
+    non_null = s.dropna().head(50)
+    if non_null.empty:
+        return False
+    if pd.api.types.is_integer_dtype(s):
+        vals = pd.to_numeric(non_null, errors="coerce")
+        med = float(vals.median()) if not vals.empty else 0.0
+        # Only accept YYYYMMDD integer dates (e.g. 20240101), never small integer IDs/counts.
+        return 19000101.0 <= med <= 21001231.0
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(non_null, errors="coerce")
+    return bool(parsed.notna().mean() >= 0.8)
+
+
+def _is_numeric_target_column(s: pd.Series) -> bool:
+    """Return True if Series ``s`` holds numeric observations suitable for a forecast target."""
+    if pd.api.types.is_bool_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
+        return False
+    non_null = s.dropna().head(50)
+    if non_null.empty:
+        return False
+    if pd.api.types.is_numeric_dtype(s):
+        return True
+    parsed = pd.to_numeric(non_null, errors="coerce")
+    return bool(parsed.notna().mean() >= 0.8)
+
+
+def _resolve_bq_table_columns(
+    client: Any,
+    fq_table: str,
+    *,
+    ts_id_col: str | None = None,
+    date_col: str | None = None,
+    target_col: str | None = None,
+) -> tuple[str, str, str | None]:
+    """Inspect BigQuery table schema metadata (0 bytes scanned) to resolve column roles safely."""
+    try:
+        table_obj = client.get_table(fq_table)
+        schema = list(getattr(table_obj, "schema", None) or [])
+    except Exception:  # noqa: BLE001 - mock clients or restricted metadata fall back to sample
+        schema = []
+    if not schema:
+        return ts_id_col or "ts_id", date_col or "ds", target_col
+
+    col_types: dict[str, str] = {
+        str(f.name): str(getattr(f, "field_type", "")).upper() for f in schema
+    }
+    cols = list(col_types.keys())
+    lower_to_actual = {c.lower(): c for c in cols}
+
+    # 1. Resolve date_col from BigQuery schema
+    if date_col is not None:
+        if date_col not in col_types:
+            raise DataError(
+                f"date_col='{date_col}' not found in BigQuery table '{fq_table}' columns {cols}."
+            )
+        if col_types[date_col] in _BQ_NUMERIC_TYPES or col_types[date_col] == "BOOL":
+            raise DataError(
+                f"date_col='{date_col}' in '{fq_table}' has non-temporal BigQuery type "
+                f"'{col_types[date_col]}'."
+            )
+        eff_date = date_col
+    else:
+        eff_date = next(
+            (
+                lower_to_actual[c]
+                for c in _DATE_CANDIDATES
+                if c in lower_to_actual
+                and (
+                    col_types[lower_to_actual[c]] in _BQ_TEMPORAL_TYPES
+                    or col_types[lower_to_actual[c]] == "STRING"
+                )
+            ),
+            "",
+        )
+        if not eff_date:
+            temporal_cols = [c for c, t in col_types.items() if t in _BQ_TEMPORAL_TYPES]
+            if len(temporal_cols) == 1:
+                eff_date = temporal_cols[0]
+            else:
+                raise DataError(
+                    f"Could not unambiguously infer date_col for BigQuery table '{fq_table}' "
+                    f"(temporal columns={temporal_cols}, all columns={cols}). "
+                    "Pass date_col='<column_name>' explicitly."
+                )
+
+    # 2. Resolve ts_id_col from BigQuery schema
+    if ts_id_col is not None:
+        if ts_id_col not in col_types:
+            raise DataError(
+                f"ts_id_col='{ts_id_col}' not found in BigQuery table '{fq_table}' columns {cols}."
+            )
+        eff_ts = ts_id_col
+    else:
+        eff_ts = next(
+            (
+                lower_to_actual[c]
+                for c in _TS_ID_CANDIDATES
+                if c in lower_to_actual and lower_to_actual[c] != eff_date
+            ),
+            "",
+        )
+        if not eff_ts:
+            id_cols = [
+                c
+                for c, t in col_types.items()
+                if c != eff_date and t in ("STRING", "INT64", "INTEGER", "BYTES")
+            ]
+            if len(id_cols) == 1:
+                eff_ts = id_cols[0]
+            else:
+                raise DataError(
+                    f"Could not unambiguously infer ts_id_col for BigQuery table '{fq_table}' "
+                    f"(identifier candidates={id_cols}, all columns={cols}). "
+                    "Pass ts_id_col='<column_name>' explicitly."
+                )
+
+    # 3. Resolve target_col from BigQuery schema (if possible)
+    eff_target: str | None = target_col
+    if eff_target is not None:
+        if eff_target not in col_types:
+            raise DataError(
+                f"target_col='{eff_target}' not found in BigQuery table '{fq_table}' "
+                f"columns {cols}."
+            )
+        if col_types[eff_target] not in _BQ_NUMERIC_TYPES:
+            raise DataError(
+                f"target_col='{eff_target}' in '{fq_table}' has non-numeric BigQuery type "
+                f"'{col_types[eff_target]}'."
+            )
+    else:
+        eff_target = next(
+            (
+                lower_to_actual[c]
+                for c in _TARGET_CANDIDATES
+                if c in lower_to_actual
+                and lower_to_actual[c] not in (eff_ts, eff_date)
+                and col_types[lower_to_actual[c]] in _BQ_NUMERIC_TYPES
+            ),
+            None,
+        )
+        if eff_target is None:
+            num_cols = [
+                c
+                for c, t in col_types.items()
+                if c not in (eff_ts, eff_date) and t in _BQ_NUMERIC_TYPES
+            ]
+            if len(num_cols) == 1:
+                eff_target = num_cols[0]
+    return eff_ts, eff_date, eff_target
+
+
 def _infer_columns_and_freq(
     df: pd.DataFrame,
     *,
@@ -1459,27 +1657,109 @@ def _infer_columns_and_freq(
     target_col: str | None = None,
     freq: str | None = None,
 ) -> tuple[str, str, str, str]:
-    """Detect `(ts_id_col, date_col, target_col, freq)` from `df`."""
+    """Deterministically detect and dtype-verify ``(ts_id_col, date_col, target_col, freq)``."""
     if df.empty:
         raise DataError("Cannot inspect an empty DataFrame for auto-forecasting.")
 
     cols = list(df.columns)
-    eff_ts = ts_id_col or next(
-        (c for c in ("ts_id", "series_id", "unique_id", "id", "item_id", "sku") if c in cols),
-        cols[0],
-    )
-    eff_date = date_col or next(
-        (c for c in ("ds", "date", "timestamp", "datetime", "time", "week", "month") if c in cols),
-        cols[1] if len(cols) > 1 else cols[0],
-    )
-    eff_target = target_col or next(
-        (c for c in ("y", "target", "value", "sales", "demand", "revenue", "qty") if c in cols),
-        cols[2] if len(cols) > 2 else cols[-1],
-    )
+    lower_to_actual = {str(c).lower(): str(c) for c in cols}
 
-    for cname in (eff_ts, eff_date, eff_target):
-        if cname not in df.columns:
-            raise DataError(f"Column '{cname}' not found in DataFrame columns {cols}.")
+    # 1. Resolve and verify date_col
+    if date_col is not None:
+        if date_col not in df.columns:
+            raise DataError(f"Column '{date_col}' not found in DataFrame columns {cols}.")
+        if not _is_temporal_column(df[date_col]):
+            raise DataError(
+                f"Column date_col='{date_col}' (dtype={df[date_col].dtype}) does not contain "
+                "valid dates or timestamps."
+            )
+        eff_date = date_col
+    else:
+        eff_date = next(
+            (
+                lower_to_actual[c]
+                for c in _DATE_CANDIDATES
+                if c in lower_to_actual and _is_temporal_column(df[lower_to_actual[c]])
+            ),
+            "",
+        )
+        if not eff_date:
+            temporal_cols = [c for c in cols if _is_temporal_column(df[c])]
+            if len(temporal_cols) == 1:
+                eff_date = str(temporal_cols[0])
+            else:
+                raise DataError(
+                    f"Could not unambiguously infer date_col from columns {cols} "
+                    f"(temporal candidates={temporal_cols}). "
+                    "Pass date_col='<column_name>' explicitly."
+                )
+
+    # 2. Resolve and verify ts_id_col
+    if ts_id_col is not None:
+        if ts_id_col not in df.columns:
+            raise DataError(f"Column '{ts_id_col}' not found in DataFrame columns {cols}.")
+        eff_ts = ts_id_col
+    else:
+        eff_ts = next(
+            (
+                lower_to_actual[c]
+                for c in _TS_ID_CANDIDATES
+                if c in lower_to_actual and lower_to_actual[c] != eff_date
+            ),
+            "",
+        )
+        if not eff_ts:
+            id_candidates = [
+                str(c)
+                for c in cols
+                if str(c) != eff_date
+                and not pd.api.types.is_float_dtype(df[c])
+                and not pd.api.types.is_bool_dtype(df[c])
+                and not pd.api.types.is_datetime64_any_dtype(df[c])
+            ]
+            if len(id_candidates) == 1:
+                eff_ts = id_candidates[0]
+            else:
+                raise DataError(
+                    f"Could not unambiguously infer ts_id_col from columns {cols} "
+                    f"(identifier candidates={id_candidates}). "
+                    "Pass ts_id_col='<column_name>' explicitly."
+                )
+
+    # 3. Resolve and verify target_col
+    if target_col is not None:
+        if target_col not in df.columns:
+            raise DataError(f"Column '{target_col}' not found in DataFrame columns {cols}.")
+        if not _is_numeric_target_column(df[target_col]):
+            raise DataError(
+                f"Column target_col='{target_col}' (dtype={df[target_col].dtype}) is not numeric."
+            )
+        eff_target = target_col
+    else:
+        eff_target = next(
+            (
+                lower_to_actual[c]
+                for c in _TARGET_CANDIDATES
+                if c in lower_to_actual
+                and lower_to_actual[c] not in (eff_ts, eff_date)
+                and _is_numeric_target_column(df[lower_to_actual[c]])
+            ),
+            "",
+        )
+        if not eff_target:
+            num_candidates = [
+                str(c)
+                for c in cols
+                if str(c) not in (eff_ts, eff_date) and _is_numeric_target_column(df[c])
+            ]
+            if len(num_candidates) == 1:
+                eff_target = num_candidates[0]
+            else:
+                raise DataError(
+                    f"Could not unambiguously infer target_col from columns {cols} "
+                    f"(numeric candidates={num_candidates}). "
+                    "Pass target_col='<column_name>' explicitly."
+                )
 
     if freq is not None:
         return eff_ts, eff_date, eff_target, freq
@@ -1546,23 +1826,31 @@ def inspect_panel_for_auto(
         fq_table = (
             data if "." in data else f"{eff_settings.project_id}.{eff_settings.dataset_id}.{data}"
         )
-        id_col_guess = ts_id_col or "ts_id"
-        date_col_guess = date_col or "ds"
+        id_col_guess, date_col_guess, target_col_guess = _resolve_bq_table_columns(
+            client,
+            fq_table,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+        ts_id_col = ts_id_col or id_col_guess
+        date_col = date_col or date_col_guess
+        target_col = target_col or target_col_guess
         sql = f"""
         WITH table_stats AS (
-          SELECT COUNT(DISTINCT {id_col_guess}) AS _sf_total_series, COUNT(*) AS _sf_total_rows
+          SELECT COUNT(DISTINCT `{id_col_guess}`) AS _sf_total_series, COUNT(*) AS _sf_total_rows
           FROM `{fq_table}`
         ),
         sampled_ids AS (
-          SELECT DISTINCT {id_col_guess}
+          SELECT DISTINCT `{id_col_guess}`
           FROM `{fq_table}`
           LIMIT 150
         )
         SELECT t.*, s_tot._sf_total_series, s_tot._sf_total_rows
         FROM `{fq_table}` t
-        JOIN sampled_ids s USING ({id_col_guess})
+        JOIN sampled_ids s USING (`{id_col_guess}`)
         CROSS JOIN table_stats s_tot
-        ORDER BY t.{id_col_guess}, t.{date_col_guess}
+        ORDER BY t.`{id_col_guess}`, t.`{date_col_guess}`
         """
         df = client.query(sql).to_dataframe()
         if "_sf_total_series" in df.columns:
@@ -1871,13 +2159,13 @@ def _build_compute_block_for_where(
     families_present = {get_model(base_model_name(m)).family for m in models}
     families_block: dict[str, Any] = {}
 
-    if where in ("cloud_cpu", "cloud_all", "auto") and (families_present & {"statistical", "ml"}):
-        if s_regime in ("large", "massive"):
-            compute_cfg["persist_models"] = False
-            compute_cfg["bucket_target_cells"] = 200
-            compute_cfg["max_executors"] = 12
-        else:
-            compute_cfg["max_executors"] = 8
+    if (
+        where in ("cloud_cpu", "cloud_all", "auto")
+        and (families_present & {"statistical", "ml"})
+        and s_regime in ("large", "massive")
+    ):
+        compute_cfg["persist_models"] = False
+        compute_cfg["bucket_target_cells"] = 200
 
     if where == "cloud_cpu":
         for fam in ("statistical", "ml", "deep_learning"):
@@ -2212,7 +2500,10 @@ def build_config(
         )
 
     hierarchy_cfg: dict[str, Any] = {"enabled": False}
-    if profile.hierarchy_id_cols:
+    has_bq_native_model = any(
+        get_model(base_model_name(m)).runtime == "bigquery" for m in selected_models
+    )
+    if profile.hierarchy_id_cols and eff_where != "bigquery" and not has_bq_native_model:
         rec_methods = list(select_hierarchy_reconciliation_methods(profile, tier=tier))
         h_cols = list(profile.hierarchy_id_cols)
         h_levels = [h_cols[: i + 1] for i in range(len(h_cols))]
@@ -2238,6 +2529,7 @@ def build_config(
         )
 
     output_cfg: dict[str, Any] = {
+        "point_forecast": "auto" if goal in ("service_level", "probabilistic") else "raw",
         "quantiles": list(policy_out["quantiles"]),
         "integer_rounding": policy_out["integer_rounding"],
     }
@@ -3005,6 +3297,7 @@ def _execute_local_panel_pass(
     cfg: RunConfig,
     *,
     cell_cache: dict[tuple[str, str], CellResult],
+    future_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Execute ``cfg`` across ``panel_df`` in-memory, reusing cached ``(ts_id, hash)`` cells."""
     from .backtest import training_window
@@ -3048,26 +3341,44 @@ def _execute_local_panel_pass(
     )
 
     hier_spec = None
-    work_panel = panel_df
     work_hist = hist_only_df
+    fut_rows = (
+        future_df.copy()
+        if future_df is not None and not future_df.empty
+        else panel_df[y_num.isna()].copy()
+    )
+    work_fut = fut_rows
     if exec_cfg.hierarchy.enabled and exec_cfg.hierarchy.levels:
         with contextlib.suppress(Exception):
             work_hist, hier_spec = build_hierarchy(hist_only_df, exec_cfg)
-            fut_rows = panel_df[y_num.isna()].copy()
             if not fut_rows.empty:
                 fut_filled = fut_rows.copy()
+                attr_cols = [
+                    c
+                    for lvl in exec_cfg.hierarchy.levels
+                    for c in lvl
+                    if c in hist_only_df.columns and c not in fut_filled.columns
+                ]
+                if attr_cols:
+                    meta_map = hist_only_df[[ts_col, *dict.fromkeys(attr_cols)]].drop_duplicates(
+                        subset=[ts_col]
+                    )
+                    fut_filled = fut_filled.merge(meta_map, on=ts_col, how="left")
                 fut_filled[target_col] = 0.0
-                fut_hier, _ = build_hierarchy(fut_filled, exec_cfg)
-                fut_hier[target_col] = np.nan
-                work_panel = pd.concat([work_hist, fut_hier], ignore_index=True)
-            else:
-                work_panel = work_hist
-    _ = work_panel
+                work_fut, _ = build_hierarchy(fut_filled, exec_cfg)
 
     hist_groups = {
         str(ts_id): grp.sort_values(date_col).reset_index(drop=True)
         for ts_id, grp in work_hist.groupby(ts_col, sort=True)
     }
+    fut_groups: dict[str, pd.DataFrame] = (
+        {
+            str(ts_id): grp.sort_values(date_col).reset_index(drop=True)
+            for ts_id, grp in work_fut.groupby(ts_col, sort=False)
+        }
+        if not work_fut.empty and ts_col in work_fut.columns
+        else {}
+    )
 
     borrowed_models_set: set[str] = set()
     executed_models_set: set[str] = set()
@@ -3086,7 +3397,12 @@ def _execute_local_panel_pass(
 
         executed_models_set.add(m)
         if is_panel_model(m, exec_cfg):
-            panel_results = run_panel(work_hist, m, exec_cfg)
+            panel_results = run_panel(
+                work_hist,
+                m,
+                exec_cfg,
+                future_df=work_fut if not work_fut.empty else None,
+            )
             for res in panel_results:
                 cell_cache[(str(res.ts_id), spec_hash)] = res
                 results_by_model_ts[(m, str(res.ts_id))] = res
@@ -3094,7 +3410,7 @@ def _execute_local_panel_pass(
             for ts_id, s_df in hist_groups.items():
                 key = (ts_id, spec_hash)
                 if key not in cell_cache:
-                    cell_cache[key] = run_cell(s_df, m, exec_cfg)
+                    cell_cache[key] = run_cell(s_df, m, exec_cfg, future_df=fut_groups.get(ts_id))
                 results_by_model_ts[(m, ts_id)] = cell_cache[key]
 
     unreconciled_metrics_by_model_ts: dict[tuple[str, str], dict[str, float]] = {}
@@ -3682,20 +3998,12 @@ def execute_one_session_pass(
     t0 = time.monotonic()
     if session.where == "local" and session.data_df is not None:
         full_panel = session.data_df.copy()
-        if session.future_df is not None and not session.future_df.empty:
-            fut = session.future_df.copy()
-            tcol = cfg.data.target_col
-            if tcol not in fut.columns:
-                fut[tcol] = float("nan")
-            for c in full_panel.columns:
-                if c not in fut.columns:
-                    fut[c] = None
-            full_panel = pd.concat([full_panel, fut[list(full_panel.columns)]], ignore_index=True)
 
         out = _execute_local_panel_pass(
             full_panel,
             cfg,
             cell_cache=session.cell_cache,
+            future_df=session.future_df,
         )
         wall_s = time.monotonic() - t0
         pass_outputs = {

@@ -686,3 +686,94 @@ def test_a_cluster_preflight_serializes_for_telemetry():
         "compute.googleapis.com/nvidia_t4_gpus",
         "compute.googleapis.com/cpus",
     }
+
+
+# --- Dataproc Serverless Spark & Vertex AI AutoML -----------------------------------------------
+
+CE_DISK = quota.compute_disk_metric()
+CE_L4 = quota.compute_gpu_metric("L4")
+
+
+def test_serverless_demands_count_driver_and_executor_shuffle_disks():
+    demands = quota.serverless_demands(
+        "us-central1",
+        max_executors=18,
+        executor_cores=4,
+        driver_cores=4,
+        min_executors=2,
+        hardware="cpu",
+    )
+    disk_demand = next(d for d in demands if d.pool == "disk")
+    assert disk_demand.metric == CE_DISK
+    assert disk_demand.fixed == 400
+    assert disk_demand.per_unit == 400
+    assert disk_demand.amount(18) == 400 + 18 * 400
+
+
+def test_preflight_serverless_divides_regional_disk_quota_across_concurrent_batches():
+    """Wave 1 reproduction: 10,240 GB regional DISKS_TOTAL_GB split across 2 concurrent Serverless
+    batches (5,120 GB per batch) allows 1 driver (400 GB) + 11 executors (4,400 GB) = 4,800 GB."""
+
+    def fetch(service, metric):
+        if metric == CE_DISK.metric:
+            return payload(bucket("10240", "us-central1"))
+        if metric == CE_CPUS.metric:
+            return payload(bucket("200", "us-central1"))
+        return payload()
+
+    pre = quota.preflight_serverless(
+        ["us-central1"],
+        "p",
+        max_executors=18,
+        executor_cores=4,
+        min_executors=2,
+        concurrent_batches=2,
+        fetch=fetch,
+    )["us-central1"]
+    assert pre.clamped
+    assert not pre.blocked
+    assert quota.clamp_serverless_executors(18, pre) == 11
+
+
+def test_preflight_serverless_large_project_quota_does_not_clamp():
+    """An enterprise project with 40,960 GB regional disk quota runs all 25 planned executors."""
+
+    def fetch(service, metric):
+        if metric == CE_DISK.metric:
+            return payload(bucket("40960", "us-central1"))
+        if metric == CE_CPUS.metric:
+            return payload(bucket("500", "us-central1"))
+        return payload()
+
+    pre = quota.preflight_serverless(
+        ["us-central1"],
+        "p",
+        max_executors=25,
+        executor_cores=4,
+        min_executors=2,
+        concurrent_batches=2,
+        fetch=fetch,
+    )["us-central1"]
+    assert not pre.clamped
+    assert quota.clamp_serverless_executors(25, pre) == 25
+
+
+def test_preflight_automl_checks_vertex_trainer_and_dataflow_meters():
+    def fetch(service, metric):
+        if metric == CPUS.metric:
+            return payload(bucket("64", "us-central1"))
+        if metric == CE_CPUS.metric:
+            return payload(bucket("64", "us-central1"))
+        return payload()
+
+    pre = quota.preflight_automl(
+        ["us-central1"],
+        "p",
+        trainer_machine_type="n1-standard-8",
+        trainer_replicas=2,
+        dataflow_machine_type="n1-standard-4",
+        dataflow_max_workers=2,
+        fetch=fetch,
+    )["us-central1"]
+    assert not pre.blocked
+    assert {o.demand.pool for o in pre.outcomes} == {"trainer", "dataflow"}

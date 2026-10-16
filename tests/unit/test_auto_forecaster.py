@@ -692,3 +692,164 @@ def test_auto_forecaster_all_run_paths_cli_airflow_sdk_mcp(tmp_path) -> None:
     assert len(cmp_pair) == 1
     assert cmp_pair.iloc[0]["model_a"] == "theta"
     assert cmp_pair.iloc[0]["model_b"] == "naive_seasonal"
+
+
+def test_step0_schema_backed_column_detection_and_type_safety() -> None:
+    import pandas as pd
+
+    from scale_forecasting.auto import _infer_columns_and_freq, _resolve_bq_table_columns
+    from scale_forecasting.errors import DataError
+
+    # 1. Custom 3-column names resolved deterministically by dtype elimination
+    custom_df = pd.DataFrame(
+        {
+            "custom_sku": ["A", "A", "A", "A"],
+            "trading_day": pd.date_range("2025-01-01", periods=4, freq="D"),
+            "units_sold": [10.0, 12.0, 15.0, 14.0],
+        }
+    )
+    ts_c, dt_c, y_c, fq = _infer_columns_and_freq(custom_df)
+    assert (ts_c, dt_c, y_c, fq) == ("custom_sku", "trading_day", "units_sold", "D")
+
+    # 2. Ambiguous multiple numeric columns without a canonical target name raises DataError
+    ambig_df = pd.DataFrame(
+        {
+            "ts_id": ["A", "A", "A"],
+            "ds": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "metric_alpha": [1.0, 2.0, 3.0],
+            "metric_beta": [4.0, 5.0, 6.0],
+        }
+    )
+    with pytest.raises(DataError, match="Could not unambiguously infer target_col"):
+        _infer_columns_and_freq(ambig_df)
+
+    # 3. Non-temporal date_col or non-numeric target_col raises DataError
+    bad_df = pd.DataFrame(
+        {
+            "ts_id": ["A", "A", "A"],
+            "ds": [1.23, 4.56, 7.89],
+            "y": ["not_a_number", "bad", "vals"],
+        }
+    )
+    with pytest.raises(DataError, match="date_col"):
+        _infer_columns_and_freq(bad_df)
+
+    # 4. BigQuery schema metadata inspection resolves non-default column names (0 bytes scanned)
+    class _FakeField:
+        def __init__(self, name: str, field_type: str) -> None:
+            self.name = name
+            self.field_type = field_type
+
+    class _FakeTable:
+        def __init__(self) -> None:
+            self.schema = [
+                _FakeField("unique_id", "STRING"),
+                _FakeField("date", "DATE"),
+                _FakeField("sales", "FLOAT64"),
+                _FakeField("onpromotion", "INT64"),
+            ]
+
+    class _FakeBQClient:
+        def get_table(self, fq_table: str) -> _FakeTable:
+            return _FakeTable()
+
+    b_ts, b_dt, b_y = _resolve_bq_table_columns(_FakeBQClient(), "proj.ds.favorita")
+    assert (b_ts, b_dt, b_y) == ("unique_id", "date", "sales")
+
+
+def test_public_benchmark_catalog_and_monash_tsf_parser() -> None:
+    import io
+    import zipfile
+
+    import scale_forecasting as sf
+    from scale_forecasting.benchmarks import (
+        PUBLIC_BENCHMARK_NAMES,
+        PUBLIC_BENCHMARK_SPECS,
+        _parse_monash_tsf_zip,
+        list_public_benchmarks,
+        public_benchmark_catalog,
+    )
+
+    assert len(PUBLIC_BENCHMARK_NAMES) == 9
+    assert list_public_benchmarks() == list(PUBLIC_BENCHMARK_NAMES)
+    cat = public_benchmark_catalog()
+    assert len(cat) == 9
+    assert {
+        "m5_walmart",
+        "favorita_grocery",
+        "m4_daily",
+        "monash_tourism_monthly",
+        "etth1",
+    }.issubset(set(cat["name"]))
+    assert sf.list_public_benchmarks() == list(PUBLIC_BENCHMARK_NAMES)
+
+    # Verify Monash .tsf zip parser offline
+    buf = io.BytesIO()
+    vals_str = ",".join(str(100 + i) for i in range(60))
+    tsf_text = (
+        "@relation Test\n"
+        "@attribute series_name string\n"
+        "@attribute start_timestamp date\n"
+        "@frequency monthly\n"
+        "@horizon 12\n"
+        "@data\n"
+        f"T1:2018-01-01 00-00-00:{vals_str}\n"
+        f"T2:2018-01-01 00-00-00:{vals_str}\n"
+    )
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("sample.tsf", tsf_text)
+
+    ds = _parse_monash_tsf_zip(
+        buf.getvalue(),
+        pub_spec=PUBLIC_BENCHMARK_SPECS["monash_hospital"],
+        n_series=2,
+        history_limit=48,
+    )
+    assert ds.spec.n_series == 2
+    assert len(ds.df) == 2 * 48
+    assert len(ds.oracle_future_df) == 2 * 12
+
+
+def test_write_api_proto_decode_for_old_partition_fallback() -> None:
+    from datetime import date
+
+    from scale_forecasting.registry.write_api import (
+        _OOF_SPEC,
+        _PRED_SPEC,
+        _decode_proto_rows,
+        _encode_rows,
+        _proto_for,
+    )
+
+    msg_cls, proto_desc = _proto_for("backtest_oof", _OOF_SPEC)
+    raw_oof = [
+        {
+            "run_id": "r-m5",
+            "ts_id": "FOODS_1_001_CA_1",
+            "model_type": "arima_plus",
+            "fold_id": 0,
+            "forecast_date": date(2016, 3, 28),
+            "y_true": 12.0,
+            "yhat": 11.5,
+        }
+    ]
+    serialized = _encode_rows(msg_cls, _OOF_SPEC, raw_oof)
+    decoded = _decode_proto_rows(proto_desc, serialized)
+    assert len(decoded) == 1
+    assert decoded[0]["forecast_date"] == "2016-03-28"
+    assert decoded[0]["fold_id"] == 0
+    assert decoded[0]["yhat"] == 11.5
+
+    p_cls, p_desc = _proto_for("forecast_predictions", _PRED_SPEC)
+    raw_pred = [
+        {
+            "run_id": "r-m5",
+            "ts_id": "FOODS_1_001_CA_1",
+            "model_type": "arima_plus",
+            "forecast_date": date(2016, 5, 23),
+            "yhat": 10.0,
+            "quantiles": '{"0.1": 5.0, "0.9": 15.0}',
+        }
+    ]
+    dec_pred = _decode_proto_rows(p_desc, _encode_rows(p_cls, _PRED_SPEC, raw_pred))
+    assert dec_pred[0]["quantiles"] == {"0.1": 5.0, "0.9": 15.0}

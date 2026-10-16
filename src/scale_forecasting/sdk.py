@@ -417,6 +417,23 @@ class Forecaster:
         """The :class:`~scale_forecasting.auto.ConfigBlueprint` when created via :meth:`auto`."""
         return None if self._auto_session is None else self._auto_session.blueprint
 
+    @property
+    def best_model(self) -> str:
+        """The winning model or ensemble strategy when created via :meth:`auto`."""
+        return "" if self._auto_session is None else self._auto_session.best_model
+
+    @property
+    def best_metric(self) -> float:
+        """The best backtest score on ``decision_metric`` when created via :meth:`auto`."""
+        return float("nan") if self._auto_session is None else self._auto_session.best_metric
+
+    @property
+    def decision_metric(self) -> str:
+        """The primary evaluation metric used to select the champion in :meth:`auto`."""
+        if self._auto_session is not None:
+            return self._auto_session.decision_metric
+        return str(self._config.backtest.decision_metric)
+
     def predict_duration(
         self,
         *,

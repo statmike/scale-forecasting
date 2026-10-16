@@ -468,6 +468,7 @@ def combine_oof(
 
     parts: list[pd.DataFrame] = []
     steps_arr = steps.to_numpy(dtype=float)
+    folds_arr = fold_ids.to_numpy(dtype=float)
     for strategy in cfg.ensemble.strategies:
         yhat = _blend_oof_strategy(
             strategy,
@@ -479,6 +480,7 @@ def combine_oof(
             learned_weights,
             fit_rows,
             cfg,
+            fold_ids=folds_arr,
         )
         if yhat is None:
             continue
@@ -522,6 +524,8 @@ def _blend_oof_strategy(
     learned_weights: dict[str, dict[str, float]],
     fit_rows: np.ndarray,
     cfg: RunConfig,
+    *,
+    fold_ids: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """The blended yhat for one strategy over the OOF value matrix, or ``None`` to skip it.
 
@@ -556,6 +560,7 @@ def _blend_oof_strategy(
             top_k=top_k,
             parsimony_margin=margin,
             champion_only=(strategy == "champion"),
+            fold_ids=fold_ids,
         )
     if strategy == "horizon_specialist":
         return _horizon_specialist_oof_blend(
@@ -646,10 +651,39 @@ def _inverse_error_blend(
     top_k: int | None = None,
     parsimony_margin: float = 0.0,
     champion_only: bool = False,
+    fold_ids: np.ndarray | None = None,
 ) -> np.ndarray:
     """Inverse-WAPE-weighted (or single-winner ``champion``) blend per ``ts_id`` from OOF."""
     out = np.full(vals.shape[0], np.nan)
     for idx in _group_row_indices(ts_ids).values():
+        if champion_only and fold_ids is not None:
+            s_folds = fold_ids[idx]
+            unique_folds = np.unique(s_folds[~np.isnan(s_folds)])
+            if len(unique_folds) >= 2:
+                for f_val in unique_folds:
+                    f_mask = s_folds == f_val
+                    other_idx = idx[~f_mask]
+                    wape_f = _series_oof_wape(vals[other_idx], truth[other_idx])
+                    weights_f = _select_or_weight_models(
+                        wape_f,
+                        models,
+                        top_k=top_k,
+                        parsimony_margin=parsimony_margin,
+                        champion_only=True,
+                    )
+                    out[idx[f_mask]] = _weighted_blend(vals[idx[f_mask]], weights_f)
+                nan_f = np.isnan(s_folds)
+                if np.any(nan_f):
+                    wape_all = _series_oof_wape(vals[idx], truth[idx])
+                    w_all = _select_or_weight_models(
+                        wape_all,
+                        models,
+                        top_k=top_k,
+                        parsimony_margin=parsimony_margin,
+                        champion_only=True,
+                    )
+                    out[idx[nan_f]] = _weighted_blend(vals[idx[nan_f]], w_all)
+                continue
         block = vals[idx]
         fit_idx = idx[fit_rows[idx]]
         if len(fit_idx) == 0:
@@ -696,23 +730,35 @@ def _horizon_specialist_oof_blend(
             out[idx] = _weighted_blend(vals[idx], fallback_w)
             continue
         s_fit = fit_rows[idx]
-        for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
+        finite_steps = np.unique(s_steps[~np.isnan(s_steps)])
+        radius = max(1, int(np.ceil(len(finite_steps) / 4.0)))
+        for step_val in finite_steps:
             step_mask = s_steps == step_val
             h_idx = idx[step_mask]
-            h_fit_idx = idx[step_mask & s_fit]
+            exact_fit_count = int(np.count_nonzero(step_mask & s_fit))
+            if exact_fit_count >= 2:
+                win_mask = (np.abs(s_steps - step_val) <= radius) & s_fit
+            else:
+                # Single inner fold: exclude the exact step_val point so Fold 0 is not scored
+                # on a weight fitted to its own single observation.
+                win_mask = (np.abs(s_steps - step_val) <= radius) & (s_steps != step_val) & s_fit
+                if not np.any(win_mask):
+                    win_mask = (np.abs(s_steps - step_val) <= radius) & s_fit
+            h_fit_idx = idx[win_mask]
             if len(h_fit_idx) == 0:
-                h_fit_idx = h_idx
+                h_fit_idx = fit_idx
             wape = _series_oof_wape(vals[h_fit_idx], truth[h_fit_idx])
             if np.all(np.isnan(wape)):
                 weights = fallback_w
             else:
-                weights = _select_or_weight_models(
+                step_w = _select_or_weight_models(
                     wape,
                     models,
                     top_k=top_k,
                     parsimony_margin=parsimony_margin,
                     champion_only=False,
                 )
+                weights = 0.5 * step_w + 0.5 * fallback_w
             out[h_idx] = _weighted_blend(vals[h_idx], weights)
         nan_mask = np.isnan(s_steps)
         if nan_mask.any():
@@ -1079,10 +1125,8 @@ def _horizon_specialist_weight_matrix(
     vals = wide.reindex(columns=models).to_numpy(dtype=float)
     aligned = oof_df.drop_duplicates(keys).set_index(keys).reindex(wide.index)
     truth = aligned["y_true"].to_numpy(dtype=float)
-    fold_ids = _carried(aligned, keys, "fold_id", "float64")
     steps = _carried(aligned, keys, "horizon_step", "float64").to_numpy(dtype=float)
     oof_ts = wide.index.get_level_values("ts_id").to_numpy()
-    fit_rows = (fold_ids != holdout_fold_id(cfg)).to_numpy(dtype=bool)
 
     top_k = cfg.ensemble.top_k
     margin = cfg.ensemble.parsimony_margin
@@ -1091,14 +1135,14 @@ def _horizon_specialist_weight_matrix(
         s_steps = steps[idx]
         if np.all(np.isnan(s_steps)):
             continue
-        s_fit = fit_rows[idx]
+        finite_steps = np.unique(s_steps[~np.isnan(s_steps)])
+        radius = max(1, int(np.ceil(len(finite_steps) / 4.0)))
         tid_str = str(tid)
-        for step_val in np.unique(s_steps[~np.isnan(s_steps)]):
-            step_mask = s_steps == step_val
-            h_idx = idx[step_mask]
-            h_fit_idx = idx[step_mask & s_fit]
+        for step_val in finite_steps:
+            win_mask = np.abs(s_steps - step_val) <= radius
+            h_fit_idx = idx[win_mask]
             if len(h_fit_idx) == 0:
-                h_fit_idx = h_idx
+                h_fit_idx = idx
             wape = _series_oof_wape(vals[h_fit_idx], truth[h_fit_idx])
             if not np.all(np.isnan(wape)):
                 step_weights[(tid_str, round(float(step_val)))] = _select_or_weight_models(
@@ -1114,7 +1158,7 @@ def _horizon_specialist_weight_matrix(
 
     out = fallback.copy()
     # Compute 1-based horizon_step for each row in `index` (already sorted by (ts_id, forecast_date)
-    # from pivot_table).
+    # from pivot_table) and shrink 50% toward series-level inverse-error fallback weights.
     step_counter: dict[str, int] = {}
     for i, tid_raw in enumerate(ts_ids):
         tid_str = str(tid_raw)
@@ -1122,7 +1166,7 @@ def _horizon_specialist_weight_matrix(
         step_counter[tid_str] = step_idx
         w = step_weights.get((tid_str, step_idx))
         if w is not None:
-            out[i] = w
+            out[i] = 0.5 * w + 0.5 * fallback[i]
     return out
 
 

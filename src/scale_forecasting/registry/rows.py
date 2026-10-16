@@ -93,9 +93,88 @@ def assemble_prediction_rows(
     ``datetime.now`` so that a caller assembling rows for comparison gets a deterministic frame,
     and so nothing silently stamps a row with the time it happened to be re-assembled.
     """
+    preds = result.predictions
+    if getattr(preds, "empty", False):
+        return []
+    cols = set(getattr(preds, "columns", ()))
+    if hasattr(preds, "__len__") and "ds" in cols:
+        n = len(preds)
+        date_cache: dict[Any, Any] = {}
+
+        def _cached_date(val: Any) -> Any:
+            try:
+                if val in date_cache:
+                    return date_cache[val]
+                res = _as_date(val)
+                date_cache[val] = res
+                return res
+            except TypeError:
+                return _as_date(val)
+
+        ds_list = [_cached_date(v) for v in preds["ds"].tolist()]
+        yh_list = [_as_float(v) for v in preds["yhat"].tolist()] if "yhat" in cols else [None] * n
+        yhr_list = (
+            [_as_float(v) for v in preds["yhat_raw"].tolist()] if "yhat_raw" in cols else [None] * n
+        )
+        yha_list = (
+            [_as_float(v) for v in preds["yhat_adjusted"].tolist()]
+            if "yhat_adjusted" in cols
+            else [None] * n
+        )
+        yhl_list = (
+            [_as_float(v) for v in preds["yhat_lower"].tolist()]
+            if "yhat_lower" in cols
+            else [None] * n
+        )
+        yhu_list = (
+            [_as_float(v) for v in preds["yhat_upper"].tolist()]
+            if "yhat_upper" in cols
+            else [None] * n
+        )
+        q_list = (
+            [_as_json(v) for v in preds["quantiles"].tolist()]
+            if "quantiles" in cols
+            else [None] * n
+        )
+        expl_col = preds["explanations"].tolist() if "explanations" in cols else [None] * n
+        expl_list = result.explanations
+        run_id = result.run_id
+        ts_id = result.ts_id
+        model_type = result.model_type
+        engine = result.compute_engine
+        return [
+            {
+                "run_id": run_id,
+                "ts_id": ts_id,
+                "model_type": model_type,
+                "compute_engine": engine,
+                "forecast_date": ds_list[idx],
+                "yhat": yh_list[idx],
+                # The two arms `yhat` was chosen between. `yhat_raw` is the model's own output;
+                # `yhat_adjusted` adds the out-of-fold bias correction. Written side by side so
+                # that switching `output.point_forecast` on a delivered run is a query, not a
+                # re-run — and so the comparison between them is a fact in the registry rather
+                # than a claim in a docstring.
+                "yhat_raw": yhr_list[idx],
+                "yhat_adjusted": yha_list[idx],
+                "yhat_lower": yhl_list[idx],
+                "yhat_upper": yhu_list[idx],
+                "quantiles": q_list[idx],
+                "created_at": created_at,
+                "explanations": _as_json(
+                    expl_col[idx]
+                    if expl_col[idx] is not None
+                    else (
+                        expl_list[idx] if expl_list is not None and idx < len(expl_list) else None
+                    )
+                ),
+            }
+            for idx in range(n)
+        ]
+
     rows: list[dict[str, Any]] = []
     expl_list = result.explanations
-    for idx, rec in enumerate(result.predictions.to_dict("records")):
+    for idx, rec in enumerate(preds.to_dict("records")):
         raw_expl = rec.get("explanations")
         if raw_expl is None and expl_list is not None and idx < len(expl_list):
             raw_expl = expl_list[idx]
@@ -107,11 +186,6 @@ def assemble_prediction_rows(
                 "compute_engine": result.compute_engine,
                 "forecast_date": _as_date(rec["ds"]),
                 "yhat": _as_float(rec.get("yhat")),
-                # The two arms `yhat` was chosen between. `yhat_raw` is the model's own output;
-                # `yhat_adjusted` adds the out-of-fold bias correction. Written side by side so
-                # that switching `output.point_forecast` on a delivered run is a query, not a
-                # re-run — and so the comparison between them is a fact in the registry rather
-                # than a claim in a docstring.
                 "yhat_raw": _as_float(rec.get("yhat_raw")),
                 "yhat_adjusted": _as_float(rec.get("yhat_adjusted")),
                 "yhat_lower": _as_float(rec.get("yhat_lower")),
@@ -134,10 +208,96 @@ def assemble_oof_rows(
     the fold forecast from, and the step within the fold's horizon. Read with ``.get`` so a frame
     assembled by something other than `backtest_cell` still produces a valid row.
     """
-    if result.oof is None:
+    oof = result.oof
+    if oof is None or getattr(oof, "empty", False):
         return []
+    cols = set(getattr(oof, "columns", ()))
+    if hasattr(oof, "__len__") and {"fold_id", "ds"}.issubset(cols):
+        n = len(oof)
+        date_cache: dict[Any, Any] = {}
+
+        def _cached_date(val: Any) -> Any:
+            try:
+                if val in date_cache:
+                    return date_cache[val]
+                res = _as_date(val)
+                date_cache[val] = res
+                return res
+            except TypeError:
+                return _as_date(val)
+
+        fold_list = [int(v) for v in oof["fold_id"].tolist()]
+        ds_list = [_cached_date(v) for v in oof["ds"].tolist()]
+        yt_list = [_as_float(v) for v in oof["y_true"].tolist()] if "y_true" in cols else [None] * n
+        yh_list = [_as_float(v) for v in oof["yhat"].tolist()] if "yhat" in cols else [None] * n
+        yhr_list = (
+            [_as_float(v) for v in oof["yhat_raw"].tolist()] if "yhat_raw" in cols else [None] * n
+        )
+        yha_list = (
+            [_as_float(v) for v in oof["yhat_adjusted"].tolist()]
+            if "yhat_adjusted" in cols
+            else [None] * n
+        )
+        yhl_list = (
+            [_as_float(v) for v in oof["yhat_lower"].tolist()]
+            if "yhat_lower" in cols
+            else [None] * n
+        )
+        yhu_list = (
+            [_as_float(v) for v in oof["yhat_upper"].tolist()]
+            if "yhat_upper" in cols
+            else [None] * n
+        )
+        cd_list = (
+            [_cached_date(v) for v in oof["cutoff_date"].tolist()]
+            if "cutoff_date" in cols
+            else [None] * n
+        )
+        hs_list = (
+            [_as_int(v) for v in oof["horizon_step"].tolist()]
+            if "horizon_step" in cols
+            else [None] * n
+        )
+        yhs_list = (
+            [_as_float(v) for v in oof["yhat_stale"].tolist()]
+            if "yhat_stale" in cols
+            else [None] * n
+        )
+        run_id = result.run_id
+        ts_id = result.ts_id
+        model_type = result.model_type
+        return [
+            {
+                "run_id": run_id,
+                "ts_id": ts_id,
+                "model_type": model_type,
+                "fold_id": fold_list[i],
+                "forecast_date": ds_list[i],
+                "y_true": yt_list[i],
+                "yhat": yh_list[i],
+                # These are the residual source. `calibration.calibrate_from_oof` learns the
+                # correction from `y_true - yhat_raw`, so the column it learns from has to be in
+                # the registry for the number to be auditable after the fact.
+                "yhat_raw": yhr_list[i],
+                "yhat_adjusted": yha_list[i],
+                "yhat_lower": yhl_list[i],
+                "yhat_upper": yhu_list[i],
+                # The fold's training cutoff — its identity across a ragged panel, where the same
+                # `fold_id` covers different dates for different series (`ensembler._pivot_oof`).
+                "cutoff_date": cd_list[i],
+                "horizon_step": hs_list[i],
+                # What a model that was never refreshed predicted for this same date, on the frozen
+                # schemes. NULL elsewhere. Persisted per row rather than only as the cell-level
+                # `staleness_gap` so the decay can be read by horizon step and by fold, which is
+                # where a refit cadence is actually decided.
+                "yhat_stale": yhs_list[i],
+                "created_at": created_at,
+            }
+            for i in range(n)
+        ]
+
     rows: list[dict[str, Any]] = []
-    for rec in result.oof.to_dict("records"):
+    for rec in oof.to_dict("records"):
         rows.append(
             {
                 "run_id": result.run_id,
@@ -147,21 +307,12 @@ def assemble_oof_rows(
                 "forecast_date": _as_date(rec["ds"]),
                 "y_true": _as_float(rec.get("y_true")),
                 "yhat": _as_float(rec.get("yhat")),
-                # These are the residual source. `calibration.calibrate_from_oof` learns the
-                # correction from `y_true - yhat_raw`, so the column it learns from has to be in
-                # the registry for the number to be auditable after the fact.
                 "yhat_raw": _as_float(rec.get("yhat_raw")),
                 "yhat_adjusted": _as_float(rec.get("yhat_adjusted")),
                 "yhat_lower": _as_float(rec.get("yhat_lower")),
                 "yhat_upper": _as_float(rec.get("yhat_upper")),
-                # The fold's training cutoff — its identity across a ragged panel, where the same
-                # `fold_id` covers different dates for different series (`ensembler._pivot_oof`).
                 "cutoff_date": _as_date(rec.get("cutoff_date")),
                 "horizon_step": _as_int(rec.get("horizon_step")),
-                # What a model that was never refreshed predicted for this same date, on the frozen
-                # schemes. NULL elsewhere. Persisted per row rather than only as the cell-level
-                # `staleness_gap` so the decay can be read by horizon step and by fold, which is
-                # where a refit cadence is actually decided.
                 "yhat_stale": _as_float(rec.get("yhat_stale")),
                 "created_at": created_at,
             }

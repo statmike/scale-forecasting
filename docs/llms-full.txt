@@ -622,6 +622,20 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `dgp_17_missing_gaps_and_leading_zeros` | `smooth` | `D` / `14` | 12 daily series where half of the SKUs have 28 pre-launch leading zeros and internal missing date gaps requiring automatic grid_policy and trim_leading_zeros. | `enable_trim_leading_zeros`, `regularize_grid_policy` |
 | `dgp_18_promo_lag_pullforward` | `smooth` | `D` / `14` | 12 daily series where promotions trigger a +85 unit contemporaneous spike on day t followed by a -52 unit pantry-loading dip on day t+1, requiring exog_lags synthesis. | `synthesize_exog_lags` |
 
+### Public Open-Data Benchmarks (9 Real-World Datasets in `benchmarks.py` via `fetch_public_benchmark`)
+
+| Benchmark Name (`name`) | Domain | Freq / H | License | Official Source URL |
+| :--- | :--- | :---: | :--- | :--- |
+| `m5_walmart` | `Retail / Hierarchical Intermittent & Smooth SKU Demand` | `D` / `28` | M5 Competition Academic & Research Terms (MOFC / Kaggle) | https://github.com/Mcompetitions/M5-methods |
+| `favorita_grocery` | `Grocery Retail / Promotional & Macroeconomic Covariates` | `D` / `16` | Competition Research Terms (Corporación Favorita / Kaggle) | https://www.kaggle.com/competitions/store-sales-time-series-forecasting |
+| `m4_daily` | `Multi-Domain Daily (M4 Competition)` | `D` / `14` | CC-BY-4.0 (Mcompetitions) | https://github.com/Mcompetitions/M4-methods |
+| `m4_weekly` | `Multi-Domain Weekly (M4 Competition)` | `W` / `13` | CC-BY-4.0 (Mcompetitions) | https://github.com/Mcompetitions/M4-methods |
+| `m4_monthly` | `Multi-Domain Monthly (M4 Competition)` | `MS` / `18` | CC-BY-4.0 (Mcompetitions) | https://github.com/Mcompetitions/M4-methods |
+| `monash_tourism_monthly` | `Tourism / Strong Multiplicative Seasonality` | `MS` / `24` | CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive) | https://zenodo.org/records/4656096 |
+| `monash_hospital` | `Healthcare / Monthly Patient Count Series` | `MS` / `12` | CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive) | https://zenodo.org/records/4656014 |
+| `monash_car_parts` | `Automotive / Sparse Intermittent Spare Parts` | `MS` / `12` | CC-BY-4.0 (Zenodo / Monash Time Series Forecasting Archive) | https://zenodo.org/records/4656021 |
+| `etth1` | `Energy / Hourly Transformer Load & Oil Temperature` | `h` / `24` | Apache-2.0 (zhouhaoyi/ETDataset) | https://github.com/zhouhaoyi/ETDataset |
+
 ================================================================================
 
 # Execution Paths, Environment Variables & Operations Reference

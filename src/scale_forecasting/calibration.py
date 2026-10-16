@@ -283,6 +283,13 @@ def calibrate_from_arrays(
 _calibrate_from_arrays = calibrate_from_arrays
 
 
+def _fast_float_array(s: pd.Series) -> np.ndarray:
+    """Extract a 1-D ``float64`` numpy array from ``s`` without Series copy when already numeric."""
+    if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+        return s.to_numpy(dtype=float, na_value=np.nan)
+    return pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+
+
 def calibrate_from_oof(
     oof: pd.DataFrame,
     quantiles: Sequence[float],
@@ -302,15 +309,8 @@ def calibrate_from_oof(
     if not needed.issubset(oof.columns):
         return None
 
-    resid = (
-        pd.to_numeric(oof["y_true"], errors="coerce")
-        - pd.to_numeric(oof[residual_column], errors="coerce")
-    ).to_numpy(dtype=float)
-    steps_raw = (
-        pd.to_numeric(oof["horizon_step"], errors="coerce").to_numpy(dtype=float)
-        if "horizon_step" in oof.columns
-        else None
-    )
+    resid = _fast_float_array(oof["y_true"]) - _fast_float_array(oof[residual_column])
+    steps_raw = _fast_float_array(oof["horizon_step"]) if "horizon_step" in oof.columns else None
     return _calibrate_from_arrays(resid, steps_raw, quantiles)
 
 
@@ -333,7 +333,7 @@ def apply_calibration(
         )
 
     out = pred.copy()
-    raw = pd.to_numeric(out["yhat_raw"], errors="coerce").to_numpy(dtype=float)
+    raw = _fast_float_array(out["yhat_raw"])
 
     if cal is None:
         # No held-out data. The band the model produced stands; the only correction available is

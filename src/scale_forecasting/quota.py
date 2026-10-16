@@ -234,6 +234,26 @@ def compute_cpu_metric() -> QuotaMetric:
     )
 
 
+# Each Dataproc Serverless Spark node (1 driver + each executor) attaches a 400 GB shuffle disk.
+SERVERLESS_SHUFFLE_DISK_GB: int = 400
+
+
+def compute_disk_metric() -> QuotaMetric:
+    """The Compute Engine regional persistent-disk-GB meter (`disks_total_gb`, pure).
+
+    Dataproc Serverless provisions a 400 GB shuffle disk on the driver and on every executor; this
+    meter is the primary pool ceiling that bounds ``spark.dynamicAllocation.maxExecutors`` when one
+    or more Serverless batches run concurrently in a region.
+    """
+    return QuotaMetric(
+        service=_COMPUTE,
+        metric=f"{_COMPUTE}/disks_total_gb",
+        label="Compute Engine — regional persistent disk GB (Serverless shuffle disks)",
+        unit="gb",
+        scope="pool",
+    )
+
+
 # Named so the omission is deliberate rather than forgotten, mirroring
 # `capacity.UNMANAGED_SERVICES`.
 # BigQuery capacity is slots, resolved BigQuery-side by reservations or on-demand queueing; there is
@@ -1390,6 +1410,291 @@ def preflight_gke(
     return result
 
 
+# --- Dataproc Serverless Spark: shuffle-disk, vCPU, and L4 GPU meters ---------------------------
+
+
+def serverless_batch_concurrency(cfg: Any) -> tuple[int, int]:
+    """Return ``(total_serverless_batches, gpu_serverless_batches)`` planned for ``cfg`` (pure).
+
+    Because `dag.plan_dag` dispatches every active model family in parallel, concurrent Dataproc
+    Serverless batches share the project's regional ``disks_total_gb`` and ``cpus`` quotas (and
+    concurrent GPU batches share ``nvidia_l4_gpus``). Dividing the regional reading across the
+    active concurrent batches prevents two parallel family jobs from each claiming >50% of the
+    regional shuffle-disk ceiling and colliding mid-run.
+    """
+    from .dag import dag_nodes, plan_dag
+
+    nodes = [
+        n
+        for n in dag_nodes(plan_dag(cfg))
+        if n.runtime == "spark" and (n.spark_mode or "serverless") == "serverless"
+    ]
+    total = max(1, len(nodes))
+    gpu = max(1, sum(1 for n in nodes if n.hardware == "gpu"))
+    return total, gpu
+
+
+def serverless_demands(
+    region: str,
+    *,
+    max_executors: int,
+    executor_cores: int = 4,
+    driver_cores: int = 4,
+    min_executors: int = 2,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    gpus_per_executor: int = 1,
+    disk_gb_per_node: int = SERVERLESS_SHUFFLE_DISK_GB,
+) -> list[QuotaDemand]:
+    """The Compute Engine meters a Dataproc Serverless Spark batch draws on, in one region (pure).
+
+    Every Serverless node (1 driver + each executor) attaches a ``disk_gb_per_node`` (400 GB)
+    shuffle disk billed to ``compute.googleapis.com/disks_total_gb`` (`compute_disk_metric`) and
+    ``executor_cores`` vCPUs (`compute_cpu_metric`). When ``hardware == "gpu"``, each executor also
+    attaches ``gpus_per_executor`` L4 accelerators billed to `compute_gpu_metric`.
+    """
+    execs = max(1, int(max_executors))
+    floor = max(1, min(int(min_executors), execs))
+    disk_gb = max(1, int(disk_gb_per_node))
+
+    demands: list[QuotaDemand] = [
+        QuotaDemand(
+            metric=compute_disk_metric(),
+            region=region,
+            pool="disk",
+            per_unit=disk_gb,
+            min_units=floor,
+            max_units=execs,
+            fixed=disk_gb,  # 1 driver node shuffle disk
+        )
+    ]
+    if hardware == "gpu" and gpus_per_executor > 0:
+        metric = compute_gpu_metric(gpu_type or "L4")
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=max(1, int(gpus_per_executor)),
+                    min_units=floor,
+                    max_units=execs,
+                    fixed=0,
+                )
+            )
+    demands.append(
+        QuotaDemand(
+            metric=compute_cpu_metric(),
+            region=region,
+            pool="worker",
+            per_unit=max(1, int(executor_cores)),
+            min_units=floor,
+            max_units=execs,
+            fixed=max(1, int(driver_cores)),
+        )
+    )
+    return demands
+
+
+def preflight_serverless(
+    regions: list[str],
+    project_id: str,
+    *,
+    max_executors: int,
+    executor_cores: int = 4,
+    driver_cores: int = 4,
+    min_executors: int = 2,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    gpus_per_executor: int = 1,
+    disk_gb_per_node: int = SERVERLESS_SHUFFLE_DISK_GB,
+    concurrent_batches: int = 1,
+    concurrent_gpu_batches: int = 1,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Compute Engine meters and judge a Serverless batch against them.
+
+    When ``concurrent_batches > 1`` (multiple model families dispatched in parallel onto Serverless
+    Spark in the same `dag.plan_dag`), regional ``disks_total_gb`` and ``cpus`` limits are divided
+    evenly across the concurrent batches (and GPU limits across ``concurrent_gpu_batches``) so the
+    combined fleet across all parallel batches never exceeds the project's regional allowance.
+    """
+    n_batches = max(1, int(concurrent_batches))
+    n_gpu_batches = max(1, int(concurrent_gpu_batches))
+    demands_by_region = {
+        region: serverless_demands(
+            region,
+            max_executors=max_executors,
+            executor_cores=executor_cores,
+            driver_cores=driver_cores,
+            min_executors=min_executors,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            gpus_per_executor=gpus_per_executor,
+            disk_gb_per_node=disk_gb_per_node,
+        )
+        for region in regions
+    }
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes: list[QuotaOutcome] = []
+        for demand in demands:
+            raw = readings.get(
+                (demand.metric.metric, region),
+                QuotaReading(demand.metric, region, None, "not read"),
+            )
+            divisor = n_gpu_batches if demand.pool == "gpu" else n_batches
+            if raw.limit is not None and divisor > 1:
+                scaled_limit = raw.limit // divisor
+                scaled = QuotaReading(
+                    metric=raw.metric,
+                    region=raw.region,
+                    limit=scaled_limit,
+                    detail=(
+                        f"{raw.detail} (per-batch share {scaled_limit} of {raw.limit} "
+                        f"across {divisor} concurrent batches)"
+                    ),
+                )
+            else:
+                scaled = raw
+            outcomes.append(reconcile(demand, scaled))
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
+def clamp_serverless_executors(
+    max_executors: int,
+    preflight: QuotaPreflight,
+    *,
+    min_executors: int = 2,
+) -> int:
+    """The executor ceiling this region will actually grant a Serverless batch (pure).
+
+    Checks every metered resource on ``preflight`` (shuffle-disk GB, L4 GPUs, and regional vCPUs)
+    and returns the tightest bound that fits within all readable regional allowances, floored at 1
+    (or ``min(min_executors, max_executors)`` when that floor fits).
+    """
+    granted = max(1, int(max_executors))
+    for outcome in preflight.outcomes:
+        if outcome.status == QUOTA_CLAMPED:
+            granted = min(granted, outcome.max_units)
+        elif outcome.reading.limit is not None and not outcome.demand.fixed_only:
+            fit = outcome.demand.units_within(outcome.reading.limit)
+            if fit > 0:
+                granted = min(granted, fit)
+    return max(1, min(int(max_executors), granted))
+
+
+# --- Vertex AI AutoML / Tabular Workflow: Vertex training + Dataflow Compute Engine meters ------
+
+
+def automl_demands(
+    region: str,
+    *,
+    trainer_machine_type: str = "n1-standard-8",
+    trainer_replicas: int = 1,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    accelerator_count: int = 1,
+    dataflow_machine_type: str = "n1-standard-4",
+    dataflow_max_workers: int = 2,
+) -> list[QuotaDemand]:
+    """The Vertex AI and Compute Engine meters a Vertex AutoML family job draws on (pure).
+
+    Stage 1/2 trial trainers draw on Vertex AI custom-model-training meters (`vertex_cpu_metric` and
+    `vertex_gpu_metric`), while Dataflow evaluation workers draw on Compute Engine regional vCPUs
+    (`compute_cpu_metric`).
+    """
+    replicas = max(1, int(trainer_replicas))
+    df_workers = max(1, int(dataflow_max_workers))
+    demands: list[QuotaDemand] = []
+    if hardware == "gpu" and gpu_type and accelerator_count > 0:
+        metric = vertex_gpu_metric(gpu_type)
+        if metric is not None:
+            demands.append(
+                QuotaDemand(
+                    metric=metric,
+                    region=region,
+                    pool="gpu",
+                    per_unit=max(1, int(accelerator_count)),
+                    min_units=1,
+                    max_units=replicas,
+                )
+            )
+    demands.append(
+        QuotaDemand(
+            metric=vertex_cpu_metric(trainer_machine_type),
+            region=region,
+            pool="trainer",
+            per_unit=machine_cores(trainer_machine_type),
+            min_units=1,
+            max_units=replicas,
+            fixed=0,
+        )
+    )
+    demands.append(
+        QuotaDemand(
+            metric=compute_cpu_metric(),
+            region=region,
+            pool="dataflow",
+            per_unit=machine_cores(dataflow_machine_type),
+            min_units=1,
+            max_units=df_workers,
+            fixed=0,
+        )
+    )
+    return demands
+
+
+def preflight_automl(
+    regions: list[str],
+    project_id: str,
+    *,
+    trainer_machine_type: str = "n1-standard-8",
+    trainer_replicas: int = 1,
+    hardware: str = "cpu",
+    gpu_type: str | None = None,
+    accelerator_count: int = 1,
+    dataflow_machine_type: str = "n1-standard-4",
+    dataflow_max_workers: int = 2,
+    fetch: Any = None,
+) -> dict[str, QuotaPreflight]:
+    """Read each candidate region's Vertex AI + Compute Engine meters for a Vertex AutoML job."""
+    demands_by_region = {
+        region: automl_demands(
+            region,
+            trainer_machine_type=trainer_machine_type,
+            trainer_replicas=trainer_replicas,
+            hardware=hardware,
+            gpu_type=gpu_type,
+            accelerator_count=accelerator_count,
+            dataflow_machine_type=dataflow_machine_type,
+            dataflow_max_workers=dataflow_max_workers,
+        )
+        for region in regions
+    }
+    metrics = {d.metric.metric: d.metric for ds in demands_by_region.values() for d in ds}
+    readings = read_limits(project_id, list(metrics.values()), regions, fetch=fetch)
+
+    result: dict[str, QuotaPreflight] = {}
+    for region, demands in demands_by_region.items():
+        outcomes = [
+            reconcile(
+                demand,
+                readings.get(
+                    (demand.metric.metric, region),
+                    QuotaReading(demand.metric, region, None, "not read"),
+                ),
+            )
+            for demand in demands
+        ]
+        result[region] = QuotaPreflight(region=region, outcomes=tuple(outcomes))
+    return result
+
+
 # --- regional prerequisites: things that must exist here, quota aside ---------------------------
 
 _ATTACHMENT_REGION_RE = re.compile(r"/regions/([^/]+)/networkAttachments/")
@@ -1458,10 +1763,12 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
       control-plane vCPU tax.
     * **Spark on an ephemeral cluster** — the Compute Engine device and vCPU meters, and the worker
       count the region will actually grant.
-    * **Spark on Serverless, BigQuery, and a reused cluster** — named, not metered. A reused cluster
-      already exists so nothing is being asked for; a Serverless batch has no fixed allocation to
-      pre-read (its vCPUs bill to Compute Engine as they are used); BigQuery has no capacity meter
-      at all (`UNMETERED_SERVICES`).
+    * **Spark on Serverless** — the Compute Engine persistent-disk GB (`disks_total_gb`), vCPU, and
+      (when on GPU) L4 device meters, divided across concurrent Serverless family batches.
+    * **Vertex AI AutoML** — the Vertex AI custom-model-training and Dataflow Compute Engine vCPU
+      meters.
+    * **BigQuery and a reused cluster** — named, not metered. A reused cluster already exists so
+      nothing is being asked for; BigQuery has no capacity meter at all (`UNMETERED_SERVICES`).
 
     Best-effort throughout: an unresolvable environment or an unreadable meter produces a line
     saying so, never an exception. A reporting verb that can fail is one an operator stops running.
@@ -1503,6 +1810,10 @@ def report_for_run(cfg: Any, *, settings: Any = None) -> list[str]:
             lines.extend(_report_gke_node(cfg, node, run_id, settings, profile))
         elif node.runtime == "spark" and node.spark_mode == "cluster" and node.family not in reused:
             lines.extend(_report_cluster_node(cfg, node, settings, profile))
+        elif node.runtime == "spark" and (node.spark_mode or "serverless") == "serverless":
+            lines.extend(_report_serverless_node(cfg, node, settings, profile))
+        elif node.runtime == "vertex_automl":
+            lines.extend(_report_automl_node(cfg, node, regions, settings))
         else:
             lines.append(
                 f"  {node.family}: on {_placement(node, node.family in reused)}, "
@@ -1719,6 +2030,86 @@ def _report_cluster_node(cfg: Any, node: Any, settings: Any, profile: Any) -> li
             lines.append(
                 f"      the cluster would be built with {granted} worker(s), not {workers}"
             )
+    return lines
+
+
+def _report_serverless_node(cfg: Any, node: Any, settings: Any, profile: Any) -> list[str]:
+    """One Dataproc Serverless family's block: its executor ceiling, judged in the batch region."""
+    from .submit import plan_sizing
+
+    hardware = node.hardware or "cpu"
+    props, _sizing = plan_sizing(
+        cfg,
+        list(node.models),
+        hardware=hardware,
+        gpu_type=node.gpu_type,
+        profile=profile,
+    )
+    planned_max = (
+        int(cfg.compute.max_executors)
+        if cfg.compute.max_executors is not None
+        else int(props.get("spark.dynamicAllocation.maxExecutors", 8))
+    )
+    executor_cores = int(props.get("spark.executor.cores", 4))
+    min_executors = int(props.get("spark.dynamicAllocation.minExecutors", 2))
+    total_batches, gpu_batches = serverless_batch_concurrency(cfg)
+    region = settings.region
+    preflights = preflight_serverless(
+        [region],
+        settings.project_id,
+        max_executors=planned_max,
+        executor_cores=executor_cores,
+        min_executors=min_executors,
+        hardware=hardware,
+        gpu_type=node.gpu_type if hardware == "gpu" else None,
+        gpus_per_executor=1 if hardware == "gpu" else 0,
+        concurrent_batches=total_batches,
+        concurrent_gpu_batches=gpu_batches,
+    )
+    lines = [
+        f"  {node.family} on spark/serverless/{hardware}: "
+        f"max_executors={planned_max} "
+        f"({executor_cores} vCPU + {SERVERLESS_SHUFFLE_DISK_GB} GB disk/node)"
+    ]
+    pf = preflights.get(region)
+    if pf is not None:
+        lines.extend(_render_region(region, pf))
+        granted = clamp_serverless_executors(planned_max, pf, min_executors=min_executors)
+        if granted < planned_max:
+            lines.append(
+                f"      the Serverless batch would be submitted with maxExecutors={granted}, "
+                f"not {planned_max}"
+            )
+    return lines
+
+
+def _report_automl_node(cfg: Any, node: Any, regions: list[str], settings: Any) -> list[str]:
+    """One Vertex AI AutoML family's block: trainer and Dataflow workers, judged per region."""
+    fc = cfg.resolve_family_compute(node.family)
+    mt = str(fc.machine_type or "n1-standard-8")
+    if mt == "auto":
+        mt = "n1-standard-8"
+    replicas = max(1, int(fc.workers or 1))
+    df_workers = max(1, int(fc.max_workers or fc.workers or 2))
+    preflights = preflight_automl(
+        regions,
+        settings.project_id,
+        trainer_machine_type=mt,
+        trainer_replicas=replicas,
+        hardware=fc.hardware,
+        gpu_type=fc.gpu_type if fc.hardware == "gpu" else None,
+        accelerator_count=max(1, int(fc.accelerator_count or 1)),
+        dataflow_max_workers=df_workers,
+    )
+    automl_mode = fc.automl_mode or cfg.compute.automl_mode
+    lines = [
+        f"  {node.family} on vertex_automl/{automl_mode}/{fc.hardware}: "
+        f"{replicas} x {mt} trainer + {df_workers} x n1-standard-4 Dataflow worker(s)"
+    ]
+    for region in regions:
+        pf = preflights.get(region)
+        if pf is not None:
+            lines.extend(_render_region(region, pf))
     return lines
 
 
