@@ -1555,6 +1555,20 @@ def render_llms_txt() -> str:
                 "AlphaEvolve calibration."
             ),
             (
+                f"- [Auto-Forecaster Benchmarks (29 Datasets & AlphaEvolve)]"
+                f"({_SITE_BASE}/auto_forecaster_benchmarks/): Full 4-tier × `autofocus` "
+                f"progression across {len(list_benchmarks())} synthetic DGP recipes, 8 "
+                "AlphaEvolve evolution stages, and 9 public open-data benchmarks (`M5`, "
+                "`Favorita`, `M4`, `Monash`, `ETT`)."
+            ),
+            (
+                f"- [Auto-Forecaster Cloud Scale (7 Runtimes & AutoML)]"
+                f"({_SITE_BASE}/auto_forecaster_cloud_scale/): 70+ live Google Cloud runs "
+                "(`10` -> `100,000` series) across `bigquery`, `spark`, `vertex` (`L4` GPU & "
+                "CPU), `gce`, `gke`, `ray`, and `vertex_automl` (`vertex_tide`, `vertex_l2l`), "
+                "plus cross-run cell borrowing."
+            ),
+            (
                 f"- [Models Reference (37 Models)]({_SITE_BASE}/models_reference/): All 37 "
                 "models, covariate support, explainability, and granular extras."
             ),
