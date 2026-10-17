@@ -220,6 +220,31 @@ In real-world forecasting reviews, stakeholders and senior practitioners rarely 
 | **6. *"Does accuracy hold up across the whole horizon, or fade after a few days?"*** | Measures step-by-step error from $h = 1 \dots H$ (`late_horizon_degradation_ratio`), identifies the horizon crossover step $h^*$, and injects `@direct` multi-horizon models + `horizon_specialist` blending when recursive rollouts decay. | `f.horizon_decay_df()`<br/>`f.practitioner_assessment_df()` |
 | **7. *"How do I trust this forecast in production?"*** | Combines distribution-free conformal prediction intervals, directional bias & Trigg Tracking Signal audits, a residual white-noise stop gate, and the **Champion Ratchet** (guaranteeing a later `autofocus` pass can never overwrite a better earlier pass). | `f.assess()`<br/>`f.explain_auto_decisions_df()` |
 
+### Complete SDK Inspection & Downstream Action Cheat-Sheet (`bp` & `f`)
+
+Every `ConfigBlueprint` (`bp = Forecaster.build_config(...)`) and `Forecaster` (`f = Forecaster.auto(...)`) exposes a complete suite of inspection, audit, and operational decision tables:
+
+| Lifecycle Stage | Method / Property | What It Returns & Why You Use It |
+| :--- | :--- | :--- |
+| **1. Pre-Run Data & Blueprint Inspection (`bp`)** | `Forecaster.profile_data(data)` / `bp.profile_df()` | **7-Dimension Step 0 Data Profile:** Summarizes scale regime, SBC demand regime, seasonality/`log1p`, breaks/outliers, calendar/gaps, covariates, and hierarchy tree before fitting any models. |
+| | `bp.explain()` / `bp.rationale_df` | **Plain-English Compiler Rationale:** Row-by-row table showing every synthesized `RunConfig` parameter, its chosen value, the empirical evidence from Step 0, and any `[PINNED]` user constraints. |
+| | `bp.duration_estimate` / `bp.cost_estimate_usd` | **Parametric Runtime & Cloud Cost Estimate:** Predicted `P50` / `P90` wall-clock minutes (`bp.estimated_minutes_p50`) and approximate cloud spend ceiling (`USD`). |
+| | `bp.with_overrides(...)` / `bp.to_file(path)` | **Zero-Cost Re-Compilation & JSON Export:** Modify any dial or `RunConfig` field without re-profiling the data, or export a standard `RunConfig` JSON file for CLI/Git/CI. |
+| | `bp.emit_airflow_dag(autofocus=...)` | **Cloud Composer 3 / Airflow DAG Generator:** Emits a standalone Python DAG file (`autofocus=False` single-pass or `autofocus=True` multi-branch tournament DAG). |
+| **2. Post-Run Trust & `autofocus` Audit (`f`)** | `f.assess()` / `f.practitioner_assessment_df()` | **7-Question Practitioner Assessment:** Formatted text report (`assess()`) or 7-row `DataFrame` answering the 7 core trust questions with metrics and verdicts. |
+| | `f.compare_models(model_a, model_b)` | **Head-to-Head Model Comparison:** Score delta, FVA lift %, series win rate %, and Diebold–Mariano $p$-value between any two models (or the champion vs. all contenders). |
+| | `f.baseline_value_df()` | **4-Anchor Baseline Value Ladder:** Compares the champion against `naive_seasonal`, plain univariate (`theta`), zero-shot foundation (`chronos_bolt`/`timesfm`), and Pass 1—plus `"beaten_complex_challenger"` rows when a simple univariate model wins. |
+| | `f.hierarchy_value_df()` / `f.hierarchy_df()` | **Hierarchical Coherence & Lift:** Accuracy lift by tree level (`Root`, `Intermediate`, `Leaf`) and verification of `0.000000` additive coherence gap. |
+| | `f.autofocus_ledger_df()` / `f.autofocus_diff_df()` | **Multi-Branch Tournament Ledger & Diffs:** Pass-by-pass audit table (`1`, `2A`, `2B`, `2C`, `3`), models executed vs. borrowed, and exact parameter/score diffs across passes. |
+| | `f.explain_auto_decisions_df()` | **Unified End-to-End Audit Trail:** Combines Step 0 Pass 1 rationales with every Pass 2 / Pass 3 `autofocus` mutation and its realized accuracy change. |
+| | `f.preview_next_loop()` / `f.step()` | **Human-in-the-Loop Stepping:** Preview proposed next-pass mutations, borrowed models, and `continue_confidence` before executing one pass at a time. |
+| **3. Forecasts, Diagnostics & Operational Actions (`f`)** | `f.leaderboard_df(all_metrics=True)` | **Model Leaderboard:** Ranked out-of-fold accuracy across all evaluated base models and ensemble strategies (pass `all_metrics=True` for all 21 metrics). |
+| | `f.predictions_df()` / `f.plot_forecasts()` | **Forecasts & Visual Trajectories:** Tidy `DataFrame` and matplotlib plot combining historical actuals, out-of-fold backtests, and future forecasts with prediction intervals. |
+| | `f.attributions_df()` / `f.horizon_decay_df()` / `f.bias_report_df()` | **Deep Diagnostics:** Covariate/lag attribution shares (`TreeSHAP`/linear), step-by-step horizon accuracy decay ($h=1\dots H$), and directional bias / Trigg Tracking Signal flags. |
+| | `f.inventory_policy_df()` / `f.simulate_scenarios()` | **Operational Replenishment & What-If Scenarios:** Reorder points (`ROP`), safety stock (`SS`), and counterfactual promo/price shock simulations. |
+| | `f.detect_anomalies_df()` / `f.detect_change_points_df()` / `f.exceptions_df()` | **Anomaly, Regime Break & Exception Triage:** Historical/live anomaly detection, structural regime change points, and Top-$N$ operational exception queue. |
+| | `f.export_report("report.html")` | **Self-Contained HTML Executive Report:** Exports leaderboards, `autofocus` ledger, FVA ladder, bias/exception queues, and forecast plots into a single shareable `.html` file. |
+
 ---
 
 ## 3. How It Works: Two Simple Dials (`tier` and `where`)
@@ -253,6 +278,20 @@ flowchart TD
     Step0 --> Dials --> Compiler --> DAG
 ```
 
+### Step 0 — What the 7-Dimension Data Profile Measures (`Forecaster.profile_data` / `f.profile_df()`)
+
+Before choosing a single model, `Forecaster.profile_data(data)` (also available as `bp.profile_df()` and `f.profile_df()`) scans your panel in under a second and produces a **7-row readiness profile** that drives every downstream compiler rule:
+
+| Step 0 Dimension | Key Metrics Measured (`PanelAutoProfile`) | How It Shapes the Compiled `RunConfig` & `autofocus` |
+| :--- | :--- | :--- |
+| **1. `scale_regime`** | `n_series`, `median_n_obs`, `total_observations`, `scale_regime` (`micro` \| `small` \| `medium` \| `large` \| `hyperscale`), `cross_series_corr` | Determines whether `@global` neural/tree pooling is safe (`small+`) or would overfit (`micro`), trims slow per-series iterative models at `hyperscale`, and sizes cloud worker pools. |
+| **2. `demand_regime` (SBC)** | `zero_share`, `adi` (Average Demand Interval), `cv2` (Squared Coefficient of Variation), `dominant_regime` (`smooth` \| `erratic` \| `intermittent` \| `lumpy`), `has_cold_start` | Switches `decision_metric` from `wape` to scale-free `mase` when zeros exceed `20%`, injects `croston@tsb` / `croston@sba` / `naive_mean`, and enables `regime_routing=True` on mixed/cold-start panels. |
+| **3. `seasonality_and_transform`** | `freq`, `seasonal_period`, `seasonality_strength`, `variance_mean_corr`, `recommends_log1p`, `strictly_non_negative` | Selects Fourier harmonics (including `365.25d` annual and `24h`/`12h`/`168h` sub-daily), sets `output.floor = 0.0` on non-negative demand, and triggers `@transform_log1p` in Pass 1 or Branch `2A`. |
+| **4. `structural_breaks_and_outliers`** | `structural_break_share`, `outlier_spike_share`, `trend_strength`, `recommends_damped_trend` | Enables `features.level_shift = True` when structural step changes are detected and `data.outlier_policy = "stl_resid"` when isolated $>6\sigma$ spikes are present. |
+| **5. `data_hygiene_and_calendar`** | `leading_zero_share`, `missing_gap_share`, `recommends_trading_days` | Enables `trim_leading_zeros = True` (pre-launch zeros), `grid_policy = "fill_zero"` (missing date gaps), and `trading_days = True` on monthly/quarterly business series. |
+| **6. `covariates_and_lags`** | `known_future_covariates`, `past_covariates`, `static_covariates`, `has_stockout_flag` | Configures `@cov_all` vs. `@univariate` ablation pairs, enables `stockout_imputation = True` when `stockout_flag` is present, and prepares Branch `2B` decoy pruning and `exog_lags` synthesis. |
+| **7. `hierarchy_structure`** | `hierarchy_cols`, `n_hierarchy_levels`, `n_bottom_series` | Selects scale-appropriate hierarchical reconciliation (`mint_nonneg`, `wls_struct`, `wls_var`, `bottom_up`) so forecasts sum coherently across every tree level. |
+
 ### Dial 1 — Exposure Depth (`tier`)
 
 Just as an astronomical observatory starts with a quick **"first light"** snapshot to check alignment before taking a **"wide field"** or **"deep field"** exposure, `tier` controls how broadly and deeply the auto-forecaster searches:
@@ -285,6 +324,8 @@ You can let the tier pick everything automatically, or pin any combination of pa
 | **`holidays`** | `str` \| `list[str]` \| `None` | Pass country holiday calendars (such as `"US"` or `["US", "UK"]`) for holiday dummy and proximity features. |
 | **`autofocus_mode`** | `"dag"` *(default)* \| `"linear"` | `"dag"` tests independent improvements in parallel branches (`2A`, `2B`, `2C`) and merges the winners; `"linear"` applies changes in a single sequential chain. |
 | **`max_minutes` / `max_usd`** | `float` | Set a target wall-clock time (in minutes) or approximate cloud spend ceiling (in USD). |
+| **`include_automl`** | `False` *(default)* \| `True` | Opt-in flag on `deep_field` (`where="cloud_all"`) to include managed Vertex AI AutoML global tabular workflows (`vertex_tide`, `vertex_l2l`, `automl`). |
+| **`reuse_prior_runs`** | `True` *(default)* \| `False` | When `True`, cloud `autofocus` queries BigQuery for prior runs with matching `model_spec_hash` and borrows finished `(ts_id, model_type)` cells without re-training. |
 | **`base_config` / `overrides`** | `RunConfig` / `dict` | Start from an existing `RunConfig` file/dict or deep-merge custom `RunConfig` fields at the end. |
 
 ### How Series Count (`n_series`), Baselines, and Hierarchies Shape the Plan
@@ -382,7 +423,9 @@ $$\text{Total Time} \approx \max_{\text{family}} \big( \text{Provisioning Startu
 
 To give you practical ballparks out of the box, [`predict_run_duration()`](api/profiling.md) uses median (P50) and 90th-percentile (P90) startup and execution timings measured across **606 completed jobs (`5.59M` fitted cells in `v_run_jobs`)** in our reference environment:
 
-| Runtime (`where` / `runtime`) | Typical Startup / Provisioning (P50 / P90) | Typical Setup & I/O Overhead (P50) | Observed Reference Job Totals (P50 / P90) | Approximate Compute Rate Used for Guardrails* |
+*How to read the numbers in this table:* **`Startup / Provisioning (P50 / P90)`** & **`Setup & I/O Overhead (P50)`** = median and 90th-percentile elapsed time before model fitting starts (**$\downarrow$ lower is faster**) · **`Observed Reference Job Totals (P50 / P90)`** = end-to-end job wall-clock duration across 606 completed cloud jobs (**$\downarrow$ lower is faster**) · **`Approximate Compute Rate`** = reference hourly cloud unit rate used for `max_usd` planning guardrails (**$\downarrow$ lower is cheaper**).
+
+| Runtime (`where` / `runtime`) | Typical Startup / Provisioning (P50 / P90) $\downarrow$ | Typical Setup & I/O Overhead (P50) $\downarrow$ | Observed Reference Job Totals (P50 / P90) $\downarrow$ | Approximate Compute Rate Used for Guardrails* $\downarrow$ |
 | :--- | :---: | :---: | :---: | :---: |
 | **`local` (In-Memory Python)** | `~0.2s / 0.5s` | `~0s` | `~15s – 12m` | `\$0.00/hr` *(runs on your machine)* |
 | **`bigquery` (Native SQL)** | `~3.5s / 8.0s` | `~42s` | `~55s / 4.5m` | `~\$0.12/hr` *(query-equivalent estimate)* |
@@ -425,6 +468,8 @@ Running every benchmark across all four exposure tiers—both as a single pass (
 
 #### Table 6.1A — What Each Exposure Tier Unlocks (CV Folds, Quantiles & Model Portfolio)
 
+*How to read this table:* **`CV Folds`** = number of expanding out-of-fold validation windows (`n_folds`); **`Quantile Grid`** = prediction interval quantiles emitted; **`Max autofocus Depth`** = maximum tournament passes when `autofocus=True`.
+
 | Exposure Tier | CV Folds | Quantile Grid | Max `autofocus` Depth | Candidate Families, `@global` Models & Foundation Backbones Added |
 | :--- | :---: | :---: | :---: | :--- |
 | **`first_light`** | `1` fold | `[0.1, 0.9]` | `2` passes | Fast local baselines (`naive_seasonal`, `theta`, `holtwinters`) + `lightgbm`; Pass 2/3 selectively adds `@transform_log1p`, `@direct`, `croston`, and `mint_nonneg` |
@@ -434,7 +479,9 @@ Running every benchmark across all four exposure tiers—both as a single pass (
 
 #### Table 6.1B — Measured Accuracy, Wall-Clock Time & Cell Borrowing by Tier (9 Public Benchmarks Mean)
 
-| Exposure Tier | Pass 1 OOF FVA (`autofocus=False`) | Multi-Pass OOF FVA (`autofocus=True`) | `autofocus` OOF Lift | Pass 1 Held-Out Test Lift | Best Held-Out Test Lift | Pass 1 Wall-Clock | `autofocus` Wall-Clock | Mean Models (`Exec` / `Borrowed`) |
+*How to read the scores in this table:* **`OOF FVA %`** = Out-of-Fold Forecast Value Added (`%` error reduction vs. `naive_seasonal` across CV folds; **$\uparrow$ higher is better**) · **`autofocus OOF Lift`** = additional FVA `%` gained by multi-pass `autofocus=True` over Pass 1 (**$\uparrow$ higher is better**) · **`Held-Out Test Lift`** = `%` error reduction vs. `naive_seasonal` on the unseen post-cutoff test window (`oracle_future_df`; **$\uparrow$ higher is better**) · **`Wall-Clock (`s`)`** = mean elapsed runtime in seconds (**$\downarrow$ lower is faster**) · **`Mean Models (`Exec` / `Borrowed`)`** = newly fitted models (`Exec`) vs. finished models reused from earlier passes at zero compute cost (`Borrowed`; **$\uparrow$ higher `Borrowed` saves more compute**).
+
+| Exposure Tier | Pass 1 OOF FVA (`autofocus=False`) $\uparrow$ | Multi-Pass OOF FVA (`autofocus=True`) $\uparrow$ | `autofocus` OOF Lift $\uparrow$ | Pass 1 Held-Out Test Lift $\uparrow$ | Best Held-Out Test Lift $\uparrow$ | Pass 1 Wall-Clock $\downarrow$ | `autofocus` Wall-Clock $\downarrow$ | Mean Models (`Exec` / `Borrowed`) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **`first_light`** | `+22.24%` | **`+27.67%`** | **`+5.43%`** | `+13.79%` | `+16.69%` | `24.1s` | `91.4s` | `10.4` / `7.0` |
 | **`wide_field`** *(default)* | `+20.93%` | **`+21.94%`** *(2-fold CV)* | `+1.01%` | `+16.15%` | `+16.34%` | `85.9s` | `138.4s` | `11.1` / `11.6` |
@@ -461,7 +508,9 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 
 #### Table 6.2A — What Each Synthetic Recipe (`dgp_01`–`dgp_20`) Simulates & How `autofocus` Solves It
 
-| Benchmark | Metric | Real-World Scenario Simulated | Diagnostic Trigger & `autofocus` Action | Overall Winning Champion | Peak FVA % |
+*How to read the scores in this table:* **`Metric`** = primary decision metric auto-selected for the regime (`wape` for smooth/promotional demand, `mase` for zero-heavy intermittent demand, `pinball_loss` for asymmetric $q=0.90$ service-level inventory) · **`Peak FVA %`** = Forecast Value Added (`%` out-of-fold error reduction vs. `naive_seasonal`; **$\uparrow$ higher is better**, e.g. `+77.57%` means the champion eliminated more than three-quarters of baseline error).
+
+| Benchmark | Metric | Real-World Scenario Simulated | Diagnostic Trigger & `autofocus` Action | Overall Winning Champion | Peak FVA % $\uparrow$ |
 | :--- | :---: | :--- | :--- | :--- | :---: |
 | **`dgp_01_smooth_seasonal`** | `wape` | Clean retail series with steady trend + weekly & yearly seasonality | Stops after Pass 1 *(already optimal)* | `ensemble_horizon_specialist` | **`+40.33%`** |
 | **`dgp_02_multiplicative_log`** | `wape` | Fast-growing series where seasonal swings widen as volume grows | Pass 2 adds `@transform_log1p` & `@direct` specialists | `ensemble_horizon_specialist` | **`+43.06%`** |
@@ -486,7 +535,9 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 
 #### Table 6.2B — 4-Tier × `autofocus` Error Progression Across All 20 DGPs (Lower Error Is Better)
 
-| Benchmark | Metric | `first_light` Pass 1 | `first_light` `autofocus` | `wide_field` Pass 1 | `wide_field` `autofocus` | `deep_sky` Pass 1 | `deep_sky` `autofocus` | `deep_field` Full Bank | Peak FVA % |
+*How to read the scores in this table:* **All `Pass 1`, `autofocus`, and `Full Bank` columns** report raw out-of-fold error on the row's `Metric` (`wape` = Weighted Absolute Percentage Error, `mase` = Mean Absolute Scaled Error vs. in-sample seasonal naive, `pinball_loss` = $q=0.90$ quantile pinball loss; **$\downarrow$ lower is better**, `0.0000` is a perfect forecast; bold marks where `autofocus=True` reduced error below Pass 1 or achieved the lowest overall error) · **`Peak FVA %`** = `%` error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**).
+
+| Benchmark | Metric | `first_light` Pass 1 $\downarrow$ | `first_light` `autofocus` $\downarrow$ | `wide_field` Pass 1 $\downarrow$ | `wide_field` `autofocus` $\downarrow$ | `deep_sky` Pass 1 $\downarrow$ | `deep_sky` `autofocus` $\downarrow$ | `deep_field` Full Bank $\downarrow$ | Peak FVA % $\uparrow$ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **`dgp_01_smooth_seasonal`** | `wape` | `0.0282` | `0.0282` | `0.0260` | `0.0260` | `0.0260` | `0.0260` | **`0.0219`** | **`+40.33%`** |
 | **`dgp_02_multiplicative_log`** | `wape` | `0.1531` | **`0.0931`** | `0.1204` | `0.1204` | `0.1179` | `0.1179` | **`0.0996`** | **`+43.06%`** |
@@ -511,7 +562,9 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 
 #### Table 6.2C — Runtime (`s`), Borrowed Models & `#1 Single` vs. `#1 @global / Foundation` Model Across All 20 DGPs
 
-| Benchmark | `first_light` Wall (`Borrowed`) | `wide_field` Wall (`Borrowed`) | `deep_sky` Wall | `deep_field` Wall | #1 Single Non-Ensemble Model (`Score`) | #1 `@global` / Foundation Model (`Score`) | Overall Champion (`Score`) |
+*How to read the scores in this table:* **`Wall (`s`)`** = total session elapsed seconds (**$\downarrow$ lower is faster**) · **`Borrowed (`b=N`)`** = number of finished `(model, spec_hash)` evaluations reused from Pass 1 at zero compute cost (**$\uparrow$ higher saves more compute**) · **`#1 Single` / `#1 @global / Foundation` / `Overall Champion` (`Score`)** = raw out-of-fold error on the row's primary metric (`wape`, `mase`, or `pinball_loss`; **$\downarrow$ lower is better**).
+
+| Benchmark | `first_light` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `wide_field` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `deep_sky` Wall $\downarrow$ | `deep_field` Wall $\downarrow$ | #1 Single Non-Ensemble Model (`Error` $\downarrow$) | #1 `@global` / Foundation Model (`Error` $\downarrow$) | Overall Champion (`Error` $\downarrow$) |
 | :--- | :---: | :---: | :---: | :---: | :--- | :--- | :--- |
 | **`dgp_01_smooth_seasonal`** | `12s` (`b=0`) | `48s` (`b=0`) | `152s` | `247s` | `holtwinters` (`0.0260`) | `chronos2@global_univariate` (`0.0264`) | `ensemble_horizon_specialist` (`0.0219`) |
 | **`dgp_02_multiplicative_log`** | `45s` (`b=7`) | `58s` (`b=0`) | `116s` | `258s` | `auto_theta` (`0.1175`) | `chronos2@global_univariate` (`0.1272`) | `ensemble_horizon_specialist` (`0.0996`) |
@@ -544,9 +597,11 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 
 ### 6.3. How AlphaEvolve on Gemini Enterprise Evolved the Policy
 
-Instead of hand-picking the thresholds and starting model lists in [`scale_forecasting.auto_policy`](api/auto.md), we used **AlphaEvolve on Gemini Enterprise** ([`Google-Cloud-AI/alphaevolve-on-googlecloud`](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud) via `discoveryengine.googleapis.com/v1alpha`) with **`gemini-3.8-flash`** and **`gemini-4-argon`** to evolve the policy against the benchmark suite:
+Instead of hand-picking the thresholds and starting model lists in [`scale_forecasting.auto_policy`](api/auto.md), we used **AlphaEvolve on Gemini Enterprise** ([`Google-Cloud-AI/alphaevolve-on-googlecloud`](https://github.com/Google-Cloud-AI/alphaevolve-on-googlecloud) via `discoveryengine.googleapis.com/v1alpha`) with **`gemini-3.8-flash`** and **`gemini-4-argon`** to evolve the policy against the benchmark suite.
 
-| Evolution Stage | Overall Score | Average FVA vs. Baseline | Average Multi-Pass `autofocus` Gain | Wasted-Pass Penalty | What AlphaEvolve Discovered |
+*How to read the scores in this table:* **`Overall Score`** = composite AlphaEvolve tournament fitness across the benchmark suite (**$\uparrow$ higher is better**) · **`Average FVA vs. Baseline`** = mean `%` out-of-fold error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Average Multi-Pass autofocus Gain`** = mean `%` error reduction from Pass 1 to the final `autofocus` pass, or mean Held-Out Test Lift in Rounds 4–5 (**$\uparrow$ higher is better**) · **`Wasted-Pass Penalty`** = penalty for triggering unnecessary follow-up passes on pure white-noise series (**`0.00` is optimal**; negative values penalize wasted compute).
+
+| Evolution Stage | Overall Score $\uparrow$ | Average FVA vs. Baseline $\uparrow$ | Average Multi-Pass `autofocus` Gain $\uparrow$ | Wasted-Pass Penalty (`0.00` Best) | What AlphaEvolve Discovered |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Initial Hand-Written Seed** | `26.08` | `+18.25%` | `+2.26%` | `-8.00` | Putting too many models into Pass 1 (`first_light`) with 1-fold per-series selection overfit noisy series and wasted a second pass on pure white noise (`dgp_12`). |
 | **Generation 1 — Smart Early Stopping** | `34.08` | `+18.25%` | `+2.26%` | `0.00` | Added a residual white-noise stop gate so `autofocus` stops right after Pass 1 when no learnable pattern remains. |
@@ -580,7 +635,9 @@ print(f.assess())
 
 #### Table 6.4A — Dataset Catalog, Peak Accuracy & #1 Single Model Across the 9 Open-Data Benchmarks
 
-| Public Benchmark | Domain & Structural Features | Freq / Horizon | Best Tier & Winning Model (`Pass`) | Peak OOF FVA vs. Seasonal Naive | Peak Held-Out Test Lift vs. `SNaive` | #1 Single Non-Ensemble Model (`deep_field`) | License & Source |
+*How to read the scores in this table:* **`Peak OOF FVA vs. Seasonal Naive`** = `%` out-of-fold cross-validation error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Peak Held-Out Test Lift vs. SNaive`** = `%` error reduction vs. `naive_seasonal` on the unseen post-cutoff test horizon (`oracle_future_df`; **$\uparrow$ higher is better**) · **`#1 Single Non-Ensemble Model (`Score`)`** = raw out-of-fold error (`WAPE`, or `MASE` on `monash_car_parts`; **$\downarrow$ lower is better**).
+
+| Public Benchmark | Domain & Structural Features | Freq / Horizon | Best Tier & Winning Model (`Pass`) | Peak OOF FVA vs. Seasonal Naive $\uparrow$ | Peak Held-Out Test Lift vs. `SNaive` $\uparrow$ | #1 Single Non-Ensemble Model (`Error` $\downarrow$) | License & Source |
 | :--- | :--- | :---: | :--- | :---: | :---: | :--- | :--- |
 | **`m5_walmart`** | Walmart retail unit sales (`item_id`, `dept_id`, `cat_id`, `store_id`, `state_id` hierarchy + SNAP/event covariates) | `D` ($H=28$) | `first_light` `ensemble_champion` (`P2B`) / `deep_field` `ensemble_inverse_error` (`P1`) | **`+26.39%`** | **`+18.00%`** | `lightgbm` (`0.2969`) · `chronos2@global` (`0.2981`) | CC BY-NC-SA 4.0 ([M5 / Makridakis et al., 2022](https://doi.org/10.1016/j.ijforecast.2021.11.013)) |
 | **`favorita_grocery`** | Corporación Favorita grocery unit sales with future `onpromotion` binary flag & store hierarchy | `D` ($H=16$) | `deep_sky` `ensemble_ridge` (`P1`) / `deep_field` `ensemble_horizon_specialist` (`P2`) | **`+25.23%`** | **`+14.42%`** | **`chronos2@global_mint_nonneg` (`0.0718`)** | CC BY-NC-SA 4.0 ([Favorita / Nixtla Open Mirror](https://zenodo.org/records/4656021)) |
@@ -594,9 +651,9 @@ print(f.assess())
 
 #### Table 6.4B — Side-by-Side 4-Tier Progression Summary (1 Row per Benchmark)
 
-To compare how a single dataset behaves as you turn the `tier` dial from `first_light` $\rightarrow$ `wide_field` $\rightarrow$ `deep_sky` $\rightarrow$ `deep_field`, the table below pivots the 36 runs into **one row per benchmark** (showing `Autofocus OOF FVA %` / `Best Held-Out Test Lift %` / `Wall-Clock s` at each tier):
+*How to read the scores in this table:* Each tier cell shows **`OOF FVA %` $\uparrow$ / `Best Test Lift %` $\uparrow$ / `Wall-Clock s` $\downarrow$**, where **`OOF FVA %`** (**$\uparrow$ higher is better**) is out-of-fold error reduction vs. `naive_seasonal`, **`Best Test`** (**$\uparrow$ higher is better**) is held-out future test error reduction vs. `naive_seasonal`, and **`Time`** (**$\downarrow$ lower is faster**) is total session seconds. The final column reports the **`#1 @global / Foundation Model (`OOF Error` $\downarrow$)`**, where **lower error is better**.
 
-| Public Benchmark | `first_light` (`OOF FVA` / `Best Test` / `Time`) | `wide_field` (`OOF FVA` / `Best Test` / `Time`) | `deep_sky` (`OOF FVA` / `Best Test` / `Time`) | `deep_field` (`OOF FVA` / `Best Test` / `Time`) | #1 `@global` / Foundation Model Across Tiers (`OOF Score`) |
+| Public Benchmark | `first_light` (`OOF FVA` $\uparrow$ / `Test` $\uparrow$ / `Time` $\downarrow$) | `wide_field` (`OOF FVA` $\uparrow$ / `Test` $\uparrow$ / `Time` $\downarrow$) | `deep_sky` (`OOF FVA` $\uparrow$ / `Test` $\uparrow$ / `Time` $\downarrow$) | `deep_field` (`OOF FVA` $\uparrow$ / `Test` $\uparrow$ / `Time` $\downarrow$) | #1 `@global` / Foundation Model (`OOF Error` $\downarrow$) |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **`m5_walmart`** | **`+26.39%`** / `+18.00%` / `81s` | **`+18.44%`** / `+17.44%` / `92s` | **`+17.85%`** / `+17.68%` / `110s` | **`+18.88%`** / `+15.95%` / `192s` | `chronos2@global` (`0.2981`) |
 | **`favorita_grocery`** | **`+28.04%`** / `+1.03%` / `173s` | **`+23.70%`** / `+6.81%` / `123s` | **`+19.43%`** / `+14.42%` / `278s` | **`+25.23%`** / `+8.97%` / `568s` | `chronos2@global_mint_nonneg` (`0.0718`) |
@@ -610,9 +667,9 @@ To compare how a single dataset behaves as you turn the `tier` dial from `first_
 
 #### Table 6.4C — Complete 36-Cell Ledger (`9 Public Benchmarks × 4 Tiers`) with Dedicated Numeric Columns
 
-Every single `(benchmark, tier)` run is itemized below with dedicated columns for **`autofocus=False` (`Pass 1`)** and **`autofocus=True` (`Final Session`)** so you can scan OOF scores, FVA %, Held-Out Test Lift %, wall-clock times, and borrowed model counts without parsing parenthetical strings:
+*How to read the scores in this table:* **`P1 OOF` / `AF OOF` / `#1 Single (`OOF`)` / `#1 @global / Foundation (`OOF`)`** = raw out-of-fold error (`WAPE`, or `MASE` on `monash_car_parts`; **$\downarrow$ lower is better**) · **`P1 FVA %` / `AF FVA %`** = `%` out-of-fold error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`P1 Test Lift` / `AF Test Lift`** = `%` held-out test window error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**; `0.00%` ties `naive_seasonal`; negative means `naive_seasonal` had lower error on that single test window) · **`P1 Wall` / `AF Wall`** = elapsed seconds (**$\downarrow$ lower is faster**) · **`Models (`Exec` / `Borrowed`)`** = newly fitted models (`Exec`) vs. cached models reused across passes (`Borrowed`; **$\uparrow$ higher `Borrowed` saves more compute**).
 
-| Public Benchmark | Exposure Tier | Pass 1 Model (`autofocus=False`) | P1 OOF | P1 FVA % | P1 Test Lift | P1 Wall | Final Model (`autofocus=True`) | Pass | AF OOF | AF FVA % | AF Test Lift | AF Wall | #1 Single Model (`OOF`) | #1 `@global` / Foundation (`OOF`) | Models (`Exec` / `Borrowed`) |
+| Public Benchmark | Exposure Tier | Pass 1 Model (`autofocus=False`) | P1 OOF $\downarrow$ | P1 FVA % $\uparrow$ | P1 Test Lift $\uparrow$ | P1 Wall $\downarrow$ | Final Model (`autofocus=True`) | Pass | AF OOF $\downarrow$ | AF FVA % $\uparrow$ | AF Test Lift $\uparrow$ | AF Wall $\downarrow$ | #1 Single Model (`OOF` $\downarrow$) | #1 `@global` / Foundation (`OOF` $\downarrow$) | Models (`Exec` / `Borrowed`) |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :--- | :--- | :---: |
 | **`m5_walmart`** | `first_light` | `ensemble_inverse_error` | `0.2699` | `+24.21%` | `+17.90%` | `20.9s` | `ensemble_champion` | `P2B` | `0.2621` | **`+26.39%`** | `+18.00%` | `81.2s` | `lightgbm` (`0.2794`) | *(not in `first_light`)* | `12` / `4` |
 | **`m5_walmart`** | `wide_field` | `ensemble_inverse_error` | `0.2968` | `+18.44%` | `+17.44%` | `92.1s` | `ensemble_inverse_error` | `P1` | `0.2968` | **`+18.44%`** | `+17.44%` | `92.5s` | `xgboost` (`0.3077`) | `chronos_bolt@global` (`0.3082`) | `11` / `0` |
@@ -665,9 +722,11 @@ The Glass-Box Auto-Forecaster is built to execute on Google Cloud at enterprise 
 
 #### Table 6.5A — Multi-Engine Cloud Bakeoffs, `L4` GPU Foundation Models & Vertex AI AutoML (`vertex_tide`, `vertex_l2l`)
 
-When `where="cloud_all"` or `where="cloud_gpu"` is selected (or when `include_automl=True` is enabled on `deep_field`), the DAG router dispatches each active model family in parallel to its specialized Google Cloud engine:
+When `where="cloud_all"` or `where="cloud_gpu"` is selected (or when `include_automl=True` is enabled on `deep_field`), the DAG router dispatches each active model family in parallel to its specialized Google Cloud engine.
 
-| Benchmark / Panel | Cloud Runtimes Dispatched | Verified `run_id` | Series (`N`) | Winning Champion | Champion `WAPE` | Top `@global` / Foundation / AutoML Contenders (`WAPE`) | FVA vs. Baseline | Cloud Wall-Clock |
+*How to read the scores in this table:* **`Champion WAPE` & Contender `WAPE`** = out-of-fold Weighted Absolute Percentage Error recorded in BigQuery `v_model_leaderboard` (**$\downarrow$ lower is better**) · **`FVA vs. Baseline`** = `%` `WAPE` reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Cloud Wall-Clock`** = end-to-end cloud run duration in `v_run_summary` including VM/cluster provisioning and container startup (**$\downarrow$ lower is faster**).
+
+| Benchmark / Panel | Cloud Runtimes Dispatched | Verified `run_id` | Series (`N`) | Winning Champion | Champion `WAPE` $\downarrow$ | Top `@global` / Foundation / AutoML Contenders (`WAPE` $\downarrow$) | FVA vs. Baseline $\uparrow$ | Cloud Wall-Clock $\downarrow$ |
 | :--- | :--- | :--- | :---: | :--- | :---: | :--- | :---: | :---: |
 | **BigLake Iceberg Covariate Bakeoff (Run A)** | `vertex:gpu` (`L4`) + `vertex:cpu` + `gce:cpu` + `bigquery` | `w1b-cov-matrix-iceberg-0392fe435de7` | `100` | **`chronos2@global_univariate`** | **`0.3226`** | **`chronos2@global_univariate` (`0.3226`)** · `timesfm@cov_all` (`0.3239`) · `chronos2@global_cov_all` (`0.3358`) | **`+30.09%`** | `5,586.2s` |
 | **BigLake Iceberg Covariate Bakeoff (Run B)** | `vertex:gpu` (`L4`) + `vertex:cpu` + `gce:cpu` + `bigquery` | `w1b-cov-matrix-iceberg-2e85b1c6777c` | `100` | **`timesfm@cov_all`** | **`0.3239`** | **`timesfm@cov_all` (`0.3239`)** · `timesfm@univariate` (`0.3302`) · `chronos2@local_cov_all` (`0.3324`) | **`+29.80%`** | `6,066.4s` |
@@ -683,9 +742,9 @@ When `where="cloud_all"` or `where="cloud_gpu"` is selected (or when `include_au
 
 #### Table 6.5B — At-a-Glance Cloud Runtime Scale Matrix (Wall-Clock Time by Series Count `N`)
 
-To see how each of the 7 Google Cloud runtimes scales across five orders of magnitude (`10` $\rightarrow$ `100,000` time series), this matrix pivots the observed cloud durations side by side:
+*How to read the numbers in this table:* Every cell reports **total end-to-end cloud wall-clock time (`s` or `m`)** from `v_run_summary`—including cluster/VM provisioning, container startup, parallel model training across `N` time series, and BigQuery result landing (**$\downarrow$ lower is faster**; `w=N` denotes worker count).
 
-| Google Cloud Runtime | `N = 10` Series | `N = 100` Series | `N = 1,000` Series | `N = 10,000` Series | `N = 25,000` Series | `N = 100,000` Series |
+| Google Cloud Runtime | `N = 10` Series $\downarrow$ | `N = 100` Series $\downarrow$ | `N = 1,000` Series $\downarrow$ | `N = 10,000` Series $\downarrow$ | `N = 25,000` Series $\downarrow$ | `N = 100,000` Series $\downarrow$ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **`bigquery`** *(BQML SQL + `AI.FORECAST`)* | **`79.6s`** | **`135.0s`** | **`340.2s`** | **`827.3s`** | **`512.4s`** *(`8.5m`)* | *(slot-scaled SQL)* |
 | **`spark`** *(Dataproc Serverless Spark)* | — | `1,246.3s` | **`521.2s`** | **`1,012.3s`** *(`16.9m`)* | **`1,158.6s`** *(P1)* | **`3,126.7s`** *(`52.1m`)* |
@@ -698,7 +757,9 @@ To see how each of the 7 Google Cloud runtimes scales across five orders of magn
 
 #### Table 6.5C — Complete Verified 7-Runtime Cloud Scale Ledger (`run_id`, Workers, Champion `WAPE` & FVA %)
 
-| Cloud Runtime (`compute.runtime`) | Scale (`N` Series) | Workers / Provisioning | Verified `run_id` | Winning Champion | Champion `WAPE` | FVA vs. Baseline | Total Cloud Duration |
+*How to read the scores in this table:* **`Champion WAPE`** = out-of-fold Weighted Absolute Percentage Error (**$\downarrow$ lower is better**) · **`FVA vs. Baseline`** = `%` `WAPE` reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Total Cloud Duration`** = end-to-end cloud wall-clock seconds recorded in `v_run_summary` (**$\downarrow$ lower is faster**).
+
+| Cloud Runtime (`compute.runtime`) | Scale (`N` Series) | Workers / Provisioning | Verified `run_id` | Winning Champion | Champion `WAPE` $\downarrow$ | FVA vs. Baseline $\uparrow$ | Total Cloud Duration $\downarrow$ |
 | :--- | :---: | :---: | :--- | :--- | :---: | :---: | :---: |
 | **`bigquery`** *(BQML SQL + `AI.FORECAST`)* | `10` | Serverless SQL slots | `w1a-bq-scale-n10-b5b939ff3351` | `timesfm@univariate` | `0.3304` | *(SQL native)* | **`79.6s`** |
 | **`bigquery`** *(BQML SQL + `AI.FORECAST`)* | `100` | Serverless SQL slots | `w1a-bq-scale-n100-09b32c2b61da` | `timesfm@univariate` | `0.3245` | *(SQL native)* | **`135.0s`** |
@@ -723,9 +784,11 @@ To see how each of the 7 Google Cloud runtimes scales across five orders of magn
 
 #### Table 6.5D — Multi-Pass Cloud `autofocus=True` & Cross-Run Cell Borrowing (`reuse_prior_runs=True`)
 
-When `Forecaster.auto(..., where="cloud_cpu" | "cloud_all" | "bigquery", autofocus=True)` runs against a BigQuery dataset, Pass 2 and Pass 3 automatically query `forecast_metrics` and `forecast_predictions` from prior passes (and any prior runs matching `make_model_spec_hash`), **borrowing already-computed `(ts_id, model_type)` cells directly from BigQuery** so cloud compute is only billed for newly proposed models:
+When `Forecaster.auto(..., where="cloud_cpu" | "cloud_all" | "bigquery", autofocus=True)` runs against a BigQuery dataset, Pass 2 and Pass 3 automatically query `forecast_metrics` and `forecast_predictions` from prior passes (and any prior runs matching `make_model_spec_hash`), **borrowing already-computed `(ts_id, model_type)` cells directly from BigQuery** so cloud compute is only billed for newly proposed models.
 
-| Cloud `autofocus` Tournament | Cloud Sandbox (`where`) | Verified Pass `run_id` Chain | Series (`N`) | Pass 1 `WAPE` | Final `WAPE` | Final Winning Model (`Pass`) | FVA vs. Baseline | Total Cloud Duration |
+*How to read the scores in this table:* **`Pass 1 WAPE` & `Final WAPE`** = out-of-fold Weighted Absolute Percentage Error before and after multi-pass `autofocus` (**$\downarrow$ lower is better**) · **`FVA vs. Baseline`** = final `%` `WAPE` reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Total Cloud Duration`** = elapsed cloud wall-clock seconds per pass (**$\downarrow$ lower is faster**).
+
+| Cloud `autofocus` Tournament | Cloud Sandbox (`where`) | Verified Pass `run_id` Chain | Series (`N`) | Pass 1 `WAPE` $\downarrow$ | Final `WAPE` $\downarrow$ | Final Winning Model (`Pass`) | FVA vs. Baseline $\uparrow$ | Total Cloud Duration $\downarrow$ |
 | :--- | :--- | :--- | :---: | :---: | :---: | :--- | :---: | :---: |
 | **Cloud Holdout `N=100` (`wide_field`)** | **`cloud_cpu`** (`vertex` / `gce` CPU) | `w3-holdout-00100-cloud-cpu-81423bb364a7` | `100` | `0.3194` | **`0.3194`** *(stopped P1)* | **`chronos_bolt@global` (`Pass 1`)** | **`+39.84%`** | `518.1s` |
 | **Cloud Holdout `N=2,500` (`wide_field`)** | **`cloud_cpu`** (Dataproc Serverless Spark) | `w3-holdout-02500-cloud-cpu-4750afbb79e0` | `2,500` | `0.3191` | **`0.3191`** *(`chronos_bolt@global` `0.3300`)* | **`ensemble_inverse_error` (`Pass 1`)** | **`+41.93%`** | `1,057.9s` |
