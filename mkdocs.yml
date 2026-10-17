@@ -126,6 +126,8 @@ nav:
       - Backtesting: backtesting.md
       - Forecaster workbench: forecaster_workbench.md
       - Auto-forecaster & autofocus: auto_forecaster.md
+      - Auto-forecaster benchmarks (29 datasets): auto_forecaster_benchmarks.md
+      - Auto-forecaster cloud scale (7 runtimes): auto_forecaster_cloud_scale.md
       - Quota and scale: quota_and_scale.md
       - Reading source data: reading_source_data.md
       - Writing results: writing_results.md

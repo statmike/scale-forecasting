@@ -54,6 +54,10 @@ How it works and every knob.
   definitions, direction/calibration flags, and edge-case rules.
 - [backtesting.md](./backtesting.md) — the method: how folds are laid out, why the newest fold fits
   nothing, what happens to short series, and what each of the four schemes actually measures.
+- [forecaster_workbench.md](./forecaster_workbench.md) — physical bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, FVA, horizon decay, Trigg bias, inventory policy (`ROP`/`SS`), scenarios, and HTML executive reports.
+- [auto_forecaster.md](./auto_forecaster.md) — **Glass-Box Auto-Forecaster & Multi-Branch `autofocus`**: Step 0 7-dimension data profiler, 4 exposure tiers, 2 dials (`tier` & `where`), Foundation/`@global` architecture guide, multi-branch `autofocus` tournament DAG, and 7-Question Practitioner Assessment (`f.assess()`).
+- [auto_forecaster_benchmarks.md](./auto_forecaster_benchmarks.md) — **Auto-Forecaster Benchmarks**: complete 4-tier $\times$ `autofocus` ledgers across all 20 synthetic ground-truth recipes (`dgp_01`–`dgp_20`), 8 AlphaEvolve evolution stages, and 9 public open-data benchmarks (`M5`, `Favorita`, `M4`, `Monash`, `ETT` — `36` cells).
+- [auto_forecaster_cloud_scale.md](./auto_forecaster_cloud_scale.md) — **Auto-Forecaster Cloud Scale**: 70+ live Google Cloud runs (`10` $\rightarrow$ `100,000` series) across all 7 runtimes (`bigquery`, `spark`, `vertex` `L4` GPU & CPU, `gce`, `gke`, `ray`, `vertex_automl`), plus multi-pass cloud cell borrowing (`reuse_prior_runs=True`).
 - [quota_and_scale.md](./quota_and_scale.md) — measured node throughput, vCPU and GPU quota planning,
   and `--quota` preflight.
 - [reading_source_data.md](./reading_source_data.md) — how each runtime reads the source panel
