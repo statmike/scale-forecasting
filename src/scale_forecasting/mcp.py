@@ -1014,6 +1014,50 @@ class McpServer:
                                 "interactive HTML report including the Autofocus & Blueprint tab."
                             ),
                         },
+                        "evolve_target": {
+                            "type": ["string", "null"],
+                            "enum": ["features", "ensemble", "model", "policy", None],
+                            "default": None,
+                            "description": (
+                                "Optional # EVOLVE-BLOCK target ('features', 'ensemble', 'model', "
+                                "'policy') to trigger Forecaster.evolve(...) with the 3-Gate "
+                                "Anti-Overfitting Ratchet."
+                            ),
+                        },
+                        "evolve_backend": {
+                            "type": "string",
+                            "enum": ["alphaevolve", "vertex_gemini", "mock"],
+                            "default": "alphaevolve",
+                            "description": (
+                                "Evolution backend when evolve_target is set: 'alphaevolve' "
+                                "(default, Gemini Enterprise Discovery Engine), 'vertex_gemini' "
+                                "(backup Vertex AI Gemini mutator), or 'mock' (offline test)."
+                            ),
+                        },
+                        "evolve_max_evaluations": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": (
+                                "Maximum candidate evaluations when evolve_target is set."
+                            ),
+                        },
+                        "evolve_model_name": {
+                            "type": "string",
+                            "default": "gemini-3.8-flash",
+                            "description": (
+                                "Gemini / Vertex AI model identifier for code evolution "
+                                "(default: 'gemini-3.8-flash')."
+                            ),
+                        },
+                        "evolve_from_run_ids": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string"},
+                            "default": None,
+                            "description": (
+                                "Optional list of completed BigQuery run_ids to pool for "
+                                "post-run super-ensembling via Forecaster.evolve(from_run_ids=...)."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -1677,7 +1721,7 @@ class McpServer:
                 "config": bp.config.model_dump(mode="json"),
             }
 
-        if name == "run_auto_forecast":
+        if name in ("run_auto_forecast", "auto_forecast"):
             import pandas as pd
 
             from . import playground
@@ -1737,6 +1781,48 @@ class McpServer:
                     if c_path.suffix.lower() == ".parquet"
                     else pd.read_csv(c_path)
                 )
+
+            evolve_target = args.get("evolve_target")
+            evolve_from_run_ids = args.get("evolve_from_run_ids")
+            if evolve_target or evolve_from_run_ids:
+                evolve_backend = str(args.get("evolve_backend", "alphaevolve"))
+                evolve_max_evals = int(args.get("evolve_max_evaluations", 10))
+                evolve_model_name = str(args.get("evolve_model_name", "gemini-3.8-flash"))
+                eff_target = str(evolve_target or "ensemble")
+                ev_res = Forecaster.evolve(
+                    None if evolve_from_run_ids else panel_run,
+                    from_run_ids=list(evolve_from_run_ids) if evolve_from_run_ids else None,
+                    target=eff_target,
+                    backend=evolve_backend,
+                    tier=tier_run,
+                    where=where_run,
+                    horizon=horizon_run,
+                    max_evaluations=evolve_max_evals,
+                    model_name=evolve_model_name,
+                )
+                lb_records = (
+                    ev_res.leaderboard_df.to_dict(orient="records")
+                    if hasattr(ev_res, "leaderboard_df") and ev_res.leaderboard_df is not None
+                    else []
+                )
+                return {
+                    "target": ev_res.target,
+                    "backend_used": ev_res.backend_used,
+                    "model_name": getattr(ev_res, "model_name", evolve_model_name),
+                    "promoted": ev_res.promoted,
+                    "rejection_reason": ev_res.rejection_reason,
+                    "baseline_score": ev_res.baseline_score,
+                    "inner_cv_score": ev_res.inner_cv_score,
+                    "lockdown_baseline_score": ev_res.lockdown_baseline_score,
+                    "lockdown_candidate_score": ev_res.lockdown_candidate_score,
+                    "fva_pct": ev_res.fva_pct,
+                    "dm_pvalue": ev_res.dm_pvalue,
+                    "worst_decile_fva_pct": ev_res.worst_decile_fva_pct,
+                    "champion_code": ev_res.champion_code,
+                    "export_path": ev_res.export_path,
+                    "diagnostics": getattr(ev_res, "diagnostics", {}),
+                    "leaderboard": lb_records,
+                }
 
             f_res = Forecaster.auto(
                 panel_run,

@@ -85,6 +85,7 @@ def test_every_subpackage_is_documented_and_has_readme() -> None:
     assert subpackages == [
         "data_gen",
         "engines",
+        "evolve",
         "metrics",
         "models",
         "probes",

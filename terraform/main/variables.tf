@@ -70,6 +70,18 @@ variable "create_gke" {
   default     = false
 }
 
+variable "enable_alphaevolve" {
+  description = <<-EOT
+    Enable `discoveryengine.googleapis.com` and bind `roles/discoveryengine.admin` to
+    `scale-forecasting-runner` for Gemini Enterprise AlphaEvolve (`scale_forecasting.evolve` with
+    `backend = "alphaevolve"`). Default FALSE — requires a Google Cloud organization with Gemini
+    Enterprise licensing and AlphaEvolve entitlement. Standard `Forecaster.auto()` and the
+    `backend = "vertex_gemini"` backup require zero extra APIs beyond `aiplatform.googleapis.com`.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # --- Colab Enterprise runtime template -----------------------------------------
 # Blueprint for the VM a Colab runtime runs on — one template (sf-main, Python 3.11) serves every
 # notebook. Free at rest (a template costs nothing until a runtime starts, and runtimes

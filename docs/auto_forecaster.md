@@ -1,6 +1,6 @@
 # Glass-Box Auto-Forecaster & Multi-Branch `autofocus`
 
-> **Glass-Box Auto-Forecaster Documentation Suite:** **Main Guide & Architecture (`auto_forecaster.md`)** · [**29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)**](./auto_forecaster_benchmarks.md) · [**7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)**](./auto_forecaster_cloud_scale.md)
+> **Glass-Box Auto-Forecaster Documentation Suite:** **Main Guide & Architecture (`auto_forecaster.md`)** · [**29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)**](./auto_forecaster_benchmarks.md) · [**7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)**](./auto_forecaster_cloud_scale.md) · [**AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)**](./alphaevolve_runner.md)
 
 When you sit down to forecast a new dataset, you usually face an uncomfortable trade-off:
 
@@ -246,6 +246,7 @@ Every `ConfigBlueprint` (`bp = Forecaster.build_config(...)`) and `Forecaster` (
 | | `f.inventory_policy_df()` / `f.simulate_scenarios()` | **Operational Replenishment & What-If Scenarios:** Reorder points (`ROP`), safety stock (`SS`), and counterfactual promo/price shock simulations. |
 | | `f.detect_anomalies_df()` / `f.detect_change_points_df()` / `f.exceptions_df()` | **Anomaly, Regime Break & Exception Triage:** Historical/live anomaly detection, structural regime change points, and Top-$N$ operational exception queue. |
 | | `f.export_report("report.html")` | **Self-Contained HTML Executive Report:** Exports leaderboards, `autofocus` ledger, FVA ladder, bias/exception queues, and forecast plots into a single shareable `.html` file. |
+| **4. Opt-In Runtime & Post-Run Evolution (`Forecaster.evolve` / `f.evolve`)** | `Forecaster.evolve(data, target=..., backend=...)`<br/>`f.evolve(target="ensemble")`<br/>`Forecaster.evolve(from_run_ids=[...])` | **Opt-In `# EVOLVE-BLOCK` Code & Multi-Run Super-Ensemble Evolution ([`alphaevolve_runner.md`](./alphaevolve_runner.md)):** Evolves causal domain features, per-series adaptive ensemble weights (on `Forecaster.auto()`, a single manual `Forecaster` run `f.evolve()`, or across multiple BigQuery runs via `from_run_ids`), `BaseModel` plugins, or `AutoPolicyWeights` under an AST sandbox, `+1e6` lookahead probe, and 3-Gate Anti-Overfitting Ratchet. |
 
 ---
 
@@ -392,7 +393,10 @@ Suppose Pass 1 shows two issues at the same time: the target has growing varianc
 
 With `autofocus_mode="dag"` (the default):
 1. **Pass 1** fits the initial tier portfolio and records out-of-fold diagnostics.
-2. **Level 2 (`2A`, `2B`, `2C`)** tests each type of improvement in its own isolated branch. Because `scale-forecasting` identifies every model configuration by a content hash (`model_spec_hash`), **each branch automatically borrows Pass 1's already-fitted models** and only trains the newly added variants.
+2. **Level 2 (`2A`, `2B`, `2C`)** tests each type of improvement in its own isolated branch. Because `scale-forecasting` identifies every model configuration by a content hash ([`make_model_spec_hash`](api/config.md)), **each branch automatically borrows Pass 1's already-fitted models** and only trains the newly added variants:
+   - **What `make_model_spec_hash` excludes (100% zero-recompute borrowing):** `run_name`, sibling models in `cfg.models`, variant spelling (`lightgbm` in a univariate run == `lightgbm@univariate` in a covariate run), `compute` runtime/sizing, `ensemble` strategies (keyed separately by `make_ensemble_id`), and calendar/Fourier/level-shift flags for models that do not consume exogenous covariates (`naive_seasonal`, `theta`).
+   - **What `make_model_spec_hash` includes (triggers a fresh fit when changed):** `base_model`, `training_mode`, `cov_profile`, `covariates_used`, `clean_params`, active target transforms (`log1p`/`boxcox`, `outlier_policy`, `regime_routing`), `data`, `backtest` fold geometry, `output` bounds/quantiles, and `hpo` settings.
+   - **Pooling across manual runs with different HPO or features (`from_run_ids`):** When you want to combine already-completed runs that used *different* HPO settings, feature sets, or cloud runtimes without refitting anything, [`Forecaster.evolve(from_run_ids=[...], target="ensemble")`](./alphaevolve_runner.md#23-mode-b--post-run--multi-run-super-ensembling-fevolve-from_runs-from_run_ids--without-autofocus-or-tiers) pools their persisted `backtest_oof` and `forecast_predictions` directly and disambiguates distinct fits as `<model_type>@<run_short_id>`.
 3. **Level 3 (`3` — Synthesis)** combines only the branches that actually improved accuracy over Pass 1 and fits a learned ensemble (`nnls`, `ridge`, `horizon_specialist`) across the full pool of borrowed and new models.
 
 ### What Each `autofocus` Branch Looks For
@@ -454,6 +458,22 @@ my_cal = calibrate_duration_from_registry(project_id="YOUR_PROJECT_ID", dataset_
 blueprint = Forecaster.build_config("source_series_native", tier="wide_field", calibration=my_cal)
 ```
 
+### 5.1. Built-In AlphaEvolve Policy (`Forecaster.auto`) vs. Opt-In Runtime Evolution (`Forecaster.evolve`)
+
+> [!IMPORTANT]
+> **Two Distinct Ways to Use AlphaEvolve in `scale-forecasting`:**
+>
+> 1. **Built-In AlphaEvolve Policy (`Forecaster.build_config()` & `Forecaster.auto()` — Zero License Required):** Runs the deterministic, pure-Python decision rules in [`auto_policy.py`](api/auto.md) that were pre-evolved across 20 synthetic DGPs and 9 public open-data benchmarks. **Requires zero LLM calls, zero external APIs, and zero special Google Cloud licensing.**
+> 2. **Opt-In Runtime Evolution (`Forecaster.evolve()` — [AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)](./alphaevolve_runner.md)):** Mutates bounded `# EVOLVE-BLOCK` Python code (`"features"`, `"ensemble"`, `"model"`, `"policy"`) on top of `Forecaster.auto()` and promotes candidates only if they clear an AST security sandbox, a `+1e6` temporal lookahead probe, and a **3-Gate Anti-Overfitting Ratchet** (including an unseen Held-Out Lockdown Fold). Its primary default **`backend="alphaevolve"`** requires a Google Cloud organization with **Gemini Enterprise licensing + AlphaEvolve entitlement** (`discoveryengine.googleapis.com/v1alpha`, `enable_alphaevolve = true` in Terraform), while its non-default backup **`backend="vertex_gemini"`** runs on any standard Google Cloud project via Vertex AI Gemini (`aiplatform.googleapis.com`).
+
+| Capability / Requirement | 1. Built-In AlphaEvolve Policy (`Forecaster.auto()`) | 2A. Opt-In Runtime Evolution — Primary (`Forecaster.evolve(..., backend="alphaevolve")`) | 2B. Opt-In Runtime Evolution — Backup (`Forecaster.evolve(..., backend="vertex_gemini")`) |
+| :--- | :--- | :--- | :--- |
+| **Licensing & Cloud API** | **Zero license required** *(100% pure Python in `auto_policy.py`, 0 LLM calls at runtime)* | **Requires Gemini Enterprise license + AlphaEvolve entitlement** (`discoveryengine.googleapis.com/v1alpha`, `enable_alphaevolve = true`) | **Standard Google Cloud project** (`aiplatform.googleapis.com`, default `"gemini-3.8-flash"`, `enable_alphaevolve = false`) |
+| **What It Optimizes** | Compiles `RunConfig` across 4 exposure tiers & runs multi-branch `autofocus` (`Pass 1 -> 2A/2B/2C -> 3`) | Evolves `# EVOLVE-BLOCK` Python code (`"features"`, `"ensemble"`, `"model"`, `"policy"`) via managed multi-island Discovery Engine | Evolves `# EVOLVE-BLOCK` Python code via in-process MAP-Elites island buffer + Vertex AI Gemini mutations |
+| **Overfitting & Leakage Guards** | 4-Anchor Baseline Ladder, multi-fold CV, parsimony margin (`0.5%`), Champion Ratchet | **AST Security Sandbox + `+1e6` Future-Shock Probe + 3-Gate Ratchet** (Inner CV $\rightarrow$ Diebold–Mariano $p_{\text{DM}}$ $\rightarrow$ Unseen Lockdown Fold) | **Identical AST Sandbox + `+1e6` Future-Shock Probe + 3-Gate Ratchet** |
+
+$\rightarrow$ **Full guide, architecture diagram, and CLI/SDK/Airflow examples: [AlphaEvolve Runtime Harness (Opt-In) (`alphaevolve_runner.md`)](./alphaevolve_runner.md).**
+
 ---
 
 ## 6. How We Proved It: 4-Tier Progression, Foundation Models, 29 Benchmarks & 7-Runtime Cloud Scale
@@ -503,7 +523,7 @@ A **Data-Generating Process (DGP)** is a synthetic dataset where we wrote the un
 
 **Key findings across all `20 DGPs × 4 Tiers × {autofocus=False, autofocus=True}` (`160` runs):**
 
-- **`100%` Positive Forecast Value Added (`+28.94%` to `+77.57%` Peak FVA):** Every single DGP achieves strong positive error reduction over `naive_seasonal`.
+- **`100%` Positive Forecast Value Added (`+38.26%` to `+94.08%` Peak FVA):** Every single DGP achieves strong positive error reduction over `naive_seasonal`.
 - **Multi-Branch `autofocus` Delivers Up to `+43.93%` Error Reduction Over Pass 1:** On `first_light`, multi-branch `autofocus=True` improves over Pass 1 (`autofocus=False`) on **15 of 20 DGPs**—including **`+43.93%`** error reduction on `dgp_04_true_vs_decoy_covs` (`0.0954` $\rightarrow$ `0.0535`), **`+37.45%`** on `dgp_18_promo_lag_pullforward` (`0.0753` $\rightarrow$ `0.0471` via synthesized `exog_lags`), and **`+24.03%`** on `dgp_07_censored_stockout`—while stopping immediately after Pass 1 (`0` wasted passes) on pure white noise (`dgp_12`).
 - **Where Zero-Shot Foundation Models (`chronos2@global`) Win Outright:** On sub-daily multi-seasonal electricity loads (`dgp_19_hourly_diurnal_weekly_load`), zero-shot **`chronos2@global`** wins outright across all 74 model variants and ensembles (`WAPE = 0.0147`, **`+73.72%` FVA**), and ranks as the **#1 single non-ensemble model** on `dgp_03_intermittent_lumpy` (`MASE = 0.7662`), `dgp_08_hierarchical_nonneg` (`WAPE = 0.0437`), and `dgp_10_newsvendor_service` (`0.0875`).
 
@@ -518,7 +538,7 @@ Instead of hand-picking the thresholds and starting model lists in [`scale_forec
 - **Rounds 1–3 (`20` DGPs & Scale-Crossover Holdouts up to `25,000` Series):** Evolved residual white-noise early stopping (`0.00` wasted-pass penalty), lean Pass 1 + targeted Pass 2/3 specialist injection ($5\times$ higher multi-pass gain), single-fold overfit guards (`"best_single"` when `n_folds=1`), and `n_series` scale-regime cutoffs (`micro=9`, `small=99`, `medium=999`, `large=9,999`), lifting composite tournament fitness from `26.08` to **`74.82`** (`+45.40%` average FVA).
 - **Rounds 4–5 (`9` Public Open-Data Benchmarks, Sub-Daily Harmonics & Conformal Intervals):** Evolved leave-one-fold-out cross-fitted `ensemble_champion`, smoothed step-window shrinkage for `ensemble_horizon_specialist`, physical `365.25d` / `24h` / `168h` Fourier harmonics, frequency-matched lag engineering (`_frequency_matched_lags`), and finite-sample conformal order statistics (`_empirical_quantile`), achieving **`9 / 9` non-negative held-out test lift** across all 9 public benchmarks.
 
-$\rightarrow$ **See the complete 8-stage AlphaEvolve progression ledger (`Table 3`) in [`auto_forecaster_benchmarks.md`](./auto_forecaster_benchmarks.md#3-how-alphaevolve-on-gemini-enterprise-evolved-the-policy).**
+$\rightarrow$ **See the complete 8-stage AlphaEvolve progression ledger (`Table 3`) in [`auto_forecaster_benchmarks.md`](./auto_forecaster_benchmarks.md#3-how-alphaevolve-on-gemini-enterprise-evolved-the-policy), or run opt-in `# EVOLVE-BLOCK` evolution on your own dataset with [`Forecaster.evolve()` (`alphaevolve_runner.md`)](./alphaevolve_runner.md).**
 
 ---
 

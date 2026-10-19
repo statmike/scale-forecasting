@@ -128,6 +128,7 @@ nav:
       - Auto-forecaster & autofocus: auto_forecaster.md
       - Auto-forecaster benchmarks (29 datasets): auto_forecaster_benchmarks.md
       - Auto-forecaster cloud scale (7 runtimes): auto_forecaster_cloud_scale.md
+      - AlphaEvolve Runtime Harness (Opt-In): alphaevolve_runner.md
       - Quota and scale: quota_and_scale.md
       - Reading source data: reading_source_data.md
       - Writing results: writing_results.md
@@ -143,6 +144,7 @@ nav:
       - Overview: api/index.md
       - Forecaster (SDK): api/sdk.md
       - Auto-forecaster & autofocus: api/auto.md
+      - evolve: api/evolve.md
       - Synthetic DGP benchmarks: api/benchmarks.md
       - AI agent surfaces & probe: api/agent_surfaces.md
       - MCP server (stdio): api/mcp.md

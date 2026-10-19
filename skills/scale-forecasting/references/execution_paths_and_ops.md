@@ -143,6 +143,7 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Glass-Box Auto-Forecaster & `autofocus`** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --tier first_light --autofocus --max-passes 3` | `Forecaster.profile_data(panel)` / `Forecaster.build_config(panel, tier='wide_field')` / `Forecaster.auto(panel, tier='first_light', autofocus=True)` |
 | **7-Question Practitioner Assessment & Model Comparison** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --autofocus` | `f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / `f.baseline_value_df()` / `f.hierarchy_value_df()` |
 | **Auto-Forecaster Composer 3 / Airflow DAG Emission** | `python -m scale_forecasting.main --auto --table source_series_native --tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | `bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |
+| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
 
 ---
 

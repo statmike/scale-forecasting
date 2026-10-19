@@ -3,17 +3,19 @@
 # the next (Terraform infers order from that), with a few explicit depends_on for API enablement.
 
 module "apis" {
-  source     = "./modules/apis"
-  project_id = var.project_id
-  enable     = var.enable_apis
+  source             = "./modules/apis"
+  project_id         = var.project_id
+  enable             = var.enable_apis
+  enable_alphaevolve = var.enable_alphaevolve
 }
 
 module "iam" {
-  source        = "./modules/iam"
-  project_id    = var.project_id
-  create        = var.create_service_accounts
-  runner_email  = var.runner_sa_email
-  compute_email = var.compute_sa_email
+  source             = "./modules/iam"
+  project_id         = var.project_id
+  create             = var.create_service_accounts
+  runner_email       = var.runner_sa_email
+  compute_email      = var.compute_sa_email
+  enable_alphaevolve = var.enable_alphaevolve
 
   depends_on = [module.apis]
 }
