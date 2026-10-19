@@ -1,6 +1,6 @@
 # Auto-Forecaster Benchmarks: 4-Tier Progression, 20 Synthetic DGPs, AlphaEvolve & 9 Public Datasets
 
-> **Part of the Glass-Box Auto-Forecaster Guide:** [**Main Guide & Architecture (`auto_forecaster.md`)**](./auto_forecaster.md) · **29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)** · [**7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)**](./auto_forecaster_cloud_scale.md)
+> **Part of the Glass-Box Auto-Forecaster Guide:** [**Main Guide & Architecture (`auto_forecaster.md`)**](./auto_forecaster.md) · **29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)** · [**7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)**](./auto_forecaster_cloud_scale.md) · [**AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)**](./alphaevolve_runner.md)
 
 This page contains the complete offline and open-data empirical evaluation of [`Forecaster.build_config()`](api/sdk.md) and [`Forecaster.auto()`](api/sdk.md) across all **4 exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`) $\times$ `{autofocus=False, autofocus=True}`**:
 
@@ -8,6 +8,7 @@ This page contains the complete offline and open-data empirical evaluation of [`
 2. **[20 Synthetic Ground-Truth Recipes (`dgp_01`–`dgp_20`) Across All 4 Exposure Tiers](#2-20-synthetic-ground-truth-recipes-dgp_01dgp_20-across-all-4-exposure-tiers)** (`Tables 2A, 2B & 2C`)
 3. **[How AlphaEvolve on Gemini Enterprise Evolved the Policy](#3-how-alphaevolve-on-gemini-enterprise-evolved-the-policy)** (`Table 3`)
 4. **[9 Real-World Public Open-Data Benchmarks Across All 4 Exposure Tiers (M5, Favorita, M4, Monash, ETT)](#4-9-real-world-public-open-data-benchmarks-across-all-4-exposure-tiers-m5-favorita-m4-monash-ett)** (`Tables 4A, 4B & 4C`)
+5. **[Built-In AlphaEvolve Policy (`Forecaster.auto`) vs. Opt-In Runtime Evolution (`Forecaster.evolve`)](#5-built-in-alphaevolve-policy-forecasterauto-vs-opt-in-runtime-evolution-forecasterevolve)** (`Table 5`)
 
 ---
 
@@ -62,7 +63,7 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 | Benchmark | Metric | Real-World Scenario Simulated | Diagnostic Trigger & `autofocus` Action | Overall Winning Champion | Peak FVA % $\uparrow$ |
 | :--- | :---: | :--- | :--- | :--- | :---: |
 | **`dgp_01_smooth_seasonal`** | `wape` | Clean retail series with steady trend + weekly & yearly seasonality | Stops after Pass 1 *(already optimal)* | `ensemble_horizon_specialist` | **`+40.33%`** |
-| **`dgp_02_multiplicative_log`** | `wape` | Fast-growing series where seasonal swings widen as volume grows | Pass 2 adds `@transform_log1p` & `@direct` specialists | `ensemble_horizon_specialist` | **`+43.06%`** |
+| **`dgp_02_multiplicative_log`** | `wape` | Fast-growing series where seasonal swings widen as volume grows | Pass 2 adds `@transform_log1p` & `@direct` specialists | `ensemble_horizon_specialist` | **`+44.89%`** |
 | **`dgp_03_intermittent_lumpy`** | `mase` | Spare-parts / lumpy demand where most days have zero sales | Pass 2 adds `croston` & `naive_mean`; `chronos2@global_univariate` leads `deep_field` | `ensemble_horizon_specialist` | **`+40.07%`** |
 | **`dgp_04_true_vs_decoy_covs`** | `wape` | 2 real promo/price drivers mixed with 3 fake random-noise columns | Drops the 3 noise columns in Pass 2 and blends in Pass 3 | `sarimax` | **`+77.57%`** |
 | **`dgp_05_horizon_crossover`** | `wape` | Short-term momentum dominates days 1–5; weekly cycle dominates days 6–14 | Pass 2 adds `@direct` horizon models + `horizon_specialist` blend | `ensemble_horizon_specialist` | **`+59.87%`** |
@@ -76,11 +77,11 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 | **`dgp_13_all_decoy_univariate_wins`** | `wape` | 4 pure random-noise feature columns (`decoy_1`..`decoy_4`) with zero true signal | Drops 100% of decoy columns; univariate champion beats multivariate ML | `ensemble_horizon_specialist` | **`+41.78%`** |
 | **`dgp_14_large_hierarchy_intermittent_leaves`** | `mase` | 3-level `region -> warehouse -> sku` hierarchy with intermittent leaves & smooth root | Applies `wls_struct` + `mint_nonneg` reconciliation across all 3 levels | `ensemble_horizon_specialist` | **`+38.26%`** |
 | **`dgp_15_scale_crossover_panel`** | `wape` | Scalable panel (`n_series=6` micro vs. `n_series=120` medium) with shared seasonal curve | Adapts portfolio from local stats (`micro`) to global cross-series pooling (`medium`) | `ensemble_horizon_specialist` | **`+44.08%`** |
-| **`dgp_16_monthly_trading_days`** | `wape` | Monthly (`freq="MS"`) revenue panel driven by calendar business-day counts | Enables `trading_days=True` calendar features & `@direct` lags | `ensemble_nnls` | **`+43.21%`** |
+| **`dgp_16_monthly_trading_days`** | `wape` | Monthly (`freq="MS"`) revenue panel driven by calendar business-day counts | Enables `trading_days=True` calendar features & `@direct` lags | `ensemble_nnls` | **`+82.71%`** |
 | **`dgp_17_missing_gaps_and_leading_zeros`** | `wape` | Series with pre-launch leading zeros (`15%`) and missing date gaps (`5%`) | Enables `trim_leading_zeros=True` and `grid_policy="fill_zero"` | `ensemble_horizon_specialist` | **`+39.33%`** |
 | **`dgp_18_promo_lag_pullforward`** | `wape` | Promotions that lift current-day sales (`t`) and pull forward demand from `t+1, t+2` | Synthesizes `exog_lags` (`[1, 2, 7]`) on `promo_flag` in Branch `2B` | `ensemble_nnls` | **`+94.08%`** |
 | **`dgp_19_hourly_diurnal_weekly_load`** | `wape` | Hourly (`freq="h"`) transformer load with $24\text{h}$ diurnal + $168\text{h}$ weekly cycle + temperature | Multi-seasonal `fourier` ($24\text{h}$, $12\text{h}$, $168\text{h}$) + `chronos2@global` overall winner (`+73.72%` FVA) | `chronos2@global` | **`+73.72%`** |
-| **`dgp_20_monthly_regime_drift_damped`** | `wape` | Monthly (`freq="MS"`, $T=60$) macro/tourism series with 12-month cycle, break & damped trend | Enables monthly lags (`[1, 2, 3, 6, 12]`), `level_shift`, and `@direct` specialists | `ensemble_horizon_specialist` | **`+61.95%`** |
+| **`dgp_20_monthly_regime_drift_damped`** | `wape` | Monthly (`freq="MS"`, $T=60$) macro/tourism series with 12-month cycle, break & damped trend | Enables monthly lags (`[1, 2, 3, 6, 12]`), `level_shift`, and `@direct` specialists | `ensemble_horizon_specialist` | **`+69.46%`** |
 
 ### Table 2B — 4-Tier × `autofocus` Error Progression & Held-Out Test Lift Across All 20 DGPs
 
@@ -267,4 +268,24 @@ print(f.assess())
 
 ---
 
-Continue to **[Auto-Forecaster Cloud Scale: 7-Runtime Matrix, `L4` GPU Foundation Models, Vertex AI AutoML & Cloud `autofocus` (`auto_forecaster_cloud_scale.md`)](./auto_forecaster_cloud_scale.md)** or return to the **[Main Auto-Forecaster Guide (`auto_forecaster.md`)](./auto_forecaster.md)**.
+## 5. Built-In AlphaEvolve Policy (`Forecaster.auto`) vs. Opt-In Runtime Evolution (`Forecaster.evolve`)
+
+> [!IMPORTANT]
+> **Pre-Calibrated Policy (`Forecaster.auto()`) vs. Opt-In Runtime Code Evolution (`Forecaster.evolve()`):**
+>
+> - **1. Built-In AlphaEvolve Policy (`Forecaster.auto()` — Zero License Required):** All 5 rounds of evolutionary discovery in [Section 3](#3-how-alphaevolve-on-gemini-enterprise-evolved-the-policy) above are already compiled into pure Python inside [`scale_forecasting.auto_policy`](api/auto.md). Running `Forecaster.build_config()` or `Forecaster.auto()` requires **zero LLM API calls, zero external dependencies, and zero Gemini Enterprise licensing**.
+> - **2. Opt-In Runtime Evolution (`Forecaster.evolve()` — [AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)](./alphaevolve_runner.md)):** When your organization wants to evolve custom `# EVOLVE-BLOCK` Python code (`"features"`, `"ensemble"`, `"model"`, or `"policy"`) on a proprietary dataset on top of `Forecaster.auto()`, use [`Forecaster.evolve()`](api/sdk.md) ([`scale_forecasting.evolve`](api/evolve.md)). Its primary default **`backend="alphaevolve"`** connects to Gemini Enterprise Discovery Engine (`discoveryengine.googleapis.com/v1alpha`, requiring **Gemini Enterprise licensing + AlphaEvolve entitlement** and `enable_alphaevolve = true` in Terraform), while its non-default backup **`backend="vertex_gemini"`** runs on standard Vertex AI Gemini (`aiplatform.googleapis.com`, default `"gemini-3.8-flash"`, customizable via `model_name="..."`). Both backends enforce the exact same AST security sandbox, `+1e6` future-leakage probe, and **3-Gate Anti-Overfitting Ratchet** (including an unseen Held-Out Lockdown Fold).
+
+### Table 5 — Built-In Policy vs. Opt-In Runtime Evolution (`scale_forecasting.evolve`)
+
+*How to read this table:* Compare the zero-license built-in `Forecaster.auto()` policy against the opt-in `Forecaster.evolve()` runtime harness backends.
+
+| Dimension | 1. Built-In AlphaEvolve Policy (`Forecaster.auto()`) | 2A. Opt-In Runtime Evolution — Primary (`Forecaster.evolve(..., backend="alphaevolve")`) | 2B. Opt-In Runtime Evolution — Backup (`Forecaster.evolve(..., backend="vertex_gemini")`) |
+| :--- | :--- | :--- | :--- |
+| **Licensing & Cloud API** | **Zero license required** *(100% pure Python in `auto_policy.py`)* | **Requires Gemini Enterprise license + AlphaEvolve entitlement** (`discoveryengine.googleapis.com/v1alpha`, `enable_alphaevolve = true`) | **Standard Google Cloud project** (`aiplatform.googleapis.com`, default `"gemini-3.8-flash"`, `enable_alphaevolve = false`) |
+| **How It Works** | Deterministic 4-tier compiler + multi-branch `autofocus` DAG (`Pass 1 -> 2A/2B/2C -> 3`) | Managed multi-island Discovery Engine service (`:acquirePrograms` / `:submitProgramsEvaluations`) mutating `# EVOLVE-BLOCK` targets | In-process MAP-Elites island population mutating `# EVOLVE-BLOCK` targets via Vertex AI Gemini |
+| **Anti-Overfitting & Causality Guards** | 4-Anchor Baseline Ladder, multi-fold CV, parsimony margin (`0.5%`), Champion Ratchet | **AST Security Sandbox + `+1e6` Future-Shock Probe + 3-Gate Ratchet** (Inner CV Lift $\rightarrow$ Diebold–Mariano $p_{\text{DM}}$ $\rightarrow$ Unseen Held-Out Lockdown Fold) | **Identical AST Sandbox + `+1e6` Future-Shock Probe + 3-Gate Ratchet** |
+
+---
+
+Continue to **[Auto-Forecaster Cloud Scale (`auto_forecaster_cloud_scale.md`)](./auto_forecaster_cloud_scale.md)**, explore the **[Opt-In AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)](./alphaevolve_runner.md)**, or return to the **[Main Auto-Forecaster Guide (`auto_forecaster.md`)](./auto_forecaster.md)**.

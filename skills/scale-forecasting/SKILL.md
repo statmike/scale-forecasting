@@ -4,7 +4,7 @@ description: Configure, validate, dry-run, execute, review, and repair enterpris
 license: Apache-2.0
 metadata:
   author: statmike
-  version: 1.3.0
+  version: 1.4.0
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide
@@ -131,6 +131,7 @@ Select the execution path that matches the user's goal and `probe_environment()`
 | **Path 4: Direct Per-Family Submitters** | Submitting a single family or runtime (`submit`, `ray_submit`, `vertex_submit`, `gce_submit`, `gke_submit`, `automl_submit`, `ensemble_run`) | `python -m scale_forecasting.vertex_submit --config <path>.json --family ml` |
 | **Path 5: Cloud Composer 3 / Airflow DAG Emission** | Rendering a self-contained Airflow DAG (`dag_<run_id>.py`) with per-family tasks, optional `--with-retry` repair node, or multi-branch `--auto --autofocus` DAG | `python -m scale_forecasting.main --config <path>.json --emit-airflow --with-retry` or `bp.emit_airflow_dag(autofocus=True)` |
 | **Auto-Forecaster & Multi-Branch `autofocus`** | Automated multi-pass tournament (`Pass 1 -> Branches 2A/2B/2C -> Pass 3 Synthesis`) with `model_spec_hash` cell borrowing and Champion Ratchet across any surface | `Forecaster.auto(source, tier="first_light", autofocus=True)` or `python -m scale_forecasting.main --auto --tier first_light --autofocus` or MCP `run_auto_forecast` |
+| **Opt-In AlphaEvolve Runtime Evolution (`Forecaster.evolve`)** | Evolving `# EVOLVE-BLOCK` Python code (`"features"`, `"ensemble"`, `"model"`, `"policy"`) on top of `Forecaster.auto()` under an AST sandbox, `+1e6` lookahead probe, and 3-Gate Anti-Overfitting Ratchet (`backend="alphaevolve"` default requiring Gemini Enterprise + `enable_alphaevolve = true`, or `backend="vertex_gemini"` backup on standard Vertex AI) | `Forecaster.evolve(source, target="features", backend="alphaevolve" \| "vertex_gemini")` or `python -m scale_forecasting.evolve --target features --backend alphaevolve` or MCP `run_auto_forecast(evolve_target="features")` |
 
 **Mandatory Pre-Flight Habit Before Any Live Cloud Run:**
 1. Run `--dry-run` (or `Forecaster.dry_run()` / MCP `plan_execution(mode="dry_run")`) to inspect the exact `LaunchPlan`, resolved machine shapes, `run_id`, and idempotency status in `run_registry`.

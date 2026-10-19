@@ -310,6 +310,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
 | `create_gke` | `false` | (already off) turn **on** for a standing GKE cluster (`SF_GKE_CLUSTER`) with scale-to-zero CPU & GPU node pools |
+| `enable_alphaevolve` | `false` | (already off) turn **on** to enable `discoveryengine.googleapis.com` and grant `roles/discoveryengine.admin` to `scale-forecasting-runner` for Gemini Enterprise AlphaEvolve (`Forecaster.evolve(..., backend="alphaevolve")`; requires Gemini Enterprise licensing, whereas `Forecaster.auto()` and the built-in `backend="vertex_gemini"` backup require zero extra APIs beyond `aiplatform.googleapis.com`) |
 | `build_image` | `true` | (already **on**) turn **off** when you build/push the runtime image yourself (CI / air-gapped) |
 | `run_seed` | `true` | (already **on**) turn **off** to skip the example dataset (bring your own source table) |
 | `create_project` (bootstrap) | `true` | your org pre-creates projects |
@@ -320,8 +321,8 @@ in `terraform.tfvars` and pass existing resources by variable:
 
 | Module | Purpose |
 | :--- | :--- |
-| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Dataflow, Pipelines, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets). |
-| [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, and Google-managed service-agent bindings. |
+| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Dataflow, Pipelines, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets, plus opt-in `discoveryengine.googleapis.com` when `enable_alphaevolve = true`). |
+| [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, Google-managed service-agent bindings, and opt-in `roles/discoveryengine.admin` on `scale-forecasting-runner` when `enable_alphaevolve = true`. |
 | [`network`](./main/modules/network/main.tf) | Provisions the VPC, regional subnet with Private Google Access, Cloud Router/NAT, internal firewall rules, Private Service Access peering, and PSC network attachment for Vertex Ray. |
 | [`storage`](./main/modules/storage/main.tf) | Creates the two GCS buckets (`<project>-warehouse` for Iceberg tables and model artifacts; `<project>-code` for staged configs, package zips, and packed-venv archives). |
 | [`bigquery`](./main/modules/bigquery/main.tf) | Creates the `scale_forecasting` BigQuery dataset and the Cloud Resource BigLake connection used by managed Apache Iceberg tables. |

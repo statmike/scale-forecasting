@@ -1403,6 +1403,14 @@ def render_skill_execution_paths_reference() -> str:
                 "--tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | "
                 "`bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |"
             ),
+            (
+                "| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | "
+                "`python -m scale_forecasting.evolve --target features --backend alphaevolve "
+                "--model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | "
+                "`Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / "
+                "`f.evolve(target='ensemble')` / "
+                "`Forecaster.evolve(from_run_ids=[...], target='ensemble')` |"
+            ),
             "",
             "---",
             "",
@@ -1567,6 +1575,15 @@ def render_llms_txt() -> str:
                 "(`10` -> `100,000` series) across `bigquery`, `spark`, `vertex` (`L4` GPU & "
                 "CPU), `gce`, `gke`, `ray`, and `vertex_automl` (`vertex_tide`, `vertex_l2l`), "
                 "plus cross-run cell borrowing."
+            ),
+            (
+                f"- [AlphaEvolve Runtime Harness (Opt-In)]({_SITE_BASE}/alphaevolve_runner/): "
+                "Opt-in evolutionary code discovery (`Forecaster.evolve`, `python -m "
+                "scale_forecasting.evolve`) across `# EVOLVE-BLOCK` targets (`features`, "
+                "`ensemble`, `model`, `policy`) with AST security sandbox, temporal lookahead "
+                "probe, and 3-Gate Anti-Overfitting Ratchet (default `backend='alphaevolve'` on "
+                "Gemini Enterprise Discovery Engine + `backend='vertex_gemini'` backup on Vertex "
+                "AI Gemini)."
             ),
             (
                 f"- [Models Reference (37 Models)]({_SITE_BASE}/models_reference/): All 37 "

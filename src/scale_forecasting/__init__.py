@@ -53,7 +53,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.3.0"
+    __version__ = "1.4.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -184,6 +184,10 @@ _LAZY: dict[str, tuple[str, str]] = {
     "list_public_benchmarks": (".benchmarks", "list_public_benchmarks"),
     "public_benchmark_catalog": (".benchmarks", "public_benchmark_catalog"),
     "fetch_public_benchmark": (".benchmarks", "fetch_public_benchmark"),
+    # Opt-in evolutionary code discovery (Track H).
+    "EvolveConfig": (".evolve", "EvolveConfig"),
+    "EvolveResult": (".evolve", "EvolveResult"),
+    "run_evolution": (".evolve", "run_evolution"),
 }
 
 __all__ = [
@@ -262,6 +266,11 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         run_group,
     )
     from .ensemble_run import ensemble_cross_runs, merge_configs_for_ensemble  # noqa: F401
+    from .evolve import (  # noqa: F401
+        EvolveConfig,
+        EvolveResult,
+        run_evolution,
+    )
     from .features import compute_demand_profile  # noqa: F401
     from .main import run  # noqa: F401
     from .mcp import McpServer  # noqa: F401

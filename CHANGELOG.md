@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] - 2026-10-19
+
+### Added
+
+- **AlphaEvolve & Vertex Gemini Evolutionary Harness (`scale_forecasting.evolve`, `Forecaster.evolve()`, [`docs/alphaevolve_runner.md`](./docs/alphaevolve_runner.md)):**
+  - Added 4 bounded `# EVOLVE-BLOCK-START` / `# EVOLVE-BLOCK-END` mutation targets (`features`, `ensemble`, `model`, `policy`) in [`targets.py`](./src/scale_forecasting/evolve/targets.py) across 3 backends in [`client.py`](./src/scale_forecasting/evolve/client.py): `backend="alphaevolve"` (`discoveryengine.googleapis.com/v1alpha`, default for Google Cloud organizations with Gemini Enterprise + AlphaEvolve entitlement), `backend="vertex_gemini"` (`aiplatform.googleapis.com`, universal Google Cloud backup using an evolutionary island-model archive), and `backend="mock"` (deterministic zero-cloud CI/offline backend).
+  - User-configurable `model_name` defaulting to `DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"` with support for `"gemini-4-argon"` Pro reasoning or any custom Gemini model across Python SDK (`Forecaster.evolve(..., model_name=...)`), CLI (`python -m scale_forecasting.evolve --model-name ...`), Airflow DAG emitter (`EvolveResult.emit_airflow_dag()`), and MCP (`run_auto_forecast(evolve_model_name=...)`).
+  - **3-Gate Anti-Overfitting Ratchet & Future-Leakage Sentinel ([`sandbox.py`](./src/scale_forecasting/evolve/sandbox.py), [`evaluator.py`](./src/scale_forecasting/evolve/evaluator.py)):** Enforces static AST sandboxing (`validate_candidate_ast`), a `+1e6` future-target perturbation causality probe (`verify_no_future_leakage`), Gate 1 multi-series inner OOF cross-validation fold gain, Gate 2 Diebold–Mariano significance ($p_{\text{DM}} \le \alpha$) + worst-decile FVA tail floor, and Gate 3 unseen held-out temporal lockdown fold verification (`promoted=True` only when all 3 gates pass; otherwise `promoted=False` zero-regret fallback).
+- **Post-Run & Multi-Run Super-Ensembling Without Requiring `autofocus` or Auto-Forecaster Tiers ([`sdk.py`](./src/scale_forecasting/sdk.py), [`evaluator.py`](./src/scale_forecasting/evolve/evaluator.py)):**
+  - `Forecaster.evolve()` works both as an instance method on any completed manual `Forecaster` run (`f.evolve(target="ensemble")`) and as a classmethod pooling out-of-fold backtest predictions (`backtest_oof`) and horizon forecasts (`forecast_predictions`) across arbitrary prior runs (`Forecaster.evolve(from_run_ids=["run-1", "run-2"], target="ensemble")` or `from_runs=[f1, f2]`).
+  - Enforces dataset/horizon/frequency/target compatibility (`verify_oof_pool_compatibility`), deduplicates identical `make_model_spec_hash` fits, disambiguates same-name models with distinct HPO/feature specs as `<model>@<run_short_id>`, benchmarks against the reigning `#1` single model or built-in `ensemble_*` strategy (`reigning_champion_model`), splits historical OOF folds temporally into inner evolution folds vs. a held-out Gate 3 lockdown fold, and materializes conformal-calibrated `EvolveResult.predictions_df` (`yhat`, `yhat_lower`, `yhat_upper`).
+- **Opt-In Terraform Provisioning (`enable_alphaevolve`) & AI Agent / MCP Surfaces ([`terraform/main/variables.tf`](./terraform/main/variables.tf), [`mcp.py`](./src/scale_forecasting/mcp.py)):**
+  - Added `enable_alphaevolve = false` (default) in [`terraform/main/variables.tf`](./terraform/main/variables.tf) to conditionally enable `discoveryengine.googleapis.com` and bind least-privilege runner IAM when set to `true`.
+  - Extended the `run_auto_forecast` MCP tool in [`mcp.py`](./src/scale_forecasting/mcp.py) with `evolve_target`, `evolve_backend`, `evolve_max_evaluations`, `evolve_from_run_ids`, and `evolve_model_name`.
+
+### Changed
+
+- **Complete Auto-Forecaster Empirical Benchmark & Cloud Scale Matrices ([`docs/auto_forecaster.md`](./docs/auto_forecaster.md), [`docs/auto_forecaster_benchmarks.md`](./docs/auto_forecaster_benchmarks.md), [`docs/auto_forecaster_cloud_scale.md`](./docs/auto_forecaster_cloud_scale.md)):**
+  - Added complete 20-DGP Tier Progression Matrices (`first_light` $\rightarrow$ `wide_field` $\rightarrow$ `deep_field` $\rightarrow$ `survey` with `autofocus=False` vs. `True`), the 9-dataset Public Open-Data Benchmark Matrix across local and cloud, the 7-Runtime Cloud Scale Progression Matrix (`10` to `100,000` series), and detailed `make_model_spec_hash` cross-run borrowing semantics (`backtest`, `hpo`, `ensemble`, `features`).
+
+---
+
 ## [1.3.0] - 2026-10-16
 
 ### Added

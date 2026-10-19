@@ -153,6 +153,26 @@ class JobTrace:
     runtime_seconds: float | None
 
 
+class _class_or_instance_method:
+    """Descriptor allowing a method to be called on ``Forecaster`` or on an instance."""
+
+    def __init__(self, func: Any) -> None:
+        self._func = func
+        self.__doc__ = func.__doc__
+        self.__name__ = func.__name__
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Any:
+        target = owner if instance is None else instance
+
+        def _bound(*args: Any, **kwargs: Any) -> Any:
+            return self._func(target, *args, **kwargs)
+
+        _bound.__doc__ = self._func.__doc__
+        _bound.__name__ = self._func.__name__
+        _bound.__qualname__ = getattr(self._func, "__qualname__", self._func.__name__)
+        return _bound
+
+
 class Forecaster:
     """The easy path: point it at a config, then `dry_run`, `run`, `status`, `wait`, or `results`.
 
@@ -169,10 +189,19 @@ class Forecaster:
     `status`/`results`/`jobs`/`trace` work as a reattach path even in a fresh process.
     """
 
-    def __init__(self, config: RunConfig, *, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        config: RunConfig,
+        *,
+        settings: Settings | None = None,
+        oof_df: pd.DataFrame | None = None,
+        predictions_df: pd.DataFrame | None = None,
+    ) -> None:
         self._config = config
         self._settings = settings
         self._auto_session: Any = None
+        self._oof_df: pd.DataFrame | None = oof_df
+        self._predictions_df: pd.DataFrame | None = predictions_df
 
     @property
     def auto_session(self) -> Any:
@@ -361,6 +390,94 @@ class Forecaster:
             settings=settings,
         )
 
+    @_class_or_instance_method
+    def evolve(
+        cls_or_self: Any,
+        data: Any = None,
+        *,
+        from_runs: Sequence[Any] | None = None,
+        from_run_ids: Sequence[str] | None = None,
+        dataset_id: str = "scale_forecasting",
+        target: str = "features",
+        backend: str = "alphaevolve",
+        tier: str = "deep_sky",
+        where: str = "local",
+        horizon: int | None = None,
+        max_evaluations: int = 10,
+        significance_alpha: float = 0.10,
+        project_id: str | None = None,
+        location: str = "global",
+        region: str = "us-central1",
+        model_name: str = "gemini-3.8-flash",
+        export_path: str | Path | None = None,
+        random_seed: int = 42,
+        config: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Run opt-in evolutionary code discovery (`scale_forecasting.evolve`).
+
+        Works both as a classmethod (``Forecaster.evolve(data=..., from_run_ids=[...],
+        from_runs=[...], model_name="gemini-3.8-flash")``) and as an instance method on an
+        existing ``Forecaster`` instance (``f.evolve(target="ensemble", ...)``, which
+        automatically passes ``from_runs=[self]`` without re-fitting base models). Pass
+        ``model_name`` (default ``"gemini-3.8-flash"``) to select any Gemini / Vertex AI model.
+        """
+        from .evolve import EvolveConfig, run_evolution
+
+        is_instance = not isinstance(cls_or_self, type)
+        if is_instance:
+            if isinstance(data, str) and data in ("features", "ensemble", "model", "policy"):
+                target = data
+                data = cls_or_self
+            elif data is None:
+                data = cls_or_self
+            if from_runs is None and from_run_ids is None:
+                from_runs = [cls_or_self]
+                if target == "features" and getattr(cls_or_self, "_auto_session", None) is None:
+                    target = "ensemble"
+            inst_settings = getattr(cls_or_self, "_settings", None)
+            if project_id is None and inst_settings is not None:
+                project_id = inst_settings.project_id
+            if (
+                dataset_id == "scale_forecasting"
+                and inst_settings is not None
+                and inst_settings.dataset_id
+            ):
+                dataset_id = inst_settings.dataset_id
+
+        if config is not None:
+            return run_evolution(
+                data,
+                config,
+                from_runs=from_runs,
+                from_run_ids=from_run_ids,
+                dataset_id=dataset_id,
+                **kwargs,
+            )
+        evolve_cfg = EvolveConfig(
+            target=target,
+            backend=backend,
+            tier=tier,
+            where=where,
+            horizon=horizon,
+            max_evaluations=max_evaluations,
+            significance_alpha=significance_alpha,
+            project_id=project_id,
+            location=location,
+            region=region,
+            model_name=model_name,
+            export_path=str(export_path) if export_path is not None else None,
+            random_seed=random_seed,
+        )
+        return run_evolution(
+            data,
+            evolve_cfg,
+            from_runs=from_runs,
+            from_run_ids=from_run_ids,
+            dataset_id=dataset_id,
+            **kwargs,
+        )
+
     @classmethod
     def from_file(cls, path: str | Path, *, settings: Settings | None = None) -> Forecaster:
         """Build from a JSON config file (delegates to
@@ -381,7 +498,15 @@ class Forecaster:
         return cls(cfg, settings=settings)
 
     @classmethod
-    def from_run_id(cls, run_id: str, *, settings: Settings | None = None) -> Forecaster:
+    def from_run_id(
+        cls,
+        run_id: str,
+        *,
+        project_id: str | None = None,
+        dataset_id: str | None = None,
+        region: str | None = None,
+        settings: Settings | None = None,
+    ) -> Forecaster:
         """Build from a run that already happened, by reading its config back out of the registry.
 
         The third way in, for the operator who inherits a broken run: they have its id, from a
@@ -399,6 +524,36 @@ class Forecaster:
         what an id buys you is the config, not a second way to plan.
         """
         from .retry_run import config_for_run
+
+        if settings is None and (
+            project_id is not None or dataset_id is not None or region is not None
+        ):
+            import os
+
+            from .settings import Settings
+
+            eff_proj = (
+                project_id
+                or os.environ.get("SF_PROJECT_ID")
+                or os.environ.get("GOOGLE_CLOUD_PROJECT")
+                or ""
+            )
+            eff_region = region or os.environ.get("SF_REGION") or "us-central1"
+            eff_ds = dataset_id or os.environ.get("SF_DATASET_ID") or "scale_forecasting"
+            if eff_proj:
+                settings = Settings(
+                    project_id=eff_proj,
+                    connection=(
+                        os.environ.get("SF_CONNECTION")
+                        or f"{eff_proj}.{eff_region}.iceberg-connection"
+                    ),
+                    warehouse_uri=(
+                        os.environ.get("SF_WAREHOUSE_URI")
+                        or f"gs://{eff_proj}-forecasting/warehouse"
+                    ),
+                    dataset_id=eff_ds,
+                    region=eff_region,
+                )
 
         return cls(config_for_run(run_id, settings=settings), settings=settings)
 
@@ -1195,6 +1350,49 @@ class Forecaster:
         """Alias for :meth:`leaderboard_df` matching :meth:`RunResult.leaderboard`."""
         return self.leaderboard_df(run_id, all_metrics=all_metrics)
 
+    def oof_df(
+        self,
+        run_id: str | None = None,
+        *,
+        ts_ids: Sequence[str] | None = None,
+        models: Sequence[str] | None = None,
+        limit: int = 50000,
+    ) -> pd.DataFrame:
+        """Return a ``DataFrame`` of out-of-fold (OOF) backtest predictions for ``run_id``."""
+        import pandas as pd
+
+        from .registry.reads import read_oof
+
+        if self._oof_df is not None and (run_id is None or run_id == self.run_id):
+            df = self._oof_df.copy()
+            if ts_ids is not None:
+                df = df[df["ts_id"].isin(list(ts_ids))]
+            if models is not None:
+                df = df[df["model_type"].isin(list(models))]
+            return df.reset_index(drop=True)
+
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            df = self._auto_session.oof_df.copy()
+            if ts_ids is not None:
+                df = df[df["ts_id"].isin(list(ts_ids))]
+            if models is not None:
+                df = df[df["model_type"].isin(list(models))]
+            return df.reset_index(drop=True)
+
+        rid = run_id or self.run_id
+        rows = read_oof(
+            rid,
+            ts_ids=list(ts_ids) if ts_ids is not None else None,
+            models=list(models) if models is not None else None,
+            limit=limit,
+            settings=self._settings,
+        )
+        return pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
+
     def predictions_df(
         self,
         run_id: str | None = None,
@@ -1216,6 +1414,16 @@ class Forecaster:
         """
         from .registry.reads import read_oof, read_predictions, read_series_history
         from .review import build_predictions_frame
+
+        if self._predictions_df is not None and (run_id is None or run_id == self.run_id):
+            df = self._predictions_df.copy()
+            if ts_id is not None:
+                df = df[df["ts_id"] == ts_id]
+            elif ts_ids is not None:
+                df = df[df["ts_id"].isin(list(ts_ids))]
+            if models is not None and "model_type" in df.columns:
+                df = df[df["model_type"].isin(list(models))]
+            return df.reset_index(drop=True)
 
         if (
             self._auto_session is not None

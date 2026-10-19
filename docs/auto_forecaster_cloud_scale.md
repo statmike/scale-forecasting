@@ -1,6 +1,6 @@
 # Auto-Forecaster Cloud Scale: 7-Runtime Matrix, L4 GPU Foundation Models, Vertex AI AutoML & Cloud autofocus
 
-> **Part of the Glass-Box Auto-Forecaster Guide:** [**Main Guide & Architecture (`auto_forecaster.md`)**](./auto_forecaster.md) · [**29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)**](./auto_forecaster_benchmarks.md) · **7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)**
+> **Part of the Glass-Box Auto-Forecaster Guide:** [**Main Guide & Architecture (`auto_forecaster.md`)**](./auto_forecaster.md) · [**29 Benchmarks & AlphaEvolve (`auto_forecaster_benchmarks.md`)**](./auto_forecaster_benchmarks.md) · **7-Runtime Cloud Scale & AutoML (`auto_forecaster_cloud_scale.md`)** · [**AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)**](./alphaevolve_runner.md)
 
 The Glass-Box Auto-Forecaster is designed to execute on Google Cloud at enterprise scale. During our verification campaign, we executed **over 70 live cloud benchmark runs** in BigQuery (`v_run_summary`, `v_model_leaderboard`, `v_run_jobs`) spanning all **7 compute runtimes** (`spark`, `vertex` `L4` GPU & sharded CPU, `gce`, `gke`, `ray`, `vertex_automl`, and `bigquery`), panels from **`10` to `100,000` time series**, BigLake Managed Iceberg tables, and multi-pass cloud `autofocus` with cross-run BigQuery cell borrowing (`reuse_prior_runs=True`).
 
@@ -132,4 +132,4 @@ When `Forecaster.auto(..., where="cloud_cpu" | "cloud_all" | "bigquery", autofoc
 
 ---
 
-Return to the **[Main Auto-Forecaster Guide (`auto_forecaster.md`)](./auto_forecaster.md)** or view the **[29 Synthetic & Open-Data Benchmarks (`auto_forecaster_benchmarks.md`)](./auto_forecaster_benchmarks.md)**.
+Return to the **[Main Auto-Forecaster Guide (`auto_forecaster.md`)](./auto_forecaster.md)**, view the **[29 Synthetic & Open-Data Benchmarks (`auto_forecaster_benchmarks.md`)](./auto_forecaster_benchmarks.md)**, or explore the **[Opt-In AlphaEvolve Runtime Harness (`alphaevolve_runner.md`)](./alphaevolve_runner.md)**.
