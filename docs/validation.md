@@ -171,7 +171,7 @@ All 12 notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting
 | `08_multi_engine_master_workflow.ipynb` | CURRENT | 2026-10-14 | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `native_source_pin=unpinned-all-sources`, `job_status=derived-from-cell-tallies`, `ensemble_weighting=per-series-calculated+batch-fit-learned`, `run_id_inputs=authored-config-only-v3` |
 | `09_custom_models_and_metrics.ipynb` | CURRENT | 2026-10-07 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 | `10_registry_operations_and_scale.ipynb` | CURRENT | 2026-10-07 | `python=3.11`, `job_status=derived-from-cell-tallies`, `run_id_inputs=authored-config-only-v3` |
-| `11_auto_forecaster_and_autofocus.ipynb` | CURRENT | 2026-10-16 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
+| `11_auto_forecaster_and_autofocus.ipynb` | CURRENT | 2026-10-19 | `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 
 ---
 
