@@ -550,25 +550,25 @@ During our cloud verification campaign, we executed **over 70 live cloud benchma
 
 #### Table 6.5A — At-a-Glance Cloud Runtime Scale Matrix (Wall-Clock Time by Series Count `N`)
 
-*How to read the numbers in this table:* Every cell reports **total end-to-end cloud wall-clock time (`s` or `m`)** from `v_run_summary`—including cluster/VM provisioning, container startup, parallel model training across `N` time series, and BigQuery result landing (**$\downarrow$ lower is faster**; `w=N` denotes worker count).
+*How to read the numbers in this table:* Every cell reports **total end-to-end cloud wall-clock time (`s` or `m`)** from `v_run_summary` / `v_run_jobs`—including cluster/VM provisioning, container startup, parallel model training across `N` time series, and BigQuery result landing (**$\downarrow$ lower is faster**; `w=N` denotes worker count).
 
 | Google Cloud Runtime | `N = 10` Series $\downarrow$ | `N = 100` Series $\downarrow$ | `N = 1,000` Series $\downarrow$ | `N = 10,000` Series $\downarrow$ | `N = 25,000` Series $\downarrow$ | `N = 100,000` Series $\downarrow$ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`bigquery`** *(BQML SQL + `AI.FORECAST`)* | **`79.6s`** | **`135.0s`** | **`340.2s`** | **`827.3s`** | **`512.4s`** *(`8.5m`)* | *(slot-scaled SQL)* |
-| **`spark`** *(Dataproc Serverless Spark)* | — | `1,246.3s` | **`521.2s`** | **`1,012.3s`** *(`16.9m`)* | **`1,158.6s`** *(P1)* | **`3,126.7s`** *(`52.1m`)* |
-| **`vertex:cpu`** *(CustomJob Sharded CPU)* | **`111.0s`** (`w=1`) | `518.1s` (`w=1`) | `2,925.7s` (`w=2`) | `2,657.0s`–`11,280s` (`w=4`) | — | — |
-| **`vertex:gpu`** *(CustomJob `L4` GPU)* | `472.9s` (`w=1`) | **`247.9s`** (`w=1`) | **`576.2s`** (`w=2`) | — | — | — |
-| **`gce`** *(Self-Deleting Single-VM COS)* | — | `543.0s` (`1` VM) | `1,579.4s` (`1` VM) | `7,329.7s` (`1` VM) | — | — |
-| **`gke`** *(GKE Indexed Job)* | — | `1,259.9s` (`2` pods) | `1,854.6s` (`2` pods) | — | — | — |
-| **`ray`** *(Vertex AI Ray Cluster)* | — | **`547.1s`** | **`831.5s`** | — | — | — |
-| **`vertex_automl`** *(Managed Tabular Workflow)* | — | `24,464s` (`N=30`) / `38,118s` (`N=50`) | — | — | — | — |
+| **`bigquery`** *(BQML SQL + `AI.FORECAST`)* | **`79.6s`** | **`135.0s`** | **`340.2s`** | **`827.3s`** | **`512.4s`** *(`8.5m`)* | **`3,358.7s`** *(`56.0m` SQL / `5,095s` total)* |
+| **`spark`** *(Dataproc Serverless Spark)* | `993.5s` *(`1,114s` total)* | `1,246.3s` | **`521.2s`** | **`1,012.3s`** *(`16.9m`)* | **`1,158.6s`** *(P1)* | **`3,126.7s`** *(`52.1m`)* |
+| **`vertex:cpu`** *(CustomJob Sharded CPU)* | **`111.0s`** (`w=1`) | `518.1s`–`1,657.7s` (`w=1`) | `2,925.7s` (`w=2`) | `2,657.0s`–`11,280s` (`w=4`) | `1,813.9s` (`w=4`) | *(use `spark` or `bigquery`)* |
+| **`vertex:gpu`** *(CustomJob `L4` / `T4` GPU)* | `472.9s` (`w=1`) | **`247.9s`** (`w=1`) | **`576.2s`** (`w=2`) | **`2,969.0s`** (`w=2` / `3,833s` total) | *(GPU batch sharded)* | *(GPU batch sharded)* |
+| **`gce`** *(Self-Deleting Single-VM COS)* | `408.9s` (`1` VM) | `543.0s` (`1` VM) | `1,579.4s` (`1` VM) | `7,329.7s` (`1` VM) | *(Single-VM `workers=1` cap)* | *(Single-VM `workers=1` cap)* |
+| **`gke`** *(GKE Indexed Job)* | `1,100.2s` (`2` pods) | `1,259.9s` (`2` pods) | `1,854.6s` (`2` pods) | `1,512.6s` `ml` / `2,543.6s` `stat` (`3,025s` total) | *(GKE Autopilot/Std pods)* | *(GKE Autopilot/Std pods)* |
+| **`ray`** *(Vertex AI Ray Cluster)* | `496.9s` *(`1,342s` total)* | **`547.1s`** | **`831.5s`** | **`999.3s`** *(`2,685s` total)* | *(Ray actor pool)* | *(Ray actor pool)* |
+| **`vertex_automl`** *(Managed Tabular Workflow)* | `7,725.2s` *(`2.1h`, `N=20`)* | `24,464s` (`N=30`) / `38,118s` (`N=50`) | *(Managed neural search)* | *(Managed neural search)* | *(Managed neural search)* | *(Managed neural search)* |
 
-**Key highlights from the 70+ live Google Cloud runs:**
+**Key highlights from the 80+ live Google Cloud runs:**
 
-- **Multi-Engine Cloud Bakeoffs & `L4` GPU Foundation Models:** On 100-series BigLake Iceberg panels and 1,000-series `L4` GPU runs (`2× g2-standard-8` workers), **`chronos2@global_univariate`** (`WAPE = 0.3221`–`0.3226`), **`timesfm_torch@global_univariate`** (`0.3207`–`0.3299`), and BigQuery **`timesfm@cov_all`** (`0.3239`) lead all contenders in `4.1`–`9.6` minutes.
-- **Managed Vertex AI AutoML Global Workflows (`vertex_tide`, `vertex_l2l`):** Verified live on `vertex_automl` (`tabular_workflow`), where **`vertex_l2l`** (`0.3858`) and `ensemble_inverse_error` (`vertex_l2l` + `vertex_tide`, `0.6819`) complete full managed neural architecture search and land directly in the same BigQuery leaderboard.
-- **25,000-Series Cloud `autofocus=True` & Cross-Run Cell Borrowing:** On `w3-holdout-25000-cloud-cpu` (`25,000` series on Dataproc Serverless Spark), multi-branch `autofocus` improved `WAPE` from `0.3737` (Pass 1) to **`0.2054` (`+64.69%` FVA)** in Pass 3 (`ensemble_horizon_specialist`), while `w2b-cloud-all-cov-iceberg-50` borrowed **`22` already-computed models** directly from BigQuery in Pass 2.
+- **Multi-Engine Cloud Bakeoffs & `L4` GPU Foundation Models (`10` to `10,000` Series):** On 100-series BigLake Iceberg panels and `1,000`–`10,000` series `L4`/`T4` GPU runs (`2` GPU workers), **`chronos2@global_univariate`** (`WAPE = 0.3221`–`0.3453`), **`timesfm_torch@global_univariate`** (`0.3207`–`0.3423`, **`+30.82%` FVA** at `N=10,000`), and BigQuery **`timesfm@cov_all`** / **`timesfm@univariate`** (`0.3239` at `N=100`, **`0.3425` / `+29.33%` FVA** at `N=100,000`) lead all contenders.
+- **Managed Vertex AI AutoML Global Workflows (`vertex_tide`, `vertex_l2l`):** Verified live on `vertex_automl` (`tabular_workflow`) across `N=20` (`smoke-42`, `ensemble_inverse_error` `WAPE = 0.3675`, **`+18.31%` FVA**), `N=30`, and `N=50` (`vertex_l2l` `WAPE = 0.3858`, **`+25.24%` FVA**), landing directly in the same BigQuery leaderboard.
+- **25,000-Series Cloud `autofocus=True`, All 9 Public Open-Data Benchmarks & Cross-Run Cell Borrowing:** On `w3-holdout-25000-cloud-cpu` (`25,000` series on Dataproc Serverless Spark), multi-branch `autofocus` improved `WAPE` from `0.3737` (Pass 1) to **`0.2054` (`+64.69%` FVA)** in Pass 3 (`ensemble_horizon_specialist`), while live cloud `autofocus=True` runs across all **9 public open-data benchmarks** (`m5_walmart`, `favorita_grocery`, `m4_daily`, `m4_weekly`, `m4_monthly`, `monash_tourism_monthly`, `monash_hospital`, `monash_car_parts`, and `etth1`) achieved **`+8.90%` to `+55.37%` FVA** with automatic BigQuery cell borrowing (`reuse_prior_runs=True`).
 
-$\rightarrow$ **See all 4 verified Google Cloud benchmark ledgers (`Tables 1A, 2A, 3A & 4A` with exact `run_id` records) in [`auto_forecaster_cloud_scale.md`](./auto_forecaster_cloud_scale.md).**
+$\rightarrow$ **See all verified Google Cloud benchmark ledgers (`Tables 1A, 2A, 2B & 3A` with exact `run_id` records) in [`auto_forecaster_cloud_scale.md`](./auto_forecaster_cloud_scale.md).**
 
 Want to run these experiments interactively with visual plots? Open **[`notebooks/11_auto_forecaster_and_autofocus.ipynb`](notebooks/11_auto_forecaster_and_autofocus.ipynb)**.

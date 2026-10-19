@@ -82,59 +82,59 @@ All 20 test datasets are built into [`scale_forecasting.benchmarks`](api/benchma
 | **`dgp_19_hourly_diurnal_weekly_load`** | `wape` | Hourly (`freq="h"`) transformer load with $24\text{h}$ diurnal + $168\text{h}$ weekly cycle + temperature | Multi-seasonal `fourier` ($24\text{h}$, $12\text{h}$, $168\text{h}$) + `chronos2@global` overall winner (`+73.72%` FVA) | `chronos2@global` | **`+73.72%`** |
 | **`dgp_20_monthly_regime_drift_damped`** | `wape` | Monthly (`freq="MS"`, $T=60$) macro/tourism series with 12-month cycle, break & damped trend | Enables monthly lags (`[1, 2, 3, 6, 12]`), `level_shift`, and `@direct` specialists | `ensemble_horizon_specialist` | **`+61.95%`** |
 
-### Table 2B — 4-Tier × `autofocus` Error Progression Across All 20 DGPs (Lower Error Is Better)
+### Table 2B — 4-Tier × `autofocus` Error Progression & Held-Out Test Lift Across All 20 DGPs
 
-*How to read the scores in this table:* **All `Pass 1`, `autofocus`, and `Full Bank` columns** report raw out-of-fold error on the row's `Metric` (`wape` = Weighted Absolute Percentage Error, `mase` = Mean Absolute Scaled Error vs. in-sample seasonal naive, `pinball_loss` = $q=0.90$ quantile pinball loss; **$\downarrow$ lower is better**, `0.0000` is a perfect forecast; bold marks where `autofocus=True` reduced error below Pass 1 or achieved the lowest overall error) · **`Peak FVA %`** = `%` error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**).
+*How to read the scores in this table:* **All `Pass 1`, `autofocus`, and `Full Bank` columns** report raw out-of-fold error on the row's `Metric` (`wape` = Weighted Absolute Percentage Error, `mase` = Mean Absolute Scaled Error vs. in-sample seasonal naive, `pinball_loss` = $q=0.90$ quantile pinball loss; **$\downarrow$ lower is better**, `0.0000` is a perfect forecast; bold marks where `autofocus=True` reduced error below Pass 1 or achieved the lowest overall error) · **`Peak FVA %`** = `%` out-of-fold error reduction vs. `naive_seasonal` (**$\uparrow$ higher is better**) · **`Peak Test Lift %`** = `%` error reduction vs. `naive_seasonal` on the unseen post-cutoff oracle test window (`oracle_future_df`; **$\uparrow$ higher is better**).
 
-| Benchmark | Metric | `first_light` Pass 1 $\downarrow$ | `first_light` `autofocus` $\downarrow$ | `wide_field` Pass 1 $\downarrow$ | `wide_field` `autofocus` $\downarrow$ | `deep_sky` Pass 1 $\downarrow$ | `deep_sky` `autofocus` $\downarrow$ | `deep_field` Full Bank $\downarrow$ | Peak FVA % $\uparrow$ |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`dgp_01_smooth_seasonal`** | `wape` | `0.0282` | `0.0282` | `0.0260` | `0.0260` | `0.0260` | `0.0260` | **`0.0219`** | **`+40.33%`** |
-| **`dgp_02_multiplicative_log`** | `wape` | `0.1531` | **`0.0931`** | `0.1204` | `0.1204` | `0.1179` | `0.1179` | **`0.0996`** | **`+43.06%`** |
-| **`dgp_03_intermittent_lumpy`** | `mase` | `0.8005` | **`0.7440`** | `0.8060` | `0.8060` | `0.7294` | `0.7294` | **`0.6902`** | **`+40.07%`** |
-| **`dgp_04_true_vs_decoy_covs`** | `wape` | `0.0498` | **`0.0473`** | `0.0359` | **`0.0321`** | `0.0329` | **`0.0314`** | **`0.0217`** | **`+77.57%`** |
-| **`dgp_05_horizon_crossover`** | `wape` | `0.1333` | `0.1333` | `0.1214` | **`0.1202`** | `0.1169` | `0.1169` | **`0.0954`** | **`+59.87%`** |
-| **`dgp_06_structural_break_spikes`** | `wape` | `0.0212` | **`0.0209`** | `0.0501` | **`0.0498`** | `0.0392` | `0.0392` | **`0.0434`** | **`+58.53%`** |
-| **`dgp_07_censored_stockouts`** | `wape` | `0.0541` | **`0.0411`** | `0.0438` | `0.0438` | `0.0415` | `0.0415` | **`0.0306`** | **`+71.86%`** |
-| **`dgp_08_hierarchical_nonneg`** | `wape` | `0.0484` | **`0.0425`** | `0.0423` | `0.0423` | `0.0448` | `0.0448` | **`0.0360`** | **`+43.39%`** |
-| **`dgp_09_cross_series_global`** | `wape` | `0.0692` | **`0.0388`** | `0.0509` | `0.0509` | `0.0551` | `0.0551` | **`0.0296`** | **`+73.37%`** |
-| **`dgp_10_newsvendor_service`** | `pinball_loss` | `0.0865` | `0.0865` | `0.0878` | `0.0878` | `0.0895` | `0.0895` | **`0.0679`** | **`+42.45%`** |
-| **`dgp_11_cold_start_mixed`** | `wape` | `0.0236` | **`0.0209`** | `0.0221` | `0.0221` | `0.0219` | `0.0219` | **`0.0176`** | **`+40.62%`** |
-| **`dgp_12_already_optimal_white_noise`** | `wape` | `0.0153` | `0.0153` | `0.0156` | `0.0156` | `0.0155` | `0.0155` | **`0.0127`** | **`+42.95%`** |
-| **`dgp_13_all_decoy_univariate_wins`** | `wape` | `0.0173` | **`0.0161`** | `0.0157` | `0.0157` | `0.0160` | `0.0160` | **`0.0121`** | **`+41.78%`** |
-| **`dgp_14_large_hierarchy_intermittent_leaves`** | `mase` | `0.8463` | **`0.7864`** | `0.7055` | `0.7055` | `0.7425` | `0.7425` | **`0.6234`** | **`+38.26%`** |
-| **`dgp_15_scale_crossover_panel`** | `wape` | `0.0224` | `0.0224` | `0.0191` | `0.0191` | `0.0198` | `0.0198` | **`0.0144`** | **`+44.08%`** |
-| **`dgp_16_monthly_trading_days`** | `wape` | `0.0115` | **`0.0075`** | `0.0113` | `0.0113` | `0.0110` | `0.0110` | **`0.0099`** | **`+43.21%`** |
-| **`dgp_17_missing_gaps_and_leading_zeros`** | `wape` | `0.0183` | `0.0183` | `0.0176` | `0.0176` | `0.0166` | `0.0166` | **`0.0146`** | **`+39.33%`** |
-| **`dgp_18_promo_lag_pullforward`** | `wape` | `0.0621` | `0.0621` | `0.0277` | `0.0277` | `0.0232` | **`0.0230`** | **`0.0134`** | **`+94.08%`** |
-| **`dgp_19_hourly_diurnal_weekly_load`** | `wape` | `0.0210` | `0.0210` | `0.0150` | `0.0150` | `0.0164` | `0.0164` | **`0.0147`** | **`+73.72%`** |
-| **`dgp_20_monthly_regime_drift_damped`** | `wape` | `0.0424` | **`0.0355`** | `0.0392` | **`0.0356`** | `0.0537` | **`0.0476`** | **`0.0465`** | **`+61.95%`** |
+| Benchmark | Metric | `first_light` Pass 1 $\downarrow$ | `first_light` `autofocus` $\downarrow$ | `wide_field` Pass 1 $\downarrow$ | `wide_field` `autofocus` $\downarrow$ | `deep_sky` Pass 1 $\downarrow$ | `deep_sky` `autofocus` $\downarrow$ | `deep_field` Pass 1 $\downarrow$ | `deep_field` `autofocus` $\downarrow$ | `deep_field` Full Bank $\downarrow$ | Peak FVA % $\uparrow$ | Peak Test Lift % $\uparrow$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`dgp_01_smooth_seasonal`** | `wape` | `0.0282` | `0.0282` | `0.0260` | `0.0260` | `0.0260` | `0.0260` | `0.0261` | `0.0261` | **`0.0219`** | **`+40.33%`** | **`+32.07%`** |
+| **`dgp_02_multiplicative_log`** | `wape` | `0.1531` | **`0.0931`** | `0.1204` | `0.1204` | `0.1179` | `0.1179` | `0.1171` | `0.1171` | **`0.0996`** | **`+44.89%`** | **`+42.68%`** |
+| **`dgp_03_intermittent_lumpy`** | `mase` | `0.8005` | **`0.7440`** | `0.8060` | `0.8060` | `0.7294` | `0.7294` | `0.7344` | `0.7344` | **`0.6902`** | **`+40.07%`** | **`+45.71%`** |
+| **`dgp_04_true_vs_decoy_covs`** | `wape` | `0.0498` | **`0.0473`** | `0.0359` | **`0.0321`** | `0.0329` | **`0.0314`** | `0.0427` | **`0.0380`** | **`0.0217`** | **`+77.57%`** | **`+30.09%`** |
+| **`dgp_05_horizon_crossover`** | `wape` | `0.1333` | `0.1333` | `0.1214` | **`0.1202`** | `0.1169` | `0.1169` | `0.1155` | **`0.1150`** | **`0.0954`** | **`+59.87%`** | **`+33.77%`** |
+| **`dgp_06_structural_break_spikes`** | `wape` | `0.0212` | **`0.0209`** | `0.0501` | **`0.0498`** | `0.0392` | `0.0392` | `0.0400` | `0.0400` | **`0.0434`** | **`+58.53%`** | `-45.34%` |
+| **`dgp_07_censored_stockouts`** | `wape` | `0.0541` | **`0.0411`** | `0.0438` | `0.0438` | `0.0415` | `0.0415` | `0.0439` | **`0.0411`** | **`0.0306`** | **`+71.86%`** | **`+51.55%`** |
+| **`dgp_08_hierarchical_nonneg`** | `wape` | `0.0484` | **`0.0425`** | `0.0423` | `0.0423` | `0.0448` | `0.0448` | `0.0453` | `0.0453` | **`0.0360`** | **`+43.39%`** | **`+26.87%`** |
+| **`dgp_09_cross_series_global`** | `wape` | `0.0692` | **`0.0388`** | `0.0509` | `0.0509` | `0.0551` | `0.0551` | `0.0571` | `0.0571` | **`0.0296`** | **`+73.37%`** | **`+20.78%`** |
+| **`dgp_10_newsvendor_service`** | `pinball_loss` | `0.0865` | `0.0865` | `0.0878` | `0.0878` | `0.0895` | `0.0895` | `0.0893` | `0.0893` | **`0.0679`** | **`+42.45%`** | **`+49.81%`** |
+| **`dgp_11_cold_start_mixed`** | `wape` | `0.0236` | **`0.0209`** | `0.0221` | `0.0221` | `0.0219` | `0.0219` | `0.0218` | `0.0218` | **`0.0176`** | **`+40.62%`** | **`+20.86%`** |
+| **`dgp_12_already_optimal_white_noise`** | `wape` | `0.0153` | `0.0153` | `0.0156` | `0.0156` | `0.0155` | `0.0155` | `0.0155` | `0.0155` | **`0.0127`** | **`+42.95%`** | **`+38.99%`** |
+| **`dgp_13_all_decoy_univariate_wins`** | `wape` | `0.0173` | **`0.0161`** | `0.0157` | `0.0157` | `0.0160` | `0.0160` | `0.0162` | `0.0162` | **`0.0121`** | **`+41.78%`** | **`+30.57%`** |
+| **`dgp_14_large_hierarchy_intermittent_leaves`** | `mase` | `0.8463` | **`0.7864`** | `0.7055` | `0.7055` | `0.7425` | `0.7425` | `0.7514` | `0.7514` | **`0.6234`** | **`+38.26%`** | **`+54.53%`** |
+| **`dgp_15_scale_crossover_panel`** | `wape` | `0.0224` | `0.0224` | `0.0191` | `0.0191` | `0.0198` | `0.0198` | `0.0199` | `0.0199` | **`0.0144`** | **`+44.08%`** | **`+35.86%`** |
+| **`dgp_16_monthly_trading_days`** | `wape` | `0.0115` | **`0.0075`** | `0.0113` | `0.0113` | `0.0110` | `0.0110` | `0.0111` | `0.0111` | **`0.0099`** | **`+82.71%`** | **`+49.10%`** |
+| **`dgp_17_missing_gaps_and_leading_zeros`** | `wape` | `0.0183` | `0.0183` | `0.0176` | `0.0176` | `0.0166` | `0.0166` | `0.0167` | `0.0167` | **`0.0146`** | **`+39.33%`** | **`+21.83%`** |
+| **`dgp_18_promo_lag_pullforward`** | `wape` | `0.0621` | `0.0621` | `0.0277` | `0.0277` | `0.0232` | **`0.0230`** | `0.0255` | `0.0255` | **`0.0134`** | **`+94.08%`** | **`+20.58%`** |
+| **`dgp_19_hourly_diurnal_weekly_load`** | `wape` | `0.0210` | `0.0210` | `0.0150` | `0.0150` | `0.0164` | `0.0164` | `0.0147` | **`0.0147`** | **`0.0147`** | **`+73.72%`** | **`+66.16%`** |
+| **`dgp_20_monthly_regime_drift_damped`** | `wape` | `0.0424` | **`0.0355`** | `0.0392` | **`0.0356`** | `0.0537` | **`0.0476`** | `0.0530` | **`0.0465`** | **`0.0465`** | **`+69.46%`** | `-15.73%` |
 
-### Table 2C — Runtime (`s`), Borrowed Models & `#1 Single` vs. `#1 @global / Foundation` Model Across All 20 DGPs
+### Table 2C — Runtime (`s`), Borrowed Models (`b=N`) & `#1 Single` vs. `#1 @global / Foundation` Model Across All 20 DGPs
 
-*How to read the scores in this table:* **`Wall (`s`)`** = total session elapsed seconds (**$\downarrow$ lower is faster**) · **`Borrowed (`b=N`)`** = number of finished `(model, spec_hash)` evaluations reused from Pass 1 at zero compute cost (**$\uparrow$ higher saves more compute**) · **`#1 Single` / `#1 @global / Foundation` / `Overall Champion` (`Score`)** = raw out-of-fold error on the row's primary metric (`wape`, `mase`, or `pinball_loss`; **$\downarrow$ lower is better**).
+*How to read the scores in this table:* **`Wall (`s`)`** = total session elapsed seconds (**$\downarrow$ lower is faster**) · **`Borrowed (`b=N`)`** = number of finished `(model, spec_hash)` evaluations reused from earlier passes at zero compute cost (**$\uparrow$ higher saves more compute**) · **`#1 Single` / `#1 @global / Foundation` / `Overall Champion` (`Score`)** = raw out-of-fold error on the row's primary metric (`wape`, `mase`, or `pinball_loss`; **$\downarrow$ lower is better**).
 
-| Benchmark | `first_light` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `wide_field` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `deep_sky` Wall $\downarrow$ | `deep_field` Wall $\downarrow$ | #1 Single Non-Ensemble Model (`Error` $\downarrow$) | #1 `@global` / Foundation Model (`Error` $\downarrow$) | Overall Champion (`Error` $\downarrow$) |
+| Benchmark | `first_light` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `wide_field` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `deep_sky` Wall $\downarrow$ (`Borrowed` $\uparrow$) | `deep_field` Wall $\downarrow$ (`Borrowed` $\uparrow$) | #1 Single Non-Ensemble Model (`Error` $\downarrow$) | #1 `@global` / Foundation Model (`Error` $\downarrow$) | Overall Champion (`Error` $\downarrow$) |
 | :--- | :---: | :---: | :---: | :---: | :--- | :--- | :--- |
-| **`dgp_01_smooth_seasonal`** | `12s` (`b=0`) | `48s` (`b=0`) | `152s` | `247s` | `holtwinters` (`0.0260`) | `chronos2@global_univariate` (`0.0264`) | `ensemble_horizon_specialist` (`0.0219`) |
-| **`dgp_02_multiplicative_log`** | `45s` (`b=7`) | `58s` (`b=0`) | `116s` | `258s` | `auto_theta` (`0.1175`) | `chronos2@global_univariate` (`0.1272`) | `ensemble_horizon_specialist` (`0.0996`) |
-| **`dgp_03_intermittent_lumpy`** | `10s` (`b=4`) | `26s` (`b=0`) | `77s` | `175s` | `chronos2@global_univariate` (`0.7662`) | `chronos2@global_univariate` (`0.7662`) | `ensemble_horizon_specialist` (`0.6902`) |
-| **`dgp_04_true_vs_decoy_covs`** | `17s` (`b=2`) | `58s` (`b=8`) | `347s` | `569s` | `sarimax` (`0.0217`) | `chronos2@local_cov_all` (`0.0315`) | `sarimax` (`0.0217`) |
-| **`dgp_05_horizon_crossover`** | `19s` (`b=0`) | `182s` (`b=26`) | `490s` | `440s` | `kalman` (`0.1169`) | `tft@global` (`0.1475`) | `ensemble_horizon_specialist` (`0.0954`) |
-| **`dgp_06_structural_break_spikes`** | `37s` (`b=0`) | `126s` (`b=19`) | `933s` | `310s` | `ucm` (`0.0464`) | `chronos2@global_univariate` (`0.0483`) | `ensemble_horizon_specialist` (`0.0434`) |
-| **`dgp_07_censored_stockouts`** | `61s` (`b=4`) | `188s` (`b=0`) | `351s` | `420s` | `sarimax` (`0.0353`) | `chronos2@global_cov_all` (`0.1566`) | `ensemble_median` (`0.0306`) |
-| **`dgp_08_hierarchical_nonneg`** | `84s` (`b=3`) | `295s` (`b=0`) | `1106s` | `706s` | `chronos2@global_univariate_mint_nonneg` (`0.0437`) | `chronos2@global_univariate_mint_nonneg` (`0.0437`) | `ensemble_horizon_specialist` (`0.0360`) |
-| **`dgp_09_cross_series_global`** | `65s` (`b=4`) | `100s` (`b=0`) | `366s` | `804s` | `sarimax` (`0.0298`) | `chronos2@local_cov_all` (`0.0405`) | `ensemble_nnls` (`0.0296`) |
-| **`dgp_10_newsvendor_service`** | `62s` (`b=0`) | `164s` (`b=0`) | `590s` | `317s` | `chronos2@global_univariate` (`0.0875`) | `chronos2@global_univariate` (`0.0875`) | `ensemble_horizon_specialist` (`0.0679`) |
-| **`dgp_11_cold_start_mixed`** | `46s` (`b=3`) | `73s` (`b=0`) | `475s` | `333s` | `auto_theta` (`0.0222`) | `chronos2@local_univariate` (`0.0231`) | `ensemble_horizon_specialist` (`0.0176`) |
-| **`dgp_12_already_optimal_white_noise`** | `18s` (`b=0`) | `77s` (`b=0`) | `277s` | `277s` | `auto_ces` (`0.0156`) | `chronos2@global_univariate` (`0.0157`) | `ensemble_horizon_specialist` (`0.0127`) |
-| **`dgp_13_all_decoy_univariate_wins`** | `42s` (`b=2`) | `79s` (`b=11`) | `382s` | `431s` | `autoets` (`0.0159`) | `chronos2@global_cov_all` (`0.0167`) | `ensemble_horizon_specialist` (`0.0121`) |
-| **`dgp_14_large_hierarchy_intermittent_leaves`** | `147s` (`b=4`) | `253s` (`b=0`) | `640s` | `586s` | `naive_mean` (`0.7284`) | `chronos2@global_univariate` (`0.7491`) | `ensemble_horizon_specialist` (`0.6234`) |
-| **`dgp_15_scale_crossover_panel`** | `43s` (`b=0`) | `184s` (`b=0`) | `537s` | `655s` | `holtwinters` (`0.0191`) | `chronos2@global_univariate` (`0.0196`) | `ensemble_horizon_specialist` (`0.0144`) |
-| **`dgp_16_monthly_trading_days`** | `69s` (`b=3`) | `101s` (`b=0`) | `400s` | `230s` | `kalman` (`0.0108`) | `chronos2@global_univariate` (`0.0169`) | `ensemble_nnls` (`0.0099`) |
-| **`dgp_17_missing_gaps_and_leading_zeros`** | `27s` (`b=0`) | `131s` (`b=0`) | `346s` | `237s` | `autoets` (`0.0174`) | `chronos2@global_univariate` (`0.0187`) | `ensemble_horizon_specialist` (`0.0146`) |
-| **`dgp_18_promo_lag_pullforward`** | `58s` (`b=2`) | `78s` (`b=8`) | `266s` | `426s` | `sarimax` (`0.0136`) | `chronos2@global_cov_all` (`0.0532`) | `ensemble_nnls` (`0.0134`) |
-| **`dgp_19_hourly_diurnal_weekly_load`** | `46s` (`b=2`) | `71s` (`b=0`) | `350s` | `174s` | `chronos2@global` (`0.0147`) | `chronos2@global` (`0.0147`) | `chronos2@global` (`0.0147`) |
-| **`dgp_20_monthly_regime_drift_damped`** | `29s` (`b=10`) | `66s` (`b=18`) | `88s` | `108s` | `holtwinters` (`0.0627`) | `chronos2@global` (`0.0844`) | `ensemble_horizon_specialist` (`0.0465`) |
+| **`dgp_01_smooth_seasonal`** | `12s` (`b=0`) | `48s` (`b=0`) | `152s` (`b=0`) | `256s` (`b=0`) | `holtwinters` (`0.0260`) | `chronos2@global_univariate` (`0.0264`) | `ensemble_horizon_specialist` (`0.0219`) |
+| **`dgp_02_multiplicative_log`** | `45s` (`b=7`) | `58s` (`b=0`) | `116s` (`b=0`) | `98s` (`b=0`) | `auto_theta` (`0.1175`) | `chronos2@global_univariate` (`0.1272`) | `ensemble_horizon_specialist` (`0.0996`) |
+| **`dgp_03_intermittent_lumpy`** | `10s` (`b=4`) | `26s` (`b=0`) | `77s` (`b=0`) | `57s` (`b=0`) | `chronos2@global_univariate` (`0.7662`) | `chronos2@global_univariate` (`0.7662`) | `ensemble_horizon_specialist` (`0.6902`) |
+| **`dgp_04_true_vs_decoy_covs`** | `17s` (`b=2`) | `58s` (`b=8`) | `347s` (`b=11`) | `252s` (`b=9`) | `sarimax` (`0.0217`) | `chronos2@local_cov_all` (`0.0315`) | `sarimax` (`0.0217`) |
+| **`dgp_05_horizon_crossover`** | `19s` (`b=0`) | `182s` (`b=26`) | `490s` (`b=17`) | `350s` (`b=15`) | `kalman` (`0.1169`) | `tft@global` (`0.1475`) | `ensemble_horizon_specialist` (`0.0954`) |
+| **`dgp_06_structural_break_spikes`** | `37s` (`b=0`) | `126s` (`b=19`) | `933s` (`b=30`) | `174s` (`b=11`) | `ucm` (`0.0464`) | `chronos2@global_univariate` (`0.0483`) | `ensemble_horizon_specialist` (`0.0434`) |
+| **`dgp_07_censored_stockouts`** | `61s` (`b=4`) | `188s` (`b=0`) | `351s` (`b=0`) | `180s` (`b=15`) | `sarimax` (`0.0353`) | `chronos2@global_cov_all` (`0.1566`) | `ensemble_median` (`0.0306`) |
+| **`dgp_08_hierarchical_nonneg`** | `84s` (`b=3`) | `295s` (`b=0`) | `1106s` (`b=0`) | `157s` (`b=0`) | `chronos2@global_univariate_mint_nonneg` (`0.0437`) | `chronos2@global_univariate_mint_nonneg` (`0.0437`) | `ensemble_horizon_specialist` (`0.0360`) |
+| **`dgp_09_cross_series_global`** | `65s` (`b=4`) | `100s` (`b=0`) | `366s` (`b=0`) | `169s` (`b=15`) | `sarimax` (`0.0298`) | `chronos2@local_cov_all` (`0.0405`) | `ensemble_nnls` (`0.0296`) |
+| **`dgp_10_newsvendor_service`** | `62s` (`b=0`) | `164s` (`b=0`) | `590s` (`b=0`) | `251s` (`b=0`) | `chronos2@global_univariate` (`0.0875`) | `chronos2@global_univariate` (`0.0875`) | `ensemble_horizon_specialist` (`0.0679`) |
+| **`dgp_11_cold_start_mixed`** | `46s` (`b=3`) | `73s` (`b=0`) | `475s` (`b=0`) | `101s` (`b=0`) | `auto_theta` (`0.0222`) | `chronos2@local_univariate` (`0.0231`) | `ensemble_horizon_specialist` (`0.0176`) |
+| **`dgp_12_already_optimal_white_noise`** | `18s` (`b=0`) | `77s` (`b=0`) | `277s` (`b=0`) | `104s` (`b=0`) | `auto_ces` (`0.0156`) | `chronos2@global_univariate` (`0.0157`) | `ensemble_horizon_specialist` (`0.0127`) |
+| **`dgp_13_all_decoy_univariate_wins`** | `42s` (`b=2`) | `79s` (`b=11`) | `382s` (`b=0`) | `123s` (`b=0`) | `autoets` (`0.0159`) | `chronos2@global_cov_all` (`0.0167`) | `ensemble_horizon_specialist` (`0.0121`) |
+| **`dgp_14_large_hierarchy_intermittent_leaves`** | `147s` (`b=4`) | `253s` (`b=0`) | `640s` (`b=0`) | `176s` (`b=0`) | `naive_mean` (`0.7284`) | `chronos2@global_univariate` (`0.7491`) | `ensemble_horizon_specialist` (`0.6234`) |
+| **`dgp_15_scale_crossover_panel`** | `43s` (`b=0`) | `184s` (`b=0`) | `537s` (`b=0`) | `143s` (`b=0`) | `holtwinters` (`0.0191`) | `chronos2@global_univariate` (`0.0196`) | `ensemble_horizon_specialist` (`0.0144`) |
+| **`dgp_16_monthly_trading_days`** | `69s` (`b=3`) | `101s` (`b=0`) | `400s` (`b=0`) | `64s` (`b=0`) | `kalman` (`0.0108`) | `chronos2@global_univariate` (`0.0169`) | `ensemble_nnls` (`0.0099`) |
+| **`dgp_17_missing_gaps_and_leading_zeros`** | `27s` (`b=0`) | `131s` (`b=0`) | `346s` (`b=0`) | `121s` (`b=0`) | `autoets` (`0.0174`) | `chronos2@global_univariate` (`0.0187`) | `ensemble_horizon_specialist` (`0.0146`) |
+| **`dgp_18_promo_lag_pullforward`** | `58s` (`b=2`) | `78s` (`b=8`) | `266s` (`b=11`) | `266s` (`b=9`) | `sarimax` (`0.0136`) | `chronos2@global_cov_all` (`0.0532`) | `ensemble_nnls` (`0.0134`) |
+| **`dgp_19_hourly_diurnal_weekly_load`** | `46s` (`b=2`) | `71s` (`b=0`) | `350s` (`b=13`) | `174s` (`b=0`) | `chronos2@global` (`0.0147`) | `chronos2@global` (`0.0147`) | `chronos2@global` (`0.0147`) |
+| **`dgp_20_monthly_regime_drift_damped`** | `29s` (`b=10`) | `66s` (`b=18`) | `88s` (`b=10`) | `108s` (`b=12`) | `holtwinters` (`0.0627`) | `chronos2@global` (`0.0844`) | `ensemble_horizon_specialist` (`0.0465`) |
 
 > [!IMPORTANT]
 > **Where Foundation & `@global` Models Win on the 20 Synthetic DGPs:**
