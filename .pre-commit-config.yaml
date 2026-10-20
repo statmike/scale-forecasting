@@ -1,0 +1,24 @@
+# Local pre-commit hooks for statmike/scale-forecasting.
+# Tracked Git hooks live in `.githooks/pre-commit` and `.githooks/pre-push` (`make hooks`).
+# This file mirrors `.githooks/pre-commit` for standard `pre-commit` CLI compatibility.
+
+repos:
+  - repo: local
+    hooks:
+      - id: uv-lock-public-pypi
+        name: uv.lock public PyPI/PyTorch index & zero internal URLs
+        entry: >-
+          python3 -c "import pathlib, re, sys;
+          allowed = {'https://pypi.org/simple', 'https://download.pytorch.org/whl/cu126'};
+          locks = [p for p in pathlib.Path('.').rglob('uv.lock') if '.venv' not in p.parts and '.venv-ci' not in p.parts];
+          bad = [f'{p}: {s}' for p in locks for s in set(re.findall(r'registry = \"([^\"]+)\"', p.read_text())) if s not in allowed];
+          leaks = [str(p) for p in locks if re.search(r'airlock-proxy\.uplink\.goog|artifact-foundry-prod|\.corp\.google\.com', p.read_text())];
+          sys.exit('Non-public uv.lock registry or internal URL detected: ' + ', '.join(bad + leaks) if (bad or leaks) else 0)"
+        language: system
+        pass_filenames: false
+
+      - id: githooks-pre-commit
+        name: .githooks/pre-commit (consistency tripwires & packaging extras)
+        entry: ./.githooks/pre-commit
+        language: system
+        pass_filenames: false
