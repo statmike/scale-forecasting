@@ -41,6 +41,8 @@ import numpy as np
 import pandas as pd
 
 from .errors import ConfigError
+from .holiday_window import build_holiday_window_features, coerce_holiday_window_config
+from .monotonicity import resolve_monotonic_constraints, validate_monotonic_constraints_map
 from .seasonality import periods_per_year, seasonal_period
 
 if TYPE_CHECKING:
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from .config import RunConfig
     from .models.base_model import BaseModel
 else:
+    from collections.abc import Mapping
     from dataclasses import dataclass
     from typing import Literal
 
@@ -68,6 +71,8 @@ VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
         "fourier",
         "level_shift",
         "trading_days",
+        "monotonic_constraints",
+        "holiday_window",
     }
 )
 VARIANT_META_KEYS: frozenset[str] = VARIANT_FEATURE_META_KEYS | {"training_mode"}
@@ -437,6 +442,7 @@ def _narrow_unsupported_features(
     new_static = list(f.static_covariates) if model_cls.supports_static_covariates else []
     kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
     new_lags = {k: list(v) for k, v in f.exog_lags.items() if k in kept_dynamic}
+    new_mono = {k: v for k, v in f.monotonic_constraints.items() if k in kept_dynamic}
     new_features = f.model_copy(
         update={
             "exog": new_exog,
@@ -444,6 +450,7 @@ def _narrow_unsupported_features(
             "past_covariates": new_past,
             "static_covariates": new_static,
             "exog_lags": new_lags,
+            "monotonic_constraints": new_mono,
         }
     )
     return cfg.model_copy(update={"features": new_features})
@@ -457,24 +464,36 @@ def resolve_model_variant(
     allow_unsupported: bool = False,
 ) -> ModelVariantSpec:
     """Resolve a ``<base_model>`` or ``<base_model>@<tag>`` entry into its `ModelVariantSpec`."""
-    base, sep, tag = model_name.partition("@")
-    base = base.strip()
+    raw_base, sep, tag = model_name.partition("@")
+    raw_base = raw_base.strip()
     variant_tag = tag.strip() if sep else None
-    if sep and (not base or not variant_tag):
+    if sep and (not raw_base or not variant_tag):
         raise ConfigError(f"malformed model variant '{model_name}'; expected '<base_model>@<tag>'")
 
-    if model_cls is None:
-        from .models import get_model
+    from .models import base_model_name, get_model
 
+    base = base_model_name(raw_base)
+    if model_cls is None:
         model_cls = get_model(base)
 
-    variant_explicit = cfg.model_params.get(model_name, {}) if model_name != base else {}
+    variant_explicit: dict[str, Any] = {}
+    if model_name != base:
+        if raw_base != base and f"{base}@{variant_tag}" in cfg.model_params:
+            variant_explicit.update(cfg.model_params[f"{base}@{variant_tag}"])
+        if model_name in cfg.model_params:
+            variant_explicit.update(cfg.model_params[model_name])
     raw_params: dict[str, Any] = dict(cfg.model_params.get(base, {}))
+    if raw_base != base and raw_base in cfg.model_params:
+        raw_params.update(cfg.model_params[raw_base])
     if variant_explicit:
         raw_params.update(variant_explicit)
 
     f = cfg.features
+    has_monotone_tag = False
     if variant_tag is not None:
+        norm_tag_tokens = [t for t in variant_tag.replace("+", "_").split("_") if t]
+        has_monotone_tag = any(t in ("monotone", "monotonic") for t in norm_tag_tokens)
+
         declared = set(f.all_covariates)
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
         if inferred_scope is not None and "training_mode" not in variant_explicit:
@@ -516,10 +535,10 @@ def resolve_model_variant(
                     ]
 
         if not matched_col_slice:
-            # Composable token parser: supports both single tags (@v2.5, @transform_log1p, @direct)
-            # and compound tags (@v2.5_univariate, @global_v2.5_cov_all, @tiny_global,
-            # @direct_transform_log1p).
-            rem_tag = variant_tag
+            # Composable token parser: supports both single tags (@v2.5, @transform_log1p, @direct,
+            # @monotone) and compound tags (@v2.5_univariate, @global_v2.5_cov_all, @tiny_global,
+            # @direct_transform_log1p, @global+monotone, @direct+monotone).
+            rem_tag = variant_tag.replace("+", "_")
             for multi_cov in sorted(VALID_COVARIATE_MODES, key=len, reverse=True):
                 if "_" in multi_cov and multi_cov in rem_tag:
                     if "covariate_mode" not in variant_explicit:
@@ -535,9 +554,11 @@ def resolve_model_variant(
                         raw_params["transform"] = tr_norm
                     rem_tag = rem_tag.replace(multi_tr, "")
 
+            supported_for_tag = model_cls.supported_training_modes()
             for tok in (t for t in rem_tag.split("_") if t):
                 if tok in ("local", "global", "hybrid") and "training_mode" not in variant_explicit:
-                    raw_params["training_mode"] = tok
+                    if not has_monotone_tag or tok in supported_for_tag:
+                        raw_params["training_mode"] = tok
                 elif tok in VALID_COVARIATE_MODES and "covariate_mode" not in variant_explicit:
                     raw_params["covariate_mode"] = tok
                 elif (
@@ -560,6 +581,36 @@ def resolve_model_variant(
                     raw_params["strategy"] = tok
                 elif tok in ("sba", "tsb", "classic") and "variant" not in variant_explicit:
                     raw_params["variant"] = tok
+
+    # If the run includes a `@monotone` sibling for this base model, an untagged base model
+    # serves as the unconstrained baseline unless `monotonic_constraints` was explicitly passed
+    # in `model_params[base]`.
+    has_monotone_sibling = any(
+        base_model_name(m) == base
+        and "@" in m
+        and any(
+            t in ("monotone", "monotonic") for t in m.partition("@")[2].replace("+", "_").split("_")
+        )
+        for m in cfg.models
+    )
+    if (
+        not has_monotone_tag
+        and has_monotone_sibling
+        and f.monotonic_constraints
+        and "monotonic_constraints" not in raw_params
+    ):
+        raw_params["monotonic_constraints"] = {}
+    elif has_monotone_tag:
+        explicit_param_mono = raw_params.get("monotonic_constraints")
+        resolved_mono = resolve_monotonic_constraints(
+            f.monotonic_constraints,
+            explicit_param_mono if isinstance(explicit_param_mono, Mapping) else None,
+            candidate_columns=f.dynamic_covariates,
+            infer_if_empty=True,
+        )
+        raw_params["monotonic_constraints"] = resolved_mono
+        if not resolved_mono:
+            raw_params.setdefault("monotone", True)
 
     scope_cap = model_cls.scope_capability()
     default_tm = "global" if scope_cap == "global_only" else "local"
@@ -590,6 +641,8 @@ def resolve_model_variant(
         new_level_shift = f.level_shift
         new_trading_days = f.trading_days
         new_transform = f.transform
+        new_mono_constraints: dict[str, Any] = dict(f.monotonic_constraints)
+        new_holiday_window = f.holiday_window
 
         if "transform" in raw_params and raw_params["transform"] is not None:
             tr_val = str(raw_params["transform"])
@@ -669,9 +722,19 @@ def resolve_model_variant(
             new_level_shift = bool(raw_params["level_shift"])
         if "trading_days" in raw_params and raw_params["trading_days"] is not None:
             new_trading_days = bool(raw_params["trading_days"])
+        if (
+            "monotonic_constraints" in raw_params
+            and raw_params["monotonic_constraints"] is not None
+        ):
+            raw_mc = raw_params["monotonic_constraints"]
+            if isinstance(raw_mc, Mapping):
+                new_mono_constraints = validate_monotonic_constraints_map(raw_mc)
+        if "holiday_window" in raw_params:
+            new_holiday_window = coerce_holiday_window_config(raw_params["holiday_window"])
 
         kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
         new_lags = {k: list(v) for k, v in new_lags.items() if k in kept_dynamic}
+        new_mono_constraints = {k: v for k, v in new_mono_constraints.items() if k in kept_dynamic}
         cand_features = f.model_copy(
             update={
                 "transform": new_transform,
@@ -684,6 +747,8 @@ def resolve_model_variant(
                 "fourier": new_fourier,
                 "level_shift": new_level_shift,
                 "trading_days": new_trading_days,
+                "monotonic_constraints": new_mono_constraints,
+                "holiday_window": new_holiday_window,
             }
         )
         cand_cfg = cfg if cand_features == f else cfg.model_copy(update={"features": cand_features})
@@ -739,6 +804,7 @@ def effective_config_for_model(
     if (
         "@" not in target_name
         and target_name not in cfg.model_params
+        and not cfg.features.monotonic_constraints
         and not model_cls.unsupported_covariate_tiers(cfg.features)
     ):
         return cfg
@@ -1349,6 +1415,10 @@ def build_features(
         hol = holiday_frame(cfg)
         holiday_days = set(hol["ds"].to_numpy())
         cols["is_holiday"] = np.isin(frame.index.to_numpy(), list(holiday_days)).astype(float)
+        if f.holiday_window is not None and f.holiday_window.enabled:
+            cols.update(
+                build_holiday_window_features(pd.DatetimeIndex(frame.index), hol, f.holiday_window)
+            )
 
     # Fourier seasonality terms (yearly), for ML models.
     if f.fourier:
@@ -1403,6 +1473,8 @@ def build_future_features(
         hol = holiday_frame(cfg)
         holiday_days = set(hol["ds"].to_numpy())
         known["is_holiday"] = np.isin(future.to_numpy(), list(holiday_days)).astype(float)
+        if f.holiday_window is not None and f.holiday_window.enabled:
+            known.update(build_holiday_window_features(future, hol, f.holiday_window))
     if f.fourier:
         known.update(_fourier_terms(future, d.freq, order=3))
     if f.trading_days:

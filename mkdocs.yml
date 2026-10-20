@@ -162,6 +162,9 @@ nav:
       - Model factory: api/models.md
       - BaseModel: api/models_base_model.md
       - Feature engineering: api/features.md
+      - Monotonic & sign constraints: api/monotonicity.md
+      - Moving-holiday windows: api/holiday_window.md
+      - Promo & price elasticity: api/elasticity.md
       - Seasonality detection: api/seasonality.md
       - Hyperparameter optimization: api/hpo.md
       - Ensembler (blending math): api/ensembler.md

@@ -339,6 +339,7 @@ def _model_context(
         device=_resolve_device(cfg, family),
         past_covariates=tuple(cfg.features.past_covariates),
         static_covariates=static_covariates,
+        monotonic_constraints=dict(cfg.features.monotonic_constraints),
     )
 
 

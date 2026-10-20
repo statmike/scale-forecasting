@@ -66,7 +66,7 @@ def model_catalog() -> pd.DataFrame:
 
     Columns: ``model, family, runtime, package, package_url, available, local, spark, ray, gpu,
     vertex_automl, bigquery, exog, future_covariates, past_covariates, static_covariates,
-    explainability, global_mode, hybrid_mode``.
+    explainability, monotonic_constraints, global_mode, hybrid_mode``.
     """
     rows: list[dict[str, Any]] = []
     for name in list_models():
@@ -93,6 +93,7 @@ def model_catalog() -> pd.DataFrame:
                 "past_covariates": cls.supports_past_covariates,
                 "static_covariates": cls.supports_static_covariates,
                 "explainability": cls.supports_explainability,
+                "monotonic_constraints": cls.supports_monotonic_constraints,
                 "global_mode": cls.supports_global,
                 "hybrid_mode": cls.supports_hybrid,
             }
@@ -339,6 +340,13 @@ class PlaygroundRun:
         scenarios: dict[str, dict[str, Any]],
         *,
         price_col: str | None = None,
+        unit_cost: float | str | dict[str, float] | None = None,
+        reconcile: bool = True,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        inventory_params: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
         """Run counterfactual future covariate scenarios on this single-series run."""
         from .scenarios import simulate_scenarios
@@ -352,13 +360,61 @@ class PlaygroundRun:
             backtest=self.backtest,
             future_covariates=fut_covs or None,
         )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
         return simulate_scenarios(
             self.series,
             cfg,
             scenarios,
             models=[self.result.model_type],
             price_col=price_col,
+            unit_cost=unit_cost,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            oof_df=oof,
+            inventory_params=inventory_params,
         )
+
+    def promo_elasticity_df(
+        self,
+        *,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        confounders: list[str] | None = None,
+        summary: bool = False,
+    ) -> pd.DataFrame:
+        """Compute cross-fitted Double-ML promo & price elasticity decomposition on this series."""
+        from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
+
+        decomp = compute_promo_elasticity_decomposition(
+            self.series,
+            promo_col=promo_col,
+            price_col=price_col,
+            confounders=confounders,
+        )
+        return summarize_promo_elasticity(decomp) if summary else decomp
+
+    promo_elasticity = promo_elasticity_df
+
+    def plot_promo_elasticity(
+        self,
+        *,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot organic baseline vs. promotional lift and post-promo dip for this series."""
+        from .elasticity import plot_promo_elasticity
+
+        decomp = self.promo_elasticity_df(promo_col=promo_col, price_col=price_col, summary=False)
+        return plot_promo_elasticity(decomp, ts_id=self.result.ts_id, ax=ax, title=title)
 
     def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
         """Return the exception triage queue for this playground run."""
@@ -543,6 +599,13 @@ class BakeOff:
         *,
         models: list[str] | None = None,
         price_col: str | None = None,
+        unit_cost: float | str | dict[str, float] | None = None,
+        reconcile: bool = True,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        inventory_params: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
         """Run counterfactual covariate scenarios across this bake-off's series and models."""
         from .scenarios import simulate_scenarios
@@ -553,7 +616,58 @@ class BakeOff:
             scenarios,
             models=models,
             price_col=price_col,
+            unit_cost=unit_cost,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            oof_df=self.oof,
+            inventory_params=inventory_params,
         )
+
+    def promo_elasticity_df(
+        self,
+        *,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        confounders: list[str] | None = None,
+        summary: bool = False,
+    ) -> pd.DataFrame:
+        """Compute cross-fitted Double-ML promo & price elasticity decomposition on this bake-off's
+        series.
+        """
+        from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
+
+        decomp = compute_promo_elasticity_decomposition(
+            self.series,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            promo_col=promo_col,
+            price_col=price_col,
+            confounders=confounders,
+            freq=self.config.data.freq,
+            holidays=self.config.features.holidays,
+        )
+        return summarize_promo_elasticity(decomp) if summary else decomp
+
+    promo_elasticity = promo_elasticity_df
+
+    def plot_promo_elasticity(
+        self,
+        *,
+        ts_id: str | None = None,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot organic baseline vs. promotional lift and post-promo dip for this bake-off."""
+        from .elasticity import plot_promo_elasticity
+
+        decomp = self.promo_elasticity_df(promo_col=promo_col, price_col=price_col, summary=False)
+        return plot_promo_elasticity(decomp, ts_id=ts_id, ax=ax, title=title)
 
     def exceptions_df(self, *, top_n: int = 50) -> pd.DataFrame:
         """Build the Top-N exception triage queue across all models in this bake-off."""

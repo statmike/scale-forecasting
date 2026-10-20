@@ -111,6 +111,7 @@ def _score_panel_params(
         ctx,
         device="auto",
         past_covariates=tuple(cfg.features.past_covariates),
+        monotonic_constraints=dict(cfg.features.monotonic_constraints),
     )
 
     series_frames: dict[str, pd.DataFrame] = {}
@@ -289,6 +290,7 @@ def _score_params(
                 device="auto",
                 past_covariates=tuple(model_cfg.features.past_covariates),
                 static_covariates=static_covs,
+                monotonic_constraints=dict(model_cfg.features.monotonic_constraints),
             )
             # partial binds this iteration's series_ctx (no loop-var capture; mypy-typed).
             # The search scores the primary arm only. Its job is to rank parameter sets under the

@@ -6,10 +6,10 @@ re-ensemble it — all from the config you wrote (see the
 your `src/` ships at submit time (see [editing code without rebuilding](./editing_code_without_rebuilding.md)).
 
 ```mermaid
-flowchart LR
+flowchart TD
     S1["1. Preflight<br/>--dry-run / --feasibility"] --> S2["2. Submit<br/>main.run / Forecaster.run"]
     S2 --> S3["3. Watch & Probe<br/>monitor_run / --probe"]
-    S3 --> S4["4. Review, Explain & Calibrate<br/>review_run / attributions_df / calibration_report"]
+    S3 --> S4["4. Review, Explain, Decompose & Simulate<br/>review_run / attributions_df / promo_elasticity_df / simulate_scenarios / calibration_report"]
     S4 --> S5["5. Re-ensemble (Optional)<br/>ensemble_run"]
     S4 --> S6["6. Manage Registry<br/>registry.ops"]
 ```
@@ -415,9 +415,9 @@ number to watch when a model's `interval_calibration` is `in-sample` or `oof-fla
 `oof-per-step` — a flat band is too wide early and too narrow late, and only the per-step view shows
 it.
 
-### Why did the model predict that? (Two-tier explainability & decomposition)
+### Why did the model predict that? (Two-tier explainability, decomposition & elasticity)
 
-After reviewing which model won and how its intervals calibrated, you can inspect **why** the forecast moved using two complementary SDK surfaces:
+After reviewing which model won and how its intervals calibrated, you can inspect **why** the forecast moved and stress-test promotional/pricing actions using three complementary SDK surfaces:
 
 1. **Two-Tier Feature Attributions (`Forecaster.attributions_df()` & `Forecaster.plot_attributions()`):**
    For all 5 Python `ml` models (`xgboost`, `lightgbm`, `catboost` via exact C++ TreeSHAP; `regression_lags` via closed-form linear attributions; `random_forest` via importance-weighted deviation) and all 4 `automl` models (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq` when `generate_explanation=True`):
@@ -430,6 +430,8 @@ After reviewing which model won and how its intervals calibrated, you can inspec
    ```
 2. **4-Panel Structural Decomposition (`Forecaster.explain_forecast()` & `Forecaster.plot_forecast_explanation()`):**
    Works universally across all **37 models** and ensembles, decomposing historical actuals and future predictions into trend, regime level shift, seasonal cycle, and exogenous covariate ridge attribution.
+3. **Promo & Price Elasticity Decomposition & 5-Stage What-If (`Forecaster.promo_elasticity_df()`, `Forecaster.plot_promo_elasticity()`, & `Forecaster.simulate_scenarios()`):**
+   Partitions Tier 2 per-step SHAP/linear attributions into `baseline_demand`, `promo_lift_units`, `price_elasticity_units`, `other_covariate_units`, and `autoregressive_calendar_units` (`total_forecast_units == sum of 5 buckets`), flags causality violations (`causality_violation_flag`), and runs 5-stage counterfactual what-if scenarios (`price_col`, `unit_cost_col`, `holding_cost_rate`, `stockout_penalty_rate`, `lead_time_periods`, `safety_stock_quantile`).
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or

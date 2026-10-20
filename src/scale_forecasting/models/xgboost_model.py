@@ -16,6 +16,7 @@ import pandas as pd
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..monotonicity import resolve_model_monotonic_vector
 from . import _lag_forecaster as lf
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
@@ -30,6 +31,7 @@ class XgboostModel(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     # The trees are the estimate; the lag buffer is not. Re-pointing the history at newer actuals
     # feeds the *same* trees better inputs without retraining one of them, which is exactly the
@@ -59,8 +61,19 @@ class XgboostModel(BaseModel):
         self._baseline_score = float(y_aligned.mean())
         self._history = y.astype(float)
         self._last_date = y.index[-1]
+        mono_vec = resolve_model_monotonic_vector(
+            self._features,
+            self.params,
+            self.ctx.monotonic_constraints,
+            recursive_lags_nonnegative=(strategy == "recursive"),
+        )
+        self._monotonic_vector = mono_vec
+        has_mono = any(v != 0 for v in mono_vec)
 
         def _make_est() -> Any:
+            extra_kw: dict[str, Any] = {}
+            if has_mono:
+                extra_kw["monotone_constraints"] = tuple(mono_vec)
             return XGBRegressor(
                 n_estimators=int(self.params.get("n_estimators", 300)),
                 max_depth=int(self.params.get("max_depth", 6)),
@@ -68,6 +81,7 @@ class XgboostModel(BaseModel):
                 subsample=0.9,
                 random_state=self.ctx.seed,
                 n_jobs=1,
+                **extra_kw,
             )
 
         self._model = _make_est()

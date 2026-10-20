@@ -110,8 +110,11 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | `outlier_policy` | `"none"` \| `"winsorize"` \| `"interpolate"` \| `"flag"` \| `"stl_resid"` | `"none"` | Winsorizes (`"winsorize"`), linearly interpolates (`"interpolate"`), or flags (`"flag"`) unflagged historical spikes exceeding `outlier_sigma` seasonal MADs (or STL residuals under `"stl_resid"`) while preserving active `promo_flag` / `is_holiday` rows. |
 | `outlier_sigma` | `float` | `3.5` | Robust seasonal-MAD threshold (`≥ 1.5`) for `outlier_policy`. |
 | `regime_routing` | `bool` | `false` | Classifies each series via the Syntetos–Boylan–Croston (SBC) matrix (`smooth`, `erratic`, `intermittent`, `lumpy`) and skips smooth continuous models on intermittent/lumpy series when intermittent-capable models are present. |
+| `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | Directional economic sign constraints on exogenous covariates (`-1` non-increasing for price/rate columns, `+1` non-decreasing for promo/discount/marketing columns, `0` unconstrained), enforced across `lightgbm`, `xgboost`, `catboost`, and `regression_lags` (`ridge_lags`). Can also be activated per-model via the `@monotone` variant tag (e.g. `"lightgbm@monotone"`, `"regression_lags@monotone"`). |
+| `holiday_window` | `HolidayWindowConfig \| dict \| bool \| null` | `null` | Multi-day moving-holiday lead/lag window (`{"enabled": true, "pre_holiday_days": 7, "post_holiday_days": 3, "kernel": "linear"}`) generating deterministic pre-holiday ramp-up (`pre_holiday_window`, `days_to_next_holiday`) and post-holiday slump (`post_holiday_window`, `days_since_prev_holiday`, `holiday_offset_days`) covariates when `holidays` or `custom_holidays` are active. |
+| `custom_holidays` | `list[dict[str, str]]` | `[]` | Custom event dates (`[{"name": "Cyber Monday", "date": "2026-11-30"}]`) combined with `holidays` for `is_holiday` and `holiday_window` features. |
 
-**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py)):
+**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py)):
 
 - **`transform`** — reshapes the target before fitting and inverts it on output:
   - `none` — identity (no constraint on `y`).
@@ -123,6 +126,23 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 - **`holidays`** — adds a single `is_holiday` flag (1.0 on holiday dates) from the `holidays` package
   for each ISO country code (e.g. `["US", "GB"]`). The same calendar feeds the BigQuery-native models,
   so holiday handling matches across runtimes. An unknown code fails fast.
+- **`holiday_window`** — expands point holidays (`holidays` and `custom_holidays`) into asymmetric multi-day pre-holiday build-up (`[-pre_holiday_days..-1]`, default `7` days) and post-holiday slump (`[+1..+post_holiday_days]`, default `3` days) distance covariates (`pre_holiday_window`, `post_holiday_window`, `days_to_next_holiday`, `days_since_prev_holiday`, `holiday_offset_days`) using `"linear"` (default), `"exponential"`, or `"indicator"` decay kernels. Automatically enabled by `Forecaster.build_config()` / `Forecaster.auto()` on daily (`D`) and hourly (`h`) panels with active holidays.
+- **`monotonic_constraints` & `@monotone`** — prevents confounded historical correlations (such as price increases coinciding with peak holiday demand) from producing wrong-signed elasticities ($\hat{y}(p + \Delta p) > \hat{y}(p)$). Setting `monotonic_constraints: {"price_index": -1, "promo_flag": 1}` (or listing `<model>@monotone` in `models`, which auto-infers `price* -> -1` and `promo* / discount* -> +1` when `monotonic_constraints` is empty) enforces native tree monotonicity in `lightgbm`, `xgboost`, and `catboost` and bounded least-squares Ridge (`scipy.optimize.lsq_linear`) in `regression_lags` (`ridge_lags`):
+  ```json
+  {
+    "run_name": "causal_guardrails_demo",
+    "data": {"source_table": "source_series_iceberg", "series_limit": 50, "freq": "D", "horizon": 14},
+    "models": ["lightgbm", "lightgbm@monotone", "regression_lags@monotone"],
+    "features": {
+      "holidays": ["US"],
+      "holiday_window": {"enabled": true, "pre_holiday_days": 7, "post_holiday_days": 3, "kernel": "linear"},
+      "future_covariates": ["price_index", "promo_flag"],
+      "exog_lags": {"promo_flag": [1, 2, 3]},
+      "monotonic_constraints": {"price_index": -1, "promo_flag": 1}
+    },
+    "backtest": {"enabled": true, "scheme": "expanding", "n_folds": 3, "horizon": 14, "step": 14, "decision_metric": "wape"}
+  }
+  ```
 - **`exog_lags`** — for each declared `exog` column and each integer `L`, adds a `{column}_lag_{L}`
   column (that **covariate** shifted back `L` steps). Use it when a driver acts on the target with a
   delay: a promotion that lifts demand the following week, a price change that takes a month to bite.

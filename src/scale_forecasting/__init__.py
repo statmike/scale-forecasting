@@ -53,7 +53,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.4.0"
+    __version__ = "1.5.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -143,7 +143,34 @@ _LAZY: dict[str, tuple[str, str]] = {
     "plot_fva": (".diagnostics", "plot_fva"),
     "plot_horizon_decay": (".diagnostics", "plot_horizon_decay"),
     "plot_inventory_policy": (".diagnostics", "plot_inventory_policy"),
+    # Causal & structural econometric guardrails (Track J).
+    "MONOTONE_SUPPORTED_MODELS": (".monotonicity", "MONOTONE_SUPPORTED_MODELS"),
+    "MONOTONICITY_AUDIT_COLUMNS": (".monotonicity", "MONOTONICITY_AUDIT_COLUMNS"),
+    "list_monotonic_models": (".monotonicity", "list_monotonic_models"),
+    "audit_scenario_monotonicity": (".monotonicity", "audit_scenario_monotonicity"),
+    "infer_monotonic_constraints": (".monotonicity", "infer_monotonic_constraints"),
+    "resolve_monotonic_constraints": (".monotonicity", "resolve_monotonic_constraints"),
+    "build_monotonic_constraint_vector": (
+        ".monotonicity",
+        "build_monotonic_constraint_vector",
+    ),
+    "resolve_model_monotonic_vector": (".monotonicity", "resolve_model_monotonic_vector"),
+    "fit_sign_constrained_ridge": (".monotonicity", "fit_sign_constrained_ridge"),
+    "HOLIDAY_WINDOW_COLUMNS": (".holiday_window", "HOLIDAY_WINDOW_COLUMNS"),
+    "HolidayWindowConfig": (".holiday_window", "HolidayWindowConfig"),
+    "build_holiday_window_features": (".holiday_window", "build_holiday_window_features"),
+    "PROMO_ELASTICITY_COLUMNS": (".elasticity", "PROMO_ELASTICITY_COLUMNS"),
+    "compute_promo_elasticity": (".elasticity", "compute_promo_elasticity"),
+    "compute_promo_elasticity_decomposition": (
+        ".elasticity",
+        "compute_promo_elasticity_decomposition",
+    ),
+    "promo_elasticity_df": (".elasticity", "promo_elasticity_df"),
+    "summarize_promo_elasticity": (".elasticity", "summarize_promo_elasticity"),
+    "plot_promo_elasticity": (".elasticity", "plot_promo_elasticity"),
+    "make_confounded_promo_dgp": (".elasticity", "make_confounded_promo_dgp"),
     "apply_scenario_shocks": (".scenarios", "apply_scenario_shocks"),
+    "compare_scenario_margin_curves": (".scenarios", "compare_scenario_margin_curves"),
     "simulate_scenarios": (".scenarios", "simulate_scenarios"),
     "summarize_scenarios": (".scenarios", "summarize_scenarios"),
     "plot_scenarios": (".scenarios", "plot_scenarios"),
@@ -258,6 +285,15 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         rollup_time,
         wilcoxon_pvalue,
     )
+    from .elasticity import (  # noqa: F401
+        PROMO_ELASTICITY_COLUMNS,
+        compute_promo_elasticity,
+        compute_promo_elasticity_decomposition,
+        make_confounded_promo_dgp,
+        plot_promo_elasticity,
+        promo_elasticity_df,
+        summarize_promo_elasticity,
+    )
     from .engines.ray_io import chunk_cells, make_chunk_runner  # noqa: F401
     from .engines.spark_io import (  # noqa: F401
         RunOutcome,
@@ -272,9 +308,25 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         run_evolution,
     )
     from .features import compute_demand_profile  # noqa: F401
+    from .holiday_window import (  # noqa: F401
+        HOLIDAY_WINDOW_COLUMNS,
+        HolidayWindowConfig,
+        build_holiday_window_features,
+    )
     from .main import run  # noqa: F401
     from .mcp import McpServer  # noqa: F401
     from .models import get_model, list_models  # noqa: F401
+    from .monotonicity import (  # noqa: F401
+        MONOTONE_SUPPORTED_MODELS,
+        MONOTONICITY_AUDIT_COLUMNS,
+        audit_scenario_monotonicity,
+        build_monotonic_constraint_vector,
+        fit_sign_constrained_ridge,
+        infer_monotonic_constraints,
+        list_monotonic_models,
+        resolve_model_monotonic_vector,
+        resolve_monotonic_constraints,
+    )
     from .playground import metric_catalog, model_catalog  # noqa: F401
     from .profiling.duration import (  # noqa: F401
         DurationCalibration,
@@ -326,6 +378,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .router import split_by_runtime  # noqa: F401
     from .scenarios import (  # noqa: F401
         apply_scenario_shocks,
+        compare_scenario_margin_curves,
         plot_scenarios,
         simulate_scenarios,
         summarize_scenarios,

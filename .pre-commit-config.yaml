@@ -12,7 +12,7 @@ repos:
           allowed = {'https://pypi.org/simple', 'https://download.pytorch.org/whl/cu126'};
           locks = [p for p in pathlib.Path('.').rglob('uv.lock') if '.venv' not in p.parts and '.venv-ci' not in p.parts];
           bad = [f'{p}: {s}' for p in locks for s in set(re.findall(r'registry = \"([^\"]+)\"', p.read_text())) if s not in allowed];
-          leaks = [str(p) for p in locks if re.search(r'airlock-proxy\.uplink\.goog|artifact-foundry-prod|\.corp\.google\.com', p.read_text())];
+          leaks = [str(p) for p in locks if re.search(r'\.uplink\.goog|\.corp\.google\.com|\.prod\.google\.com|c\.googlers\.com|pkg\.dev/[a-z0-9-]+-prod/', p.read_text())];
           sys.exit('Non-public uv.lock registry or internal URL detected: ' + ', '.join(bad + leaks) if (bad or leaks) else 0)"
         language: system
         pass_filenames: false

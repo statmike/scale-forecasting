@@ -15,6 +15,7 @@ import pandas as pd
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..monotonicity import resolve_model_monotonic_vector
 from . import _lag_forecaster as lf
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
@@ -29,6 +30,7 @@ class RandomForestModel(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     supports_recondition = True
     supports_extrapolate = True
@@ -52,14 +54,26 @@ class RandomForestModel(BaseModel):
         self._last_date = y.index[-1]
         max_depth_raw = self.params.get("max_depth", 10)
         max_depth = int(max_depth_raw) if max_depth_raw is not None else None
+        mono_vec = resolve_model_monotonic_vector(
+            self._features,
+            self.params,
+            self.ctx.monotonic_constraints,
+            recursive_lags_nonnegative=(strategy == "recursive"),
+        )
+        self._monotonic_vector = mono_vec
+        has_mono = any(v != 0 for v in mono_vec)
 
         def _make_est() -> Any:
+            extra_kw: dict[str, Any] = {}
+            if has_mono:
+                extra_kw["monotonic_cst"] = list(mono_vec)
             return RandomForestRegressor(
                 n_estimators=int(self.params.get("n_estimators", 200)),
                 max_depth=max_depth,
                 min_samples_leaf=int(self.params.get("min_samples_leaf", 2)),
                 random_state=self.ctx.seed,
                 n_jobs=1,
+                **extra_kw,
             )
 
         self._model = _make_est()
