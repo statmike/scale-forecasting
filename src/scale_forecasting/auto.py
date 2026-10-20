@@ -62,6 +62,7 @@ from .auto_policy import (
 from .config import RunConfig, load_config
 from .errors import ConfigError, DataError, get_logger
 from .models import base_model_name, get_model, list_models
+from .monotonicity import infer_monotonic_constraints
 from .profiling.duration import (
     DurationCalibration,
     DurationEstimate,
@@ -1450,6 +1451,104 @@ class AutoForecastSession:
         )
         return f"{prof_str}\n\n{head}\n\n{assess_df.to_string(index=False)}"
 
+    def promo_elasticity_df(
+        self,
+        *,
+        data: pd.DataFrame | None = None,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        confounders: Sequence[str] | None = None,
+        summary: bool = False,
+    ) -> pd.DataFrame:
+        """Compute cross-fitted Double-ML promo & price elasticity decomposition on this session's
+        panel (`elasticity.compute_promo_elasticity_decomposition`).
+        """
+        from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
+
+        panel = data if data is not None else self.data_df
+        if panel is None or panel.empty:
+            return pd.DataFrame()
+        champ = self.champion_record()
+        cfg = champ.config if champ is not None else self.blueprint.config
+        decomp = compute_promo_elasticity_decomposition(
+            panel,
+            ts_id_col=cfg.data.ts_id_col,
+            date_col=cfg.data.date_col,
+            target_col=cfg.data.target_col,
+            promo_col=promo_col,
+            price_col=price_col,
+            confounders=confounders,
+            freq=cfg.data.freq,
+            holidays=cfg.features.holidays,
+        )
+        return summarize_promo_elasticity(decomp) if summary else decomp
+
+    promo_elasticity = promo_elasticity_df
+
+    def plot_promo_elasticity(
+        self,
+        *,
+        data: pd.DataFrame | None = None,
+        ts_id: str | None = None,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot organic baseline vs. promotional lift and post-promo dip for ``ts_id``."""
+        from .elasticity import plot_promo_elasticity
+
+        decomp = self.promo_elasticity_df(
+            data=data, promo_col=promo_col, price_col=price_col, summary=False
+        )
+        return plot_promo_elasticity(decomp, ts_id=ts_id, ax=ax, title=title)
+
+    def simulate_scenarios(
+        self,
+        scenarios: Mapping[str, Mapping[str, Any]],
+        *,
+        data: pd.DataFrame | None = None,
+        models: Sequence[str] | None = None,
+        future_covariates_df: pd.DataFrame | None = None,
+        price_col: str | None = None,
+        unit_cost: float | str | Mapping[str, float] | None = None,
+        reconcile: bool = True,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        inventory_params: Mapping[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Run full-chain counterfactual scenario propagation across this session's champion
+        configuration (base models -> ensembles -> hierarchy reconciliation -> gross margin &
+        inventory policy shift).
+        """
+        from .scenarios import simulate_scenarios
+
+        panel = data if data is not None else self.data_df
+        if panel is None or panel.empty:
+            raise DataError("No in-memory panel available on AutoForecastSession; pass data=...")
+        champ = self.champion_record()
+        cfg = champ.config if champ is not None else self.blueprint.config
+        fut = future_covariates_df if future_covariates_df is not None else self.future_df
+        oof = self.oof_df if not self.oof_df.empty else None
+        return simulate_scenarios(
+            panel,
+            cfg,
+            scenarios,
+            models=models,
+            future_covariates_df=fut,
+            price_col=price_col,
+            unit_cost=unit_cost,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            oof_df=oof,
+            inventory_params=inventory_params,
+        )
+
 
 _TS_ID_CANDIDATES: tuple[str, ...] = (
     "ts_id",
@@ -2117,6 +2216,7 @@ def inspect_panel_for_auto(
         missing_date_gap_share=round(float(np.mean(gap_flags)) if gap_flags else 0.0, 4),
         hierarchy_node_count=hierarchy_node_count,
         cross_series_corr=round(cross_series_corr, 4),
+        monotonic_constraints=infer_monotonic_constraints([*future_covs, *past_covs]),
     )
 
 
@@ -2477,6 +2577,27 @@ def build_config(
     }
     if policy_out.get("censored_col"):
         features_cfg["censored_col"] = policy_out["censored_col"]
+    if policy_out.get("monotonic_constraints"):
+        features_cfg["monotonic_constraints"] = dict(policy_out["monotonic_constraints"])
+    if hol_list and str(profile.freq).strip().upper() in ("D", "B", "H", "1H", "BH"):
+        features_cfg["holiday_window"] = {
+            "enabled": True,
+            "pre_holiday_days": 7,
+            "post_holiday_days": 3,
+            "kernel": "linear",
+        }
+        rationales.append(
+            {
+                "category": "features",
+                "parameter": "features.holiday_window",
+                "value": "pre=7d, post=3d, kernel='linear'",
+                "evidence": f"holidays={hol_list}, freq='{profile.freq}'",
+                "rationale": (
+                    "Expands point-day holiday indicators into asymmetric pre-holiday stock-up "
+                    "ramps and post-holiday dip windows."
+                ),
+            }
+        )
 
     if profile.future_covariates:
         rationales.append(

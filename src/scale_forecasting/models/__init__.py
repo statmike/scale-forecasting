@@ -65,6 +65,7 @@ _log = get_logger(__name__)
 # Clarity aliases mapping to their canonical registered base model names.
 _MODEL_ALIASES: dict[str, str] = {
     "bq_timesfm": "timesfm",
+    "ridge_lags": "regression_lags",
 }
 
 

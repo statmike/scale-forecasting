@@ -298,7 +298,105 @@ def _build_explorer_series_map(
     return {"series": series_payload, "ts_ids": ts_ids, "models": models}
 
 
+def _extract_target_frames(
+    target: Any,
+    *,
+    run_id: str,
+    metric: str | None,
+) -> dict[str, Any]:
+    """Extract standard report frames from a BakeOff, PlaygroundRun, Forecaster, or dict."""
+    eff_run_id = run_id
+    eff_metric = metric or "wape"
+    out: dict[str, Any] = {}
+    if target is None:
+        return {"run_id": eff_run_id, "metric": eff_metric}
+
+    # 0. Pre-built payload dict (already contains "kpis" and "explorer")
+    if isinstance(target, dict) and "kpis" in target and "explorer" in target:
+        return {"_prebuilt_payload": target}
+
+    # 1. BakeOff duck-typing
+    if hasattr(target, "leaderboard") and hasattr(target, "predictions") and hasattr(target, "oof"):
+        out["leaderboard_df"] = target.leaderboard
+        out["predictions_df"] = target.predictions
+        out["oof_df"] = target.oof
+        out["history_df"] = getattr(target, "series", None)
+        if hasattr(target, "inventory_policy_df"):
+            out["inventory_policy_df"] = target.inventory_policy_df()
+        if hasattr(target, "config"):
+            eff_run_id = getattr(target.config, "run_name", eff_run_id)
+            if metric is None:
+                eff_metric = target.config.backtest.decision_metric
+    # 2. PlaygroundRun duck-typing
+    elif hasattr(target, "result") and hasattr(target, "series"):
+        res = target.result
+        eff_run_id = getattr(res, "run_id", eff_run_id)
+        out["predictions_df"] = res.predictions.assign(ts_id=res.ts_id, model_type=res.model_type)
+        if res.oof is not None and not res.oof.empty:
+            out["oof_df"] = res.oof.assign(ts_id=res.ts_id, model_type=res.model_type)
+        out["history_df"] = target.series
+        if hasattr(target, "inventory_policy_df"):
+            out["inventory_policy_df"] = target.inventory_policy_df()
+    # 3. AutoForecastSession duck-typing
+    elif hasattr(target, "leaderboard_df") and isinstance(
+        getattr(target, "leaderboard_df", None), pd.DataFrame
+    ):
+        eff_run_id = getattr(target, "run_id", eff_run_id)
+        out["leaderboard_df"] = target.leaderboard_df
+        out["oof_df"] = getattr(target, "oof_df", None)
+        out["predictions_df"] = getattr(target, "predictions_df", None)
+        out["history_df"] = getattr(target, "data_df", None)
+        out["fva_df"] = getattr(target, "fva_df", None)
+        out["horizon_decay_df"] = getattr(target, "horizon_decay_df", None)
+        out["bias_df"] = getattr(target, "bias_df", None)
+        if hasattr(target, "autofocus_ledger_df") and callable(target.autofocus_ledger_df):
+            out["autofocus_ledger_df"] = target.autofocus_ledger_df()
+        if getattr(target, "blueprint", None) is not None:
+            out["blueprint_rationale_df"] = target.blueprint.rationale_df
+    # 4. Forecaster duck-typing
+    elif hasattr(target, "leaderboard_df") and hasattr(target, "fva_df"):
+        eff_run_id = getattr(target, "run_id", eff_run_id)
+        out["leaderboard_df"] = target.leaderboard_df(eff_run_id)
+        out["fva_df"] = target.fva_df(eff_run_id, metric=metric)
+        out["horizon_decay_df"] = target.horizon_decay_df(eff_run_id, metric=metric)
+        out["bias_df"] = target.bias_report_df(eff_run_id)
+        out["predictions_df"] = target.predictions_df(eff_run_id)
+        if hasattr(target, "exceptions_df"):
+            out["exceptions_df"] = target.exceptions_df(eff_run_id)
+        if hasattr(target, "inventory_policy_df"):
+            out["inventory_policy_df"] = target.inventory_policy_df(eff_run_id)
+        if hasattr(target, "autofocus_ledger_df"):
+            out["autofocus_ledger_df"] = target.autofocus_ledger_df()
+        if getattr(target, "blueprint", None) is not None:
+            out["blueprint_rationale_df"] = target.blueprint.rationale_df
+    # 5. Mapping of DataFrames
+    elif isinstance(target, dict):
+        eff_run_id = str(target.get("run_id", eff_run_id))
+        for k in (
+            "leaderboard_df",
+            "oof_df",
+            "predictions_df",
+            "history_df",
+            "fva_df",
+            "horizon_decay_df",
+            "bias_df",
+            "exceptions_df",
+            "inventory_policy_df",
+            "autofocus_ledger_df",
+            "blueprint_rationale_df",
+            "promo_elasticity_df",
+            "scenarios_df",
+        ):
+            if target.get(k) is not None:
+                out[k] = target.get(k)
+
+    out["run_id"] = eff_run_id
+    out["metric"] = eff_metric
+    return out
+
+
 def build_report_payload(
+    target: Any = None,
     *,
     title: str = "Scale-Forecasting Executive Workbench Report",
     run_id: str = "local-workbench",
@@ -315,9 +413,44 @@ def build_report_payload(
     inventory_policy_df: pd.DataFrame | None = None,
     autofocus_ledger_df: pd.DataFrame | None = None,
     blueprint_rationale_df: pd.DataFrame | None = None,
+    promo_elasticity_df: pd.DataFrame | None = None,
+    scenarios_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
+    if target is not None:
+        ext = _extract_target_frames(target, run_id=run_id, metric=metric)
+        if "_prebuilt_payload" in ext:
+            return dict(ext["_prebuilt_payload"])
+        run_id = ext.get("run_id", run_id)
+        metric = ext.get("metric", metric)
+        if leaderboard_df is None:
+            leaderboard_df = ext.get("leaderboard_df")
+        if oof_df is None:
+            oof_df = ext.get("oof_df")
+        if predictions_df is None:
+            predictions_df = ext.get("predictions_df")
+        if history_df is None:
+            history_df = ext.get("history_df")
+        if fva_df is None:
+            fva_df = ext.get("fva_df")
+        if horizon_decay_df is None:
+            horizon_decay_df = ext.get("horizon_decay_df")
+        if bias_df is None:
+            bias_df = ext.get("bias_df")
+        if exceptions_df is None:
+            exceptions_df = ext.get("exceptions_df")
+        if inventory_policy_df is None:
+            inventory_policy_df = ext.get("inventory_policy_df")
+        if autofocus_ledger_df is None:
+            autofocus_ledger_df = ext.get("autofocus_ledger_df")
+        if blueprint_rationale_df is None:
+            blueprint_rationale_df = ext.get("blueprint_rationale_df")
+        if promo_elasticity_df is None:
+            promo_elasticity_df = ext.get("promo_elasticity_df")
+        if scenarios_df is None:
+            scenarios_df = ext.get("scenarios_df")
+
     if fva_df is None and oof_df is not None and not oof_df.empty:
         fva_df = compute_fva(oof_df, metric=metric, series_df=history_df)
     if horizon_decay_df is None and oof_df is not None and not oof_df.empty:
@@ -334,6 +467,23 @@ def build_report_payload(
         )
     if inventory_policy_df is None and predictions_df is not None and not predictions_df.empty:
         inventory_policy_df = compute_inventory_policy(predictions_df, oof_df=oof_df)
+    if promo_elasticity_df is None and history_df is not None and not history_df.empty:
+        lower_cols = {str(c).lower() for c in history_df.columns}
+        if any(
+            k in col
+            for col in lower_cols
+            for k in ("promo", "price", "discount", "markdown", "deal", "sale")
+        ):
+            from .elasticity import (
+                compute_promo_elasticity_decomposition,
+                summarize_promo_elasticity,
+            )
+
+            try:
+                decomp = compute_promo_elasticity_decomposition(history_df)
+                promo_elasticity_df = summarize_promo_elasticity(decomp)
+            except Exception:  # noqa: BLE001 - optional promo decomposition falls back cleanly
+                promo_elasticity_df = None
 
     fva_recs = _df_to_records(fva_df)
     lb_recs = _df_to_records(leaderboard_df)
@@ -345,6 +495,8 @@ def build_report_payload(
     inv_recs = _df_to_records(inventory_policy_df)
     af_recs = _df_to_records(autofocus_ledger_df)
     bp_recs = _df_to_records(blueprint_rationale_df)
+    promo_recs = _df_to_records(promo_elasticity_df)
+    scen_recs = _df_to_records(scenarios_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -382,6 +534,8 @@ def build_report_payload(
         "inventory_policy": inv_recs,
         "autofocus_ledger": af_recs,
         "blueprint_rationale": bp_recs,
+        "promo_elasticity": promo_recs,
+        "scenarios": scen_recs,
         "explorer": explorer,
     }
 
@@ -426,6 +580,7 @@ def _html_table(records: list[dict[str, Any]], *, table_id: str = "", empty_msg:
 
 
 def render_html_report(
+    target: Any = None,
     *,
     title: str = "Scale-Forecasting Executive Workbench Report",
     run_id: str = "local-workbench",
@@ -442,10 +597,13 @@ def render_html_report(
     inventory_policy_df: pd.DataFrame | None = None,
     autofocus_ledger_df: pd.DataFrame | None = None,
     blueprint_rationale_df: pd.DataFrame | None = None,
+    promo_elasticity_df: pd.DataFrame | None = None,
+    scenarios_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
     payload = build_report_payload(
+        target,
         title=title,
         run_id=run_id,
         leaderboard_df=leaderboard_df,
@@ -461,8 +619,13 @@ def render_html_report(
         inventory_policy_df=inventory_policy_df,
         autofocus_ledger_df=autofocus_ledger_df,
         blueprint_rationale_df=blueprint_rationale_df,
+        promo_elasticity_df=promo_elasticity_df,
+        scenarios_df=scenarios_df,
         metric=metric,
     )
+    title = str(payload.get("title", title))
+    run_id = str(payload.get("run_id", run_id))
+    metric = str(payload.get("metric", metric))
     kpis = payload["kpis"]
     fva_svg = _render_fva_svg(payload["fva"])
     decay_svg = _render_decay_svg(payload["horizon_decay"])
@@ -481,6 +644,14 @@ def render_html_report(
     inv_html = _html_table(
         payload["inventory_policy"],
         empty_msg="No forward predictions available for inventory policy translation.",
+    )
+    promo_html = _html_table(
+        payload.get("promo_elasticity", []),
+        empty_msg="No promotional or price elasticity decomposition rows.",
+    )
+    scen_html = _html_table(
+        payload.get("scenarios", []),
+        empty_msg="No counterfactual scenario simulation rows.",
     )
     af_html = _html_table(
         payload["autofocus_ledger"],
@@ -685,6 +856,14 @@ def render_html_report(
     <h2>Inventory &amp; Replenishment Policy (ROP / Safety Stock / Order-Up-To)</h2>
     {inv_html}
   </div>
+  <div class="card">
+    <h2>Promo &amp; Price Elasticity Decomposition (Double-ML)</h2>
+    {promo_html}
+  </div>
+  <div class="card">
+    <h2>Counterfactual Scenario &amp; Gross-Margin Simulation</h2>
+    {scen_html}
+  </div>
 </section>
 
 <section id="tab-explorer" class="tab-panel">
@@ -846,115 +1025,38 @@ def export_report(
     *,
     title: str | None = None,
     metric: str | None = None,
+    promo_elasticity_df: pd.DataFrame | None = None,
+    scenarios_df: pd.DataFrame | None = None,
     write_json: bool = False,
 ) -> Path:
     """Export a self-contained `.html` report (and optional `.json` sidecar) from a `BakeOff`,
-    `PlaygroundRun`, `Forecaster`, or dictionary of DataFrames.
+    `PlaygroundRun`, `Forecaster`, `AutoForecastSession`, or dictionary of DataFrames.
     """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    run_id = "local-workbench"
-    eff_metric = metric or "wape"
-    leaderboard_df: pd.DataFrame | None = None
-    oof_df: pd.DataFrame | None = None
-    predictions_df: pd.DataFrame | None = None
-    history_df: pd.DataFrame | None = None
-    fva_df: pd.DataFrame | None = None
-    horizon_decay_df: pd.DataFrame | None = None
-    bias_df: pd.DataFrame | None = None
-    exceptions_df: pd.DataFrame | None = None
-    inventory_policy_df: pd.DataFrame | None = None
-    autofocus_ledger_df: pd.DataFrame | None = None
-    blueprint_rationale_df: pd.DataFrame | None = None
-
-    # 1. BakeOff duck-typing
-    if hasattr(target, "leaderboard") and hasattr(target, "predictions") and hasattr(target, "oof"):
-        leaderboard_df = target.leaderboard
-        predictions_df = target.predictions
-        oof_df = target.oof
-        history_df = getattr(target, "series", None)
-        if hasattr(target, "inventory_policy_df"):
-            inventory_policy_df = target.inventory_policy_df()
-        if hasattr(target, "config"):
-            run_id = getattr(target.config, "run_name", run_id)
-            if metric is None:
-                eff_metric = target.config.backtest.decision_metric
-    # 2. PlaygroundRun duck-typing
-    elif hasattr(target, "result") and hasattr(target, "series"):
-        res = target.result
-        run_id = getattr(res, "run_id", run_id)
-        predictions_df = res.predictions.assign(ts_id=res.ts_id, model_type=res.model_type)
-        if res.oof is not None and not res.oof.empty:
-            oof_df = res.oof.assign(ts_id=res.ts_id, model_type=res.model_type)
-        history_df = target.series
-        if hasattr(target, "inventory_policy_df"):
-            inventory_policy_df = target.inventory_policy_df()
-    # 3. Forecaster duck-typing
-    elif hasattr(target, "leaderboard_df") and hasattr(target, "fva_df"):
-        run_id = getattr(target, "run_id", run_id)
-        leaderboard_df = target.leaderboard_df(run_id)
-        fva_df = target.fva_df(run_id, metric=metric)
-        horizon_decay_df = target.horizon_decay_df(run_id, metric=metric)
-        bias_df = target.bias_report_df(run_id)
-        predictions_df = target.predictions_df(run_id)
-        if hasattr(target, "exceptions_df"):
-            exceptions_df = target.exceptions_df(run_id)
-        if hasattr(target, "inventory_policy_df"):
-            inventory_policy_df = target.inventory_policy_df(run_id)
-        if hasattr(target, "autofocus_ledger_df"):
-            autofocus_ledger_df = target.autofocus_ledger_df()
-        if getattr(target, "blueprint", None) is not None:
-            blueprint_rationale_df = target.blueprint.rationale_df
-    # 4. Mapping of DataFrames
-    elif isinstance(target, dict):
-        run_id = str(target.get("run_id", run_id))
-        leaderboard_df = target.get("leaderboard_df")
-        oof_df = target.get("oof_df")
-        predictions_df = target.get("predictions_df")
-        history_df = target.get("history_df")
-        fva_df = target.get("fva_df")
-        horizon_decay_df = target.get("horizon_decay_df")
-        bias_df = target.get("bias_df")
-        exceptions_df = target.get("exceptions_df")
-        inventory_policy_df = target.get("inventory_policy_df")
-        autofocus_ledger_df = target.get("autofocus_ledger_df")
-        blueprint_rationale_df = target.get("blueprint_rationale_df")
-
+    ext = _extract_target_frames(target, run_id="local-workbench", metric=metric)
+    run_id = str(ext.get("run_id", "local-workbench"))
+    eff_metric = str(ext.get("metric", metric or "wape"))
     eff_title = title or f"Scale-Forecasting Executive Report ({run_id})"
+
     html_str = render_html_report(
+        target,
         title=eff_title,
         run_id=run_id,
-        leaderboard_df=leaderboard_df,
-        oof_df=oof_df,
-        predictions_df=predictions_df,
-        history_df=history_df,
-        fva_df=fva_df,
-        horizon_decay_df=horizon_decay_df,
-        bias_df=bias_df,
-        exceptions_df=exceptions_df,
-        inventory_policy_df=inventory_policy_df,
-        autofocus_ledger_df=autofocus_ledger_df,
-        blueprint_rationale_df=blueprint_rationale_df,
+        promo_elasticity_df=promo_elasticity_df,
+        scenarios_df=scenarios_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
 
     if write_json:
         payload = build_report_payload(
+            target,
             title=eff_title,
             run_id=run_id,
-            leaderboard_df=leaderboard_df,
-            oof_df=oof_df,
-            predictions_df=predictions_df,
-            history_df=history_df,
-            fva_df=fva_df,
-            horizon_decay_df=horizon_decay_df,
-            bias_df=bias_df,
-            exceptions_df=exceptions_df,
-            inventory_policy_df=inventory_policy_df,
-            autofocus_ledger_df=autofocus_ledger_df,
-            blueprint_rationale_df=blueprint_rationale_df,
+            promo_elasticity_df=promo_elasticity_df,
+            scenarios_df=scenarios_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")

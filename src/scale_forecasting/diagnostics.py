@@ -40,10 +40,20 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from .elasticity import (
+    PROMO_ELASTICITY_COLUMNS,
+    compute_promo_elasticity,
+    compute_promo_elasticity_decomposition,
+    make_confounded_promo_dgp,
+    plot_promo_elasticity,
+    promo_elasticity_df,
+    summarize_promo_elasticity,
+)
 from .metrics import compute_metrics, loss_of
 
 __all__ = [
     "BASELINE_CANDIDATES",
+    "PROMO_ELASTICITY_COLUMNS",
     "compute_anomalies",
     "compute_bias_report",
     "compute_change_points",
@@ -51,13 +61,19 @@ __all__ = [
     "compute_fva",
     "compute_horizon_decay",
     "compute_inventory_policy",
+    "compute_promo_elasticity",
+    "compute_promo_elasticity_decomposition",
     "compute_realized_accuracy",
     "compute_revision_stability",
     "diebold_mariano_test",
+    "make_confounded_promo_dgp",
     "plot_fva",
     "plot_horizon_decay",
     "plot_inventory_policy",
+    "plot_promo_elasticity",
+    "promo_elasticity_df",
     "rollup_time",
+    "summarize_promo_elasticity",
     "wilcoxon_pvalue",
 ]
 

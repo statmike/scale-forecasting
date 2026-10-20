@@ -1066,6 +1066,17 @@
           "title": "Future Covariates",
           "type": "array"
         },
+        "holiday_window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HolidayWindowConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "holidays": {
           "items": {
             "type": "string"
@@ -1082,6 +1093,18 @@
           "default": false,
           "title": "Level Shift",
           "type": "boolean"
+        },
+        "monotonic_constraints": {
+          "additionalProperties": {
+            "enum": [
+              -1,
+              0,
+              1
+            ],
+            "type": "integer"
+          },
+          "title": "Monotonic Constraints",
+          "type": "object"
         },
         "on_unsupported_covariates": {
           "default": "fallback",
@@ -1206,6 +1229,43 @@
         }
       },
       "title": "HierarchyConfig",
+      "type": "object"
+    },
+    "HolidayWindowConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for asymmetric pre- and post-holiday window covariates.\n\nAttributes:\n    enabled: Whether to emit holiday-window lead/lag covariates when\n        ``features.holidays`` is non-empty.\n    pre_holiday_days: Number of calendar days prior to each holiday date\n        (``1..pre_holiday_days``) over which the pre-holiday build-up\n        ramp is active. Also accepted as ``pre_days``.\n    post_holiday_days: Number of calendar days following each holiday date\n        (``1..post_holiday_days``) over which the post-holiday slump\n        recovery ramp is active. Also accepted as ``post_days``.\n    kernel: Shape of the proximity weight curve across the window:\n        ``\"linear\"`` (default triangular ramp peaking at 1.0 adjacent to the\n        holiday), ``\"indicator\"`` (uniform 1.0 across the window), or\n        ``\"exponential\"`` (exponential decay away from the holiday). Also\n        accepted as ``decay`` (where ``\"none\"`` maps to ``\"indicator\"``).",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "kernel": {
+          "default": "linear",
+          "enum": [
+            "indicator",
+            "linear",
+            "exponential"
+          ],
+          "title": "Kernel",
+          "type": "string"
+        },
+        "post_holiday_days": {
+          "default": 3,
+          "maximum": 30,
+          "minimum": 0,
+          "title": "Post Holiday Days",
+          "type": "integer"
+        },
+        "pre_holiday_days": {
+          "default": 7,
+          "maximum": 30,
+          "minimum": 0,
+          "title": "Pre Holiday Days",
+          "type": "integer"
+        }
+      },
+      "title": "HolidayWindowConfig",
       "type": "object"
     },
     "HpoConfig": {
@@ -1539,10 +1599,26 @@
             },
             {
               "additionalProperties": {
-                "items": {
-                  "type": "integer"
-                },
-                "type": "array"
+                "anyOf": [
+                  {
+                    "items": {
+                      "type": "integer"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ]
               },
               "type": "object"
             },

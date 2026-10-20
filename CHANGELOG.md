@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.0] - 2026-10-20
+
+### Added
+
+- **Monotonic & Economic Sign Constraints (`features.monotonic_constraints`, `@monotone`, [`monotonicity.py`](./src/scale_forecasting/monotonicity.py)):**
+  - Added `FeaturesConfig.monotonic_constraints: dict[str, Literal[-1, 0, 1]]` in [`config.py`](./src/scale_forecasting/config.py) and composable `@monotone` model variant tags (e.g., `"lightgbm@monotone"`, `"xgboost@global+monotone"`, `"catboost@monotone"`, `"regression_lags@monotone"` / `"ridge_lags@monotone"`) in [`features.py`](./src/scale_forecasting/features.py) and [`monotonicity.py`](./src/scale_forecasting/monotonicity.py).
+  - Enforces exact directional sign constraints across [`LightGBMModel`](./src/scale_forecasting/models/lightgbm_model.py), [`XGBoostModel`](./src/scale_forecasting/models/xgboost_model.py), [`CatBoostModel`](./src/scale_forecasting/models/catboost_model.py) (point RMSE + anchored quantile intervals), and [`RegressionLagsModel`](./src/scale_forecasting/models/regression_lags.py) (`scipy.optimize.lsq_linear` bounded Ridge solver), guaranteeing non-positive price response ($\hat{y}(p + \Delta p) \le \hat{y}(p)$ for $\Delta p > 0$) and non-negative promo response even when historical price hikes are confounded with peak holiday demand.
+  - Wired Step 0 confounded price/promo detection (`infer_monotonic_constraints`) and Branch `2B` (`covariates_and_horizon`) `@monotone` candidate injection into [`auto.py`](./src/scale_forecasting/auto.py) and [`auto_policy.py`](./src/scale_forecasting/auto_policy.py), while preserving 100% deterministic `run_id` hash stability for existing configs via `_DEFAULT_ELIDED` in [`registry/ids.py`](./src/scale_forecasting/registry/ids.py).
+- **Orthogonalized Double/Debiased ML Promo & Price Elasticity Decomposition (`Forecaster.promo_elasticity_df()`, [`elasticity.py`](./src/scale_forecasting/elasticity.py)):**
+  - Added [`elasticity.py`](./src/scale_forecasting/elasticity.py) implementing Robinson (1988) / Chernozhukov et al. (2018) cross-fitted Double/Debiased ML partialing-out across out-of-fold seasonal/trend/holiday baseline nuisance controls to decompose demand into **Baseline Demand** (`baseline_yhat`), **Incremental Promo Lift** (`incremental_promo_lift`), **Post-Promo Pull-Forward Dip** (`pull_forward_dip`), **Cross-SKU Cannibalization / Halo** (`cannibalization_effect`), and **Own-Price Effect** (`price_effect`, `net_causal_elasticity` vs. `naive_ols_elasticity`).
+  - Exposed via `Forecaster.promo_elasticity_df()` and `Forecaster.plot_promo_elasticity()` in [`sdk.py`](./src/scale_forecasting/sdk.py), `PlaygroundRun` / `BakeOff` in [`playground.py`](./src/scale_forecasting/playground.py), self-contained HTML reports in [`report.py`](./src/scale_forecasting/report.py), and the built-in MCP server (`run_diagnostics` / `promo_elasticity`) in [`mcp.py`](./src/scale_forecasting/mcp.py).
+- **Multi-Day Moving-Holiday Lead/Lag Windows (`features.holiday_window`, [`holiday_window.py`](./src/scale_forecasting/holiday_window.py)):**
+  - Added `HolidayWindowConfig` (`enabled`, `pre_holiday_days`, `post_holiday_days`, `kernel="indicator" | "linear" | "exponential"`) in [`holiday_window.py`](./src/scale_forecasting/holiday_window.py) and [`config.py`](./src/scale_forecasting/config.py), expanding point holidays into asymmetric pre-holiday build-up (`pre_holiday_window`, `days_to_next_holiday`) and post-holiday slump (`post_holiday_window`, `days_since_prev_holiday`, `holiday_offset_days`) covariates in [`features.py`](./src/scale_forecasting/features.py).
+  - Automatically enabled in Step 0 (`auto.py` / `auto_policy.py`) on daily (`D`, `B`) and hourly (`h`) panels whenever `features.holidays` or `features.custom_holidays` are active.
+- **Full-Chain Gross-Margin & Inventory What-If Simulation ([`scenarios.py`](./src/scale_forecasting/scenarios.py), `Forecaster.simulate_scenarios()`):**
+  - Upgraded `simulate_scenarios()`, `summarize_scenarios()`, and `compare_scenario_margin_curves()` in [`scenarios.py`](./src/scale_forecasting/scenarios.py) with `unit_cost`, `reconcile=True`, and `include_inventory_impact=False`, propagating counterfactual price/promo shocks end-to-end through base models, winning ensembles (`ensembler.py`), coherent hierarchy reconciliation (`mint_nonneg` with `0.000000` discrepancy), gross profit ($\Delta\text{Margin} = (p - c)\hat{y}_{\text{scen}} - (p_0 - c)\hat{y}_0$, `gross_margin_delta`), and operational inventory replenishment policy shifts (`delta_reorder_point`, `delta_safety_stock`, `delta_order_qty`).
+
+---
+
 ## [1.4.0] - 2026-10-19
 
 ### Added

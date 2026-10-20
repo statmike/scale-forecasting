@@ -68,7 +68,7 @@ Root run configuration object.
 | `ensemble` | `EnsembleConfig` | `EnsembleConfig()` | — |
 | `hierarchy` | `HierarchyConfig` | `HierarchyConfig()` | — |
 | `compute` | `ComputeConfig` | `ComputeConfig()` | — |
-| `model_params` | `dict[str, dict[str, bool \| int \| float \| str \| None \| list[bool \| int \| float \| str \| None] \| dict[str, list[int]]]]` | `{}` | — |
+| `model_params` | `dict[str, dict[str, bool \| int \| float \| str \| None \| list[bool \| int \| float \| str \| None] \| dict[str, list[int] \| int \| float \| str \| bool]]]` | `{}` | — |
 
 ### `data (DataConfig)`
 
@@ -111,6 +111,8 @@ Target transforms, country holidays, covariates (future/past/static), lags, and 
 | `include_univariate_baselines` | `bool` | `false` | — |
 | `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
 | `ablation_models` | `list[str]` | `[]` | — |
+| `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | — |
+| `holiday_window` | `HolidayWindowConfig \| None` | `null` | — |
 
 ### `backtest (BacktestConfig)`
 

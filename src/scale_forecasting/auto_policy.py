@@ -23,6 +23,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .monotonicity import infer_monotonic_constraints
+
 __all__ = [
     "EXPOSURE_TIERS",
     "SCALE_REGIMES",
@@ -185,6 +187,7 @@ class PanelAutoProfile:
     missing_date_gap_share: float = 0.0
     hierarchy_node_count: int = 0
     cross_series_corr: float = 0.0
+    monotonic_constraints: dict[str, int] = field(default_factory=dict)
 
     @property
     def scale_regime(self) -> str:
@@ -576,6 +579,7 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "prune_decoy_covariates": (0.86, 6.6),
             "fallback_to_plain_univariate": (0.65, 7.4),
             "synthesize_exog_lags": (0.92, 5.0),
+            "inject_monotone_guardrails": (0.88, 4.2),
             "inject_transform_log1p": (0.92, 10.4),
             "inject_direct_horizon_models": (0.84, 5.7),
             "enable_level_shift": (0.92, 11.5),
@@ -1323,6 +1327,23 @@ def select_tier_models_and_features(
                 }
             )
 
+    inferred_mono = dict(profile.monotonic_constraints) or infer_monotonic_constraints(
+        [*profile.future_covariates, *profile.past_covariates]
+    )
+    if inferred_mono:
+        rationales.append(
+            {
+                "category": "features",
+                "parameter": "features.monotonic_constraints",
+                "value": str(inferred_mono),
+                "evidence": f"price/promo drivers detected: {list(inferred_mono.keys())}",
+                "rationale": (
+                    "Enforces structural sign guardrails (negative price elasticity, "
+                    "non-negative promotional lift) on tree and linear lag learners."
+                ),
+            }
+        )
+
     return {
         "models": models,
         "model_params": model_params,
@@ -1335,6 +1356,7 @@ def select_tier_models_and_features(
         "trading_days": trading_days,
         "fourier": fourier,
         "censored_col": censored_col,
+        "monotonic_constraints": inferred_mono,
         "horizon_strategy": "recursive",
         "regime_routing": regime_routing,
         "include_univariate_baselines": include_univariate_baselines,
@@ -1546,6 +1568,55 @@ def propose_autofocus_pass(
                 ),
             }
         )
+
+    # 1.5. Monotonic Price / Promo Elasticity Guardrail Injection
+    eff_fut_covs = [str(c) for c in features_cfg.get("future_covariates", [])]
+    eff_past_covs = [str(c) for c in features_cfg.get("past_covariates", [])]
+    active_cov_set = set(eff_fut_covs) | set(eff_past_covs)
+    raw_mono = dict(profile.monotonic_constraints) or infer_monotonic_constraints(
+        [*eff_fut_covs, *eff_past_covs]
+    )
+    active_mono = {k: int(v) for k, v in raw_mono.items() if k in active_cov_set and int(v) != 0}
+    has_monotone_variant = any("@monotone" in m for m in current_models)
+    if active_mono and not has_monotone_variant:
+        mono_candidates = (
+            ("lightgbm", "regression_lags")
+            if tier in ("first_light", "wide_field")
+            else ("lightgbm", "xgboost", "regression_lags")
+        )
+        mono_added: list[str] = []
+        for mc in mono_candidates:
+            if mc in avail:
+                spec_m = f"{mc}@monotone"
+                if spec_m not in current_models:
+                    current_models.append(spec_m)
+                    added_models.append(spec_m)
+                    mono_added.append(spec_m)
+                if mc in ("lightgbm", "xgboost") and tier in ("first_light", "wide_field"):
+                    model_params.setdefault(
+                        spec_m, {"n_estimators": int(th.get("tree_n_estimators_fast", 55))}
+                    )
+        old_mono = dict(prior_config_dict.get("features", {}).get("monotonic_constraints", {}))
+        features_cfg["monotonic_constraints"] = active_mono
+        if mono_added:
+            strats_m = list(ensemble_cfg.get("strategies", ["inverse_error"]))
+            if "champion" not in strats_m:
+                strats_m.append("champion")
+            ensemble_cfg["strategies"] = strats_m
+            mutations.append(
+                {
+                    "action": "inject_monotone_guardrails",
+                    "domain": "covariates_and_horizon",
+                    "parameter": "models + features.monotonic_constraints",
+                    "old_value": str(old_mono or "unconstrained"),
+                    "new_value": f"{', '.join(mono_added)} ({active_mono})",
+                    "evidence": f"structural_drivers={list(active_mono.keys())}",
+                    "rationale": (
+                        "Injecting sign-constrained @monotone learners and monotonic_constraints "
+                        "to prevent wrong-signed price/promotion elasticity under collinearity."
+                    ),
+                }
+            )
 
     # 2. Multiplicative Variance / Log1p Transform Exploration
     resid_hetero = float(diagnostics_summary.get("residual_heteroskedasticity", 0.0))
@@ -2109,7 +2180,7 @@ def propose_autofocus_dag_branches(
                 b_strats.append("champion")
         elif dom == "covariates_and_horizon":
             for m in full_proposal["models"]:
-                if ("@direct" in m) and m not in b_models:
+                if ("@direct" in m or "@monotone" in m) and m not in b_models:
                     b_models.append(m)
                     b_added.append(m)
                     if m in full_params:
@@ -2118,12 +2189,21 @@ def propose_autofocus_dag_branches(
                 b_features["future_covariates"] = list(full_features["future_covariates"])
             if "exog_lags" in full_features and isinstance(full_features["exog_lags"], dict):
                 b_features["exog_lags"] = dict(full_features["exog_lags"])
+            if "monotonic_constraints" in full_features and isinstance(
+                full_features["monotonic_constraints"], dict
+            ):
+                b_features["monotonic_constraints"] = dict(full_features["monotonic_constraints"])
             for s_tag in ("horizon_specialist", "champion"):
                 if s_tag not in b_strats:
                     b_strats.append(s_tag)
         else:
             for m in full_proposal["models"]:
-                if m not in b_models and "@transform_" not in m and "@direct" not in m:
+                if (
+                    m not in b_models
+                    and "@transform_" not in m
+                    and "@direct" not in m
+                    and "@monotone" not in m
+                ):
                     b_models.append(m)
                     b_added.append(m)
                     if m in full_params:
@@ -2212,6 +2292,8 @@ def propose_autofocus_synthesis_pass(
             for fk in (
                 "future_covariates",
                 "exog_lags",
+                "monotonic_constraints",
+                "holiday_window",
                 "transform",
                 "level_shift",
                 "outlier_policy",

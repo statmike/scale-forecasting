@@ -195,6 +195,8 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "include_univariate_baselines"): False,
     ("features", "ablation_modes"): [],
     ("features", "ablation_models"): [],
+    ("features", "monotonic_constraints"): {},
+    ("features", "holiday_window"): None,
 }
 
 
@@ -322,24 +324,31 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         spec.model_cls.supports_future_covariates and spec.base_model != "arima_plus"
     )
     clean_no_tm = {k: v for k, v in spec.clean_params.items() if k != "training_mode"}
+    features_payload: dict[str, Any] = {
+        "transform": eff_f.transform,
+        "holidays": sorted(eff_f.holidays) if uses_calendar else [],
+        "fourier": bool(eff_f.fourier) if uses_py_calendar else False,
+        "level_shift": bool(eff_f.level_shift) if uses_py_calendar else False,
+        "trading_days": bool(eff_f.trading_days) if uses_py_calendar else False,
+        "exog_lags": eff_f.exog_lags,
+        "censored_col": eff_f.censored_col,
+        "outlier_policy": eff_f.outlier_policy,
+        "outlier_sigma": eff_f.outlier_sigma if eff_f.outlier_policy != "none" else 3.5,
+        "regime_routing": eff_f.regime_routing,
+    }
+    if eff_f.monotonic_constraints:
+        features_payload["monotonic_constraints"] = dict(
+            sorted(eff_f.monotonic_constraints.items())
+        )
+    if eff_f.holiday_window is not None and uses_py_calendar and eff_f.holidays:
+        features_payload["holiday_window"] = eff_f.holiday_window.model_dump(mode="json")
     spec_payload: dict[str, Any] = {
         "base_model": spec.base_model,
         "training_mode": spec.training_mode,
         "cov_profile": spec.cov_profile,
         "covariates_used": list(spec.covariates_used),
         "clean_params": clean_no_tm,
-        "features": {
-            "transform": eff_f.transform,
-            "holidays": sorted(eff_f.holidays) if uses_calendar else [],
-            "fourier": bool(eff_f.fourier) if uses_py_calendar else False,
-            "level_shift": bool(eff_f.level_shift) if uses_py_calendar else False,
-            "trading_days": bool(eff_f.trading_days) if uses_py_calendar else False,
-            "exog_lags": eff_f.exog_lags,
-            "censored_col": eff_f.censored_col,
-            "outlier_policy": eff_f.outlier_policy,
-            "outlier_sigma": eff_f.outlier_sigma if eff_f.outlier_policy != "none" else 3.5,
-            "regime_routing": eff_f.regime_routing,
-        },
+        "features": features_payload,
         "data": {
             "source_table": cfg.data.source_table,
             "ts_id_col": cfg.data.ts_id_col,

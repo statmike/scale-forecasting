@@ -172,7 +172,8 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.bias_df()` | `pd.DataFrame` | Directional percentage bias, Trigg Tracking Signal ($\text{TS}$), and chronic over/under-forecasting streaks |
 | `forecaster.rollup_time(freq="W")` | `pd.DataFrame` | Autocorrelation-aware temporal or $L$-day lead-time aggregation of point and interval forecasts |
 | `forecaster.inventory_policy_df(...)` / `plot_inventory_policy(...)` | `pd.DataFrame` / `Axes` | Translates calibrated forecasts, empirical AR(1) residual autocorrelation, and supplier lead-time variability into continuous $(s, S)$ and periodic $(R, S)$ **Reorder Points (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To Levels ($S$)**, **Recommended Order Quantities ($Q$)**, and **Expected Holding vs. Stockout Cost** tables |
-| `forecaster.simulate_scenarios(scenarios={...})` | `pd.DataFrame` | Counterfactual future covariate shocks (promo/price elasticity) with delta units and revenue impact |
+| `forecaster.promo_elasticity_df(...)` / `plot_promo_elasticity(...)` | `pd.DataFrame` / `Axes` | Robinson (1988) / Chernozhukov et al. (2018) Double/Debiased ML partialing-out decomposition of demand into `baseline_yhat`, `incremental_promo_lift`, `pull_forward_dip`, `cannibalization_effect`, `price_effect`, and `net_causal_elasticity` vs. `naive_ols_elasticity` |
+| `forecaster.simulate_scenarios(scenarios={...}, unit_cost=..., reconcile=True, include_inventory_impact=True)` | `pd.DataFrame` | 5-stage full-chain counterfactual future covariate shocks propagating through base models, winning ensembles, `mint_nonneg` hierarchy reconciliation (`0.000000` discrepancy), delta units/revenue, gross profit (`gross_margin_delta`), and replenishment shifts (`delta_reorder_point`, `delta_safety_stock`, `delta_order_qty`) |
 | `forecaster.score_realized(actuals_df)` | `pd.DataFrame` | Joins published predictions against newly arrived actuals and flags live accuracy drift (`drift_flagged`) |
 | `forecaster.revision_stability_df([run_1, ...])` | `pd.DataFrame` | Cross-run forecast revision stability (`mar`, `revision_cov`, `whipsaw_flagged`) across overlapping target dates |
 | `forecaster.exceptions_df()` | `pd.DataFrame` | Ranked Top-$N$ operational exception triage queue across 5 failure modes (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) |
@@ -189,7 +190,8 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
 top level of `scale_forecasting` (`build_variant_matrix_frame`, `explain_forecast_frame`, `plot_forecast_explanation`,
-`build_attributions_frame`, `plot_attributions`, `compute_anomalies`, `compute_change_points`,
+`build_attributions_frame`, `plot_attributions`, `promo_elasticity_df`, `plot_promo_elasticity`,
+`simulate_scenarios`, `summarize_scenarios`, `compare_scenario_margin_curves`, `compute_anomalies`, `compute_change_points`,
 `compute_inventory_policy`, `plot_inventory_policy`, `build_calibration_frames`, `plot_calibration`,
 `build_ensemble_weights_frame`, `plot_ensemble_weights`, `build_cohorts_frame`), so you can run the
 exact same diagnostics on in-memory `CellResult` objects in `00_model_playground.ipynb` before

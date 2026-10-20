@@ -15,6 +15,7 @@ import pandas as pd
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..monotonicity import fit_sign_constrained_ridge, resolve_model_monotonic_vector
 from . import _lag_forecaster as lf
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
@@ -23,14 +24,15 @@ if TYPE_CHECKING:
 
 
 class _Ridge:
-    """Closed-form ridge regression with an unpenalized intercept.
+    """Closed-form or sign-constrained ridge regression with an unpenalized intercept.
 
     Exposes ``fit``/``predict`` so it drops straight into ``_lag_forecaster``'s recursive
     step loop, which only relies on ``estimator.predict(row)``.
     """
 
-    def __init__(self, alpha: float) -> None:
+    def __init__(self, alpha: float, constraint_vec: list[int] | None = None) -> None:
         self.alpha = alpha
+        self.constraint_vec = list(constraint_vec) if constraint_vec is not None else None
         self._w: np.ndarray | None = None
 
     @staticmethod
@@ -39,6 +41,11 @@ class _Ridge:
         return np.hstack([np.ones((x.shape[0], 1)), x])
 
     def fit(self, x: np.ndarray, y: np.ndarray) -> _Ridge:
+        if self.constraint_vec is not None and any(c != 0 for c in self.constraint_vec):
+            self._w = fit_sign_constrained_ridge(
+                x, np.asarray(y, dtype=float), self.alpha, self.constraint_vec
+            )
+            return self
         xb = self._augment(x)
         d = xb.shape[1]
         penalty = self.alpha * np.eye(d)
@@ -78,9 +85,16 @@ class RegressionLags(BaseModel):
         self._history = y.astype(float)
         self._last_date = y.index[-1]
         alpha = float(self.params.get("alpha", 1.0))
+        mono_vec = resolve_model_monotonic_vector(
+            self._features,
+            self.params,
+            self.ctx.monotonic_constraints,
+            recursive_lags_nonnegative=(strategy == "recursive"),
+        )
+        self._monotonic_vector = mono_vec
 
         def _make_est() -> _Ridge:
-            return _Ridge(alpha)
+            return _Ridge(alpha, constraint_vec=mono_vec)
 
         self._model = _make_est()
         self._model.fit(self._design, y_aligned.to_numpy())

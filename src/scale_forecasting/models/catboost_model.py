@@ -16,6 +16,7 @@ import pandas as pd
 
 from ..errors import ModelError
 from ..features import invert_transform
+from ..monotonicity import resolve_model_monotonic_vector
 from . import _lag_forecaster as lf
 from .base_model import DEFAULT_QUANTILES, BaseModel, register
 
@@ -56,8 +57,19 @@ class CatboostModel(BaseModel):
         self._baseline_score = float(y_aligned.mean())
         self._history = y.astype(float)
         self._last_date = y.index[-1]
+        mono_vec = resolve_model_monotonic_vector(
+            self._features,
+            self.params,
+            self.ctx.monotonic_constraints,
+            recursive_lags_nonnegative=(strategy == "recursive"),
+        )
+        self._monotonic_vector = mono_vec
+        has_mono = any(v != 0 for v in mono_vec)
 
         def _make_est() -> Any:
+            extra_kw: dict[str, Any] = {}
+            if has_mono:
+                extra_kw["monotone_constraints"] = list(mono_vec)
             return CatBoostRegressor(
                 iterations=int(self.params.get("iterations", self.params.get("n_estimators", 300))),
                 depth=int(self.params.get("depth", 6)),
@@ -66,6 +78,7 @@ class CatboostModel(BaseModel):
                 thread_count=1,
                 verbose=False,
                 allow_writing_files=False,
+                **extra_kw,
             )
 
         self._model = _make_est()

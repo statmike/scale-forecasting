@@ -474,6 +474,30 @@ class McpServer:
                                 "Optional price column name for revenue impact simulation."
                             ),
                         },
+                        "unit_cost": {
+                            "type": ["number", "string"],
+                            "description": (
+                                "Optional unit cost (COGS) scalar or column name for gross-margin "
+                                "counterfactual simulation."
+                            ),
+                        },
+                        "include_inventory_impact": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute operational inventory policy shifts "
+                                "(delta_reorder_point, delta_safety_stock, delta_order_qty) for "
+                                "each scenario."
+                            ),
+                        },
+                        "include_promo_elasticity": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute cross-fitted Double-ML promo & price "
+                                "elasticity decomposition on the series."
+                            ),
+                        },
                         "include_inventory_policy": {
                             "type": "boolean",
                             "default": False,
@@ -1238,7 +1262,10 @@ class McpServer:
 
             scenarios_arg = args.get("scenarios")
             price_col = args.get("price_col")
-            with_exog = bool(scenarios_arg or price_col)
+            unit_cost_arg = args.get("unit_cost")
+            inc_inv_impact = bool(args.get("include_inventory_impact", False))
+            inc_promo_elast = bool(args.get("include_promo_elasticity", False))
+            with_exog = bool(scenarios_arg or price_col or inc_promo_elast)
             panel = playground.sample_data(n_series=n_series, with_exog=with_exog)
             run = playground.run_model(
                 model_name,
@@ -1284,8 +1311,14 @@ class McpServer:
                     scenarios_arg,
                     models=[model_name],
                     price_col=str(price_col) if price_col else None,
+                    unit_cost=unit_cost_arg,
+                    include_inventory_impact=inc_inv_impact,
                 )
                 out_pg["scenario_summary"] = summarize_scenarios(sim_df).to_dict(orient="records")
+            if inc_promo_elast:
+                out_pg["promo_elasticity"] = run.promo_elasticity_df(summary=True).to_dict(
+                    orient="records"
+                )
             inv_params_pg = args.get("inventory_params")
             if bool(args.get("include_inventory_policy", False)) or isinstance(inv_params_pg, dict):
                 inv_kw_pg = dict(inv_params_pg) if isinstance(inv_params_pg, dict) else {}
@@ -1873,6 +1906,93 @@ class McpServer:
                 "leaderboard": sess.leaderboard_df.to_dict(orient="records"),
                 "sample_predictions": sess.predictions_df.head(10).to_dict(orient="records"),
                 "report_path": report_written,
+            }
+
+        if name == "promo_elasticity":
+            import pandas as pd
+
+            from .elasticity import (
+                PROMO_ELASTICITY_COLUMNS,
+                compute_promo_elasticity_decomposition,
+                make_confounded_promo_dgp,
+                summarize_promo_elasticity,
+            )
+
+            records_arg = args.get("records")
+            if isinstance(records_arg, list) and records_arg:
+                el_input = pd.DataFrame.from_records(records_arg)
+            else:
+                el_input, _ = make_confounded_promo_dgp(
+                    n_series=int(args.get("n_series", 2)),
+                    n_days=int(args.get("n_days", 120)),
+                )
+            decomp_df = compute_promo_elasticity_decomposition(
+                el_input,
+                promo_col=args.get("promo_col"),
+                price_col=args.get("price_col"),
+            )
+            sum_df = summarize_promo_elasticity(decomp_df)
+            return {
+                "status": "ok",
+                "columns": list(PROMO_ELASTICITY_COLUMNS),
+                "summary": sum_df.to_dict(orient="records"),
+                "sample_rows": decomp_df.head(10).to_dict(orient="records"),
+            }
+
+        if name == "simulate_scenarios":
+            import pandas as pd
+
+            from . import playground
+            from .scenarios import simulate_scenarios, summarize_scenarios
+
+            records_arg = args.get("records")
+            if isinstance(records_arg, list) and records_arg:
+                sim_panel = pd.DataFrame.from_records(records_arg)
+            else:
+                sim_panel = playground.sample_data(
+                    n_series=int(args.get("n_series", 2)),
+                    with_exog=True,
+                )
+            models_arg = args.get("models") or ["regression_lags@monotone"]
+            if args.get("config"):
+                sim_cfg = _parse_run_config_input(args["config"], self.repo_root)
+            else:
+                covs = [
+                    c
+                    for c in ("price", "promo", "price_index", "promo_flag")
+                    if c in sim_panel.columns
+                ]
+                sim_cfg = RunConfig.model_validate(
+                    {
+                        "run_name": "mcp-scenarios",
+                        "data": {
+                            "source_table": "playground",
+                            "horizon": int(args.get("horizon", 7)),
+                            "freq": str(args.get("freq", "D")),
+                        },
+                        "features": {"future_covariates": covs},
+                        "models": list(models_arg),
+                        "ensemble": {"enabled": len(models_arg) >= 2},
+                    }
+                )
+            scen_map = args.get("scenarios") or {
+                "price_cut_10pct": {
+                    ("price" if "price" in sim_panel.columns else "price_index"): "-10%"
+                }
+            }
+            sim_df = simulate_scenarios(
+                sim_panel,
+                sim_cfg,
+                scen_map,
+                models=list(models_arg),
+                price_col=args.get("price_col"),
+                unit_cost=args.get("unit_cost"),
+                include_inventory_impact=bool(args.get("include_inventory_impact", False)),
+            )
+            return {
+                "status": "ok",
+                "summary": summarize_scenarios(sim_df).to_dict(orient="records"),
+                "sample_rows": sim_df.head(10).to_dict(orient="records"),
             }
 
         raise ValueError(f"Unknown tool: {name!r}")

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import numpy as np
@@ -92,6 +92,7 @@ class ModelContext:
     # empty/None so existing callers constructing ModelContext(freq, horizon) are unchanged.
     past_covariates: tuple[str, ...] = ()
     static_covariates: dict[str, Any] | None = None
+    monotonic_constraints: dict[str, int] = field(default_factory=dict)
 
 
 # The factory registry: name → concrete model class. Populated by register() at import.

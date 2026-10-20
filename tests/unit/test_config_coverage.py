@@ -284,6 +284,21 @@ UNPROVEN: dict[str, str] = {
         )
         for m in sorted(VALID_ABLATION_MODES)
     },
+    "features.holiday_window.enabled=false": (
+        "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
+    ),
+    "features.holiday_window.enabled=true": (
+        "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
+    ),
+    "features.holiday_window.kernel=exponential": (
+        "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
+    ),
+    "features.holiday_window.kernel=indicator": (
+        "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
+    ),
+    "features.holiday_window.kernel=linear": (
+        "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
+    ),
     "features.include_univariate_baselines=true": (
         "tests/unit/test_phase_g5_variants_and_borrowing.py::"
         "test_include_univariate_baselines_skips_already_univariate_models"

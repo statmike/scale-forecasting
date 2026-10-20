@@ -39,7 +39,14 @@ flowchart TD
         V1 --> V2 --> V3
     end
 
-    S1 --> S2 --> S3 --> S4 --> S5
+    subgraph S6["Stage 6: Causal & Structural Econometric Guardrails + Full-Chain What-If (Track J)"]
+        J1["Monotonic Sign Constraints & Moving-Holiday Windows<br/>features.monotonic_constraints (@monotone) · features.holiday_window"]
+        J2["Double/Debiased ML Promo & Price Decomposition<br/>promo_elasticity_df (baseline · lift · pull-forward dip · cannibalization)"]
+        J3["5-Stage Full-Chain Margin & Inventory What-If<br/>simulate_scenarios(unit_cost=..., reconcile=True, include_inventory_impact=True)"]
+        J1 --> J2 --> J3
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6
 ```
 
 ---
@@ -94,19 +101,41 @@ Every pre-fit transformation runs **strictly inside each backtest fold** (`ds <=
 
 ---
 
-## 3. Econometric Diagnostics, Lead-Time Rollups & What-If Scenarios
+## 3. Econometric Diagnostics, Promo Elasticity, Lead-Time Rollups & Full-Chain What-If Scenarios
 
-The pure offline modules [`scale_forecasting.diagnostics`](./api/review.md) and [`scale_forecasting.scenarios`](./api/review.md) answer the four questions every S&OP review asks: *Did complex models add statistically significant value over a naive baseline? At what lead time does forecast skill decay? Which SKUs have chronic directional bias? What happens to units and revenue if we change next month's promo or price plan?*
+The pure offline modules [`scale_forecasting.diagnostics`](./api/review.md), [`scale_forecasting.monotonicity`](./api/monotonicity.md), [`scale_forecasting.holiday_window`](./api/holiday_window.md), [`scale_forecasting.elasticity`](./api/elasticity.md), and [`scale_forecasting.scenarios`](./api/review.md) answer the core questions every S&OP and merchandising review asks: *Did complex models add statistically significant value over a naive baseline? What is the true causal price elasticity and net promo lift after removing seasonal confounding, post-promo pull-forward dips, and cross-SKU cannibalization? What happens to units, reconciled hierarchy totals, gross profit, and inventory reorder points if we change next month's promo or price plan?*
+
+```mermaid
+flowchart TD
+    subgraph Causal["1. Causal & Structural Econometric Guardrails"]
+        C1["Monotonic Sign Constraints (monotonicity.py)<br/>features.monotonic_constraints = {'price': -1, 'promo': 1}<br/>@monotone on lightgbm · xgboost · catboost · regression_lags (ridge_lags)"]
+        C2["Moving-Holiday Lead/Lag Windows (holiday_window.py)<br/>features.holiday_window (pre_holiday_days=7, post_holiday_days=3)<br/>pre_holiday_window · post_holiday_window · holiday_offset_days"]
+        C3["Double/Debiased ML Promo & Price Decomposition (elasticity.py)<br/>Robinson (1988) / Chernozhukov (2018) cross-fitted partialing-out<br/>baseline_yhat · incremental_promo_lift · pull_forward_dip · cannibalization_effect · net_causal_elasticity"]
+        C1 --> C2 --> C3
+    end
+
+    subgraph Chain["2. 5-Stage Full-Chain Counterfactual Simulator (scenarios.py)"]
+        S_1["Stage 1: Shock Future Covariates<br/>apply_scenario_shocks (+ / * / = on price & promo)"]
+        S_2["Stage 2: Refit-Free Model & Ensemble Propagation<br/>Base models + winning ensemble_mean / nnls / ridge / champion"]
+        S_3["Stage 3: Coherent Hierarchy Reconciliation (reconcile=True)<br/>mint_nonneg projection (0.000000 coherence discrepancy)"]
+        S_4["Stage 4: Gross Profit & Margin Delta (unit_cost=...)<br/>gross_margin_delta = (p_scen - c)*yhat_scen - (p_0 - c)*yhat_0"]
+        S_5["Stage 5: Operational Inventory Impact (include_inventory_impact=True)<br/>delta_reorder_point (ΔROP) · delta_safety_stock (ΔSS) · delta_order_qty"]
+        S_1 --> S_2 --> S_3 --> S_4 --> S_5
+    end
+
+    Causal --> Chain
+```
 
 | Function / SDK Method | Purpose & Key Outputs |
 | :--- | :--- |
 | `sf.compute_fva(oof_df, ...)` / `bo.fva_df()` / `forecaster.fva_df()` | Computes the **Forecast Value Added (FVA)** waterfall (`Baseline` $\to$ `Statistical` $\to$ `ML` $\to$ `Deep Learning` $\to$ `AutoML` $\to$ `Ensemble`) with `fva_vs_baseline_pct`, **Sibling Covariate Lift (`covariate_fva_pct`)**, **Sibling Pooling Lift (`pooling_fva_pct`)**, `pct_series_beating_baseline`, **Harvey–Leybourne–Newbold (1997) modified Diebold–Mariano** `dm_stat` & `dm_pvalue`, and **paired Wilcoxon** `wilcoxon_pvalue`. |
+| `sf.promo_elasticity_df(data, cfg, ...)` / `bo.promo_elasticity_df()` / `forecaster.promo_elasticity_df()` | Performs **Robinson (1988) / Chernozhukov et al. (2018) Double/Debiased ML** cross-fitted partialing-out against seasonal/trend/holiday baseline nuisance controls to decompose demand into `baseline_yhat`, `incremental_promo_lift`, `pull_forward_dip` (post-promo pantry-loading slump), `cannibalization_effect` (leave-one-out peer promo halo/cannibalization), `price_effect`, and `net_causal_elasticity` vs. `naive_ols_elasticity`. Pair with `forecaster.plot_promo_elasticity()` and `sf.summarize_promo_elasticity()`. |
 | `sf.compute_horizon_decay(oof_df, ...)` / `bo.horizon_decay_df()` / `forecaster.horizon_decay_df()` | Evaluates accuracy and empirical interval coverage at each step $h = 1 \dots H$ and identifies `crossover_step` ($h^*$), the first lead-time step where a model's error exceeds the baseline. |
 | `sf.compute_bias_report(oof_df)` / `bo.bias_df()` / `forecaster.bias_df()` | Audits per-`(ts_id, model_type)` signed `bias_pct`, **Trigg / APICS Tracking Signal** ($\text{TS} = \sum e_t / \text{MAD}$), `max_over_streak`, `max_under_streak`, and `bias_status` (`unbiased`, `over_forecasting`, `under_forecasting`). |
 | `sf.rollup_time(predictions_df, freq="W", oof_df=...)` / `bo.rollup_time(...)` | Aggregates daily/weekly forecasts to Weekly (`"W"`), Monthly (`"MS"`), Quarterly (`"QS"`), or $L$-day supplier lead-time windows (`window=7`) using **empirical AR(1) multi-step error covariance** so cumulative uncertainty bands are realistic rather than naively summed. |
 | `sf.compute_inventory_policy(predictions_df, oof_df=..., ...)` / `bo.inventory_policy_df(...)` / `forecaster.inventory_policy_df(...)` | Translates non-stationary forward forecasts ($\hat{y}_1 \dots \hat{y}_H$), empirical AR(1) residual autocorrelation ($\hat{\rho}_1$ from `oof_df`), and supplier lead-time variability ($\mu_L, \sigma_L$) into continuous-review $(s, S)$ and periodic-review $(R, S)$ **Reorder Points (`reorder_point`)**, **Calibrated Safety Stock (`safety_stock` vs. `naive_iid_safety_stock` and `naive_linear_safety_stock`)**, **Order-Up-To Levels (`order_up_to_level`)**, **Recommended Order Quantities (`recommended_order_qty` with `min_order_qty` & `order_multiple` lot-sizing)**, and **Expected Holding vs. Stockout Cost** across **Cycle Service Level ($\alpha$)**, **Unit Fill Rate ($\beta$ via standard normal loss $G(z)$)**, or **Newsvendor Critical Fractile ($\alpha^* = c_u / (c_u + c_o)$)**. |
 | `sf.plot_inventory_policy(policy_df)` / `bo.plot_inventory_policy(...)` / `forecaster.plot_inventory_policy(...)` | Plots a horizontal stacked bar chart of Lead-Time Demand ($\mu_L$), Calibrated Safety Stock (`SS`), Review-Period Demand ($R$), current Inventory Position (`IP`), and annotated Recommended Order Quantities ($Q$). |
-| `sf.simulate_scenarios(...)` / `run.simulate_scenarios(scenarios={...})` | Runs counterfactual future covariate trajectories (additive `+`, multiplicative `*`, or override `=` shocks to `price_index`, `promo_flag`, etc.) without refitting models, returning delta units (`delta_yhat`, `delta_pct`) and revenue impact (`baseline_revenue`, `scenario_revenue`, `delta_revenue`). |
+| `sf.simulate_scenarios(..., unit_cost=..., reconcile=True, include_inventory_impact=True)` / `forecaster.simulate_scenarios(...)` | Runs counterfactual future covariate trajectories (additive `+`, multiplicative `*`, or override `=` shocks to `price_index`, `promo_flag`, etc.) across base models and winning ensembles, reconciles hierarchy nodes via `mint_nonneg` (`0.000000` coherence discrepancy), and computes delta units (`delta_yhat`, `delta_pct`), revenue (`delta_revenue`), gross profit (`baseline_gross_margin`, `scenario_gross_margin`, `gross_margin_delta`, `gross_margin_delta_pct`), and replenishment shifts (`delta_reorder_point`, `delta_safety_stock`, `delta_order_qty`). |
 
 ---
 
@@ -119,20 +148,20 @@ Once forecasts are published into operations, [`scale_forecasting.diagnostics`](
 | **Realized Accuracy & Live Drift** | `sf.compute_realized_accuracy(pred_df, actuals_df, oof_df=...)`<br/>`forecaster.score_realized(actuals_df)` | Joins published forecasts against newly arrived actuals, scores all 21 metrics + realized interval coverage, and flags `drift_flagged = True` when live error exceeds `drift_threshold` $\times$ backtest OOF expectation (`drift_ratio`). |
 | **Cross-Run Revision Stability ("Whipsaw")** | `sf.compute_revision_stability(runs_predictions)`<br/>`forecaster.revision_stability_df([run_1, run_2, ...])` | Compares overlapping forecast target dates across consecutive runs (`run_t-2`, `run_t-1`, `run_t`) to measure Mean Absolute Revision (`mar`), Revision CoV (`revision_cov`), and `max_single_step_jump_pct`, flagging supply-chain whipsaw (`whipsaw_flagged`). |
 | **Top-$N$ Exception Triage Queue** | `sf.compute_exceptions_queue(...)`<br/>`bo.exceptions_df()` · `forecaster.exceptions_df()` | Ranks `(ts_id, model_type)` cells by a composite `severity_score` across 5 operational flags (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) with plain-English `exception_reasons`. |
-| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, filterable Exception Triage table, SVG Horizon Decay & Bias tables, Operational Inventory Policy (`ROP` / `SS` / `Order-Up-To`) tab, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
+| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, Double-ML Promo Elasticity & Full-Chain Scenario Margin/Inventory cards, filterable Exception Triage table, SVG Horizon Decay & Bias tables, Operational Inventory Policy (`ROP` / `SS` / `Order-Up-To`) tab, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
 
 ---
 
 ## 5. Model Variants (`<base_model>@<tag>`), Ablation Ladders & Cross-Run Cell Borrowing
 
-Forecasters routinely need to answer: *Did future promo calendars or past weather lags actually improve `xgboost` and `tide` over their own univariate fits? Did cross-series global pooling beat per-series local fitting? Can my next experiment reuse the 10 models I already ran on the same table snapshot without re-running them?*
+Forecasters routinely need to answer: *Did future promo calendars, `@monotone` sign constraints, or past weather lags actually improve `xgboost` and `tide` over their own univariate fits? Did cross-series global pooling beat per-series local fitting? Can my next experiment reuse the 10 models I already ran on the same table snapshot without re-running them?*
 
 | Surface / Config Knob | Type / Values | Purpose |
 | :--- | :--- | :--- |
-| `<base_model>@<tag>` in `models` & `model_params` | e.g., `"xgboost@univariate"`, `"xgboost@promo_only"`, `"tide@local_cov_all"` | Runs multiple configurations of the same base estimator in a single run, with per-variant hyperparameters and covariate/scope overrides (`training_mode`, `use_covariates`, `future_covariates`, `past_covariates`, `static_covariates`, `exog_lags`). |
+| `<base_model>@<tag>` in `models` & `model_params` | e.g., `"xgboost@univariate"`, `"lightgbm@monotone"`, `"regression_lags@monotone"`, `"tide@local_cov_all"` | Runs multiple configurations of the same base estimator in a single run, with per-variant hyperparameters, economic sign constraints (`@monotone`), and covariate/scope overrides (`training_mode`, `use_covariates`, `future_covariates`, `past_covariates`, `static_covariates`, `exog_lags`). |
 | `features.include_univariate_baselines` | `bool` (`false`) | Automatically appends `<model>@univariate` for every covariate-capable model in `models`. |
 | `features.ablation_modes` & `features.ablation_models` | `list[AblationMode]`, `list[str] \| null` | Expands a full or targeted covariate/scope ablation ladder (`"univariate"`, `"cov_future_only"`, `"cov_past_only"`, `"cov_static_only"`, `"cov_all"`, `"local_cov_all"`, `"local_univariate"`, `"global_cov_all"`, `"global_univariate"`), deduplicating equivalent `(training_mode, cov_profile)` specs automatically. |
-| `forecaster.variant_matrix()` | `pd.DataFrame` | Offline preflight table showing every expanded variant's `scope_capability` (`local`, `global`, `hybrid`), `training_mode`, dynamic `cov_profile` (`univariate`, `cov_future_only`, `cov_future_past`, `cov_all`, `cov_custom`), `covariates_used`, and deterministic `model_spec_hash`. |
+| `forecaster.variant_matrix()` | `pd.DataFrame` | Offline preflight table showing every expanded variant's `scope_capability` (`local`, `global`, `hybrid`), `training_mode`, dynamic `cov_profile` (`univariate`, `cov_future_only`, `cov_future_past`, `cov_all`, `cov_custom`), `covariates_used`, `monotonic_constraints`, and deterministic `model_spec_hash`. |
 | `compute.reuse_prior_runs` & `data.snapshot_millis` | `bool` (`false`), `int \| null` | Queries BigQuery before compute launch for prior `COMPLETED` cells matching `(source_table, snapshot_millis, ts_id, model_type, model_spec_hash)`, copies matching `forecast_metadata`, `forecast_predictions`, and `backtest_oof` rows (`borrowed_from_run_id`), and skips or narrows cloud compute jobs to only the uncached models/series. Overridden by `--force`. |
 
 ---
@@ -150,10 +179,18 @@ Forecasters routinely need to answer: *Did future promo calendars or past weathe
     "grid_policy": "zero_fill",
     "trim_leading_zeros": true
   },
-  "models": ["naive_seasonal", "theta", "croston", "lightgbm"],
+  "models": ["naive_seasonal", "theta", "croston", "lightgbm", "lightgbm@monotone"],
   "features": {
     "holidays": ["US"],
+    "holiday_window": {
+      "enabled": true,
+      "pre_holiday_days": 7,
+      "post_holiday_days": 3,
+      "kernel": "linear"
+    },
     "future_covariates": ["promo_flag", "price_index"],
+    "exog_lags": {"promo_flag": [1, 2, 3]},
+    "monotonic_constraints": {"price_index": -1, "promo_flag": 1},
     "outlier_policy": "winsorize",
     "outlier_sigma": 3.5,
     "regime_routing": true
@@ -195,27 +232,35 @@ Forecasters routinely need to answer: *Did future promo calendars or past weathe
 import scale_forecasting as sf
 from scale_forecasting.playground import bakeoff
 
-# 1. Run an offline multi-model bake-off with physical floor=0 and multi-quantile fan
+# 1. Run an offline multi-model bake-off with @monotone guardrails, floor=0, and multi-quantile fan
 bo = bakeoff(
-    models=["naive_seasonal", "theta", "lightgbm"],
+    models=["naive_seasonal", "theta", "lightgbm", "lightgbm@monotone"],
     horizon=14,
     n_folds=3,
     floor=0.0,
     quantiles=[0.10, 0.50, 0.90, 0.95],
 )
 
-# 2. Inspect econometric FVA waterfall (with HLN Diebold-Mariano p-values), decay, bias & exceptions
+# 2. Inspect econometric FVA waterfall, Double-ML promo elasticity decomposition, decay, bias & exceptions
 print(bo.fva_df()[["model_type", "fva_stage", "mean_metric", "fva_pct", "p_value_dm", "significant_at_05"]])
+print(bo.promo_elasticity_df()[["ts_id", "ds", "baseline_yhat", "incremental_promo_lift", "pull_forward_dip", "cannibalization_effect", "net_causal_elasticity"]].head())
 print(bo.horizon_decay_df().head())
 print(bo.bias_df().head())
 print(bo.exceptions_df().head())
 
-# 3. Roll daily forecasts up to weekly replenishment buckets and translate into (s, S) / (R, S) inventory policies
+# 3. Run a full-chain price/promo What-If with gross-margin and inventory replenishment impact
+sim_df = bo.simulate_scenarios(
+    scenarios={"price_hike_10pct": {"price_index": "*1.10"}, "promo_push": {"promo_flag": "=1.0", "price_index": "*0.90"}},
+    price_col="price_index",
+    unit_cost=0.55,
+    reconcile=True,
+    include_inventory_impact=True,
+)
+print(sf.summarize_scenarios(sim_df)[["scenario", "model_type", "delta_pct", "gross_margin_delta", "delta_reorder_point", "delta_safety_stock"]])
+
+# 4. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
 weekly_df = bo.rollup_time(freq="W")
 inv_df = bo.inventory_policy_df(lead_time=7.0, lead_time_std=1.0, service_level=0.95, on_hand=150.0, order_multiple=10.0)
-print(inv_df[["ts_id", "model_type", "reorder_point", "safety_stock", "recommended_order_qty", "expected_total_cost"]])
-
-# 4. Export a standalone interactive HTML + JSON executive report
 bo.export_report("workbench_report.html", write_json=True)
 ```
 

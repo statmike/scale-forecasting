@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +30,7 @@ from .registry.views import VIEW_NAMES
 from .router import split_by_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     import pandas as pd
@@ -191,13 +192,13 @@ class Forecaster:
 
     def __init__(
         self,
-        config: RunConfig,
+        config: RunConfig | Mapping[str, Any],
         *,
         settings: Settings | None = None,
         oof_df: pd.DataFrame | None = None,
         predictions_df: pd.DataFrame | None = None,
     ) -> None:
-        self._config = config
+        self._config = RunConfig.model_validate(config) if isinstance(config, Mapping) else config
         self._settings = settings
         self._auto_session: Any = None
         self._oof_df: pd.DataFrame | None = oof_df
@@ -2184,16 +2185,36 @@ class Forecaster:
         models: Sequence[str] | None = None,
         future_covariates_df: pd.DataFrame | None = None,
         price_col: str | None = None,
+        unit_cost: float | str | Mapping[str, float] | None = None,
+        reconcile: bool = True,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        oof_df: pd.DataFrame | None = None,
+        inventory_params: Mapping[str, Any] | None = None,
         run_id: str | None = None,
     ) -> pd.DataFrame:
-        """Run counterfactual covariate shocks (`scenarios.simulate_scenarios`) across ``data``
-        (or BigQuery source series when ``run_id`` is provided, or synthetic sample data when
-        ``data`` is omitted) using this config's settings.
+        """Run full-chain counterfactual covariate shocks (`scenarios.simulate_scenarios`) across
+        ``data`` (or in-memory `auto_session.data_df`, or BigQuery source series when ``run_id`` is
+        provided, or synthetic sample data when ``data`` is omitted) using this config's settings.
         """
         from . import playground
         from .scenarios import simulate_scenarios
 
         panel = data
+        fut_df = future_covariates_df
+        eff_oof = oof_df
+        if (
+            panel is None
+            and self._auto_session is not None
+            and self._auto_session.data_df is not None
+        ):
+            panel = self._auto_session.data_df
+            if fut_df is None:
+                fut_df = self._auto_session.future_df
+            if eff_oof is None and not self._auto_session.oof_df.empty:
+                eff_oof = self._auto_session.oof_df
         if panel is None and run_id is not None:
             try:
                 from .engines.bigquery_names import source_ref
@@ -2223,8 +2244,16 @@ class Forecaster:
             self._config,
             scenarios,
             models=models,
-            future_covariates_df=future_covariates_df,
+            future_covariates_df=fut_df,
             price_col=price_col,
+            unit_cost=unit_cost,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            oof_df=eff_oof,
+            inventory_params=inventory_params,
         )
 
     def plot_scenarios(
@@ -2248,6 +2277,89 @@ class Forecaster:
             ax=ax,
             title=title,
         )
+
+    def promo_elasticity_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        confounders: Sequence[str] | None = None,
+        summary: bool = False,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Compute cross-fitted Double-ML promo & price elasticity decomposition
+        (`elasticity.compute_promo_elasticity_decomposition`).
+        """
+        from . import playground
+        from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
+
+        panel = data
+        if (
+            panel is None
+            and self._auto_session is not None
+            and self._auto_session.data_df is not None
+        ):
+            panel = self._auto_session.data_df
+        if panel is None and run_id is not None:
+            try:
+                from .engines.bigquery_names import source_ref
+                from .engines.bigquery_sql import series_filter
+                from .registry.reads import resolve_settings
+
+                resolved = resolve_settings(self._settings)
+                source = source_ref(self._config, resolved.registry_dataset_ref)
+                idc, datec = self._config.data.ts_id_col, self._config.data.date_col
+                sfilter = series_filter(self._config, source, idc)
+                where_clause = f" WHERE {sfilter}" if sfilter else ""
+                sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
+                client = bigquery_client(resolved.project_id)
+                df = client.query(sql).to_dataframe()
+                if not df.empty:
+                    panel = df
+            except Exception:  # noqa: BLE001 - fall back to synthetic sample data when offline
+                panel = None
+        if panel is None:
+            panel = playground.sample_data(
+                n_series=min(self._config.data.series_limit or 3, 5),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        decomp = compute_promo_elasticity_decomposition(
+            panel,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            promo_col=promo_col,
+            price_col=price_col,
+            confounders=confounders,
+            freq=self._config.data.freq,
+            holidays=self._config.features.holidays,
+        )
+        return summarize_promo_elasticity(decomp) if summary else decomp
+
+    promo_elasticity = promo_elasticity_df
+
+    def plot_promo_elasticity(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        ts_id: str | None = None,
+        promo_col: str | None = None,
+        price_col: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot organic baseline vs. promotional lift and post-promo dip."""
+        from .elasticity import PROMO_ELASTICITY_COLUMNS, plot_promo_elasticity
+
+        if data is not None and set(PROMO_ELASTICITY_COLUMNS).issubset(data.columns):
+            decomp = data
+        else:
+            decomp = self.promo_elasticity_df(
+                data, promo_col=promo_col, price_col=price_col, summary=False
+            )
+        return plot_promo_elasticity(decomp, ts_id=ts_id, ax=ax, title=title)
 
     def score_realized(
         self,
@@ -2692,6 +2804,8 @@ class Forecaster:
         *,
         run_id: str | None = None,
         title: str | None = None,
+        promo_elasticity_df: pd.DataFrame | None = None,
+        scenarios_df: pd.DataFrame | None = None,
         write_json: bool = False,
     ) -> Any:
         """Export a self-contained `.html` report for ``run_id``."""
@@ -2707,15 +2821,20 @@ class Forecaster:
             "exceptions_df": self.exceptions_df(rid),
             "inventory_policy_df": self.inventory_policy_df(rid),
             "predictions_df": self.predictions_df(rid),
+            "promo_elasticity_df": promo_elasticity_df,
+            "scenarios_df": scenarios_df,
         }
         if self._auto_session is not None:
             payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
             payload_dict["blueprint_rationale_df"] = self._auto_session.blueprint.rationale_df
+            payload_dict["history_df"] = self._auto_session.data_df
         return export_report(
             payload_dict,
             out_path,
             title=title,
             metric=self._config.backtest.decision_metric,
+            promo_elasticity_df=promo_elasticity_df,
+            scenarios_df=scenarios_df,
             write_json=write_json,
         )
 

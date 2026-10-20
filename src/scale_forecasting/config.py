@@ -35,6 +35,8 @@ from pydantic import (
 
 from .capacity import DEFAULT_POLICIES, CapacityPolicy
 from .errors import ConfigError, get_logger
+from .holiday_window import HolidayWindowConfig, coerce_holiday_window_config
+from .monotonicity import validate_monotonic_constraints_map
 
 _log = get_logger(__name__)
 
@@ -143,7 +145,9 @@ Hardware = Literal["cpu", "gpu"]
 # (``n_lags``, ``batch_size``, a SARIMAX ``order`` triple); a nested structure would fit the digest
 # fine but is not needed, and leaving it out keeps the error message useful.
 ModelParamScalar = bool | int | float | str | None
-ModelParam = ModelParamScalar | list[ModelParamScalar] | dict[str, list[int]]
+ModelParam = (
+    ModelParamScalar | list[ModelParamScalar] | dict[str, list[int] | int | float | str | bool]
+)
 
 
 def _is_non_finite(value: Any) -> bool:
@@ -319,6 +323,18 @@ class FeaturesConfig(BaseModel):
     include_univariate_baselines: bool = False
     ablation_modes: list[AblationMode] = Field(default_factory=list)
     ablation_models: list[str] = Field(default_factory=list)
+    monotonic_constraints: dict[str, Literal[-1, 0, 1]] = Field(default_factory=dict)
+    holiday_window: HolidayWindowConfig | None = None
+
+    @field_validator("monotonic_constraints", mode="before")
+    @classmethod
+    def _validate_monotonic_constraints(cls, value: Any) -> dict[str, int]:
+        return validate_monotonic_constraints_map(value)
+
+    @field_validator("holiday_window", mode="before")
+    @classmethod
+    def _validate_holiday_window(cls, value: Any) -> HolidayWindowConfig | None:
+        return coerce_holiday_window_config(value)
 
     @property
     def dynamic_covariates(self) -> list[str]:
@@ -1821,7 +1837,11 @@ class RunConfig(BaseModel):
                 if isinstance(val, list):
                     flat = list(val)
                 elif isinstance(val, dict):
-                    flat = [item for sublist in val.values() for item in sublist]
+                    flat = [
+                        item
+                        for sublist in val.values()
+                        for item in (sublist if isinstance(sublist, list) else [sublist])
+                    ]
                 else:
                     flat = [val]
                 bad = [v for v in flat if _is_non_finite(v)]
@@ -1922,6 +1942,64 @@ class RunConfig(BaseModel):
                     tf_params[target_k] = dict(v)
             object.__setattr__(self, "models", tf_models)
             object.__setattr__(self, "model_params", tf_params)
+
+        # 1a-ter. Normalize the `ridge_lags` clarity alias to `regression_lags` across
+        #         `models`, `model_params`, and `features.ablation_models`.
+        has_ridge_alias = (
+            any(m == "ridge_lags" or m.startswith("ridge_lags@") for m in self.models)
+            or any(k == "ridge_lags" or k.startswith("ridge_lags@") for k in self.model_params)
+            or any(
+                m == "ridge_lags" or m.startswith("ridge_lags@")
+                for m in self.features.ablation_models
+            )
+        )
+        if has_ridge_alias:
+            rl_models: list[str] = []
+            for m in self.models:
+                if m == "ridge_lags":
+                    rl_models.append("regression_lags")
+                elif m.startswith("ridge_lags@"):
+                    rl_models.append("regression_lags@" + m.split("@", 1)[1])
+                else:
+                    rl_models.append(m)
+            if len(set(rl_models)) != len(rl_models):
+                raise ValueError(f"models contains duplicates after normalization: {rl_models}")
+            rl_params: dict[str, dict[str, Any]] = {}
+            for k, v in self.model_params.items():
+                target_k = (
+                    "regression_lags"
+                    if k == "ridge_lags"
+                    else (
+                        "regression_lags@" + k.split("@", 1)[1]
+                        if k.startswith("ridge_lags@")
+                        else k
+                    )
+                )
+                if target_k in rl_params:
+                    rl_params[target_k] = {**rl_params[target_k], **dict(v)}
+                else:
+                    rl_params[target_k] = dict(v)
+            if any(
+                m == "ridge_lags" or m.startswith("ridge_lags@")
+                for m in self.features.ablation_models
+            ):
+                rl_abl = [
+                    "regression_lags"
+                    if m == "ridge_lags"
+                    else (
+                        "regression_lags@" + m.split("@", 1)[1]
+                        if m.startswith("ridge_lags@")
+                        else m
+                    )
+                    for m in self.features.ablation_models
+                ]
+                object.__setattr__(
+                    self,
+                    "features",
+                    self.features.model_copy(update={"ablation_models": rl_abl}),
+                )
+            object.__setattr__(self, "models", rl_models)
+            object.__setattr__(self, "model_params", rl_params)
 
         # 1b. Expand config-driven univariate baselines and ablation ladders when requested.
         if (
