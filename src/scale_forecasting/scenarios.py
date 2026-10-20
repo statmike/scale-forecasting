@@ -54,7 +54,7 @@ from .features import (
 )
 from .models import base_model_name, get_model
 from .models.base_model import ModelContext
-from .monotonicity import _infer_shock_sign_from_spec, audit_scenario_monotonicity
+from .monotonicity import audit_scenario_monotonicity, infer_shock_sign_from_spec
 from .seasonality import seasonal_period
 from .worker import is_panel_model
 
@@ -322,7 +322,7 @@ def _expected_scenario_dir(
     dirs: list[int] = []
     for col, spec in shocks.items():
         c_sign = int(constraints.get(str(col), 0))
-        sh_sign = _infer_shock_sign_from_spec(spec)
+        sh_sign = infer_shock_sign_from_spec(spec)
         if c_sign != 0 and sh_sign != 0:
             dirs.append(c_sign * sh_sign)
     if dirs and all(d == dirs[0] for d in dirs):

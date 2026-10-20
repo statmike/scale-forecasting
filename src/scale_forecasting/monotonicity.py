@@ -398,7 +398,7 @@ def fit_sign_constrained_ridge(
     return w
 
 
-def _infer_shock_sign_from_spec(spec: Any) -> int:
+def infer_shock_sign_from_spec(spec: Any) -> int:
     """Infer directional shock sign (``+1``, ``-1``, or ``0``) from a shock specification."""
     if isinstance(spec, (int, float)) and not isinstance(spec, bool):
         val = float(spec)
@@ -506,7 +506,7 @@ def audit_scenario_monotonicity(
                 if c_sign is None:
                     inferred_c = infer_monotonic_constraints([col_str])
                     c_sign = inferred_c.get(col_str, 0)
-                sh_sign = _infer_shock_sign_from_spec(spec)
+                sh_sign = infer_shock_sign_from_spec(spec)
                 if c_sign != 0 and sh_sign != 0:
                     dirs.append(int(c_sign * sh_sign))
             if cov_names:
