@@ -88,15 +88,26 @@ def get_model(name: str) -> type[BaseModel]:
         raise ModelError(f"unknown model '{name}'; registered models: {known}") from None
 
 
-def list_models(*, available_only: bool = False) -> list[str]:
+def list_models(
+    *,
+    available_only: bool = False,
+    supports_monotonic_constraints: bool = False,
+) -> list[str]:
     """All registered model names, sorted.
 
     Pass ``available_only=True`` to restrict the returned list to models whose
     upstream Python package is installed in the current environment.
+    Pass ``supports_monotonic_constraints=True`` to restrict to models with
+    native training-time monotonic sign-constraint support (``@monotone``).
     """
-    if not available_only:
-        return sorted(_REGISTRY)
-    return sorted(name for name, cls in _REGISTRY.items() if cls.is_available())
+    out: list[str] = []
+    for name, cls in _REGISTRY.items():
+        if available_only and not cls.is_available():
+            continue
+        if supports_monotonic_constraints and not cls.supports_monotonic_constraints:
+            continue
+        out.append(name)
+    return sorted(out)
 
 
 def filter_available_models(models: Sequence[str]) -> list[str]:

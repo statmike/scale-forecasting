@@ -108,7 +108,7 @@ The pure offline modules [`scale_forecasting.diagnostics`](./api/review.md), [`s
 ```mermaid
 flowchart TD
     subgraph Causal["1. Causal & Structural Econometric Guardrails"]
-        C1["Monotonic Sign Constraints (monotonicity.py)<br/>features.monotonic_constraints = {'price': -1, 'promo': 1}<br/>@monotone on lightgbm · xgboost · catboost · regression_lags (ridge_lags)"]
+        C1["Monotonic Sign Constraints (monotonicity.py)<br/>features.monotonic_constraints = {'price': -1, 'promo': 1}<br/>@monotone on lightgbm · xgboost · catboost · random_forest · regression_lags (ridge_lags)"]
         C2["Moving-Holiday Lead/Lag Windows (holiday_window.py)<br/>features.holiday_window (pre_holiday_days=7, post_holiday_days=3)<br/>pre_holiday_window · post_holiday_window · holiday_offset_days"]
         C3["Double/Debiased ML Promo & Price Decomposition (elasticity.py)<br/>Robinson (1988) / Chernozhukov (2018) cross-fitted partialing-out<br/>baseline_yhat · incremental_promo_lift · pull_forward_dip · cannibalization_effect · net_causal_elasticity"]
         C1 --> C2 --> C3
@@ -136,6 +136,7 @@ flowchart TD
 | `sf.compute_inventory_policy(predictions_df, oof_df=..., ...)` / `bo.inventory_policy_df(...)` / `forecaster.inventory_policy_df(...)` | Translates non-stationary forward forecasts ($\hat{y}_1 \dots \hat{y}_H$), empirical AR(1) residual autocorrelation ($\hat{\rho}_1$ from `oof_df`), and supplier lead-time variability ($\mu_L, \sigma_L$) into continuous-review $(s, S)$ and periodic-review $(R, S)$ **Reorder Points (`reorder_point`)**, **Calibrated Safety Stock (`safety_stock` vs. `naive_iid_safety_stock` and `naive_linear_safety_stock`)**, **Order-Up-To Levels (`order_up_to_level`)**, **Recommended Order Quantities (`recommended_order_qty` with `min_order_qty` & `order_multiple` lot-sizing)**, and **Expected Holding vs. Stockout Cost** across **Cycle Service Level ($\alpha$)**, **Unit Fill Rate ($\beta$ via standard normal loss $G(z)$)**, or **Newsvendor Critical Fractile ($\alpha^* = c_u / (c_u + c_o)$)**. |
 | `sf.plot_inventory_policy(policy_df)` / `bo.plot_inventory_policy(...)` / `forecaster.plot_inventory_policy(...)` | Plots a horizontal stacked bar chart of Lead-Time Demand ($\mu_L$), Calibrated Safety Stock (`SS`), Review-Period Demand ($R$), current Inventory Position (`IP`), and annotated Recommended Order Quantities ($Q$). |
 | `sf.simulate_scenarios(..., unit_cost=..., reconcile=True, include_inventory_impact=True)` / `forecaster.simulate_scenarios(...)` | Runs counterfactual future covariate trajectories (additive `+`, multiplicative `*`, or override `=` shocks to `price_index`, `promo_flag`, etc.) across base models and winning ensembles, reconciles hierarchy nodes via `mint_nonneg` (`0.000000` coherence discrepancy), and computes delta units (`delta_yhat`, `delta_pct`), revenue (`delta_revenue`), gross profit (`baseline_gross_margin`, `scenario_gross_margin`, `gross_margin_delta`, `gross_margin_delta_pct`), and replenishment shifts (`delta_reorder_point`, `delta_safety_stock`, `delta_order_qty`). |
+| `sf.list_monotonic_models()` / `sf.audit_scenario_monotonicity(sim_df)` / `forecaster.audit_monotonicity_df(sim_df)` | Discovers all models with native training-time monotonic sign constraints (`supports_monotonic_constraints = True`: `lightgbm`, `xgboost`, `catboost`, `random_forest`, `regression_lags`) and audits counterfactual scenario runs for directional sign violations (`n_violations`, `violation_rate`, `max_violation`, `status = "PASS" \| "VIOLATION"`). |
 
 ---
 
@@ -257,6 +258,7 @@ sim_df = bo.simulate_scenarios(
     include_inventory_impact=True,
 )
 print(sf.summarize_scenarios(sim_df)[["scenario", "model_type", "delta_pct", "gross_margin_delta", "delta_reorder_point", "delta_safety_stock"]])
+print(sf.audit_scenario_monotonicity(sim_df))
 
 # 4. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
 weekly_df = bo.rollup_time(freq="W")

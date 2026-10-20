@@ -66,6 +66,7 @@ class RegressionLags(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     # Same seam as the tree models: the ridge coefficients are the estimate, the lag buffer is not.
     supports_recondition = True

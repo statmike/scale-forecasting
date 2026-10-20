@@ -127,6 +127,7 @@ class BaseModel(ABC):
     supports_past_covariates: ClassVar[bool] = False
     supports_static_covariates: ClassVar[bool] = False
     supports_explainability: ClassVar[bool] = False
+    supports_monotonic_constraints: ClassVar[bool] = False
     supports_native_intervals: ClassVar[bool] = False
     # Can this model train a single shared network across a multi-series panel
     # (`training_mode="global"`) or a shared-plus-series-specific architecture

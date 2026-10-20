@@ -31,6 +31,7 @@ class CatboostModel(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     supports_recondition = True
     supports_extrapolate = True

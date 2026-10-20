@@ -15,9 +15,11 @@ from scale_forecasting.features import (
 from scale_forecasting.models import get_model, list_models
 from scale_forecasting.monotonicity import (
     MONOTONE_SUPPORTED_MODELS,
+    audit_scenario_monotonicity,
     build_monotonic_constraint_vector,
     fit_sign_constrained_ridge,
     infer_monotonic_constraints,
+    list_monotonic_models,
     resolve_model_monotonic_vector,
     resolve_monotonic_constraints,
     validate_monotonic_constraints_map,
@@ -37,9 +39,9 @@ def _make_confounded_price_panel(n_series: int = 2, n_days: int = 120) -> pd.Dat
     for s in range(n_series):
         tid = f"sku_{s}"
         for t, d in enumerate(dates):
-            # High demand peak every 14 days where price is ALSO raised (+25%), creating positive
-            # observational correlation between price_index and y.
-            peak = 1.0 if (t % 14 in (11, 12, 13)) else 0.0
+            # High demand peak every 10 days where price is ALSO raised (+25%), creating positive
+            # observational correlation between price_index and y without aligning to 7/14/28 lags.
+            peak = 1.0 if (t % 10 in (7, 8)) else 0.0
             promo_flag = 1.0 if (t % 21 == 5) else 0.0
             price_index = 1.0 + 0.25 * peak - 0.15 * promo_flag + rng.normal(0.0, 0.01)
             y = 100.0 + 80.0 * peak + 35.0 * promo_flag + rng.normal(0.0, 2.0)
@@ -247,3 +249,79 @@ def test_auto_forecaster_compiles_monotonic_constraints_for_price_and_promo() ->
     bp = build_config(panel, tier="wide_field", where="local", horizon=7)
     assert bp.config.features.monotonic_constraints.get("price_index") == -1
     assert bp.config.features.monotonic_constraints.get("promo_flag") == 1
+
+
+def test_list_monotonic_models_and_random_forest_monotone() -> None:
+    mono_models = list_models(supports_monotonic_constraints=True)
+    assert mono_models == [
+        "catboost",
+        "lightgbm",
+        "random_forest",
+        "regression_lags",
+        "xgboost",
+    ]
+    assert list_monotonic_models() == mono_models
+    assert "random_forest" in MONOTONE_SUPPORTED_MODELS
+
+    panel = _make_confounded_price_panel(n_series=1, n_days=100)
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "rf-monotone-check",
+            "data": {"source_table": "playground", "freq": "D", "horizon": 7},
+            "models": ["random_forest@monotone"],
+            "features": {
+                "future_covariates": ["price_index", "promo_flag"],
+            },
+            "backtest": {"enabled": False},
+        }
+    )
+    sim_df = simulate_scenarios(
+        panel,
+        cfg,
+        {"hike_20pct": {"price_index": "*1.20"}},
+        price_col="price_index",
+    )
+    hike_sub = sim_df[sim_df["scenario"] == "hike_20pct"]
+    assert not hike_sub.empty
+    assert float(hike_sub["delta_yhat"].max()) <= 1e-6
+
+
+def test_hpo_propagates_monotone_variant_constraints_and_audit_monotonicity() -> None:
+    from scale_forecasting.hpo import tune_model
+    from scale_forecasting.sdk import Forecaster
+
+    panel = _make_confounded_price_panel(n_series=2, n_days=100)
+    # Note: top-level monotonic_constraints is empty; @monotone variant infers constraints.
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "hpo-monotone-audit",
+            "data": {"source_table": "playground", "freq": "D", "horizon": 7},
+            "models": ["regression_lags", "regression_lags@monotone"],
+            "features": {
+                "future_covariates": ["price_index", "promo_flag"],
+            },
+            "backtest": {"enabled": True, "n_folds": 2, "horizon": 7, "step": 7},
+            "hpo": {"enabled": True, "n_trials": 2},
+        }
+    )
+    sample = [grp for _, grp in panel.groupby("ts_id")]
+    best_params = tune_model("regression_lags@monotone", sample, cfg)
+    assert "alpha" in best_params
+
+    f = Forecaster(cfg)
+    shocks = {
+        "hike_20pct": {"price_index": "*1.20"},
+        "cut_15pct": {"price_index": "*0.85"},
+    }
+    sim_df = f.simulate_scenarios(shocks, data=panel, price_col="price_index")
+    audit_df = f.audit_monotonicity_df(sim_df, scenarios=shocks)
+    assert not audit_df.empty
+    mono_rows = audit_df[audit_df["model_type"] == "regression_lags@monotone"]
+    assert (mono_rows["n_violations"] == 0).all()
+    assert (mono_rows["status"] == "PASS").all()
+    unconstrained_hike = audit_df[
+        (audit_df["model_type"] == "regression_lags") & (audit_df["scenario"] == "hike_20pct")
+    ]
+    assert int(unconstrained_hike["n_violations"].iloc[0]) > 0
+    assert str(unconstrained_hike["status"].iloc[0]) == "VIOLATION"
+    assert audit_scenario_monotonicity(pd.DataFrame()).empty

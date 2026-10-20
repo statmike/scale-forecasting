@@ -31,6 +31,7 @@ class XgboostModel(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     # The trees are the estimate; the lag buffer is not. Re-pointing the history at newer actuals
     # feeds the *same* trees better inputs without retraining one of them, which is exactly the

@@ -6,45 +6,45 @@
 
 ## 1. Forecasting Models (37 Models Across 5 Families)
 
-| Model (`models` key) | Family | Runtime | Upstream Package | Install Extra | Future Cov. | Past Cov. | Static Cov. | Explainability | Global / Hybrid | GPU Capable |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `vertex_l2l` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
-| `vertex_seq2seq` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
-| `vertex_tft` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
-| `vertex_tide` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | `local/global` | Yes |
-| `chronos2` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | Yes | Yes | Yes | No | `local/global` | Yes |
-| `chronos_bolt` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | No | No | No | No | `local/global` | Yes |
-| `neuralprophet` | `deep_learning` | `python` | `neuralprophet` | `models-dl` | No | No | No | No | `local/global/hybrid` | Yes |
-| `patchtst` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | No | No | No | No | `local/global` | Yes |
-| `tft` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
-| `tide` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
-| `timesfm_torch` | `deep_learning` | `python` | `timesfm` | `models-foundation` | Yes | Yes | Yes | No | `local/global` | Yes |
-| `tsmixer` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | `local/global` | Yes |
-| `catboost` | `ml` | `python` | `catboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
-| `lightgbm` | `ml` | `python` | `lightgbm` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
-| `random_forest` | `ml` | `python` | `scikit-learn` | `core` | Yes | Yes | No | Yes | `local` | No |
-| `regression_lags` | `ml` | `python` | `numpy` | `core` | Yes | Yes | No | Yes | `local` | No |
-| `xgboost` | `ml` | `python` | `xgboost` | `models-trees` | Yes | Yes | No | Yes | `local` | No |
-| `arima_plus` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | No | No | Yes | `local` | No |
-| `timesfm` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | Yes | No | No | `local` | No |
-| `auto_arima` | `statistical` | `python` | `statsforecast` | `models-stats` | Yes | Yes | No | No | `local` | No |
-| `auto_ces` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
-| `auto_theta` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
-| `autoets` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
-| `croston` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
-| `fft` | `statistical` | `python` | `scipy` | `core` | No | No | No | No | `local` | No |
-| `holtwinters` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
-| `kalman` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
-| `naive_drift` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
-| `naive_mean` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
-| `naive_moving_average` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
-| `naive_seasonal` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | `local` | No |
-| `prophet` | `statistical` | `python` | `prophet` | `models-prophet` | Yes | Yes | No | No | `local` | No |
-| `sarimax` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
-| `stl_bagging` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
-| `tbats` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | `local` | No |
-| `theta` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | `local` | No |
-| `ucm` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | `local` | No |
+| Model (`models` key) | Family | Runtime | Upstream Package | Install Extra | Future Cov. | Past Cov. | Static Cov. | Explainability | Monotone (`@monotone`) | Global / Hybrid | GPU Capable |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `vertex_l2l` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | No | `local/global` | Yes |
+| `vertex_seq2seq` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | No | `local/global` | Yes |
+| `vertex_tft` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | No | `local/global` | Yes |
+| `vertex_tide` | `automl` | `vertex_automl` | `google-cloud-pipeline-components` | `models-automl` | Yes | Yes | Yes | Yes | No | `local/global` | Yes |
+| `chronos2` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | Yes | Yes | Yes | No | No | `local/global` | Yes |
+| `chronos_bolt` | `deep_learning` | `python` | `chronos-forecasting` | `models-foundation` | No | No | No | No | No | `local/global` | Yes |
+| `neuralprophet` | `deep_learning` | `python` | `neuralprophet` | `models-dl` | No | No | No | No | No | `local/global/hybrid` | Yes |
+| `patchtst` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | No | No | No | No | No | `local/global` | Yes |
+| `tft` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | No | `local/global` | Yes |
+| `tide` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | No | `local/global` | Yes |
+| `timesfm_torch` | `deep_learning` | `python` | `timesfm` | `models-foundation` | Yes | Yes | Yes | No | No | `local/global` | Yes |
+| `tsmixer` | `deep_learning` | `python` | `neuralforecast` | `models-dl` | Yes | Yes | Yes | No | No | `local/global` | Yes |
+| `catboost` | `ml` | `python` | `catboost` | `models-trees` | Yes | Yes | No | Yes | Yes | `local` | No |
+| `lightgbm` | `ml` | `python` | `lightgbm` | `models-trees` | Yes | Yes | No | Yes | Yes | `local` | No |
+| `random_forest` | `ml` | `python` | `scikit-learn` | `core` | Yes | Yes | No | Yes | Yes | `local` | No |
+| `regression_lags` | `ml` | `python` | `numpy` | `core` | Yes | Yes | No | Yes | Yes | `local` | No |
+| `xgboost` | `ml` | `python` | `xgboost` | `models-trees` | Yes | Yes | No | Yes | Yes | `local` | No |
+| `arima_plus` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | No | No | Yes | No | `local` | No |
+| `timesfm` | `native` | `bigquery` | `bigquery-ml` | `gcp` | Yes | Yes | No | No | No | `local` | No |
+| `auto_arima` | `statistical` | `python` | `statsforecast` | `models-stats` | Yes | Yes | No | No | No | `local` | No |
+| `auto_ces` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | No | `local` | No |
+| `auto_theta` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | No | `local` | No |
+| `autoets` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | No | `local` | No |
+| `croston` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | No | `local` | No |
+| `fft` | `statistical` | `python` | `scipy` | `core` | No | No | No | No | No | `local` | No |
+| `holtwinters` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | No | `local` | No |
+| `kalman` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | No | `local` | No |
+| `naive_drift` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | No | `local` | No |
+| `naive_mean` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | No | `local` | No |
+| `naive_moving_average` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | No | `local` | No |
+| `naive_seasonal` | `statistical` | `python` | `numpy` | `core` | No | No | No | No | No | `local` | No |
+| `prophet` | `statistical` | `python` | `prophet` | `models-prophet` | Yes | Yes | No | No | No | `local` | No |
+| `sarimax` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | No | `local` | No |
+| `stl_bagging` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | No | `local` | No |
+| `tbats` | `statistical` | `python` | `statsforecast` | `models-stats` | No | No | No | No | No | `local` | No |
+| `theta` | `statistical` | `python` | `statsmodels` | `core` | No | No | No | No | No | `local` | No |
+| `ucm` | `statistical` | `python` | `statsmodels` | `core` | Yes | Yes | No | No | No | `local` | No |
 
 ---
 

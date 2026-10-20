@@ -294,3 +294,117 @@ def test_hierarchy_financial_coherence_and_unit_cost_column_invariance() -> None
         assert abs(tot_gm - leaf_gm) < 1e-6
 
     assert float((s_dict["yhat"] - s_col["yhat"]).abs().max()) == 0.0
+
+
+def test_simulate_scenarios_non_native_monotone_clamp_and_global_panel_model() -> None:
+    from scale_forecasting.models.base_model import BaseModel, register
+    from scale_forecasting.monotonicity import audit_scenario_monotonicity
+
+    panel = _make_hierarchical_promo_panel(n_days=70)
+    # Test non-native model tagged with @monotone (e.g. sarimax@monotone) clamped by guardrail
+    cfg_non_native = RunConfig.model_validate(
+        {
+            "run_name": "non-native-monotone",
+            "data": {"source_table": "playground", "freq": "D", "horizon": 7},
+            "models": ["sarimax@monotone"],
+            "features": {
+                "future_covariates": ["price_index", "promo_flag"],
+                "monotonic_constraints": {"price_index": -1, "promo_flag": 1},
+            },
+            "backtest": {"enabled": False},
+        }
+    )
+    shocks = {"hike_20pct": {"price_index": "*1.20"}}
+    sim_nn = simulate_scenarios(
+        panel[panel["ts_id"] == "east_s1"],
+        cfg_non_native,
+        shocks,
+        price_col="price_index",
+    )
+    audit_nn = audit_scenario_monotonicity(sim_nn, scenarios=shocks)
+    assert not audit_nn.empty
+    assert (audit_nn["n_violations"] == 0).all()
+
+    # Verify @global panel model path (fit_panel / predict_panel) in simulate_scenarios
+    fit_panel_calls: list[int] = []
+    predict_panel_calls: list[int] = []
+
+    class _DummyGlobalModel(BaseModel):
+        name = "_dummy_global_scen"
+        runtime = "python"
+        family = "deep_learning"
+        supports_exog = True
+        supports_global = True
+
+        def fit(self, y: pd.Series, X: pd.DataFrame | None = None) -> None:
+            self._last_date = pd.Timestamp(y.index[-1])
+            self._mean = float(y.mean())
+
+        def predict(
+            self,
+            horizon: int,
+            X: pd.DataFrame | None = None,
+            quantiles: tuple[float, ...] = (0.1, 0.5, 0.9),
+        ) -> pd.DataFrame:
+            ds = self._forecast_index(horizon)
+            base = np.full(horizon, self._mean, dtype=float)
+            return self._assemble_frame(ds, dict.fromkeys(quantiles, base), raw=base)
+
+        def fit_panel(
+            self,
+            series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]],
+            static_map: dict[str, dict[str, object]] | None = None,
+        ) -> None:
+            fit_panel_calls.append(len(series_map))
+            self._last_dates = {
+                uid: pd.Timestamp(y.index[-1]) for uid, (y, _) in series_map.items()
+            }
+            self._means = {uid: float(y.mean()) for uid, (y, _) in series_map.items()}
+
+        def predict_panel(
+            self,
+            horizon: int,
+            future_exog_map: dict[str, pd.DataFrame | None] | None = None,
+            quantiles: tuple[float, ...] = (0.1, 0.5, 0.9),
+            transform_lambdas: dict[str, float | None] | None = None,
+        ) -> dict[str, pd.DataFrame]:
+            predict_panel_calls.append(horizon)
+            out: dict[str, pd.DataFrame] = {}
+            for uid, last_dt in self._last_dates.items():
+                ds = self._future_index(last_dt, horizon)
+                X_u = future_exog_map.get(uid) if future_exog_map else None
+                p_adj = (
+                    -10.0 * (X_u["price_index"].to_numpy(dtype=float) - 1.0)
+                    if X_u is not None and "price_index" in X_u.columns
+                    else np.zeros(horizon, dtype=float)
+                )
+                vals = np.full(horizon, self._means[uid], dtype=float) + p_adj
+                out[uid] = self._assemble_frame(ds, dict.fromkeys(quantiles, vals), raw=vals)
+            return out
+
+    from scale_forecasting.models.base_model import _REGISTRY
+
+    register(_DummyGlobalModel)
+    try:
+        cfg_glob = RunConfig.model_validate(
+            {
+                "run_name": "global-panel-scen",
+                "data": {"source_table": "playground", "freq": "D", "horizon": 7},
+                "models": ["_dummy_global_scen@global"],
+                "features": {"future_covariates": ["price_index"]},
+                "backtest": {"enabled": False},
+            }
+        )
+        sim_glob = simulate_scenarios(
+            panel[panel["ts_id"].isin(["east_s1", "west_s1"])],
+            cfg_glob,
+            {"hike_10pct": {"price_index": "*1.10"}},
+            price_col="price_index",
+        )
+        assert fit_panel_calls == [2]
+        assert len(predict_panel_calls) == 2  # baseline + hike_10pct
+        assert not sim_glob.empty
+        hike_g = sim_glob[sim_glob["scenario"] == "hike_10pct"]
+        assert (hike_g["delta_yhat"] < 0.0).all()
+    finally:
+        _REGISTRY.pop("_dummy_global_scen", None)

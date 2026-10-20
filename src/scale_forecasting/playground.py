@@ -66,7 +66,7 @@ def model_catalog() -> pd.DataFrame:
 
     Columns: ``model, family, runtime, package, package_url, available, local, spark, ray, gpu,
     vertex_automl, bigquery, exog, future_covariates, past_covariates, static_covariates,
-    explainability, global_mode, hybrid_mode``.
+    explainability, monotonic_constraints, global_mode, hybrid_mode``.
     """
     rows: list[dict[str, Any]] = []
     for name in list_models():
@@ -93,6 +93,7 @@ def model_catalog() -> pd.DataFrame:
                 "past_covariates": cls.supports_past_covariates,
                 "static_covariates": cls.supports_static_covariates,
                 "explainability": cls.supports_explainability,
+                "monotonic_constraints": cls.supports_monotonic_constraints,
                 "global_mode": cls.supports_global,
                 "hybrid_mode": cls.supports_hybrid,
             }

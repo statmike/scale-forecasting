@@ -30,6 +30,7 @@ class LightgbmModel(BaseModel):
     runtime = "python"
     family = "ml"
     supports_exog = True
+    supports_monotonic_constraints = True
     supports_native_intervals = False
     # Same seam as `xgboost`: the trees are the estimate, the lag buffer is not.
     supports_recondition = True

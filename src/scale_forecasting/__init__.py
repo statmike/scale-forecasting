@@ -145,6 +145,9 @@ _LAZY: dict[str, tuple[str, str]] = {
     "plot_inventory_policy": (".diagnostics", "plot_inventory_policy"),
     # Causal & structural econometric guardrails (Track J).
     "MONOTONE_SUPPORTED_MODELS": (".monotonicity", "MONOTONE_SUPPORTED_MODELS"),
+    "MONOTONICITY_AUDIT_COLUMNS": (".monotonicity", "MONOTONICITY_AUDIT_COLUMNS"),
+    "list_monotonic_models": (".monotonicity", "list_monotonic_models"),
+    "audit_scenario_monotonicity": (".monotonicity", "audit_scenario_monotonicity"),
     "infer_monotonic_constraints": (".monotonicity", "infer_monotonic_constraints"),
     "resolve_monotonic_constraints": (".monotonicity", "resolve_monotonic_constraints"),
     "build_monotonic_constraint_vector": (
@@ -315,9 +318,12 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .models import get_model, list_models  # noqa: F401
     from .monotonicity import (  # noqa: F401
         MONOTONE_SUPPORTED_MODELS,
+        MONOTONICITY_AUDIT_COLUMNS,
+        audit_scenario_monotonicity,
         build_monotonic_constraint_vector,
         fit_sign_constrained_ridge,
         infer_monotonic_constraints,
+        list_monotonic_models,
         resolve_model_monotonic_vector,
         resolve_monotonic_constraints,
     )

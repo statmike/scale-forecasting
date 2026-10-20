@@ -47,16 +47,20 @@ from .config import LEARNED_STRATEGIES, RunConfig, corrected_arm_for
 from .features import (
     build_features,
     build_future_features,
+    extract_static_covariates,
     fit_transform_lambda,
     regularize_series_grid,
     resolve_model_variant,
 )
 from .models import base_model_name, get_model
 from .models.base_model import ModelContext
+from .monotonicity import _infer_shock_sign_from_spec, audit_scenario_monotonicity
 from .seasonality import seasonal_period
+from .worker import is_panel_model
 
 __all__ = [
     "apply_scenario_shocks",
+    "audit_scenario_monotonicity",
     "compare_scenario_margin_curves",
     "plot_scenarios",
     "simulate_scenarios",
@@ -308,6 +312,99 @@ def _resolve_unit_cost_array(
     return None
 
 
+def _expected_scenario_dir(
+    shocks: Mapping[str, Any],
+    constraints: Mapping[str, int],
+) -> int:
+    """Return ``-1`` or ``+1`` when all active constrained shocks agree on direction, else ``0``."""
+    if not shocks or not constraints:
+        return 0
+    dirs: list[int] = []
+    for col, spec in shocks.items():
+        c_sign = int(constraints.get(str(col), 0))
+        sh_sign = _infer_shock_sign_from_spec(spec)
+        if c_sign != 0 and sh_sign != 0:
+            dirs.append(c_sign * sh_sign)
+    if dirs and all(d == dirs[0] for d in dirs):
+        return int(dirs[0])
+    return 0
+
+
+def _clamp_monotonic_trajectories(
+    df: pd.DataFrame,
+    scenarios: Mapping[str, Mapping[str, Any]],
+    model_mono_map: Mapping[str, dict[str, int]],
+    model_native_mono: Mapping[str, bool],
+) -> pd.DataFrame:
+    """Clamp counterfactual trajectories to respect ``monotonic_constraints`` for models without
+    native training-time sign constraints (e.g. ``sarimax@monotone``, ``prophet@monotone``, or
+    unconstrained ``ensemble_ridge`` / ``ensemble_xgb`` over all-monotone base models).
+    """
+    if df.empty:
+        return df
+    all_base_monotone = bool(model_mono_map) and all(
+        any(v != 0 for v in cmap.values()) for cmap in model_mono_map.values()
+    )
+    merged_base_constraints: dict[str, int] = (
+        {k: v for cmap in model_mono_map.values() for k, v in cmap.items() if v != 0}
+        if all_base_monotone
+        else {}
+    )
+
+    base_rows = df[df["scenario"] == "baseline"]
+    if base_rows.empty:
+        return df
+    base_lookup = (
+        base_rows.drop_duplicates(subset=["ts_id", "model_type", "ds"])
+        .set_index(["ts_id", "model_type", "ds"])["yhat"]
+        .to_dict()
+    )
+
+    out_records: list[dict[Any, Any]] = []
+    for rec in df.to_dict(orient="records"):
+        scen = str(rec["scenario"])
+        mtype = str(rec["model_type"])
+        if scen == "baseline" or scen not in scenarios:
+            out_records.append(rec)
+            continue
+
+        if mtype.startswith("ensemble_"):
+            if not all_base_monotone:
+                out_records.append(rec)
+                continue
+            c_map = merged_base_constraints
+        else:
+            if model_native_mono.get(mtype, False):
+                out_records.append(rec)
+                continue
+            c_map = model_mono_map.get(mtype, {})
+            if not any(v != 0 for v in c_map.values()):
+                out_records.append(rec)
+                continue
+
+        exp_dir = _expected_scenario_dir(scenarios[scen], c_map)
+        if exp_dir == 0:
+            out_records.append(rec)
+            continue
+
+        key = (str(rec["ts_id"]), mtype, pd.Timestamp(rec["ds"]))
+        b_yh = base_lookup.get(key)
+        if b_yh is None:
+            out_records.append(rec)
+            continue
+
+        yh = float(rec["yhat"])
+        if (exp_dir == -1 and yh > float(b_yh)) or (exp_dir == 1 and yh < float(b_yh)):
+            shift = float(b_yh) - yh
+            rec = dict(rec)
+            rec["yhat"] = float(b_yh)
+            rec["yhat_lower"] = float(rec["yhat_lower"]) + shift
+            rec["yhat_upper"] = float(rec["yhat_upper"]) + shift
+        out_records.append(rec)
+
+    return pd.DataFrame.from_records(out_records)
+
+
 def _apply_learned_ensemble_rows(
     base_df: pd.DataFrame,
     wmap: dict[str, float],
@@ -528,6 +625,11 @@ def simulate_scenarios(
     cost_lookup: dict[tuple[str, int], float] = {}
     collected_oof: list[pd.DataFrame] = []
 
+    s_clean_by_tid: dict[str, pd.DataFrame] = {}
+    lam_by_tid: dict[str, float | None] = {}
+    base_fut_by_tid: dict[str, pd.DataFrame] = {}
+    static_map: dict[str, dict[str, Any]] = {}
+
     for raw_tid, s_group in panel.groupby(d.ts_id_col, sort=True):
         tid = str(raw_tid)
         s_clean = regularize_series_grid(s_group, work_cfg)
@@ -536,6 +638,15 @@ def simulate_scenarios(
         base_fut = _build_baseline_future_frame(
             s_clean, work_cfg, known_covs, future_covariates_df, tid
         )
+        s_clean_by_tid[tid] = s_clean
+        lam_by_tid[tid] = lam
+        base_fut_by_tid[tid] = base_fut
+        try:
+            sc = extract_static_covariates(s_clean, work_cfg)
+            if sc:
+                static_map[tid] = sc
+        except Exception:  # noqa: BLE001 - static covariates optional
+            pass
 
         hist_for_cost = s_clean
         fut_for_cost = base_fut
@@ -585,11 +696,142 @@ def simulate_scenarios(
                 for dt_v in dt_vals:
                     price_lookup[(scen_name, tid, pd.Timestamp(dt_v))] = 1.0
 
-        for mname in py_models:
+    uids = sorted(s_clean_by_tid.keys())
+    panel_py_models: list[str] = []
+    local_py_models: list[str] = []
+    model_mono_map: dict[str, dict[str, int]] = {}
+    model_native_mono: dict[str, bool] = {}
+
+    for mname in py_models:
+        m_cls = get_model(base_model_name(mname))
+        spec = resolve_model_variant(work_cfg, mname, model_cls=m_cls)
+        model_mono_map[mname] = dict(spec.effective_cfg.features.monotonic_constraints)
+        model_native_mono[mname] = bool(m_cls.supports_monotonic_constraints)
+        if is_panel_model(mname, work_cfg) and (m_cls.supports_global or m_cls.supports_hybrid):
+            panel_py_models.append(mname)
+        else:
+            local_py_models.append(mname)
+
+    # Execute @global / @hybrid panel models once across all series via fit_panel / predict_panel
+    for mname in tuple(panel_py_models):
+        m_cls = get_model(base_model_name(mname))
+        spec = resolve_model_variant(work_cfg, mname, model_cls=m_cls)
+        model_cfg = spec.effective_cfg
+        m_params: dict[str, Any] = dict(spec.clean_params)
+        panel_ctx = ModelContext(
+            freq=d.freq,
+            horizon=model_cfg.max_horizon,
+            transform=model_cfg.features.transform,
+            past_covariates=tuple(model_cfg.features.past_covariates),
+            monotonic_constraints=dict(model_cfg.features.monotonic_constraints),
+        )
+        try:
+            full_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
+            for tid in uids:
+                full_series_map[tid] = build_features(
+                    s_clean_by_tid[tid],
+                    model_cfg,
+                    lam_by_tid[tid],
+                    m_cls.lags_covariates_internally,
+                )
+            est = m_cls(m_params, panel_ctx)
+            est.fit_panel(full_series_map, static_map=static_map if static_map else None)
+
+            cal_by_tid: dict[str, Calibration | None] = dict.fromkeys(uids, None)
+            arm_by_tid: dict[str, str] = {}
+            for tid in uids:
+                cell_oof: pd.DataFrame | None = None
+                if (
+                    oof_df is not None
+                    and not oof_df.empty
+                    and {"ts_id", "model_type"}.issubset(oof_df.columns)
+                ):
+                    sub_oof = oof_df[
+                        (oof_df["ts_id"].astype(str) == tid) & (oof_df["model_type"] == mname)
+                    ]
+                    if not sub_oof.empty:
+                        cell_oof = sub_oof.copy()
+                        if "ds" not in cell_oof.columns and "forecast_date" in cell_oof.columns:
+                            cell_oof["ds"] = pd.to_datetime(cell_oof["forecast_date"])
+                        cal_by_tid[tid] = calibrate_from_oof(cell_oof, target_qs)
+                        oof_tagged = cell_oof.copy()
+                        oof_tagged["ts_id"] = tid
+                        oof_tagged["model_type"] = mname
+                        if "forecast_date" not in oof_tagged.columns and "ds" in oof_tagged.columns:
+                            oof_tagged["forecast_date"] = pd.to_datetime(oof_tagged["ds"])
+                        collected_oof.append(oof_tagged)
+                arm_val, _ = resolve_arm(
+                    model_cfg.output.point_forecast,
+                    cell_oof,
+                    model_cfg.backtest.decision_metric,
+                    fallback_arm,
+                )
+                arm_by_tid[tid] = arm_val
+
+            for scen_name, shocks in all_scenarios.items():
+                scen_futr_map: dict[str, pd.DataFrame | None] = {}
+                fut_cov_by_tid: dict[str, pd.DataFrame] = {}
+                for tid in uids:
+                    fut_cov_df = apply_scenario_shocks(
+                        base_fut_by_tid[tid], shocks, date_col=d.date_col
+                    )
+                    fut_cov_by_tid[tid] = fut_cov_df
+                    y_hist_t, X_hist_t = full_series_map[tid]
+                    scen_futr_map[tid] = build_future_features(
+                        y_hist_t,
+                        X_hist_t,
+                        model_cfg,
+                        horizon=horizon,
+                        future_covariates_df=fut_cov_df,
+                    )
+                preds_map = est.predict_panel(
+                    horizon,
+                    scen_futr_map,
+                    quantiles=target_qs,
+                    transform_lambdas=lam_by_tid,
+                )
+                for tid in uids:
+                    raw_pred = preds_map[tid]
+                    cal_pred, _ = apply_calibration(raw_pred, cal_by_tid[tid], arm_by_tid[tid])
+                    cal_pred, _ = apply_quantile_and_cost_rules(cal_pred, model_cfg.output)
+                    if has_output_constraints(model_cfg.output):
+                        cal_pred = apply_output_constraints(
+                            cal_pred, model_cfg.output, bounds_df=fut_cov_by_tid[tid]
+                        )
+                    yh = pd.to_numeric(cal_pred["yhat"], errors="coerce").to_numpy(dtype=float)
+                    yl = pd.to_numeric(cal_pred["yhat_lower"], errors="coerce").to_numpy(
+                        dtype=float
+                    )
+                    yu = pd.to_numeric(cal_pred["yhat_upper"], errors="coerce").to_numpy(
+                        dtype=float
+                    )
+                    ds_vals = pd.to_datetime(cal_pred["ds"]).tolist()
+                    for idx in range(len(cal_pred)):
+                        raw_scen_rows.append(
+                            {
+                                "scenario": scen_name,
+                                "ts_id": tid,
+                                "model_type": mname,
+                                "ds": pd.Timestamp(ds_vals[idx]),
+                                "horizon_step": idx + 1,
+                                "yhat": float(yh[idx]),
+                                "yhat_lower": float(yl[idx]),
+                                "yhat_upper": float(yu[idx]),
+                            }
+                        )
+        except Exception:  # noqa: BLE001 - fall back to per-series execution if panel fit fails
+            local_py_models.append(mname)
+
+    for tid in uids:
+        s_clean = s_clean_by_tid[tid]
+        lam = lam_by_tid[tid]
+        base_fut = base_fut_by_tid[tid]
+
+        for mname in local_py_models:
             m_cls = get_model(base_model_name(mname))
             spec = resolve_model_variant(work_cfg, mname, model_cls=m_cls)
             model_cfg = spec.effective_cfg
-            m_params: dict[str, Any] = dict(spec.clean_params)
+            m_params = dict(spec.clean_params)
             ctx = ModelContext(
                 freq=d.freq,
                 horizon=model_cfg.max_horizon,
@@ -604,7 +846,7 @@ def simulate_scenarios(
             est.fit(y_hist, X_hist)
 
             cal: Calibration | None = None
-            cell_oof: pd.DataFrame | None = None
+            cell_oof = None
             if (
                 oof_df is not None
                 and not oof_df.empty
@@ -782,6 +1024,13 @@ def simulate_scenarios(
             scen_pred_df = pd.concat(
                 [scen_pred_df, pd.DataFrame.from_records(ens_rows)], ignore_index=True
             )
+
+    scen_pred_df = _clamp_monotonic_trajectories(
+        scen_pred_df,
+        scenarios,
+        model_mono_map,
+        model_native_mono,
+    )
 
     # Stage 3: Hierarchy Reconciliation across every scenario and model
     if hier_spec is not None:
@@ -1009,11 +1258,11 @@ def simulate_scenarios(
         d_q_col: list[float] = []
 
         for r in out_df.to_dict(orient="records"):
-            sc = str(r["scenario"])
+            scen_key = str(r["scenario"])
             ti = str(r["ts_id"])
             mt = str(r["model_type"])
             base_inv = inv_by_scen.get(("baseline", ti, mt), {"rop": 0.0, "ss": 0.0, "q": 0.0})
-            scen_inv = inv_by_scen.get((sc, ti, mt), base_inv)
+            scen_inv = inv_by_scen.get((scen_key, ti, mt), base_inv)
             b_rop, s_rop = base_inv["rop"], scen_inv["rop"]
             b_ss, s_ss = base_inv["ss"], scen_inv["ss"]
             b_q, s_q = base_inv["q"], scen_inv["q"]

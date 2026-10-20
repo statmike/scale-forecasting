@@ -126,6 +126,7 @@ def _build_models_catalog() -> list[dict[str, Any]]:
                 "supports_past_covariates": cls.supports_past_covariates,
                 "supports_static_covariates": cls.supports_static_covariates,
                 "supports_explainability": cls.supports_explainability,
+                "supports_monotonic_constraints": cls.supports_monotonic_constraints,
                 "supports_global": cls.supports_global,
                 "supports_hybrid": cls.supports_hybrid,
             }

@@ -73,6 +73,14 @@ def test_model_catalog_runtime_flags_are_consistent() -> None:
         "vertex_seq2seq",
         "arima_plus",
     }
+    # Native training-time monotonic constraints are supported by all 5 ml models.
+    assert set(df[df["monotonic_constraints"]].index) == {
+        "regression_lags",
+        "random_forest",
+        "lightgbm",
+        "xgboost",
+        "catboost",
+    }
     # GPU is only the deep-learning and automl families, never a statistical/ml/native model.
     assert bool(df.loc["neuralprophet", "gpu"]) is True
     assert not df[~df["family"].isin(["deep_learning", "automl"])]["gpu"].any()

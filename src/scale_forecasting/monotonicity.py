@@ -15,14 +15,49 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import numpy as np
+    import pandas as pd
 
 MONOTONE_SUPPORTED_MODELS: tuple[str, ...] = (
     "lightgbm",
     "xgboost",
     "catboost",
+    "random_forest",
     "regression_lags",
     "ridge_lags",
 )
+
+MONOTONICITY_AUDIT_COLUMNS: tuple[str, ...] = (
+    "model_type",
+    "scenario",
+    "shocked_covariate",
+    "expected_direction",
+    "n_cells",
+    "n_violations",
+    "violation_rate",
+    "max_violation",
+    "mean_delta_yhat",
+    "status",
+)
+
+
+def list_monotonic_models(*, available_only: bool = False) -> list[str]:
+    """Return sorted registered model names supporting training-time monotonic constraints.
+
+    Args:
+        available_only: When ``True``, filter to models whose upstream Python
+            package is installed in the active environment.
+
+    Returns:
+        Sorted list of canonical model names with
+        ``BaseModel.supports_monotonic_constraints == True``.
+    """
+    from .models import list_models
+
+    return list_models(
+        available_only=available_only,
+        supports_monotonic_constraints=True,
+    )
+
 
 _PRICE_EXACT: frozenset[str] = frozenset(
     {
@@ -363,11 +398,188 @@ def fit_sign_constrained_ridge(
     return w
 
 
+def _infer_shock_sign_from_spec(spec: Any) -> int:
+    """Infer directional shock sign (``+1``, ``-1``, or ``0``) from a shock specification."""
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        val = float(spec)
+        return 1 if val > 0.0 else (-1 if val < 0.0 else 0)
+    if isinstance(spec, str):
+        s = spec.strip()
+        if s.endswith("%"):
+            pct = float(s[:-1].strip())
+            return 1 if pct > 0.0 else (-1 if pct < 0.0 else 0)
+        if s.startswith("*"):
+            f = float(s[1:].strip())
+            return 1 if f > 1.0 else (-1 if f < 1.0 else 0)
+        if s.startswith("="):
+            v = float(s[1:].strip())
+            return 1 if v > 0.0 else (-1 if v <= 0.0 else 0)
+        if s.startswith(("+", "-")):
+            d = float(s)
+            return 1 if d > 0.0 else (-1 if d < 0.0 else 0)
+    if isinstance(spec, Mapping):
+        if "op" in spec and "value" in spec:
+            op = str(spec["op"]).lower().strip()
+            val = float(spec["value"])
+            if op in ("mul", "multiply", "*"):
+                return 1 if val > 1.0 else (-1 if val < 1.0 else 0)
+            if op in ("pct", "percent", "%"):
+                return 1 if val > 0.0 else (-1 if val < 0.0 else 0)
+            if op in ("add", "delta", "+"):
+                return 1 if val > 0.0 else (-1 if val < 0.0 else 0)
+            if op in ("set", "override", "="):
+                return 1 if val > 0.0 else (-1 if val <= 0.0 else 0)
+        if "factor" in spec:
+            f = float(spec["factor"])
+            return 1 if f > 1.0 else (-1 if f < 1.0 else 0)
+        if "pct" in spec:
+            p = float(spec["pct"])
+            return 1 if p > 0.0 else (-1 if p < 0.0 else 0)
+        if "delta" in spec or "add" in spec:
+            d = float(spec.get("delta", spec.get("add", 0.0)))
+            return 1 if d > 0.0 else (-1 if d < 0.0 else 0)
+    return 0
+
+
+def audit_scenario_monotonicity(
+    sim_df: pd.DataFrame,
+    constraints: Mapping[str, int] | None = None,
+    scenarios: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    tol: float = 1e-6,
+) -> pd.DataFrame:
+    """Audit ``simulate_scenarios`` predictions for directional monotonicity compliance.
+
+    Evaluates every ``(model_type, scenario)`` pair in ``sim_df`` (excluding ``"baseline"``)
+    and checks whether ``delta_yhat = yhat - baseline_yhat`` respects the expected economic
+    response direction implied by ``constraints`` and the scenario shock.
+
+    Args:
+        sim_df: Output DataFrame returned by :func:`scale_forecasting.scenarios.simulate_scenarios`.
+        constraints: Optional ``{column: -1 | 0 | 1}`` constraint dictionary. When omitted,
+            economic signs are inferred from shocked column names (`price* -> -1`,
+            `promo*/discount* -> +1`).
+        scenarios: Optional scenario specification dictionary passed to ``simulate_scenarios``.
+            When omitted, shock direction is inferred from ``price - baseline_price`` in
+            ``sim_df`` or from the scenario name (`hike`/`up` vs. `cut`/`discount`/`promo`).
+        tol: Numerical tolerance for directional comparison (default ``1e-6``).
+
+    Returns:
+        Summary DataFrame with columns ``MONOTONICITY_AUDIT_COLUMNS`` reporting ``n_cells``,
+        ``n_violations``, ``violation_rate``, ``max_violation``, ``mean_delta_yhat``, and
+        ``status`` (``"PASS"`` or ``"VIOLATION"``).
+    """
+    import numpy as np
+    import pandas as pd
+
+    if sim_df is None or sim_df.empty or "scenario" not in sim_df.columns:
+        return pd.DataFrame(columns=list(MONOTONICITY_AUDIT_COLUMNS))
+
+    shock_cols: list[str] = []
+    if scenarios:
+        shock_cols = sorted({str(k) for sh in scenarios.values() for k in sh})
+    eff_constraints = resolve_monotonic_constraints(
+        constraints,
+        candidate_columns=[*shock_cols, "price", "price_index", "promo", "promo_flag"],
+        infer_if_empty=True,
+    )
+
+    non_base = sim_df[sim_df["scenario"].astype(str) != "baseline"]
+    if non_base.empty:
+        return pd.DataFrame(columns=list(MONOTONICITY_AUDIT_COLUMNS))
+
+    rows: list[dict[str, Any]] = []
+    for (mtype, scen), grp in non_base.groupby(["model_type", "scenario"], sort=False):
+        scen_str = str(scen)
+        mtype_str = str(mtype)
+        shocked_cov = "price"
+        expected_dir = 0
+
+        if scenarios and scen_str in scenarios:
+            sh_map = scenarios[scen_str]
+            dirs: list[int] = []
+            cov_names: list[str] = []
+            for col, spec in sh_map.items():
+                col_str = str(col)
+                cov_names.append(col_str)
+                c_sign = eff_constraints.get(col_str)
+                if c_sign is None:
+                    inferred_c = infer_monotonic_constraints([col_str])
+                    c_sign = inferred_c.get(col_str, 0)
+                sh_sign = _infer_shock_sign_from_spec(spec)
+                if c_sign != 0 and sh_sign != 0:
+                    dirs.append(int(c_sign * sh_sign))
+            if cov_names:
+                shocked_cov = "+".join(cov_names)
+            if dirs and all(d == dirs[0] for d in dirs):
+                expected_dir = dirs[0]
+
+        if expected_dir == 0 and {"price", "baseline_price"}.issubset(grp.columns):
+            p_diff = (
+                pd.to_numeric(grp["price"], errors="coerce")
+                - pd.to_numeric(grp["baseline_price"], errors="coerce")
+            ).dropna()
+            if not p_diff.empty:
+                mean_p_diff = float(p_diff.mean())
+                if abs(mean_p_diff) > 1e-12:
+                    p_c = eff_constraints.get("price", eff_constraints.get("price_index", -1))
+                    sh_sign = 1 if mean_p_diff > 0.0 else -1
+                    expected_dir = int(p_c * sh_sign)
+                    shocked_cov = "price"
+
+        if expected_dir == 0:
+            s_low = scen_str.lower()
+            if any(k in s_low for k in ("hike", "increase", "price_up")):
+                expected_dir = -1
+                shocked_cov = "price"
+            elif any(k in s_low for k in ("cut", "discount", "markdown", "promo", "price_down")):
+                expected_dir = 1
+                shocked_cov = "promo" if "promo" in s_low else "price"
+
+        deltas = pd.to_numeric(grp["delta_yhat"], errors="coerce").dropna().to_numpy(dtype=float)
+        n_cells = int(deltas.size)
+        if n_cells == 0:
+            continue
+        if expected_dir == -1:
+            viol_mask = deltas > tol
+            viol_mags = np.where(viol_mask, deltas, 0.0)
+        elif expected_dir == 1:
+            viol_mask = deltas < -tol
+            viol_mags = np.where(viol_mask, -deltas, 0.0)
+        else:
+            viol_mask = np.zeros(n_cells, dtype=bool)
+            viol_mags = np.zeros(n_cells, dtype=float)
+
+        n_viol = int(viol_mask.sum())
+        v_rate = float(n_viol / n_cells)
+        max_v = float(viol_mags.max()) if n_cells > 0 else 0.0
+        mean_d = float(deltas.mean())
+        rows.append(
+            {
+                "model_type": mtype_str,
+                "scenario": scen_str,
+                "shocked_covariate": shocked_cov,
+                "expected_direction": int(expected_dir),
+                "n_cells": n_cells,
+                "n_violations": n_viol,
+                "violation_rate": v_rate,
+                "max_violation": max_v,
+                "mean_delta_yhat": mean_d,
+                "status": "PASS" if n_viol == 0 else "VIOLATION",
+            }
+        )
+
+    return pd.DataFrame.from_records(rows, columns=list(MONOTONICITY_AUDIT_COLUMNS))
+
+
 __all__ = [
     "MONOTONE_SUPPORTED_MODELS",
+    "MONOTONICITY_AUDIT_COLUMNS",
+    "audit_scenario_monotonicity",
     "build_monotonic_constraint_vector",
     "fit_sign_constrained_ridge",
     "infer_monotonic_constraints",
+    "list_monotonic_models",
     "resolve_model_monotonic_vector",
     "resolve_monotonic_constraints",
     "validate_monotonic_constraints_map",

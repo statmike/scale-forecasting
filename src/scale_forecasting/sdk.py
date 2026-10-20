@@ -2278,6 +2278,33 @@ class Forecaster:
             title=title,
         )
 
+    def audit_monotonicity_df(
+        self,
+        sim_df: pd.DataFrame,
+        *,
+        constraints: Mapping[str, int] | None = None,
+        scenarios: Mapping[str, Mapping[str, Any]] | None = None,
+        tol: float = 1e-6,
+    ) -> pd.DataFrame:
+        """Audit counterfactual ``simulate_scenarios`` predictions for directional monotonicity
+        compliance (`monotonicity.audit_scenario_monotonicity`).
+        """
+        from .monotonicity import audit_scenario_monotonicity
+
+        eff_constraints = (
+            constraints
+            if constraints is not None
+            else dict(self._config.features.monotonic_constraints)
+        )
+        return audit_scenario_monotonicity(
+            sim_df,
+            constraints=eff_constraints,
+            scenarios=scenarios,
+            tol=tol,
+        )
+
+    audit_scenario_monotonicity = audit_monotonicity_df
+
     def promo_elasticity_df(
         self,
         data: pd.DataFrame | None = None,

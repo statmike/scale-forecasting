@@ -527,6 +527,7 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
             "total": len(list_models()),
             "available_count": len(available_models_list),
             "available": available_models_list,
+            "monotonic_models": list_models(supports_monotonic_constraints=True),
             "missing": missing_models_list,
         },
         "settings_env": {
@@ -865,10 +866,10 @@ def render_skill_catalog_reference(repo_root: Path | None = None) -> str:
         "",
         (
             "| Model (`models` key) | Family | Runtime | Upstream Package | Install Extra | "
-            "Future Cov. | Past Cov. | Static Cov. | Explainability | Global / Hybrid | "
-            "GPU Capable |"
+            "Future Cov. | Past Cov. | Static Cov. | Explainability | Monotone (`@monotone`) | "
+            "Global / Hybrid | GPU Capable |"
         ),
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
 
     model_names = sorted(
@@ -889,6 +890,7 @@ def render_skill_catalog_reference(repo_root: Path | None = None) -> str:
             f"{'Yes' if cls.supports_past_covariates else 'No'} | "
             f"{'Yes' if cls.supports_static_covariates else 'No'} | "
             f"{'Yes' if cls.supports_explainability else 'No'} | "
+            f"{'Yes' if cls.supports_monotonic_constraints else 'No'} | "
             f"`{'/'.join(modes)}` | "
             f"{'Yes' if cls.gpu_capable else 'No'} |"
         )
