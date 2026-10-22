@@ -197,26 +197,26 @@ Full guide and interactive notebook: **[Glass-Box Auto-Forecaster & `autofocus` 
 | **`native`** (`2`) | `arima_plus` (`ARIMA_PLUS` / `ARIMA_PLUS_XREG`), `timesfm` / `bq_timesfm` (`AI.FORECAST`) | `bigquery` | Pure BigQuery SQL execution with future covariates (`ARIMA_PLUS_XREG`), `ML.EXPLAIN_FORECAST` attributions, and zero cluster provisioning. |
 
 - **Feature Engineering, Causal Guardrails & Compositional Simplex** — [`docs/features_and_covariates.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/features_and_covariates.md)
-  - `├─` **3-tier covariates & calendar signals:** Future (`price`, `promo`), past-only, and static covariates, country holidays, automatic Fourier harmonics, and structural level-shift detection.
-  - `├─` **Economic sign guardrails (`@monotone`) & moving-holiday ramps (`holiday_window`):** Enforce downward price response (`-1`) and upward promo lift (`+1`) (`features.monotonic_constraints`) and expand point holidays into pre-holiday build-up (`pre_holiday_days`) and post-holiday slump (`post_holiday_days`) windows.
-  - `└─` **Compositional market-share simplex (`@transform_ilr`, `@transform_clr`):** Forecast brand or channel shares in Aitchison log-ratio space (`simplex_sum`) so components stay strictly positive and sum to `1.0` or `100.0` at every horizon step.
+  - **3-tier covariates & calendar signals:** Future (`price`, `promo`), past-only, and static covariates, country holidays, automatic Fourier harmonics, and structural level-shift detection.
+  - **Economic sign guardrails (`@monotone`) & moving-holiday ramps (`holiday_window`):** Enforce downward price response (`-1`) and upward promo lift (`+1`) (`features.monotonic_constraints`) and expand point holidays into pre-holiday build-up (`pre_holiday_days`) and post-holiday slump (`post_holiday_days`) windows.
+  - **Compositional market-share simplex (`@transform_ilr`, `@transform_clr`):** Forecast brand or channel shares in Aitchison log-ratio space (`simplex_sum`) so components stay strictly positive and sum to `1.0` or `100.0` at every horizon step.
 - **Backtesting, 21 Evaluation Metrics & Calibrated Uncertainty** — [`docs/metrics_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/metrics_reference.md)
-  - `├─` **Walk-forward cross-validation & Optuna HPO:** Expanding, sliding, and frozen-origin backtests with `fleetwide` or `per_series` Bayesian hyperparameter tuning.
-  - `├─` **21 evaluation metrics:** 16 point metrics (`wape`, `smape`, `mape`, `maape`, `ope`, `mae`, `rmse`, `mse`, `rmsle`, `bias`, `mase`, `mase_seasonal`, `rmsse`, `msse`, `r2`, `cv`) and 5 interval metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`).
-  - `└─` **Conformal intervals, quantile fans & Newsvendor targets:** Out-of-fold conformal prediction bands, Chernozhukov-rearranged monotone percentile fans (`output.quantiles`), physical bounds (`floor`, `cap`, `cumulative_round`), and asymmetric `underage_cost` / `overage_cost` quantile targeting.
+  - **Walk-forward cross-validation & Optuna HPO:** Expanding, sliding, and frozen-origin backtests with `fleetwide` or `per_series` Bayesian hyperparameter tuning.
+  - **21 evaluation metrics:** 16 point metrics (`wape`, `smape`, `mape`, `maape`, `ope`, `mae`, `rmse`, `mse`, `rmsle`, `bias`, `mase`, `mase_seasonal`, `rmsse`, `msse`, `r2`, `cv`) and 5 interval metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`).
+  - **Conformal intervals, quantile fans & Newsvendor targets:** Out-of-fold conformal prediction bands, Chernozhukov-rearranged monotone percentile fans (`output.quantiles`), physical bounds (`floor`, `cap`, `cumulative_round`), and asymmetric `underage_cost` / `overage_cost` quantile targeting.
 - **3-Mode Hierarchical Reconciliation (`THieF` & Cross-Temporal)** — [`docs/hierarchical_forecasting.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/hierarchical_forecasting.md)
-  - `├─` **Mode 1 — Spatial hierarchies:** Reconcile product/geography trees (`SKU -> Category -> Region -> Total`) via all 8 Hyndman FPP3 methods, including active-set non-negative `mint_nonneg` alongside `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, and `middle_out`.
-  - `├─` **Mode 2 — Temporal hierarchies (`THieF`):** Opt-in `reconcile_temporal` reconciles any flat panel across calendar frequencies (`Daily <-> Weekly <-> Monthly <-> Annual`) on both forward horizons and backtest folds.
-  - `└─` **Mode 3 — Simultaneous cross-temporal (`cross_temporal_mint`) & coherent paths:** Enforce spatial and temporal coherence simultaneously (`0.000000` discrepancy on both axes) with OOF-learned `spatial_temporal_weight="auto"` and joint Monte Carlo trajectory simulation (`sample_coherent_paths`).
+  - **Mode 1 — Spatial hierarchies:** Reconcile product/geography trees (`SKU -> Category -> Region -> Total`) via all 8 Hyndman FPP3 methods, including active-set non-negative `mint_nonneg` alongside `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, and `middle_out`.
+  - **Mode 2 — Temporal hierarchies (`THieF`):** Opt-in `reconcile_temporal` reconciles any flat panel across calendar frequencies (`Daily <-> Weekly <-> Monthly <-> Annual`) on both forward horizons and backtest folds.
+  - **Mode 3 — Simultaneous cross-temporal (`cross_temporal_mint`) & coherent paths:** Enforce spatial and temporal coherence simultaneously (`0.000000` discrepancy on both axes) with OOF-learned `spatial_temporal_weight="auto"` and joint Monte Carlo trajectory simulation (`sample_coherent_paths`).
 - **Smart Ensembling, Explainability & Day-2 Operations** — [`docs/models_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md) · [`docs/operations.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md)
-  - `├─` **8 ensemble strategies:** Heuristic/winner rules (`mean`, `median`, `inverse_error`, `champion`, `horizon_specialist`) and out-of-fold stackers (`nnls`, `ridge`, `xgb`) with `top_k` and `parsimony_margin` pruning.
-  - `├─` **Two-tier explainability:** Global driver importance and per-step signed feature attributions (`attributions_df`, `plot_attributions`) plus structural trend/seasonality decomposition (`explain_forecast`).
-  - `└─` **Zero-refit re-ensembling, cell borrowing & surgical repair:** Re-blend completed runs (`reensemble`, `ensemble_runs`), borrow unchanged `(series, model)` cells across runs, or repair failed cells (`retry_run`).
+  - **8 ensemble strategies:** Heuristic/winner rules (`mean`, `median`, `inverse_error`, `champion`, `horizon_specialist`) and out-of-fold stackers (`nnls`, `ridge`, `xgb`) with `top_k` and `parsimony_margin` pruning.
+  - **Two-tier explainability:** Global driver importance and per-step signed feature attributions (`attributions_df`, `plot_attributions`) plus structural trend/seasonality decomposition (`explain_forecast`).
+  - **Zero-refit re-ensembling, cell borrowing & surgical repair:** Re-blend completed runs (`reensemble`, `ensemble_runs`), borrow unchanged `(series, model)` cells across runs, or repair failed cells (`retry_run`).
 - **Forecaster Decision Workbench, Scenarios, Goal-Seek QP & Inventory** — [`docs/forecaster_workbench.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md)
-  - `├─` **Double/Debiased ML promo & price decomposition:** Robinson/Chernozhukov partialing-out (`promo_elasticity_df`) into baseline demand, causal promo lift, post-promo pull-forward dip, and cross-SKU cannibalization.
-  - `├─` **5-stage full-chain What-If scenarios:** Propagate price/promo shocks through base models, ensembles, `mint_nonneg` reconciliation, gross margin (`gross_margin_delta`), and inventory $\Delta\text{ROP}$ / $\Delta\text{SS}$ (`simulate_scenarios`).
-  - `├─` **Top-down Goal-Seek constrained QP:** Disaggregate executive targets down the hierarchy (`allocate_target`) subject to `locked_nodes`, capacity `[lower_bounds, upper_bounds]`, and multi-period `smoothness_weight`.
-  - `└─` **Inventory policies, FVA audits & HTML reports:** $(s, S)$, $(R, S)$, Fill Rate, and Newsvendor policies (`inventory_policy_df`), modified Diebold–Mariano $p$-values (`compute_fva`), SBC regime routing, exception queues (`exceptions_df`), and interactive reports (`python -m scale_forecasting.report`).
+  - **Double/Debiased ML promo & price decomposition:** Robinson/Chernozhukov partialing-out (`promo_elasticity_df`) into baseline demand, causal promo lift, post-promo pull-forward dip, and cross-SKU cannibalization.
+  - **5-stage full-chain What-If scenarios:** Propagate price/promo shocks through base models, ensembles, `mint_nonneg` reconciliation, gross margin (`gross_margin_delta`), and inventory $\Delta\text{ROP}$ / $\Delta\text{SS}$ (`simulate_scenarios`).
+  - **Top-down Goal-Seek constrained QP:** Disaggregate executive targets down the hierarchy (`allocate_target`) subject to `locked_nodes`, capacity `[lower_bounds, upper_bounds]`, and multi-period `smoothness_weight`.
+  - **Inventory policies, FVA audits & HTML reports:** $(s, S)$, $(R, S)$, Fill Rate, and Newsvendor policies (`inventory_policy_df`), modified Diebold–Mariano $p$-values (`compute_fva`), SBC regime routing, exception queues (`exceptions_df`), and interactive reports (`python -m scale_forecasting.report`).
 
 ---
 
@@ -224,19 +224,57 @@ Full guide and interactive notebook: **[Glass-Box Auto-Forecaster & `autofocus` 
 
 All notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/README.md) include committed outputs and one-click **Colab Enterprise** launch links:
 
-- **Track 1 — Local sandbox, auto-forecaster & plugins (no GCP setup):** [`00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb) · [`11_auto_forecaster_and_autofocus.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/11_auto_forecaster_and_autofocus.ipynb) · [`09_custom_models_and_metrics.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_custom_models_and_metrics.ipynb)
-- **Track 2 — Cloud runtimes:** [`01_bigquery_native_sql.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_bigquery_native_sql.ipynb) · [`02_vertex_and_gce_vms.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_vertex_and_gce_vms.ipynb) · [`03_spark_serverless_and_connect.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_spark_serverless_and_connect.ipynb) · [`04_ray_on_vertex_gpu.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex_gpu.ipynb)
-- **Track 3 — Covariates, hierarchy, HPO & ensembles:** [`05_covariates_and_global_models.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_covariates_and_global_models.ipynb) · [`06_hierarchical_reconciliation.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_hierarchical_reconciliation.ipynb) · [`07_hpo_backtesting_and_ensembles.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_hpo_backtesting_and_ensembles.ipynb)
-- **Track 4 — Master multi-engine DAG & operations:** [`08_multi_engine_master_workflow.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb) · [`10_registry_operations_and_scale.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb)
-- **Team lab:** [Hands-on workshop guide (`docs/workshop.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
+- **Track 1 — Local sandbox, auto-forecaster & plugins (no GCP setup):**
+  - [`00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb)
+  - [`11_auto_forecaster_and_autofocus.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/11_auto_forecaster_and_autofocus.ipynb)
+  - [`09_custom_models_and_metrics.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_custom_models_and_metrics.ipynb)
+- **Track 2 — Cloud runtimes:**
+  - [`01_bigquery_native_sql.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_bigquery_native_sql.ipynb)
+  - [`02_vertex_and_gce_vms.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_vertex_and_gce_vms.ipynb)
+  - [`03_spark_serverless_and_connect.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_spark_serverless_and_connect.ipynb)
+  - [`04_ray_on_vertex_gpu.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex_gpu.ipynb)
+- **Track 3 — Covariates, hierarchy, HPO & ensembles:**
+  - [`05_covariates_and_global_models.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_covariates_and_global_models.ipynb)
+  - [`06_hierarchical_reconciliation.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_hierarchical_reconciliation.ipynb)
+  - [`07_hpo_backtesting_and_ensembles.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_hpo_backtesting_and_ensembles.ipynb)
+- **Track 4 — Master multi-engine DAG & operations:**
+  - [`08_multi_engine_master_workflow.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb)
+  - [`10_registry_operations_and_scale.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb)
+- **Team lab:**
+  - [Hands-on workshop guide (`docs/workshop.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
 
 ---
 
 ## Where next
 
-- **Start here:** [Getting started](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md) · [Platform overview](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md) · [Auto-forecaster & `autofocus`](https://github.com/statmike/scale-forecasting/blob/main/docs/auto_forecaster.md) · [AlphaEvolve runtime harness](https://github.com/statmike/scale-forecasting/blob/main/docs/alphaevolve_runner.md) · [Forecaster workbench](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md) · [AI agents, skills & MCP](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md) · [Choosing a runtime](https://github.com/statmike/scale-forecasting/blob/main/docs/choosing_a_runtime.md) · [Cost estimates & controls](https://github.com/statmike/scale-forecasting/blob/main/docs/cost_estimates.md) · [Why Google Cloud](https://github.com/statmike/scale-forecasting/blob/main/docs/why_google_cloud.md) · [FAQ](https://github.com/statmike/scale-forecasting/blob/main/docs/faq.md) · [Glossary](https://github.com/statmike/scale-forecasting/blob/main/docs/glossary.md) · [Documentation map](https://github.com/statmike/scale-forecasting/blob/main/docs/README.md)
-- **Reference:** [Compute runtimes](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [Configuration](https://github.com/statmike/scale-forecasting/blob/main/docs/configuration_reference.md) · [Models & ensembles](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md) · [Hierarchical & cross-temporal forecasting](https://github.com/statmike/scale-forecasting/blob/main/docs/hierarchical_forecasting.md) · [Features, covariates & simplex](https://github.com/statmike/scale-forecasting/blob/main/docs/features_and_covariates.md) · [Evaluation metrics](https://github.com/statmike/scale-forecasting/blob/main/docs/metrics_reference.md) · [Output schemas & views](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md)
-- **Operate & extend:** [Python SDK (`Forecaster`)](https://github.com/statmike/scale-forecasting/blob/main/docs/using_the_sdk.md) · [Running & reviewing](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md) · [Operations & repair](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md) · [Quota & 100k scale](https://github.com/statmike/scale-forecasting/blob/main/docs/quota_and_scale.md) · [System validation ledger](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) · [API reference](https://statmike.github.io/scale-forecasting/api/)
+- **Start here:**
+  - [Getting started](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md)
+  - [Platform overview](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md)
+  - [Auto-forecaster & `autofocus`](https://github.com/statmike/scale-forecasting/blob/main/docs/auto_forecaster.md)
+  - [AlphaEvolve runtime harness](https://github.com/statmike/scale-forecasting/blob/main/docs/alphaevolve_runner.md)
+  - [Forecaster workbench](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md)
+  - [AI agents, skills & MCP](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md)
+  - [Choosing a runtime](https://github.com/statmike/scale-forecasting/blob/main/docs/choosing_a_runtime.md)
+  - [Cost estimates & controls](https://github.com/statmike/scale-forecasting/blob/main/docs/cost_estimates.md)
+  - [Why Google Cloud](https://github.com/statmike/scale-forecasting/blob/main/docs/why_google_cloud.md)
+  - [FAQ](https://github.com/statmike/scale-forecasting/blob/main/docs/faq.md)
+  - [Glossary](https://github.com/statmike/scale-forecasting/blob/main/docs/glossary.md)
+  - [Documentation map](https://github.com/statmike/scale-forecasting/blob/main/docs/README.md)
+- **Reference:**
+  - [Compute runtimes](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md)
+  - [Configuration](https://github.com/statmike/scale-forecasting/blob/main/docs/configuration_reference.md)
+  - [Models & ensembles](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md)
+  - [Hierarchical & cross-temporal forecasting](https://github.com/statmike/scale-forecasting/blob/main/docs/hierarchical_forecasting.md)
+  - [Features, covariates & simplex](https://github.com/statmike/scale-forecasting/blob/main/docs/features_and_covariates.md)
+  - [Evaluation metrics](https://github.com/statmike/scale-forecasting/blob/main/docs/metrics_reference.md)
+  - [Output schemas & views](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md)
+- **Operate & extend:**
+  - [Python SDK (`Forecaster`)](https://github.com/statmike/scale-forecasting/blob/main/docs/using_the_sdk.md)
+  - [Running & reviewing](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md)
+  - [Operations & repair](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md)
+  - [Quota & 100k scale](https://github.com/statmike/scale-forecasting/blob/main/docs/quota_and_scale.md)
+  - [System validation ledger](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md)
+  - [API reference](https://statmike.github.io/scale-forecasting/api/)
 
 ---
 
