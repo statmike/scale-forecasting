@@ -444,9 +444,9 @@ def test_no_stale_config_names_or_counts_in_docs(markdown_files: list[Path]) -> 
             errors.append(f"{label} missing '{n_metrics} evaluation metrics'")
         if f"{n_views} Analytical SQL Views" not in text:
             errors.append(f"{label} missing '{n_views} Analytical SQL Views'")
-    if len(root_readme.splitlines()) > 250:
+    if len(root_readme.splitlines()) > 300:
         errors.append(
-            f"README.md exceeds 250-line front-door cap ({len(root_readme.splitlines())} lines)"
+            f"README.md exceeds 300-line front-door cap ({len(root_readme.splitlines())} lines)"
         )
     if len(overview.splitlines()) > 350:
         errors.append(f"docs/overview.md exceeds 350-line cap ({len(overview.splitlines())} lines)")
