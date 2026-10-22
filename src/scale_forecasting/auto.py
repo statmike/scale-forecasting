@@ -1362,6 +1362,11 @@ class AutoForecastSession:
             alpha_val = diag.get(
                 "spatial_weight_alpha", champ.config.hierarchy.spatial_temporal_weight
             )
+            alpha_str = (
+                f"{float(alpha_val):.4f}"
+                if isinstance(alpha_val, (int, float)) and not isinstance(alpha_val, bool)
+                else str(alpha_val)
+            )
             ct_beat = bool(
                 diag.get(
                     "cross_temporal_beats_spatial",
@@ -1377,14 +1382,14 @@ class AutoForecastSession:
                 f"Yes — cross_temporal reconciliation ('{rec_m}', mode=cross_temporal) achieved "
                 f"exact spatial coherence (residual={max_coh:.6f}) and temporal coherence "
                 f"(residual={temp_coh:.6f} across aggregations={temp_aggs}, "
-                f"spatial_weight_alpha={alpha_val}), {neg_cnt} negative leaves, "
+                f"spatial_weight_alpha={alpha_str}), {neg_cnt} negative leaves, "
                 f"{rec_lift:+.2f}% tree-wide accuracy change, and "
                 f"cross_temporal_beats_spatial={ct_beat}."
             )
             q5_ev = (
                 f"mode='cross_temporal', method='{rec_m}', coherence_gap={max_coh:.6f}, "
                 f"temporal_coherence_gap={temp_coh:.6f}, temporal_aggregations={temp_aggs}, "
-                f"spatial_weight_alpha={alpha_val}, cross_temporal_beats_spatial={ct_beat}, "
+                f"spatial_weight_alpha={alpha_str}, cross_temporal_beats_spatial={ct_beat}, "
                 f"negative_leaves={neg_cnt}, levels={len(hval_df)}"
             )
         elif has_spatial and not hval_df.empty:
@@ -3747,11 +3752,19 @@ def _execute_local_panel_pass(
                 results_by_model_ts[(m, ts_id)] = cell_cache[key]
 
     unreconciled_metrics_by_model_ts: dict[tuple[str, str], dict[str, float]] = {}
+    max_temp_coherence_residual = 0.0
+    learned_alpha_float: float | None = None
     if hier_spec is not None:
-        primary_method = (
-            exec_cfg.hierarchy.reconciliation_methods[0]
-            if exec_cfg.hierarchy.reconciliation_methods
-            else "bottom_up"
+        has_ct_cfg = bool(
+            exec_cfg.hierarchy.reconcile_temporal
+            or exec_cfg.hierarchy.cross_temporal
+            or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
+        )
+        non_ct_methods = [
+            m for m in exec_cfg.hierarchy.reconciliation_methods if m != "cross_temporal_mint"
+        ]
+        primary_method: Any = (
+            non_ct_methods[0] if non_ct_methods else ("wls_struct" if has_ct_cfg else "bottom_up")
         )
         for (m_u, ts_u), res_u in results_by_model_ts.items():
             if res_u.status == "ok":
@@ -3792,18 +3805,14 @@ def _execute_local_panel_pass(
                     s_hash = f"{make_model_spec_hash(base_m, exec_cfg)}:rec:{primary_method}"
                     cell_cache[(str(r_cell.ts_id), s_hash)] = r_cell
                     results_by_model_ts[(r_cell.model_type, str(r_cell.ts_id))] = r_cell
-            if (
-                exec_cfg.hierarchy.reconcile_temporal
-                or exec_cfg.hierarchy.cross_temporal
-                or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
-            ) and primary_method != "cross_temporal_mint":
+            if has_ct_cfg:
                 ct_method = "cross_temporal_mint"
                 ct_hier_cfg = exec_cfg.model_copy(
                     update={
                         "hierarchy": exec_cfg.hierarchy.model_copy(
                             update={
                                 "reconciliation_methods": [ct_method],
-                                "reconcile_temporal": False,
+                                "reconcile_temporal": True,
                                 "cross_temporal": True,
                             }
                         )
@@ -3816,6 +3825,21 @@ def _execute_local_panel_pass(
                         for ts_id in hist_groups:
                             r_cached = cell_cache[(ts_id, s_hash)]
                             results_by_model_ts[(r_cached.model_type, ts_id)] = r_cached
+                            ct_diag = r_cached.predictions.attrs.get(
+                                "cross_temporal_diagnostics", {}
+                            )
+                            if isinstance(ct_diag, Mapping):
+                                if "spatial_weight_alpha" in ct_diag:
+                                    learned_alpha_float = float(ct_diag["spatial_weight_alpha"])
+                                max_temp_coherence_residual = max(
+                                    max_temp_coherence_residual,
+                                    float(
+                                        ct_diag.get(
+                                            "final_temp_discrepancy",
+                                            ct_diag.get("temporal_discrepancy", 0.0),
+                                        )
+                                    ),
+                                )
                     else:
                         for ts_id in hist_groups:
                             c_u = results_by_model_ts.get((m_u, ts_id))
@@ -3833,7 +3857,19 @@ def _execute_local_panel_pass(
                         s_hash = f"{make_model_spec_hash(base_m, exec_cfg)}:rec:{ct_method}"
                         cell_cache[(str(r_cell.ts_id), s_hash)] = r_cell
                         results_by_model_ts[(r_cell.model_type, str(r_cell.ts_id))] = r_cell
-    max_temp_coherence_residual = 0.0
+                        ct_diag = r_cell.predictions.attrs.get("cross_temporal_diagnostics", {})
+                        if isinstance(ct_diag, Mapping):
+                            if "spatial_weight_alpha" in ct_diag:
+                                learned_alpha_float = float(ct_diag["spatial_weight_alpha"])
+                            max_temp_coherence_residual = max(
+                                max_temp_coherence_residual,
+                                float(
+                                    ct_diag.get(
+                                        "final_temp_discrepancy",
+                                        ct_diag.get("temporal_discrepancy", 0.0),
+                                    )
+                                ),
+                            )
     if hier_spec is None and exec_cfg.hierarchy.reconcile_temporal:
         for (m_u, ts_u), res_u in results_by_model_ts.items():
             if res_u.status == "ok":
@@ -4194,7 +4230,28 @@ def _execute_local_panel_pass(
     reconciliation_lift_pct = 0.0
     rec_mode = "none"
     max_spatial_coh = 0.0
-    learned_alpha: Any = exec_cfg.hierarchy.spatial_temporal_weight
+    has_ct_flag = bool(
+        hier_spec is not None
+        and (
+            exec_cfg.hierarchy.reconcile_temporal
+            or exec_cfg.hierarchy.cross_temporal
+            or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
+        )
+    )
+    learned_alpha: float = (
+        float(learned_alpha_float)
+        if learned_alpha_float is not None
+        else (
+            float(exec_cfg.hierarchy.spatial_temporal_weight)
+            if isinstance(exec_cfg.hierarchy.spatial_temporal_weight, (int, float))
+            and not isinstance(exec_cfg.hierarchy.spatial_temporal_weight, bool)
+            else (
+                0.0
+                if (hier_spec is None and exec_cfg.hierarchy.reconcile_temporal)
+                else (0.5 if has_ct_flag else 1.0)
+            )
+        )
+    )
     ct_beats_spatial = False
     if hier_spec is not None and not full_metric_df.empty:
         from .reconciliation import verify_coherence
@@ -4212,11 +4269,7 @@ def _execute_local_panel_pass(
             }
         mid_ids = (all_node_ids - leaf_ids) - root_ids
 
-        has_ct = bool(
-            exec_cfg.hierarchy.reconcile_temporal
-            or exec_cfg.hierarchy.cross_temporal
-            or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
-        )
+        has_ct = has_ct_flag
         rec_mode = "cross_temporal" if has_ct else "spatial_only"
         primary_rec_method = (
             "cross_temporal_mint"
@@ -4229,7 +4282,12 @@ def _execute_local_panel_pass(
         )
         if not all_preds_raw.empty:
             rec_suffixes = tuple(
-                f"_{m}" for m in (*exec_cfg.hierarchy.reconciliation_methods, "cross_temporal_mint")
+                f"_{m}"
+                for m in (
+                    *exec_cfg.hierarchy.reconciliation_methods,
+                    "wls_struct",
+                    "cross_temporal_mint",
+                )
             )
             rec_preds_sub = all_preds_raw[
                 all_preds_raw["model_type"].astype(str).str.endswith(rec_suffixes)
@@ -4258,15 +4316,16 @@ def _execute_local_panel_pass(
                 for k, v in m_means.items()
                 if str(k).endswith("_cross_temporal_mint") and math.isfinite(float(v))
             ]
+            sp_methods = [
+                rm
+                for rm in (*exec_cfg.hierarchy.reconciliation_methods, "wls_struct")
+                if rm != "cross_temporal_mint"
+            ]
             sp_scores = [
                 float(v)
                 for k, v in m_means.items()
                 if not str(k).endswith("_cross_temporal_mint")
-                and any(
-                    str(k).endswith(f"_{rm}")
-                    for rm in exec_cfg.hierarchy.reconciliation_methods
-                    if rm != "cross_temporal_mint"
-                )
+                and any(str(k).endswith(f"_{rm}") for rm in sp_methods)
                 and math.isfinite(float(v))
             ]
             if ct_scores and sp_scores:
@@ -4626,6 +4685,7 @@ def execute_one_session_pass(
             "bias_df": out["bias_df"],
             "attributions_df": out["attributions_df"],
             "hierarchy_summary_df": out["hierarchy_summary_df"],
+            "hierarchy_spec": out.get("hierarchy_spec"),
             "diagnostics_summary": out["diagnostics_summary"],
         }
         session.last_diagnostics_summary = out["diagnostics_summary"]

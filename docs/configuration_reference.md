@@ -93,7 +93,8 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
 | `holidays` | `list[str]` | `[]` | Holiday country codes to add (e.g. `["US"]`). |
-| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` | `"none"` | Target transform, inverted on output. |
+| `transform` | `"none"` \| `"log1p"` \| `"boxcox"` \| `"clr"` \| `"ilr"` | `"none"` | Target transform, inverted on output (`"clr"` and `"ilr"` apply Aitchison compositional log-ratio transforms with cross-series simplex closure). |
+| `simplex_sum` | `float` \| `null` | `null` | Constant cross-sectional simplex total ($S = 1.0$ for proportions or $S = 100.0$ for percentages) when `transform` is `"clr"` or `"ilr"` or a `<model>@transform_clr` / `<model>@transform_ilr` variant is used (`null` auto-detects $1.0$ vs. $100.0$ from training history). |
 | `exog` | `list[str]` | `[]` | Legacy alias for `future_covariates` (known future exogenous columns projected from the source table). |
 | `static_covariates` | `list[str]` | `[]` | Time-invariant series attributes (`stat_exog_list`, e.g. `["region", "category", "base_price"]`) consumed by cross-series panel models (`tide`, `tft`, `tsmixer`). |
 | `future_covariates` | `list[str]` | `[]` | Known-future time-varying regressors (`futr_exog_list`, e.g. `["promo_flag", "price_index", "is_holiday"]`) consumed by covariate-aware statistical, ML, deep-learning, and `arima_plus` models. |
@@ -114,15 +115,16 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | `holiday_window` | `HolidayWindowConfig \| dict \| bool \| null` | `null` | Multi-day moving-holiday lead/lag window (`{"enabled": true, "pre_holiday_days": 7, "post_holiday_days": 3, "kernel": "linear"}`) generating deterministic pre-holiday ramp-up (`pre_holiday_window`, `days_to_next_holiday`) and post-holiday slump (`post_holiday_window`, `days_since_prev_holiday`, `holiday_offset_days`) covariates when `holidays` or `custom_holidays` are active. |
 | `custom_holidays` | `list[dict[str, str]]` | `[]` | Custom event dates (`[{"name": "Cyber Monday", "date": "2026-11-30"}]`) combined with `holidays` for `is_holiday` and `holiday_window` features. |
 
-**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py)):
+**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py)):
 
 - **`transform`** — reshapes the target before fitting and inverts it on output:
   - `none` — identity (no constraint on `y`).
   - `log1p` — `log(1+y)` forward, `expm1` back. Tames multiplicative growth / right-skew. **Requires
     `y >= -1`.** Stateless.
   - `boxcox` — a **power transform** whose λ is fit **per series** by maximum likelihood; the *same* λ
-    is reused across backtest folds and the final fit. Strongest variance-stabilizer of the three.
+    is reused across backtest folds and the final fit. Strongest variance-stabilizer of the five.
     **Requires strictly positive `y` (`y > 0`).**
+  - `clr` / `ilr` — **Aitchison (1986) Centered Log-Ratio (`clr`)** and **Egozcue et al. (2003) Isometric Log-Ratio (`ilr`)** transforms for compositional market-share, category-mix, and budget-allocation panels that lie on the simplex $\mathcal{S}^D = \{x \in (0, S)^D : \sum_{j=1}^D x_{t,j} = S\}$. Boundary zeros ($0.0$ and $S$) are regularized via Martín-Fernández (2003) multiplicative replacement before log-ratio mapping, and predicted log-ratios are inverted via softmax closure so $\hat{y}_{t,j} \in (0, S)$ and $\sum_{j=1}^D \hat{y}_{t,j} = S$ hold at every horizon step and backtest fold. Can also be applied per-model via `<model>@transform_clr` and `<model>@transform_ilr`.
 - **`holidays`** — adds a single `is_holiday` flag (1.0 on holiday dates) from the `holidays` package
   for each ISO country code (e.g. `["US", "GB"]`). The same calendar feeds the BigQuery-native models,
   so holiday handling matches across runtimes. An unknown code fails fast.
@@ -751,12 +753,15 @@ following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd 
 
 | Field | Type | Default | Constraint | Purpose |
 |-------|------|---------|-----------|---------|
-| `enabled` | `bool` | `false` | — | Enable hierarchical aggregation and post-forecast reconciliation. |
+| `enabled` | `bool` | `false` | — | Enable cross-sectional hierarchical aggregation and post-forecast reconciliation. |
 | `levels` | `list[list[str]]` | `[]` | non-empty when `enabled=true` | Grouping paths defining upper-level nodes (e.g. `[["region_id"], ["region_id", "category_id"]]`). An empty inner list `[]` (automatically included) represents the top-level `"__total__"` node. Supports both strict nested hierarchies and crossed/grouped structures (`[["region_id"], ["category_id"]]`). |
-| `reconciliation_methods` | `list[ReconciliationMethod]` | `["bottom_up", "wls_struct", "mint_shrink"]` | non-empty when `enabled=true` | Reconciliation operators applied to base forecasts. Each method emits reconciled cells named `<base_model>_<method>` alongside the untouched base cells. |
+| `reconciliation_methods` | `list[ReconciliationMethod]` | `["bottom_up", "wls_struct", "mint_shrink"]` | non-empty when `enabled=true` or `reconcile_temporal=true` | Reconciliation operators applied to base forecasts. Each method emits reconciled cells named `<base_model>_<method>` alongside the untouched base cells. |
 | `middle_level` | `list[str]` \| `null` | `null` | must appear in `levels` when `"middle_out"` is selected | Grouping path serving as the anchor level for `"middle_out"` reconciliation. |
+| `reconcile_temporal` | `bool` | `false` | — | Enable Athanasopoulos et al. (2017) Temporal Hierarchy Reconciliation (`THieF`), aggregating each series across non-overlapping temporal factors $k \in \{k_p, \dots, 1\}$, fitting the same model family at each temporal level, and projecting via $S_{\text{temp}} G_{\text{temp}}$ so bottom-frequency forecasts sum coherently to weekly/monthly/quarterly/annual totals. |
+| `temporal_aggregations` | `list[int]` \| `null` | `null` | positive integers (`≥ 2`) | Explicit temporal aggregation factors $k$ (e.g. `[3, 6, 12]` on monthly `"MS"`, `[4, 13, 52]` on weekly `"W"`, `[7, 14, 28]` on daily `"D"`). When `null` and `reconcile_temporal=true`, factors are resolved automatically from `data.freq`. |
+| `cross_temporal` | `bool` | `false` | requires `enabled=true` and `reconcile_temporal=true` | Enable Kourentzes & Athanasopoulos (2019) simultaneous cross-temporal reconciliation across both the cross-sectional summing matrix $S_{\text{cs}}$ and temporal summing matrix $S_{\text{temp}}$. |
 
-**Supported `reconciliation_methods`** ([`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py)):
+**Supported `reconciliation_methods`** ([`reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/reconciliation.py), [`temporal_reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/temporal_reconciliation.py)):
 
 | Method | Kind | Mapping Matrix $G$ | Description |
 |--------|------|-----------------------------|-------------|
@@ -768,6 +773,7 @@ following Hyndman & Athanasopoulos (*Forecasting: Principles and Practice*, 3rd 
 | `wls_var` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{var}}^{-1} S)^{-1} S^\top W_{\text{var}}^{-1}$ | Variance-weighted Least Squares using diagonal in-sample / out-of-fold 1-step residual variances. |
 | `mint_shrink` | Optimal ($\text{MinT}$) | $(S^\top W_{\text{shr}}^{-1} S)^{-1} S^\top W_{\text{shr}}^{-1}$ | Minimum Trace with analytical **Schäfer-Strimmer shrinkage** of the residual covariance toward its diagonal variance target, ensuring positive-definiteness even when $n_{\text{nodes}} \gg T$. |
 | `mint_nonneg` | Constrained Optimal ($\text{MinT} \ge 0$) | Active-set projection on $W_{\text{shr}}^{-1}$ | Non-negative Minimum Trace reconciliation: projects negative bottom-level MinT allocations onto the $\tilde{b_t} \ge 0$ simplex and sums upward via $S \tilde{b_t}$. |
+| `cross_temporal_mint` | Cross-Temporal Optimal (`THieF` $\otimes$ `MinT`) | Alternating / Kronecker projection on $S_{\text{cs}} \otimes S_{\text{temp}}$ | Simultaneously reconciles cross-sectional hierarchy nodes and temporal aggregation buckets (`[3, 6, 12]`, `[7, 14, 28]`, etc.) so both cross-sectional sums and multi-horizon period totals agree to $< 10^{-6}$. |
 
 ## `compute` — `ComputeConfig`
 

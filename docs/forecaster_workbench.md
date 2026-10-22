@@ -46,7 +46,14 @@ flowchart TD
         J1 --> J2 --> J3
     end
 
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6
+    subgraph S7["Stage 7: Cross-Temporal Reconciliation, Compositional Simplex & Top-Down Goal-Seek QP (Track K)"]
+        K1["3-Mode Reconciliation & Coherent Path Simulation (temporal_reconciliation.py)<br/>spatial_only · temporal_only · cross_temporal_mint (spatial_temporal_weight='auto') · sample_coherent_paths"]
+        K2["Compositional Simplex Log-Ratio Transforms & Evolve Closure (simplex.py)<br/>features.transform = 'clr' | 'ilr' (@transform_clr · @transform_ilr) · verify_simplex"]
+        K3["Smooth Multi-Period Top-Down Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets=..., locks=..., bounds=..., smoothness_weight=10.0)"]
+        K1 --> K2 --> K3
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
 ```
 
 ---
@@ -67,7 +74,7 @@ Real-world operational forecasts must obey physical constraints (non-negative de
 | `ensemble.top_k` | `int \| null` | `null` | Prunes the candidate pool per series to the top-$K$ lowest-error base models before computing ensemble weights. |
 | `ensemble.parsimony_margin` | `float` | `0.0` | Complexity guardrail (e.g., `0.01` = 1%): if a complex model or ensemble does not beat the simplest baseline (`naive_seasonal` / `theta`) by at least this relative margin on OOF folds, `"champion"` falls back to the simpler model. |
 | `ensemble.variant_policy` | `"all"` \| `"best_per_base_model"` \| `"primary_only"` | `"all"` | Controls how `<base_model>@<tag>` variants participate in ensemble blending (`"best_per_base_model"` selects the single best variant per `(ts_id, base_model)` before blending). |
-| `hierarchy.reconciliation_methods` | `list[str]` | `["bottom_up", "mint_shrink"]` | Adds `"mint_nonneg"` (active-set non-negative Minimum Trace projection) so reconciled bottom-level SKU forecasts are guaranteed $\ge 0$ while summing coherently across the tree. |
+| `hierarchy.reconciliation_methods` | `list[str]` | `["bottom_up", "mint_shrink"]` | Adds `"mint_nonneg"` (active-set non-negative Minimum Trace projection) and `"cross_temporal_mint"` (simultaneous cross-sectional and temporal reconciliation) so reconciled bottom-level SKU forecasts are guaranteed $\ge 0$ and sum coherently across the tree and calendar. |
 
 All 9 ensemble strategies automatically propagate conformal prediction intervals (`yhat_lower`, `yhat_upper`) and score all 5 interval evaluation metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`) alongside the 16 point metrics.
 
@@ -149,7 +156,7 @@ Once forecasts are published into operations, [`scale_forecasting.diagnostics`](
 | **Realized Accuracy & Live Drift** | `sf.compute_realized_accuracy(pred_df, actuals_df, oof_df=...)`<br/>`forecaster.score_realized(actuals_df)` | Joins published forecasts against newly arrived actuals, scores all 21 metrics + realized interval coverage, and flags `drift_flagged = True` when live error exceeds `drift_threshold` $\times$ backtest OOF expectation (`drift_ratio`). |
 | **Cross-Run Revision Stability ("Whipsaw")** | `sf.compute_revision_stability(runs_predictions)`<br/>`forecaster.revision_stability_df([run_1, run_2, ...])` | Compares overlapping forecast target dates across consecutive runs (`run_t-2`, `run_t-1`, `run_t`) to measure Mean Absolute Revision (`mar`), Revision CoV (`revision_cov`), and `max_single_step_jump_pct`, flagging supply-chain whipsaw (`whipsaw_flagged`). |
 | **Top-$N$ Exception Triage Queue** | `sf.compute_exceptions_queue(...)`<br/>`bo.exceptions_df()` · `forecaster.exceptions_df()` | Ranks `(ts_id, model_type)` cells by a composite `severity_score` across 5 operational flags (`worse_than_naive`, `chronic_bias`, `realized_drift`, `whipsaw_jump`, `capacity_ceiling_hit`) with plain-English `exception_reasons`. |
-| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, Double-ML Promo Elasticity & Full-Chain Scenario Margin/Inventory cards, filterable Exception Triage table, SVG Horizon Decay & Bias tables, Operational Inventory Policy (`ROP` / `SS` / `Order-Up-To`) tab, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
+| **Self-Contained HTML & JSON Report** | `sf.export_report(target, "report.html", write_json=True)`<br/>`python -m scale_forecasting.report --out report.html` | Exports a single-file, zero-server interactive `.html` report (and optional `.json` sidecar) with KPI cards, SVG FVA waterfall + DM significance badges, Double-ML Promo Elasticity & Full-Chain Scenario Margin/Inventory cards, Top-Down Goal-Seek Allocation card, filterable Exception Triage table, SVG Horizon Decay & Bias tables, Operational Inventory Policy (`ROP` / `SS` / `Order-Up-To`) tab, and an interactive client-side Series & Multi-Quantile Fan Explorer. |
 
 ---
 
@@ -159,11 +166,52 @@ Forecasters routinely need to answer: *Did future promo calendars, `@monotone` s
 
 | Surface / Config Knob | Type / Values | Purpose |
 | :--- | :--- | :--- |
-| `<base_model>@<tag>` in `models` & `model_params` | e.g., `"xgboost@univariate"`, `"lightgbm@monotone"`, `"regression_lags@monotone"`, `"tide@local_cov_all"` | Runs multiple configurations of the same base estimator in a single run, with per-variant hyperparameters, economic sign constraints (`@monotone`), and covariate/scope overrides (`training_mode`, `use_covariates`, `future_covariates`, `past_covariates`, `static_covariates`, `exog_lags`). |
+| `<base_model>@<tag>` in `models` & `model_params` | e.g., `"xgboost@univariate"`, `"lightgbm@monotone"`, `"regression_lags@monotone"`, `"naive_mean@transform_ilr"`, `"tide@local_cov_all"` | Runs multiple configurations of the same base estimator in a single run, with per-variant hyperparameters, economic sign constraints (`@monotone`), compositional log-ratio transforms (`@transform_clr`, `@transform_ilr`), and covariate/scope overrides (`training_mode`, `use_covariates`, `future_covariates`, `past_covariates`, `static_covariates`, `exog_lags`). |
 | `features.include_univariate_baselines` | `bool` (`false`) | Automatically appends `<model>@univariate` for every covariate-capable model in `models`. |
 | `features.ablation_modes` & `features.ablation_models` | `list[AblationMode]`, `list[str] \| null` | Expands a full or targeted covariate/scope ablation ladder (`"univariate"`, `"cov_future_only"`, `"cov_past_only"`, `"cov_static_only"`, `"cov_all"`, `"local_cov_all"`, `"local_univariate"`, `"global_cov_all"`, `"global_univariate"`), deduplicating equivalent `(training_mode, cov_profile)` specs automatically. |
 | `forecaster.variant_matrix()` | `pd.DataFrame` | Offline preflight table showing every expanded variant's `scope_capability` (`local`, `global`, `hybrid`), `training_mode`, dynamic `cov_profile` (`univariate`, `cov_future_only`, `cov_future_past`, `cov_all`, `cov_custom`), `covariates_used`, `monotonic_constraints`, and deterministic `model_spec_hash`. |
 | `compute.reuse_prior_runs` & `data.snapshot_millis` | `bool` (`false`), `int \| null` | Queries BigQuery before compute launch for prior `COMPLETED` cells matching `(source_table, snapshot_millis, ts_id, model_type, model_spec_hash)`, copies matching `forecast_metadata`, `forecast_predictions`, and `backtest_oof` rows (`borrowed_from_run_id`), and skips or narrows cloud compute jobs to only the uncached models/series. Overridden by `--force`. |
+
+---
+
+## 6. Temporal & Cross-Temporal Reconciliation (THieF), Compositional Simplex Transforms & Top-Down Goal-Seek QP
+
+Enterprise S&OP and financial planning require three mathematical coherence guarantees beyond standard cross-sectional hierarchy reconciliation:
+1. **Three-Mode Reconciliation & Coherent Sample Paths (`THieF`, [`temporal_reconciliation.py`](./api/temporal_reconciliation.md)):** `HierarchyConfig` supports Mode 1 (`spatial_only`, `spatial_weight_alpha = 1.0`), Mode 2 (`temporal_only`, `levels = []` with `reconcile_temporal = true` and OOF metric recomputation), and Mode 3 (`cross_temporal = true`, `"cross_temporal_mint"` raced side-by-side on the leaderboard against pure spatial `<model>_mint_shrink` / `<model>_mint_nonneg` with `spatial_temporal_weight = "auto"` or float $\alpha \in [0, 1]$), plus `sample_coherent_paths(n_paths=200)` for cross-sectionally and temporally coherent sample trajectories.
+2. **Compositional Simplex Coherence ([`simplex.py`](./api/simplex.md)):** Market-share, category-mix, and budget-allocation panels on the simplex $\mathcal{S}^D = \{x \in (0, S)^D : \sum_{j=1}^D x_{t,j} = S\}$ ($S = 1.0$ or $100.0$) use Aitchison `clr` or Egozcue `ilr` Helmert log-ratio transforms (`features.transform = "clr" | "ilr"`, `<model>@transform_clr`, `<model>@transform_ilr`) with Martín-Fernández multiplicative zero replacement and post-blend `enforce_simplex_closure()` in `Forecaster.evolve(target="ensemble")` so forecasts stay strictly inside $(0, S)$ and sum to $S$ (`verify_simplex < 1e-6`).
+3. **Top-Down Goal-Seek & Smooth Multi-Period Target Allocation ([`goal_seek.py`](./api/goal_seek.md)):** When executives set a top-down target on `"__total__"` or a regional sub-tree (e.g., `+8%` Q4 volume or \$50M revenue) while locking contractual SKU cells and enforcing warehouse capacity bounds $[l_i, u_i]$, `forecaster.allocate_target(..., smoothness_weight=10.0)` solves the precision-weighted convex quadratic program $\min_b \frac{1}{2}(b - \hat{b})^\top W^{-1}(b - \hat{b}) + \frac{\lambda_{\text{smooth}}}{2}\|D(b - \hat{b})\|_2^2$ subject to $C b = d$ and $l \le b \le u$, propagating adjustments into reconciled nodes, gross margin (`gross_margin_delta`), and inventory policy ($\Delta\text{ROP}$, $\Delta\text{SS}$).
+
+```mermaid
+flowchart TD
+    subgraph THieF["1. 3-Mode Reconciliation & Coherent Paths (temporal_reconciliation.py)"]
+        T1["Non-Overlapping Temporal Aggregation (THieF)<br/>Factors k in {12, 6, 4, 3, 2, 1} (MS) or {28, 14, 7, 1} (D)"]
+        T2["Mode 1 (spatial_only) · Mode 2 (temporal_only) · Mode 3 (cross_temporal_mint)<br/>spatial_temporal_weight = 'auto' | float in [0, 1] · Side-by-Side Leaderboard"]
+        T3["Simultaneous S_cs x S_temp Projection & Coherent Path Simulation<br/>verify_cross_temporal_coherence < 1e-6 · sample_coherent_paths(n_paths=200)"]
+        T1 --> T2 --> T3
+    end
+
+    subgraph Simplex["2. Compositional Simplex Log-Ratio Pipeline (simplex.py)"]
+        X1["Martín-Fernández Multiplicative Zero Replacement<br/>Handles 0.0 and S (1.0 or 100.0) Boundary Shares"]
+        X2["Forward Aitchison Log-Ratio Transform<br/>CLR (Centered) or ILR (D x D-1 Orthonormal Helmert Basis V)"]
+        X3["Inverse Softmax & Evolved Ensemble Closure Across Panel<br/>0 < yhat < S and verify_simplex(preds, simplex_sum=S) < 1e-6"]
+        X1 --> X2 --> X3
+    end
+
+    subgraph GoalSeek["3. Smooth Top-Down Goal-Seek Constrained QP (goal_seek.py)"]
+        G1["Executive Targets, Node Locks, Box Bounds & Smoothness<br/>targets={'__total__': 1200} · locked_nodes · bounds · smoothness_weight=10.0"]
+        G2["MinT / WLS Precision-Weighted + Temporal Roughness Convex QP<br/>min_b 0.5*(b - b_hat)^T W^-1 (b - b_hat) + 0.5*lambda*||D(b - b_hat)||_2^2"]
+        G3["Full-Chain Margin & Inventory Propagation<br/>allocated_yhat · adjustment_pct · gross_margin_delta · delta_reorder_point"]
+        G1 --> G2 --> G3
+    end
+
+    THieF --> Simplex --> GoalSeek
+```
+
+| Capability | SDK / Workbench Entrypoint | Key Parameters & Outputs |
+| :--- | :--- | :--- |
+| **Temporal & Cross-Temporal Reconciliation (`THieF`) & Coherent Paths** | `forecaster.temporal_reconcile_df(method="cross_temporal_mint")`<br/>`forecaster.sample_coherent_paths(n_paths=200)`<br/>`sf.reconcile_temporal_forecasts(preds_df, history_df=...)`<br/>`sf.reconcile_cross_temporal(preds_df, spec, spatial_temporal_weight="auto")` | Reconciles per-series or panel forecasts across temporal factors (`aggregations=[3, 6, 12]`, `[7, 14, 28]`, `[4, 13, 52]`) and optional cross-sectional `HierarchySpec`, recording `out_df.attrs["cross_temporal_diagnostics"]`. Verify with `sf.verify_temporal_coherence()`, `sf.verify_cross_temporal_coherence()`, and simulate joint trajectories via `sf.sample_coherent_paths()`. |
+| **Compositional Simplex Transforms (`clr` & `ilr`)** | `features={"transform": "ilr", "simplex_sum": 100.0}`<br/>`models=["lightgbm@transform_ilr", "ridge_lags@transform_clr"]`<br/>`sf.forecast_simplex_panel(panel_df, horizon=6, transform="ilr")` | Maps $D$-part compositional shares to unconstrained log-ratio space and closes predictions (including `Forecaster.evolve(target="ensemble")`) back onto the simplex $\sum_{j=1}^D \hat{y}_{t,j} = S$. Verify with `sf.verify_simplex(preds_df, simplex_sum=100.0)`. Automatically detected by `Forecaster.profile_data()` (`is_compositional_simplex=True`) and reported in `f.assess()` Question 5. |
+| **Top-Down Goal-Seek Target Allocation QP (`smoothness_weight`)** | `forecaster.allocate_target(1200.0, locked_nodes=[...], floor=0.0, cap=500.0, smoothness_weight=10.0)`<br/>`bo.allocate_target(targets={"__total__": 1200.0}, smoothness_weight=5.0)`<br/>`sf.allocate_forecast_target(preds_df, targets=..., ...)` | Solves the constrained QP (raising `sf.GoalSeekInfeasibleError` with an exact diagnostic message if locks or bounds make the target mathematically unreachable) with optional $\ell_2$ first-difference trajectory smoothing (`smoothness_weight`) and returns `baseline_yhat`, `allocated_yhat`, `adjustment_delta`, `adjustment_pct`, `is_locked`, `bound_hit`, plus optional `gross_margin_delta` and `delta_reorder_point`. Visualize with `forecaster.plot_goal_seek(goal_seek_df)` or pass `goal_seek_df=...` to `export_report()`. |
 
 ---
 

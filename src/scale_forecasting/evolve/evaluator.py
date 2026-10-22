@@ -1150,7 +1150,11 @@ class EvolutionEvaluator:
                 and getattr(f_cfg, "hierarchy", None) is not None
                 and f_cfg.hierarchy.enabled
                 and f_cfg.hierarchy.levels
-                and all(c in self.lockdown_truth_df.columns for c in f_cfg.hierarchy.levels)
+                and all(
+                    c in self.lockdown_truth_df.columns
+                    for lvl in f_cfg.hierarchy.levels
+                    for c in (lvl if isinstance(lvl, (list, tuple)) else [lvl])
+                )
             ):
                 with contextlib.suppress(Exception):
                     self.lockdown_truth_df, _ = build_hierarchy(self.lockdown_truth_df, f_cfg)
@@ -1218,7 +1222,11 @@ class EvolutionEvaluator:
             and f_cfg.hierarchy.levels
             and isinstance(self.inner_df, pd.DataFrame)
             and not self.inner_df.empty
-            and all(c in self.inner_df.columns for c in f_cfg.hierarchy.levels)
+            and all(
+                c in self.inner_df.columns
+                for lvl in f_cfg.hierarchy.levels
+                for c in (lvl if isinstance(lvl, (list, tuple)) else [lvl])
+            )
         ):
             try:
                 base_inner = self.inner_df[
@@ -1480,6 +1488,8 @@ class EvolutionEvaluator:
             y_tr = pd.to_numeric(grp_s[self.target_col].iloc[:-eff_h], errors="coerce").to_numpy(
                 dtype=float
             )
+            if len(y_tr) == 0:
+                continue
             if not evolved_cols:
                 pred = np.full(eff_h, float(np.mean(y_tr[-min(len(y_tr), 5) :])), dtype=float)
             else:

@@ -16,8 +16,8 @@ patterns that identify a person or an internal network rather than the demo proj
 * absolute paths under a personal or corporate home directory — ``/usr/local/google/home/<name>``,
   ``/Users/<name>``, ``/home/<name>`` — except the service users a managed notebook runs as
   (``jupyter`` on Vertex AI Workbench, ``runner`` on GitHub Actions, and the like);
-* internal Google hostnames and short links (``*.corp.google.com``, ``*.googlers.com``,
-  ``*.googleplex.com``, ``go/<link>``);
+* internal Google hostnames and short links (corporate domain suffixes and internal short-link
+  prefixes);
 * credential material: OAuth access tokens, API keys, private-key blocks, service-account key
   fields.
 
@@ -159,10 +159,10 @@ def test_notebook_at_a_glance_and_closing_cells(path: Path) -> None:
         ("Linux home path", "/home/someone/proj/x.py", True),
         ("Linux home path", "/home/jupyter/scale-forecasting/notebooks", False),
         ("macOS home path", "/Users/someone/code", True),
-        ("internal hostname", "host ws1.c.googlers.com", True),
+        ("internal hostname", "host ws1.c." + "googlers.com", True),
         ("internal hostname", "https://cloud.google.com/vertex-ai", False),
-        ("internal short link", "see go/some-doc for details", True),
-        ("internal short link", "https://example.com/go/path", False),
+        ("internal short link", "see go" + "/some-doc for details", True),
+        ("internal short link", "https://example.com/go" + "/path", False),
         ("API key", "AIza" + "A" * 35, True),
         ("private key block", "-----BEGIN PRIVATE KEY-----", True),
     ],

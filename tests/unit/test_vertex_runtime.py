@@ -297,8 +297,8 @@ def test_dag_and_commands_support_vertex_runtime() -> None:
     assert get_probe("vertex").name == "vertex"
 
     lc = build_vertex_commands(
-        config_uri="gs://b/runs/r.json",
-        package_uri="gs://b/runs/pkg.zip",
+        config_uri="gs://bucket/runs/r.json",
+        package_uri="gs://bucket/runs/pkg.zip",
         settings=settings,
         display_name=sys_id,
         models=["tide"],

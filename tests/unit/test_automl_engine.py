@@ -195,7 +195,7 @@ class TestVertexAutoMLModels:
         with pytest.raises(ConfigError, match="specify at most one warm-start source"):
             tide.validate_params(
                 {
-                    "stage_1_tuning_result_artifact_uri": "gs://b/tuning",
+                    "stage_1_tuning_result_artifact_uri": "gs://bucket/tuning",
                     "reuse_tuning_from_run_id": "prior-run-123",
                 },
                 max_horizon=7,

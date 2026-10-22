@@ -2820,3 +2820,92 @@ def test_t4_compositional_market_share_evolve_and_practitioner_assess() -> None:
     assert not ev_res.predictions_df.empty
     assert verify_simplex(ev_res.predictions_df, simplex_sum=100.0) < 1e-6
     assert bool((ev_res.predictions_df["yhat"] > 0.0).all())
+
+
+# =============================================================================
+# TIER 5 EXPANSION — Adversarial Regression Coverage for Evolve Hierarchy,
+# Mode 3 Learned Alpha Assessment, and Aggregate-Node Goal-Seek Target Total
+# =============================================================================
+
+
+def test_t5_evolve_hierarchy_levels_assess_mode3_alpha_and_goal_seek_locked_aggregate() -> None:
+    """Tier 5 regression test for R3.2 (EvolutionEvaluator nested hierarchy.levels flattening and
+    champion_outputs['hierarchy_spec'] propagation), R2.2 (learned float spatial_weight_alpha in
+    AutoForecastSession.practitioner_assessment_df() Mode 3), and R4 (GoalSeekResult.target_total
+    accuracy when an aggregate node is locked).
+    """
+    raw_hier = _make_retail_hierarchy_panel(n_months=30, seed=173)[
+        ["ts_id", "region", "ds", "y"]
+    ].copy()
+    f_ct = sf.Forecaster.auto(
+        raw_hier,
+        tier="first_light",
+        models=["naive_mean", "naive_drift"],
+        horizon=4,
+        base_config={
+            "hierarchy": {
+                "enabled": True,
+                "levels": [["region"]],
+                "reconciliation_methods": ["wls_struct", "cross_temporal_mint"],
+                "reconcile_temporal": True,
+                "cross_temporal": True,
+                "temporal_aggregations": [2, 4],
+                "spatial_temporal_weight": "auto",
+            }
+        },
+    )
+    assert f_ct.auto_session is not None
+    diag = f_ct.auto_session.last_diagnostics_summary
+    alpha_val = diag["spatial_weight_alpha"]
+    assert isinstance(alpha_val, float) and not isinstance(alpha_val, bool)
+    assert 0.0 <= alpha_val <= 1.0
+
+    assess_df = f_ct.practitioner_assessment_df()
+    q5 = assess_df.query("question_id == 'hierarchy_reconciliation'").iloc[0]
+    assert q5["verdict"] == "coherent_and_verified"
+    assert "spatial_weight_alpha=auto" not in str(q5["answer"])
+    assert "spatial_weight_alpha=auto" not in str(q5["evidence"])
+    assert f"spatial_weight_alpha={alpha_val:.4f}" in str(q5["evidence"])
+
+    # R3.2: Forecaster.evolve on from_runs=[f_ct] with nested levels=[["region"]]
+    spec = f_ct.auto_session.champion_outputs.get("hierarchy_spec")
+    assert spec is not None
+    ev_from_run = sf.Forecaster.evolve(
+        from_runs=[f_ct],
+        target="ensemble",
+        backend="mock",
+        max_evaluations=2,
+    )
+    assert not ev_from_run.predictions_df.empty
+    assert verify_coherence(ev_from_run.predictions_df, spec) < 1e-6
+
+    # R3.2: Forecaster.evolve on a raw panel with auto-detected hierarchy columns (region, store)
+    raw_with_store = _make_retail_hierarchy_panel(n_months=28, seed=179).copy()
+    raw_with_store["store"] = raw_with_store["ts_id"]
+    ev_raw_hier = sf.Forecaster.evolve(
+        raw_with_store[["ts_id", "region", "store", "ds", "y"]],
+        target="ensemble",
+        backend="mock",
+        max_evaluations=2,
+        horizon=4,
+    )
+    assert not ev_raw_hier.predictions_df.empty
+
+    # R4: GoalSeekResult.target_total when locking an upper-level aggregate node ("region=South")
+    ct_preds = f_ct.auto_session.raw_predictions_df[
+        f_ct.auto_session.raw_predictions_df["model_type"] == "naive_mean_cross_temporal_mint"
+    ].copy()
+    assert not ct_preds.empty
+    base_tot = float(ct_preds.loc[ct_preds["ts_id"] == TOTAL_NODE_ID, "yhat"].sum())
+    target_tot = base_tot * 1.15
+    gs_res = allocate_target(
+        ct_preds,
+        target_total=target_tot,
+        hier_spec=spec,
+        locked_nodes=["region=South"],
+        return_result=True,
+    )
+    assert isinstance(gs_res, GoalSeekResult)
+    assert abs(gs_res.target_total - target_tot) < 1e-6
+    assert gs_res.max_target_discrepancy < 1e-6
+    assert gs_res.max_coherence_error < 1e-6

@@ -1108,6 +1108,7 @@ def allocate_target(
                         eq_rhs.append(float(s_r @ b_hat[:, t_idx]))
 
     # Add target equality constraint(s).
+    n_lock_eq = len(eq_rhs)
     if isinstance(raw_target, pd.DataFrame):
         if raw_target.empty:
             raise ConfigError("target_total DataFrame cannot be empty")
@@ -1555,9 +1556,11 @@ def allocate_target(
         out_df["delta_order_qty"] = d_q
 
     coh_err = float(np.max(np.abs(a_eq @ b_alloc_flat - c_eq)))
+    target_eq_rhs = eq_rhs[n_lock_eq:]
+    target_tot_val = float(np.sum(target_eq_rhs)) if target_eq_rhs else float(np.sum(c_eq))
     out_df.attrs["hierarchy_spec"] = resolved_spec
     out_df.attrs["target_node"] = eff_target_node
-    out_df.attrs["target_total"] = float(np.sum(c_eq))
+    out_df.attrs["target_total"] = target_tot_val
     out_df.attrs["coherence_max_abs_error"] = coh_err
     out_df.attrs["smoothness_weight"] = smooth_w
     if return_result:
@@ -1566,7 +1569,7 @@ def allocate_target(
             allocations=out_df,
             summary=sum_df,
             target_node=eff_target_node,
-            target_total=float(np.sum(c_eq)),
+            target_total=target_tot_val,
             baseline_total=float(np.sum(y_base_all[target_node_idx, active_t_indices])),
             allocated_total=float(np.sum(y_alloc_all[target_node_idx, active_t_indices])),
             coherence_max_abs_error=coh_err,

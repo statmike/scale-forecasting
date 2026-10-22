@@ -341,8 +341,8 @@ _CONFIG_MODELS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     (
         "features (FeaturesConfig)",
         (
-            "Target transforms, country holidays, covariates (future/past/static), lags, "
-            "and Fourier terms."
+            "Target transforms (including compositional `clr`/`ilr` simplex transforms), "
+            "country holidays, covariates (future/past/static), lags, and Fourier terms."
         ),
         FeaturesConfig,
     ),
@@ -372,8 +372,9 @@ _CONFIG_MODELS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     (
         "hierarchy (HierarchyConfig)",
         (
-            "Cross-sectional aggregation levels and FPP3 reconciliation (`bottom_up`, "
-            "`mint_shrink`, ...)."
+            "Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, "
+            "`mint_shrink`, ...), temporal hierarchy reconciliation (`THieF`), and cross-temporal "
+            "reconciliation."
         ),
         HierarchyConfig,
     ),
@@ -1375,9 +1376,10 @@ def render_skill_execution_paths_reference() -> str:
             ),
             "| **Interval & arm calibration** | — | `calibration_report(run_id)` |",
             (
-                "| **Forecaster's Workbench & Inventory Policy** | — | "
+                "| **Forecaster's Workbench, Goal-Seek & Temporal Reconciliation** | — | "
                 "`Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / "
-                "`.exceptions_df()` / `.inventory_policy_df()` |"
+                "`.exceptions_df()` / `.inventory_policy_df()` / `.allocate_target()` / "
+                "`.temporal_reconcile_df()` |"
             ),
             (
                 "| **Executive HTML + JSON report** | "
@@ -1552,8 +1554,9 @@ def render_llms_txt() -> str:
             (
                 f"- [Forecaster's Workbench]({_SITE_BASE}/forecaster_workbench/): Physical "
                 "bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe "
-                "hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, scenarios, "
-                "lifecycle governance, and executive HTML/JSON reports."
+                "hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, THieF temporal "
+                "reconciliation, top-down Goal-Seek QP, compositional simplex transforms, "
+                "scenarios, lifecycle governance, and executive HTML/JSON reports."
             ),
             (
                 f"- [Auto-Forecaster & Bounded `autofocus`]({_SITE_BASE}/auto_forecaster/): "

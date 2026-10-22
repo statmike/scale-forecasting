@@ -49,12 +49,13 @@ Source BigQuery table, column names, frequency, and horizon.
 
 ### `features (FeaturesConfig)`
 
-Target transforms, country holidays, covariates (future/past/static), lags, and Fourier terms.
+Target transforms (including compositional `clr`/`ilr` simplex transforms), country holidays, covariates (future/past/static), lags, and Fourier terms.
 
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
 | `holidays` | `list[str]` | `[]` | — |
-| `transform` | `'none' \| 'log1p' \| 'boxcox'` | `"none"` | — |
+| `transform` | `'none' \| 'log1p' \| 'boxcox' \| 'clr' \| 'ilr'` | `"none"` | — |
+| `simplex_sum` | `float \| None` | `null` | `> 0.0` |
 | `exog` | `list[str]` | `[]` | — |
 | `static_covariates` | `list[str]` | `[]` | — |
 | `future_covariates` | `list[str]` | `[]` | — |
@@ -138,14 +139,18 @@ Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xg
 
 ### `hierarchy (HierarchyConfig)`
 
-Cross-sectional aggregation levels and FPP3 reconciliation (`bottom_up`, `mint_shrink`, ...).
+Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, `mint_shrink`, ...), temporal hierarchy reconciliation (`THieF`), and cross-temporal reconciliation.
 
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
 | `enabled` | `bool` | `false` | — |
 | `levels` | `list[list[str]]` | `[]` | — |
-| `reconciliation_methods` | `list['bottom_up' \| 'top_down' \| 'middle_out' \| 'ols' \| 'wls_struct' \| 'wls_var' \| 'mint_shrink' \| 'mint_nonneg']` | `["bottom_up", "wls_struct", "mint_shrink"]` | — |
+| `reconciliation_methods` | `list['bottom_up' \| 'top_down' \| 'middle_out' \| 'ols' \| 'wls_struct' \| 'wls_var' \| 'mint_shrink' \| 'mint_nonneg' \| 'cross_temporal_mint']` | `["bottom_up", "wls_struct", "mint_shrink"]` | — |
 | `middle_level` | `list[str] \| None` | `null` | — |
+| `reconcile_temporal` | `bool` | `false` | — |
+| `temporal_aggregations` | `list[int] \| None` | `null` | — |
+| `cross_temporal` | `bool` | `false` | — |
+| `spatial_temporal_weight` | `float \| 'auto'` | `"auto"` | — |
 
 ### `compute (ComputeConfig)`
 
@@ -287,7 +292,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `models` | Non-empty list of registered model names (`37` available; see [`catalog_reference.md`](./catalog_reference.md)). No duplicates allowed. |
 | `backtest.decision_metric` | Any of the `21` registered metrics: `mae`, `rmse`, `mse`, `mape`, `smape`, `wape`, `mase`, `rmsse`, `bias`, `coverage`, `pinball`, `mase_seasonal`, `maape`, `interval_score`, `interval_width`, `ope`, `rmsle`, `msse`, `msis`, `r2`, `cv`. |
 | `ensemble.strategies` | Calculated: `mean`, `median`, `inverse_error` (work with or without backtest). Learned stackers: `nnls`, `ridge`, `xgb` (require `backtest.enabled=true`). Singular shorthand `strategy` is also accepted. |
-| `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `middle_out`, `mint_nonneg`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |
+| `hierarchy.reconciliation_methods` | Any subset of `bottom_up`, `cross_temporal_mint`, `middle_out`, `mint_nonneg`, `mint_shrink`, `ols`, `top_down`, `wls_struct`, `wls_var`. |
 | `compute.families` | Keys must be in `statistical`, `ml`, `deep_learning`, `automl`. `native` models always run in BigQuery and never take a `compute.families` entry. |
 | `compute.profile.source` | One of `none`, `auto`, `baseline` or an existing `<slug>-<12hex>` `run_id`. |
 | `model_params` | Dict mapping `<model_name>` to `<param_dict>` of JSON-safe scalars or flat lists (`bool`, `int`, `float`, `str`, `None`). Non-finite floats (`NaN`, `Infinity`) are rejected. |

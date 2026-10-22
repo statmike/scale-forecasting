@@ -180,12 +180,12 @@ def test_format_plan_shouts_about_an_in_flight_run():
 def test_format_sweep_plan_reports_the_scope_it_searched():
     plan = ops.SweepPlan(
         registry="proj.reg",
-        root="gs://b/warehouse/artifacts/proj/reg",
+        root="gs://bucket/warehouse/artifacts/proj/reg",
         prefixes=(_prefix("orphan_1"),),
         known_runs=12,
     )
     text = ops.format_plan(plan)
-    assert "artifact root: gs://b/warehouse/artifacts/proj/reg" in text
+    assert "artifact root: gs://bucket/warehouse/artifacts/proj/reg" in text
     assert "runs known to the registry: 12" in text
     assert "orphan prefixes (1): orphan_1" in text
 

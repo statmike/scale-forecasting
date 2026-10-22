@@ -38,7 +38,7 @@ pandas/NumPy:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -1106,12 +1106,15 @@ def reconcile_cells(
                 )
 
             rec_model_name = f"{base_model}_{method}"
-            preds_by_id = {
-                str(tid): grp.drop(columns=[id_col, "model_type"], errors="ignore").reset_index(
+            ct_diag = rec_preds.attrs.get("cross_temporal_diagnostics")
+            preds_by_id: dict[str, pd.DataFrame] = {}
+            for tid, grp in rec_preds.groupby(id_col, sort=False):
+                sub_p = grp.drop(columns=[id_col, "model_type"], errors="ignore").reset_index(
                     drop=True
                 )
-                for tid, grp in rec_preds.groupby(id_col, sort=False)
-            }
+                if isinstance(ct_diag, Mapping):
+                    sub_p.attrs["cross_temporal_diagnostics"] = dict(ct_diag)
+                preds_by_id[str(tid)] = sub_p
             oof_by_id = (
                 {
                     str(tid): grp.drop(columns=[id_col, "model_type"], errors="ignore").reset_index(
