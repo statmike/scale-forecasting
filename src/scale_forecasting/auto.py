@@ -49,6 +49,7 @@ import pandas as pd
 from .auto_policy import (
     EXPOSURE_TIERS,
     SCALE_REGIMES,
+    DataProfile,
     PanelAutoProfile,
     classify_scale_regime,
     estimate_continue_confidence,
@@ -84,6 +85,7 @@ __all__ = [
     "AutoForecastSession",
     "AutofocusPassRecord",
     "ConfigBlueprint",
+    "DataProfile",
     "NextLoopPreview",
     "PanelAutoProfile",
     "auto_forecast",
@@ -1227,37 +1229,69 @@ class AutoForecastSession:
             champ.config.features.past_covariates
         )
         pruned_covs = [c for c in all_covs if c not in kept_covs]
+        mono_constraints = dict(champ.config.features.monotonic_constraints or {})
+        monotone_models = [m for m in champ.config.models if "@monotone" in m]
+        hw_cfg = champ.config.features.holiday_window
+        hw_active = bool(hw_cfg is not None and getattr(hw_cfg, "enabled", False))
+        guardrail_notes: list[str] = []
+        guardrail_ev: list[str] = []
+        if mono_constraints or monotone_models:
+            guardrail_notes.append(
+                f"structural sign guardrails enforced (monotonic_constraints={mono_constraints}"
+                + (f", monotone_models={monotone_models}" if monotone_models else "")
+                + ")"
+            )
+            guardrail_ev.append(f"monotonic_constraints={mono_constraints}")
+            if monotone_models:
+                guardrail_ev.append(f"monotone_models={monotone_models}")
+        if hw_active and hw_cfg is not None:
+            guardrail_notes.append(
+                f"asymmetric holiday window active (-{hw_cfg.pre_holiday_days}d/+"
+                f"{hw_cfg.post_holiday_days}d, kernel='{hw_cfg.kernel}')"
+            )
+            guardrail_ev.append(
+                f"holiday_window=(-{hw_cfg.pre_holiday_days}, +{hw_cfg.post_holiday_days}, "
+                f"'{hw_cfg.kernel}')"
+            )
+        guardrail_suffix = f" ({'; '.join(guardrail_notes)})" if guardrail_notes else ""
+        guardrail_ev_suffix = f", {', '.join(guardrail_ev)}" if guardrail_ev else ""
+
         if not all_covs:
             q3_verdict = "univariate_panel"
             q3_ans = (
                 "No external covariates in source data; forecast relies on target history "
-                "and calendar cycles."
+                f"and calendar cycles{guardrail_suffix}."
             )
-            q3_ev = "covariates=0"
+            q3_ev = f"covariates=0{guardrail_ev_suffix}"
         elif not kept_covs or champ.champion_is_univariate:
             q3_verdict = "overfitting_prevented"
             pruned_list = pruned_covs or all_covs
             q3_ans = (
                 f"Covariates did not improve out-of-fold accuracy (pruned={pruned_list}); "
-                "univariate model won, preventing covariate overfitting."
+                f"univariate model won, preventing covariate overfitting{guardrail_suffix}."
             )
-            q3_ev = f"initial_covs={all_covs}, kept_covs={kept_covs}"
+            q3_ev = f"initial_covs={all_covs}, kept_covs={kept_covs}{guardrail_ev_suffix}"
         elif pruned_covs:
             q3_verdict = "selective_signal_kept"
             q3_ans = (
                 f"True drivers {kept_covs} improved accuracy (+{fva_uni:.2f}% vs. univariate), "
-                f"while noisy decoy columns {pruned_covs} were automatically pruned."
+                f"while noisy decoy columns {pruned_covs} were automatically pruned"
+                f"{guardrail_suffix}."
             )
             q3_ev = (
-                f"kept={kept_covs}, pruned_decoys={pruned_covs}, fva_vs_univariate=+{fva_uni:.2f}%"
+                f"kept={kept_covs}, pruned_decoys={pruned_covs}, "
+                f"fva_vs_univariate=+{fva_uni:.2f}%{guardrail_ev_suffix}"
             )
         else:
             q3_verdict = "covariates_help"
             q3_ans = (
                 f"Covariates {kept_covs} added +{fva_uni:.2f}% lift over plain "
-                "univariate baselines."
+                f"univariate baselines{guardrail_suffix}."
             )
-            q3_ev = f"active_covariates={kept_covs}, fva_vs_univariate=+{fva_uni:.2f}%"
+            q3_ev = (
+                f"active_covariates={kept_covs}, fva_vs_univariate=+{fva_uni:.2f}%"
+                f"{guardrail_ev_suffix}"
+            )
 
         # 4. Does global provide an advantage over local?
         global_models = [m for m in champ.config.models if "@global" in m]
@@ -1281,13 +1315,84 @@ class AutoForecastSession:
         )
 
         # 5. Is reconciliation being done correctly?
-        if not self.profile.hierarchy_id_cols or hval_df.empty:
-            q5_verdict = "not_applicable_flat_panel"
-            q5_ans = (
-                "Flat panel (no hierarchy columns); output.floor enforces non-negativity directly."
+        has_spatial = bool(
+            self.profile.hierarchy_id_cols
+            or (champ.config.hierarchy.enabled and champ.config.hierarchy.levels)
+        )
+        has_temporal = bool(
+            champ.config.hierarchy.reconcile_temporal
+            or champ.config.hierarchy.cross_temporal
+            or "cross_temporal_mint" in champ.config.hierarchy.reconciliation_methods
+            or diag.get("reconciliation_mode") in ("temporal_only", "cross_temporal")
+        )
+        temp_aggs = list(
+            champ.config.hierarchy.temporal_aggregations
+            or getattr(self.profile, "temporal_aggregations", None)
+            or [1]
+        )
+        is_simplex = bool(
+            getattr(self.profile, "is_compositional_simplex", False)
+            or champ.config.features.simplex_sum is not None
+            or champ.config.features.transform in ("clr", "ilr")
+            or any("@transform_clr" in m or "@transform_ilr" in m for m in champ.config.models)
+        )
+
+        if has_spatial and has_temporal:
+            all_row = (
+                hval_df[hval_df["hierarchy_level"] == "All Hierarchy Nodes"]
+                if not hval_df.empty
+                else pd.DataFrame()
             )
-            q5_ev = f"hierarchy_id_cols={list(self.profile.hierarchy_id_cols)}"
-        else:
+            r_row = (
+                all_row.iloc[0]
+                if not all_row.empty
+                else (hval_df.iloc[0] if not hval_df.empty else pd.Series(dtype=object))
+            )
+            max_coh = float(
+                r_row.get("max_coherence_residual", diag.get("spatial_coherence_residual", 0.0))
+            )
+            temp_coh = float(
+                r_row.get(
+                    "temporal_coherence_residual", diag.get("temporal_coherence_residual", 0.0)
+                )
+            )
+            neg_cnt = int(r_row.get("negative_leaf_count", 0))
+            rec_m = str(r_row.get("reconciliation_method", "cross_temporal_mint"))
+            rec_lift = float(r_row.get("reconciliation_lift_pct", 0.0))
+            alpha_val = diag.get(
+                "spatial_weight_alpha", champ.config.hierarchy.spatial_temporal_weight
+            )
+            alpha_str = (
+                f"{float(alpha_val):.4f}"
+                if isinstance(alpha_val, (int, float)) and not isinstance(alpha_val, bool)
+                else str(alpha_val)
+            )
+            ct_beat = bool(
+                diag.get(
+                    "cross_temporal_beats_spatial",
+                    "cross_temporal_mint" in str(champ.champion_model),
+                )
+            )
+            q5_verdict = (
+                "coherent_and_verified"
+                if max_coh < 1e-4 and temp_coh < 1e-4 and neg_cnt == 0
+                else "check_tree"
+            )
+            q5_ans = (
+                f"Yes — cross_temporal reconciliation ('{rec_m}', mode=cross_temporal) achieved "
+                f"exact spatial coherence (residual={max_coh:.6f}) and temporal coherence "
+                f"(residual={temp_coh:.6f} across aggregations={temp_aggs}, "
+                f"spatial_weight_alpha={alpha_str}), {neg_cnt} negative leaves, "
+                f"{rec_lift:+.2f}% tree-wide accuracy change, and "
+                f"cross_temporal_beats_spatial={ct_beat}."
+            )
+            q5_ev = (
+                f"mode='cross_temporal', method='{rec_m}', coherence_gap={max_coh:.6f}, "
+                f"temporal_coherence_gap={temp_coh:.6f}, temporal_aggregations={temp_aggs}, "
+                f"spatial_weight_alpha={alpha_str}, cross_temporal_beats_spatial={ct_beat}, "
+                f"negative_leaves={neg_cnt}, levels={len(hval_df)}"
+            )
+        elif has_spatial and not hval_df.empty:
             all_row = hval_df[hval_df["hierarchy_level"] == "All Hierarchy Nodes"]
             r_row = all_row.iloc[0] if not all_row.empty else hval_df.iloc[0]
             max_coh = float(r_row.get("max_coherence_residual", 0.0))
@@ -1298,14 +1403,97 @@ class AutoForecastSession:
                 "coherent_and_verified" if max_coh < 1e-4 and neg_cnt == 0 else "check_tree"
             )
             q5_ans = (
-                f"Yes — fold-safe '{rec_m}' reconciliation achieved exact additive coherence "
-                f"(residual={max_coh:.6f}), {neg_cnt} negative leaves, and {rec_lift:+.2f}% "
-                "tree-wide accuracy change."
+                f"Yes — fold-safe '{rec_m}' spatial_only reconciliation achieved exact additive "
+                f"coherence (residual={max_coh:.6f}), {neg_cnt} negative leaves, and "
+                f"{rec_lift:+.2f}% tree-wide accuracy change."
             )
             q5_ev = (
-                f"method='{rec_m}', coherence_gap={max_coh:.6f}, "
+                f"mode='spatial_only', method='{rec_m}', coherence_gap={max_coh:.6f}, "
                 f"negative_leaves={neg_cnt}, levels={len(hval_df)}"
             )
+        elif has_temporal:
+            all_row = (
+                hval_df[hval_df["hierarchy_level"] == "All Hierarchy Nodes"]
+                if not hval_df.empty
+                else pd.DataFrame()
+            )
+            r_row = (
+                all_row.iloc[0]
+                if not all_row.empty
+                else (hval_df.iloc[0] if not hval_df.empty else pd.Series(dtype=object))
+            )
+            temp_coh = float(
+                r_row.get(
+                    "temporal_coherence_residual",
+                    r_row.get(
+                        "max_coherence_residual", diag.get("temporal_coherence_residual", 0.0)
+                    ),
+                )
+            )
+            rec_m = str(
+                r_row.get(
+                    "reconciliation_method",
+                    champ.config.hierarchy.reconciliation_methods[0]
+                    if champ.config.hierarchy.reconciliation_methods
+                    else "wls_struct",
+                )
+            )
+            rec_lift = float(r_row.get("reconciliation_lift_pct", 0.0))
+            q5_verdict = "temporal_coherent_and_verified" if temp_coh < 1e-4 else "check_temporal"
+            q5_ans = (
+                f"Yes — temporal_only reconciliation ('{rec_m}') on flat panel verified exact "
+                f"multi-horizon bucket coherence (temporal_residual={temp_coh:.6f} across "
+                f"temporal_aggregations={temp_aggs}) with {rec_lift:+.2f}% accuracy change."
+            )
+            q5_ev = (
+                f"mode='temporal_only', method='{rec_m}', temporal_coherence_gap={temp_coh:.6f}, "
+                f"temporal_aggregations={temp_aggs}, reconciliation_lift_pct={rec_lift:+.2f}%"
+            )
+        else:
+            q5_verdict = "not_applicable_flat_panel"
+            q5_ans = (
+                "Flat panel (no hierarchy columns); output.floor enforces non-negativity directly."
+            )
+            q5_ev = f"mode='none', hierarchy_id_cols={list(self.profile.hierarchy_id_cols)}"
+
+        if is_simplex:
+            from .simplex import verify_simplex_coherence
+
+            s_target = float(
+                champ.config.features.simplex_sum
+                or getattr(self.profile, "simplex_total", None)
+                or 1.0
+            )
+            simplex_disc = (
+                float(
+                    verify_simplex_coherence(
+                        self.predictions_df,
+                        simplex_sum=s_target,
+                        raise_on_error=False,
+                    )
+                )
+                if not self.predictions_df.empty
+                else 0.0
+            )
+            min_share = (
+                float(pd.to_numeric(self.predictions_df["yhat"], errors="coerce").min())
+                if not self.predictions_df.empty and "yhat" in self.predictions_df.columns
+                else s_target
+            )
+            q5_ans += (
+                f" Compositional simplex closure active (simplex_sum={s_target:g}, "
+                f"simplex_discrepancy={simplex_disc:.6f}, min_share={min_share:.6f} > 0)."
+            )
+            q5_ev += (
+                f", is_compositional_simplex=True, simplex_sum={s_target:g}, "
+                f"simplex_discrepancy={simplex_disc:.6f}, strictly_positive={min_share > 0.0}"
+            )
+            if not has_spatial and not has_temporal:
+                q5_verdict = (
+                    "coherent_and_verified"
+                    if simplex_disc < 1e-4 and min_share > 0.0
+                    else "check_simplex"
+                )
 
         # 6. Does accuracy hold up across the horizon?
         decay_ratio = float(diag.get("late_horizon_degradation_ratio", 1.0))
@@ -1388,7 +1576,8 @@ class AutoForecastSession:
                 "answer": q3_ans,
                 "evidence": q3_ev,
                 "recommendation": (
-                    "Inspect f.attributions_df() to see per-feature importance shares."
+                    "Inspect f.attributions_df() and f.promo_elasticity_df() to see per-feature "
+                    "importance shares, promotional lift, and causal sign adherence."
                 ),
             },
             {
@@ -2181,6 +2370,29 @@ def inspect_panel_for_auto(
             else:
                 past_covs.append(c)
 
+    # Compositional simplex detection (parts summing to ~1.0 or ~100.0 per date)
+    is_compositional_simplex = False
+    simplex_total = 0.0
+    if sampled_n_series >= 2 and non_negative:
+        date_grp = hist_df.groupby(eff_date, sort=False)[eff_target]
+        date_counts = date_grp.count()
+        date_sums = date_grp.sum()
+        full_dates = date_sums[date_counts >= min(2, sampled_n_series)]
+        if len(full_dates) >= 5:
+            sums_arr = full_dates.to_numpy(dtype=np.float64)
+            med_sum = float(np.median(sums_arr))
+            max_val = float(np.max(y_vals)) if y_vals.size > 0 else 0.0
+            for cand_total in (1.0, 100.0):
+                tol = 0.03 * cand_total
+                if (
+                    abs(med_sum - cand_total) <= tol
+                    and max_val <= cand_total + tol
+                    and float(np.mean(np.abs(sums_arr - cand_total) <= tol)) >= 0.90
+                ):
+                    is_compositional_simplex = True
+                    simplex_total = cand_total
+                    break
+
     return PanelAutoProfile(
         source_table=source_table_name,
         ts_id_col=eff_ts,
@@ -2217,6 +2429,8 @@ def inspect_panel_for_auto(
         hierarchy_node_count=hierarchy_node_count,
         cross_series_corr=round(cross_series_corr, 4),
         monotonic_constraints=infer_monotonic_constraints([*future_covs, *past_covs]),
+        is_compositional_simplex=is_compositional_simplex,
+        simplex_total=simplex_total,
     )
 
 
@@ -2575,6 +2789,8 @@ def build_config(
         ),
         "ablation_modes": [] if models is not None else list(policy_out["ablation_modes"]),
     }
+    if policy_out.get("simplex_sum") is not None:
+        features_cfg["simplex_sum"] = float(policy_out["simplex_sum"])
     if policy_out.get("censored_col"):
         features_cfg["censored_col"] = policy_out["censored_col"]
     if policy_out.get("monotonic_constraints"):
@@ -3443,6 +3659,7 @@ def _execute_local_panel_pass(
         reconcile_oof,
     )
     from .review import build_attributions_frame, build_predictions_frame
+    from .simplex import close_simplex_predictions, should_close_simplex
     from .worker import is_panel_model, rollup_metrics, run_cell, run_panel
 
     ts_col = cfg.data.ts_id_col
@@ -3535,11 +3752,19 @@ def _execute_local_panel_pass(
                 results_by_model_ts[(m, ts_id)] = cell_cache[key]
 
     unreconciled_metrics_by_model_ts: dict[tuple[str, str], dict[str, float]] = {}
+    max_temp_coherence_residual = 0.0
+    learned_alpha_float: float | None = None
     if hier_spec is not None:
-        primary_method = (
-            exec_cfg.hierarchy.reconciliation_methods[0]
-            if exec_cfg.hierarchy.reconciliation_methods
-            else "bottom_up"
+        has_ct_cfg = bool(
+            exec_cfg.hierarchy.reconcile_temporal
+            or exec_cfg.hierarchy.cross_temporal
+            or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
+        )
+        non_ct_methods = [
+            m for m in exec_cfg.hierarchy.reconciliation_methods if m != "cross_temporal_mint"
+        ]
+        primary_method: Any = (
+            non_ct_methods[0] if non_ct_methods else ("wls_struct" if has_ct_cfg else "bottom_up")
         )
         for (m_u, ts_u), res_u in results_by_model_ts.items():
             if res_u.status == "ok":
@@ -3548,7 +3773,11 @@ def _execute_local_panel_pass(
             primary_hier_cfg = exec_cfg.model_copy(
                 update={
                     "hierarchy": exec_cfg.hierarchy.model_copy(
-                        update={"reconciliation_methods": [primary_method]}
+                        update={
+                            "reconciliation_methods": [primary_method],
+                            "reconcile_temporal": False,
+                            "cross_temporal": False,
+                        }
                     )
                 }
             )
@@ -3576,6 +3805,168 @@ def _execute_local_panel_pass(
                     s_hash = f"{make_model_spec_hash(base_m, exec_cfg)}:rec:{primary_method}"
                     cell_cache[(str(r_cell.ts_id), s_hash)] = r_cell
                     results_by_model_ts[(r_cell.model_type, str(r_cell.ts_id))] = r_cell
+            if has_ct_cfg:
+                ct_method = "cross_temporal_mint"
+                ct_hier_cfg = exec_cfg.model_copy(
+                    update={
+                        "hierarchy": exec_cfg.hierarchy.model_copy(
+                            update={
+                                "reconciliation_methods": [ct_method],
+                                "reconcile_temporal": True,
+                                "cross_temporal": True,
+                            }
+                        )
+                    }
+                )
+                ct_to_reconcile: list[CellResult] = []
+                for m_u in exec_cfg.models:
+                    s_hash = f"{make_model_spec_hash(m_u, exec_cfg)}:rec:{ct_method}"
+                    if all((ts_id, s_hash) in cell_cache for ts_id in hist_groups):
+                        for ts_id in hist_groups:
+                            r_cached = cell_cache[(ts_id, s_hash)]
+                            results_by_model_ts[(r_cached.model_type, ts_id)] = r_cached
+                            ct_diag = r_cached.predictions.attrs.get(
+                                "cross_temporal_diagnostics", {}
+                            )
+                            if isinstance(ct_diag, Mapping):
+                                if "spatial_weight_alpha" in ct_diag:
+                                    learned_alpha_float = float(ct_diag["spatial_weight_alpha"])
+                                max_temp_coherence_residual = max(
+                                    max_temp_coherence_residual,
+                                    float(
+                                        ct_diag.get(
+                                            "final_temp_discrepancy",
+                                            ct_diag.get("temporal_discrepancy", 0.0),
+                                        )
+                                    ),
+                                )
+                    else:
+                        for ts_id in hist_groups:
+                            c_u = results_by_model_ts.get((m_u, ts_id))
+                            if c_u is not None:
+                                ct_to_reconcile.append(c_u)
+                if ct_to_reconcile:
+                    ct_cells = reconcile_cells(
+                        ct_to_reconcile,
+                        ct_hier_cfg,
+                        hier_spec,
+                        history_df=work_hist,
+                    )
+                    for r_cell in ct_cells:
+                        base_m = r_cell.model_type[: -len(f"_{ct_method}")]
+                        s_hash = f"{make_model_spec_hash(base_m, exec_cfg)}:rec:{ct_method}"
+                        cell_cache[(str(r_cell.ts_id), s_hash)] = r_cell
+                        results_by_model_ts[(r_cell.model_type, str(r_cell.ts_id))] = r_cell
+                        ct_diag = r_cell.predictions.attrs.get("cross_temporal_diagnostics", {})
+                        if isinstance(ct_diag, Mapping):
+                            if "spatial_weight_alpha" in ct_diag:
+                                learned_alpha_float = float(ct_diag["spatial_weight_alpha"])
+                            max_temp_coherence_residual = max(
+                                max_temp_coherence_residual,
+                                float(
+                                    ct_diag.get(
+                                        "final_temp_discrepancy",
+                                        ct_diag.get("temporal_discrepancy", 0.0),
+                                    )
+                                ),
+                            )
+    if hier_spec is None and exec_cfg.hierarchy.reconcile_temporal:
+        for (m_u, ts_u), res_u in results_by_model_ts.items():
+            if res_u.status == "ok":
+                unreconciled_metrics_by_model_ts[(m_u, ts_u)] = dict(res_u.metrics)
+        with contextlib.suppress(Exception):
+            from .temporal_reconciliation import verify_temporal_coherence
+
+            t_method = str(
+                exec_cfg.hierarchy.reconciliation_methods[0]
+                if exec_cfg.hierarchy.reconciliation_methods
+                else "wls_struct"
+            )
+            t_to_reconcile: list[CellResult] = []
+            for m_u in exec_cfg.models:
+                s_hash = f"{make_model_spec_hash(m_u, exec_cfg)}:trec:{t_method}"
+                if all((ts_id, s_hash) in cell_cache for ts_id in hist_groups):
+                    for ts_id in hist_groups:
+                        r_cached = cell_cache[(ts_id, s_hash)]
+                        results_by_model_ts[(r_cached.model_type, ts_id)] = r_cached
+                else:
+                    for ts_id in hist_groups:
+                        c_u = results_by_model_ts.get((m_u, ts_id))
+                        if c_u is not None:
+                            t_to_reconcile.append(c_u)
+            if t_to_reconcile:
+                t_cells = reconcile_cells(
+                    t_to_reconcile,
+                    exec_cfg,
+                    None,
+                    history_df=work_hist,
+                )
+                s_period_t = seasonal_period(exec_cfg.data.freq)
+                for r_cell in t_cells:
+                    raw_m = str(r_cell.model_type)
+                    orig_m = (
+                        raw_m[: -len(f"_{t_method}")] if raw_m.endswith(f"_{t_method}") else raw_m
+                    )
+                    t_name = f"{orig_m}_temporal"
+                    agg_by_k = r_cell.predictions.attrs.get("aggregated_by_k")
+                    t_spec_attr = r_cell.predictions.attrs.get("temporal_spec")
+                    if isinstance(agg_by_k, Mapping) and not r_cell.predictions.empty:
+                        c_disc = verify_temporal_coherence(
+                            r_cell.predictions["yhat"].to_numpy(dtype=float),
+                            agg_by_k,
+                            spec=t_spec_attr,
+                            raise_on_error=False,
+                        )
+                        max_temp_coherence_residual = max(
+                            max_temp_coherence_residual, float(c_disc)
+                        )
+                    t_metrics = dict(r_cell.metrics)
+                    h_series = hist_groups.get(str(r_cell.ts_id))
+                    if (
+                        r_cell.oof is not None
+                        and not r_cell.oof.empty
+                        and h_series is not None
+                        and not h_series.empty
+                    ):
+                        hist_ds = pd.to_datetime(h_series[date_col]).to_numpy()
+                        hist_y = pd.to_numeric(h_series[target_col], errors="coerce").to_numpy(
+                            dtype=np.float64
+                        )
+                        fold_panels_t: list[dict[str, float]] = []
+                        for _fid, fg in r_cell.oof.sort_values("ds").groupby("fold_id"):
+                            lo_t = (
+                                fg["yhat_lower"].to_numpy(dtype=np.float64)
+                                if "yhat_lower" in fg.columns and fg["yhat_lower"].notna().all()
+                                else None
+                            )
+                            hi_t = (
+                                fg["yhat_upper"].to_numpy(dtype=np.float64)
+                                if "yhat_upper" in fg.columns and fg["yhat_upper"].notna().all()
+                                else None
+                            )
+                            fold_panels_t.append(
+                                compute_metrics(
+                                    fg["y_true"].to_numpy(dtype=np.float64),
+                                    fg["yhat"].to_numpy(dtype=np.float64),
+                                    lower=lo_t,
+                                    upper=hi_t,
+                                    y_train=training_window(
+                                        hist_ds,
+                                        hist_y,
+                                        fg["cutoff_date"].min()
+                                        if "cutoff_date" in fg.columns
+                                        else None,
+                                        exec_cfg,
+                                    ),
+                                    seasonal_period=s_period_t,
+                                )
+                            )
+                        if fold_panels_t:
+                            t_metrics = rollup_metrics(fold_panels_t)
+                    r_tagged = replace(r_cell, model_type=t_name, metrics=t_metrics)
+                    s_hash = f"{make_model_spec_hash(orig_m, exec_cfg)}:trec:{t_method}"
+                    cell_cache[(str(r_cell.ts_id), s_hash)] = r_tagged
+                    results_by_model_ts[(t_name, str(r_cell.ts_id))] = r_tagged
 
     # Assemble base predictions, OOF, metrics, and attributions across all series
     base_pred_parts: list[pd.DataFrame] = []
@@ -3741,6 +4132,23 @@ def _execute_local_panel_pass(
         else oof_df.copy()
     )
 
+    if should_close_simplex(exec_cfg):
+        target_sum = float(exec_cfg.features.simplex_sum or 1.0)
+        if not all_preds_raw.empty:
+            all_preds_raw = close_simplex_predictions(
+                all_preds_raw,
+                target_sum=target_sum,
+                date_col="forecast_date",
+                ts_id_col="ts_id",
+            )
+        if not all_oof.empty:
+            all_oof = close_simplex_predictions(
+                all_oof,
+                target_sum=target_sum,
+                date_col="forecast_date",
+                ts_id_col="ts_id",
+            )
+
     # Build aggregated leaderboard across series
     full_metric_df = pd.DataFrame(metric_rows)
     lb_rows: list[dict[str, Any]] = []
@@ -3820,7 +4228,34 @@ def _execute_local_panel_pass(
 
     hierarchy_summary_df = pd.DataFrame()
     reconciliation_lift_pct = 0.0
+    rec_mode = "none"
+    max_spatial_coh = 0.0
+    has_ct_flag = bool(
+        hier_spec is not None
+        and (
+            exec_cfg.hierarchy.reconcile_temporal
+            or exec_cfg.hierarchy.cross_temporal
+            or "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods
+        )
+    )
+    learned_alpha: float = (
+        float(learned_alpha_float)
+        if learned_alpha_float is not None
+        else (
+            float(exec_cfg.hierarchy.spatial_temporal_weight)
+            if isinstance(exec_cfg.hierarchy.spatial_temporal_weight, (int, float))
+            and not isinstance(exec_cfg.hierarchy.spatial_temporal_weight, bool)
+            else (
+                0.0
+                if (hier_spec is None and exec_cfg.hierarchy.reconcile_temporal)
+                else (0.5 if has_ct_flag else 1.0)
+            )
+        )
+    )
+    ct_beats_spatial = False
     if hier_spec is not None and not full_metric_df.empty:
+        from .reconciliation import verify_coherence
+
         leaf_ids = set(hist_only_df[ts_col].astype(str).unique())
         all_node_ids = set(work_hist[ts_col].astype(str).unique())
         root_ids = {
@@ -3834,16 +4269,71 @@ def _execute_local_panel_pass(
             }
         mid_ids = (all_node_ids - leaf_ids) - root_ids
 
+        has_ct = has_ct_flag
+        rec_mode = "cross_temporal" if has_ct else "spatial_only"
         primary_rec_method = (
-            exec_cfg.hierarchy.reconciliation_methods[0]
-            if exec_cfg.hierarchy.reconciliation_methods
-            else "mint_nonneg"
+            "cross_temporal_mint"
+            if (has_ct and "cross_temporal_mint" in exec_cfg.hierarchy.reconciliation_methods)
+            else (
+                exec_cfg.hierarchy.reconciliation_methods[0]
+                if exec_cfg.hierarchy.reconciliation_methods
+                else "mint_nonneg"
+            )
         )
+        if not all_preds_raw.empty:
+            rec_suffixes = tuple(
+                f"_{m}"
+                for m in (
+                    *exec_cfg.hierarchy.reconciliation_methods,
+                    "wls_struct",
+                    "cross_temporal_mint",
+                )
+            )
+            rec_preds_sub = all_preds_raw[
+                all_preds_raw["model_type"].astype(str).str.endswith(rec_suffixes)
+            ]
+            if not rec_preds_sub.empty:
+                with contextlib.suppress(Exception):
+                    max_spatial_coh = float(
+                        verify_coherence(
+                            rec_preds_sub,
+                            hier_spec,
+                            date_col="forecast_date",
+                            ts_id_col="ts_id",
+                            atol=float("inf"),
+                        )
+                    )
         neg_leaf_count = int(
             (all_preds_raw[all_preds_raw["ts_id"].astype(str).isin(leaf_ids)]["yhat"] < -1e-9).sum()
             if not all_preds_raw.empty
             else 0
         )
+
+        if has_ct and decision in full_metric_df.columns:
+            m_means = full_metric_df.groupby("model_type")[decision].mean().dropna()
+            ct_scores = [
+                float(v)
+                for k, v in m_means.items()
+                if str(k).endswith("_cross_temporal_mint") and math.isfinite(float(v))
+            ]
+            sp_methods = [
+                rm
+                for rm in (*exec_cfg.hierarchy.reconciliation_methods, "wls_struct")
+                if rm != "cross_temporal_mint"
+            ]
+            sp_scores = [
+                float(v)
+                for k, v in m_means.items()
+                if not str(k).endswith("_cross_temporal_mint")
+                and any(str(k).endswith(f"_{rm}") for rm in sp_methods)
+                and math.isfinite(float(v))
+            ]
+            if ct_scores and sp_scores:
+                ct_beats_spatial = min(ct_scores) <= min(sp_scores)
+            elif ct_scores:
+                ct_beats_spatial = True
+            if ct_beats_spatial:
+                primary_rec_method = "cross_temporal_mint"
 
         # Compute unreconciled vs reconciled scores per hierarchy level
         unrec_rows: list[dict[str, Any]] = []
@@ -3889,11 +4379,13 @@ def _execute_local_panel_pass(
                     "hierarchy_level": lvl_name,
                     "n_nodes": len(node_set),
                     "reconciliation_method": primary_rec_method,
+                    "reconciliation_mode": rec_mode,
                     "decision_metric": decision,
                     "unreconciled_score": round(unrec_best, 4),
                     "reconciled_score": round(rec_best, 4),
                     "reconciliation_lift_pct": lift_pct,
-                    "max_coherence_residual": 0.0,
+                    "max_coherence_residual": round(max_spatial_coh, 8),
+                    "temporal_coherence_residual": round(max_temp_coherence_residual, 8),
                     "negative_leaf_count": neg_leaf_count
                     if "Leaf" in lvl_name or "All" in lvl_name
                     else 0,
@@ -3902,6 +4394,56 @@ def _execute_local_panel_pass(
             if lvl_name == "All Hierarchy Nodes":
                 reconciliation_lift_pct = lift_pct
         hierarchy_summary_df = pd.DataFrame(h_rows)
+    elif exec_cfg.hierarchy.reconcile_temporal and not full_metric_df.empty:
+        rec_mode = "temporal_only"
+        t_method_name = str(
+            exec_cfg.hierarchy.reconciliation_methods[0]
+            if exec_cfg.hierarchy.reconciliation_methods
+            else "wls_struct"
+        )
+        all_node_ids = set(work_hist[ts_col].astype(str).unique())
+        neg_leaf_count = int(
+            (all_preds_raw["yhat"] < -1e-9).sum() if not all_preds_raw.empty else 0
+        )
+        rec_by_m = (
+            full_metric_df.groupby("model_type")[decision].mean().dropna()
+            if decision in full_metric_df.columns
+            else pd.Series(dtype=float)
+        )
+        rec_best = float(rec_by_m.min()) if not rec_by_m.empty else 0.0
+        unrec_best = rec_best
+        unrec_rows_t: list[dict[str, Any]] = []
+        for (m_u, ts_u), m_dict in unreconciled_metrics_by_model_ts.items():
+            if decision in m_dict and math.isfinite(float(m_dict[decision])):
+                unrec_rows_t.append(
+                    {"model_type": m_u, "ts_id": str(ts_u), "score": float(m_dict[decision])}
+                )
+        if unrec_rows_t:
+            u_by_m_t = pd.DataFrame(unrec_rows_t).groupby("model_type")["score"].mean().dropna()
+            if not u_by_m_t.empty:
+                unrec_best = float(u_by_m_t.min())
+        reconciliation_lift_pct = (
+            round(100.0 * (unrec_best - rec_best) / max(1e-9, unrec_best), 2)
+            if math.isfinite(unrec_best) and unrec_best > 1e-9
+            else 0.0
+        )
+        hierarchy_summary_df = pd.DataFrame(
+            [
+                {
+                    "hierarchy_level": "All Hierarchy Nodes",
+                    "n_nodes": len(all_node_ids),
+                    "reconciliation_method": t_method_name,
+                    "reconciliation_mode": rec_mode,
+                    "decision_metric": decision,
+                    "unreconciled_score": round(unrec_best, 4),
+                    "reconciled_score": round(rec_best, 4),
+                    "reconciliation_lift_pct": reconciliation_lift_pct,
+                    "max_coherence_residual": round(max_temp_coherence_residual, 8),
+                    "temporal_coherence_residual": round(max_temp_coherence_residual, 8),
+                    "negative_leaf_count": neg_leaf_count,
+                }
+            ]
+        )
 
     diag_summary = _summarize_pass_diagnostics(
         cfg=exec_cfg,
@@ -3914,6 +4456,11 @@ def _execute_local_panel_pass(
         hist_df=hist_for_diag,
         reconciliation_lift_pct=reconciliation_lift_pct,
     )
+    diag_summary["reconciliation_mode"] = rec_mode
+    diag_summary["spatial_coherence_residual"] = round(max_spatial_coh, 8)
+    diag_summary["temporal_coherence_residual"] = round(max_temp_coherence_residual, 8)
+    diag_summary["spatial_weight_alpha"] = learned_alpha
+    diag_summary["cross_temporal_beats_spatial"] = ct_beats_spatial
 
     return {
         "effective_config": exec_cfg,
@@ -3928,6 +4475,7 @@ def _execute_local_panel_pass(
         "bias_df": bias_df,
         "attributions_df": attributions_df,
         "hierarchy_summary_df": hierarchy_summary_df,
+        "hierarchy_spec": hier_spec,
         "diagnostics_summary": diag_summary,
     }
 
@@ -4137,6 +4685,7 @@ def execute_one_session_pass(
             "bias_df": out["bias_df"],
             "attributions_df": out["attributions_df"],
             "hierarchy_summary_df": out["hierarchy_summary_df"],
+            "hierarchy_spec": out.get("hierarchy_spec"),
             "diagnostics_summary": out["diagnostics_summary"],
         }
         session.last_diagnostics_summary = out["diagnostics_summary"]

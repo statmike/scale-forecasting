@@ -267,9 +267,11 @@ def models_sharded_across_workers(cfg: RunConfig, models: Sequence[str]) -> bool
        `_is_dedicated_vm_model_set`), giving each deep-learning model its own dedicated VM on the
        full panel.
     """
+    from ..simplex import has_simplex_models
+
     if not models:
         return False
-    if cfg.hierarchy.enabled:
+    if cfg.hierarchy.enabled or has_simplex_models(cfg, models):
         return True
     if all(is_panel_model(m, cfg) for m in models):
         return True

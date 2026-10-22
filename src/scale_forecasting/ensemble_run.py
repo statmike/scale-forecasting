@@ -478,6 +478,175 @@ def _ensemble_batch(
     ens_oof = combine_oof(oof_df, cfg, learned_weights) if not oof_df.empty else pd.DataFrame()
     pred_rows = calibrate_ensemble_predictions(pred_rows, ens_oof, cfg)
 
+    from .simplex import enforce_simplex_closure, has_simplex_models
+
+    if has_simplex_models(cfg, cfg.models):
+        if pred_rows:
+            closed_pred_df = enforce_simplex_closure(
+                pd.DataFrame(pred_rows),
+                simplex_sum=cfg.features.simplex_sum,
+                ts_id_col="ts_id",
+                date_col="forecast_date",
+            )
+            pred_rows = [
+                {
+                    **{str(k): v for k, v in r.items()},
+                    "yhat_lower": None
+                    if r.get("yhat_lower") is None
+                    or (isinstance(r.get("yhat_lower"), float) and np.isnan(r["yhat_lower"]))
+                    else float(r["yhat_lower"]),
+                    "yhat_upper": None
+                    if r.get("yhat_upper") is None
+                    or (isinstance(r.get("yhat_upper"), float) and np.isnan(r["yhat_upper"]))
+                    else float(r["yhat_upper"]),
+                }
+                for r in closed_pred_df.to_dict(orient="records")
+            ]
+        if not ens_oof.empty:
+            ens_oof = enforce_simplex_closure(
+                ens_oof,
+                simplex_sum=cfg.features.simplex_sum,
+                ts_id_col="ts_id",
+                date_col="forecast_date",
+            )
+
+    cached_history: pd.DataFrame | None = None
+    if ts_ids is None and (
+        cfg.hierarchy.cross_temporal
+        or cfg.hierarchy.reconcile_temporal
+        or "cross_temporal_mint" in cfg.hierarchy.reconciliation_methods
+    ):
+        cached_history = _query(build_history_query(cfg, dataset)).to_dataframe()
+        hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+        hist_cfg = cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(
+                    update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                )
+            }
+        )
+        if (
+            cfg.hierarchy.enabled
+            and cached_history is not None
+            and not cached_history.empty
+            and hier_cols
+            and hier_cols.issubset(cached_history.columns)
+        ):
+            from .reconciliation import build_hierarchy, reconcile_oof
+            from .temporal_reconciliation import reconcile_cross_temporal
+
+            cached_history, hier_spec = build_hierarchy(cached_history, hist_cfg)
+            if pred_rows:
+                ct_ens_preds = reconcile_cross_temporal(
+                    pd.DataFrame(pred_rows),
+                    hier_spec,
+                    history_df=cached_history,
+                    oof_df=ens_oof if not ens_oof.empty else None,
+                    cfg=hist_cfg,
+                    method="cross_temporal_mint",
+                    middle_level=cfg.hierarchy.middle_level,
+                    stamp_method=False,
+                    return_aggregations=False,
+                    date_col="forecast_date",
+                    ts_id_col="ts_id",
+                    target_col="y",
+                )
+                assert isinstance(ct_ens_preds, pd.DataFrame)
+                pred_rows = [
+                    {
+                        **{str(k): v for k, v in r.items()},
+                        "yhat_lower": None
+                        if r.get("yhat_lower") is None
+                        or (isinstance(r.get("yhat_lower"), float) and np.isnan(r["yhat_lower"]))
+                        else float(r["yhat_lower"]),
+                        "yhat_upper": None
+                        if r.get("yhat_upper") is None
+                        or (isinstance(r.get("yhat_upper"), float) and np.isnan(r["yhat_upper"]))
+                        else float(r["yhat_upper"]),
+                    }
+                    for r in ct_ens_preds.to_dict(orient="records")
+                ]
+            if not ens_oof.empty:
+                ens_oof = reconcile_oof(
+                    ens_oof,
+                    hier_spec,
+                    "cross_temporal_mint",
+                    cfg=hist_cfg,
+                    history_df=cached_history,
+                    middle_level=cfg.hierarchy.middle_level,
+                    ts_id_col="ts_id",
+                    target_col="y",
+                    stamp_method=False,
+                )
+        elif (
+            not cfg.hierarchy.enabled
+            and cfg.hierarchy.reconcile_temporal
+            and cached_history is not None
+            and not cached_history.empty
+        ):
+            from .temporal_reconciliation import reconcile_temporal_forecasts
+
+            t_method = next(
+                (m for m in cfg.hierarchy.reconciliation_methods if m != "cross_temporal_mint"),
+                "mint_shrink",
+            )
+            if pred_rows:
+                t_ens_preds = reconcile_temporal_forecasts(
+                    pd.DataFrame(pred_rows),
+                    history_df=cached_history,
+                    oof_df=ens_oof if not ens_oof.empty else None,
+                    cfg=hist_cfg,
+                    method=t_method,
+                    stamp_method=False,
+                    return_aggregations=False,
+                    date_col="forecast_date",
+                    ts_id_col="ts_id",
+                    target_col="y",
+                )
+                assert isinstance(t_ens_preds, pd.DataFrame)
+                pred_rows = [
+                    {
+                        **{str(k): v for k, v in r.items()},
+                        "yhat_lower": None
+                        if r.get("yhat_lower") is None
+                        or (isinstance(r.get("yhat_lower"), float) and np.isnan(r["yhat_lower"]))
+                        else float(r["yhat_lower"]),
+                        "yhat_upper": None
+                        if r.get("yhat_upper") is None
+                        or (isinstance(r.get("yhat_upper"), float) and np.isnan(r["yhat_upper"]))
+                        else float(r["yhat_upper"]),
+                    }
+                    for r in t_ens_preds.to_dict(orient="records")
+                ]
+            if not ens_oof.empty:
+                fold_col = "fold_id" if "fold_id" in ens_oof.columns else "cutoff_date"
+                oof_parts: list[pd.DataFrame] = []
+                for _fkey, fold_slice in ens_oof.groupby(fold_col, sort=True):
+                    fold_hist = cached_history
+                    if "cutoff_date" in fold_slice.columns and "ds" in cached_history.columns:
+                        c_val = fold_slice["cutoff_date"].iloc[0]
+                        sub_h = cached_history[
+                            pd.to_datetime(cached_history["ds"]) <= pd.Timestamp(c_val)
+                        ]
+                        if not sub_h.empty:
+                            fold_hist = sub_h
+                    rec_fold = reconcile_temporal_forecasts(
+                        fold_slice,
+                        history_df=fold_hist,
+                        cfg=hist_cfg,
+                        horizon=int(fold_slice.groupby(["model_type", "ts_id"]).size().max()),
+                        method=t_method,
+                        stamp_method=False,
+                        return_aggregations=False,
+                        date_col="forecast_date",
+                        ts_id_col="ts_id",
+                        target_col="y",
+                    )
+                    assert isinstance(rec_fold, pd.DataFrame)
+                    oof_parts.append(rec_fold)
+                if oof_parts:
+                    ens_oof = pd.concat(oof_parts, ignore_index=True)
+
     stamp_ensemble_prediction_rows(
         pred_rows, run_id=run_id, ensemble_id=ensemble_id, created_at=created_at
     )
@@ -578,20 +747,23 @@ def _ensemble_batch(
         # rows, so read the full series history once, matching the natives' history read. The
         # dates come with it because the scale denominator is the *fold's* training window,
         # not the whole series — see `backtest.training_window`.
-        history = _query(build_history_query(cfg, dataset)).to_dataframe()
-        if cfg.hierarchy.enabled and not history.empty:
-            hier_cols = {col for level in cfg.hierarchy.levels for col in level}
-            if hier_cols and hier_cols.issubset(history.columns):
-                from .reconciliation import build_hierarchy
+        if cached_history is not None:
+            history = cached_history
+        else:
+            history = _query(build_history_query(cfg, dataset)).to_dataframe()
+            if cfg.hierarchy.enabled and not history.empty:
+                hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+                if hier_cols and hier_cols.issubset(history.columns):
+                    from .reconciliation import build_hierarchy
 
-                hist_cfg = cfg.model_copy(
-                    update={
-                        "data": cfg.data.model_copy(
-                            update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
-                        )
-                    }
-                )
-                history, _ = build_hierarchy(history, hist_cfg)
+                    hist_cfg = cfg.model_copy(
+                        update={
+                            "data": cfg.data.model_copy(
+                                update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                            )
+                        }
+                    )
+                    history, _ = build_hierarchy(history, hist_cfg)
         if not history.empty:
             ds_all = pd.to_datetime(history["ds"]).to_numpy()
             y_all = history["y"].to_numpy()

@@ -303,7 +303,10 @@ def test_hierarchy_reconciliation_smoke_covers_all_seven_methods() -> None:
     assert cfg.hierarchy.enabled is True
     assert cfg.hierarchy.levels == [["region"], ["region", "category"]]
     assert cfg.hierarchy.middle_level == ["region"]
-    assert set(cfg.hierarchy.reconciliation_methods) == RECONCILIATION_METHODS - {"mint_nonneg"}
+    assert set(cfg.hierarchy.reconciliation_methods) == RECONCILIATION_METHODS - {
+        "mint_nonneg",
+        "cross_temporal_mint",
+    }
 
 
 def test_covariate_fallback_multi_runtime_smoke_spans_all_runtimes_and_tiers() -> None:

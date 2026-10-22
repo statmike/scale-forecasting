@@ -124,6 +124,8 @@ nav:
       - Models & ensembles: models_reference.md
       - Evaluation metrics: metrics_reference.md
       - Backtesting: backtesting.md
+      - Hierarchical & cross-temporal reconciliation: hierarchical_forecasting.md
+      - Features, covariates & simplex transforms: features_and_covariates.md
       - Forecaster workbench: forecaster_workbench.md
       - Auto-forecaster & autofocus: auto_forecaster.md
       - Auto-forecaster benchmarks (29 datasets): auto_forecaster_benchmarks.md
@@ -162,6 +164,7 @@ nav:
       - Model factory: api/models.md
       - BaseModel: api/models_base_model.md
       - Feature engineering: api/features.md
+      - Compositional simplex transforms: api/simplex.md
       - Monotonic & sign constraints: api/monotonicity.md
       - Moving-holiday windows: api/holiday_window.md
       - Promo & price elasticity: api/elasticity.md
@@ -170,6 +173,8 @@ nav:
       - Ensembler (blending math): api/ensembler.md
       - Ensemble driver: api/ensemble_run.md
       - Hierarchical reconciliation: api/reconciliation.md
+      - Temporal hierarchy reconciliation: api/temporal_reconciliation.md
+      - Top-down goal-seek allocation: api/goal_seek.md
       - Backtest: api/backtest.md
       - Metrics: api/metrics.md
       - BaseMetric: api/metrics_base_metric.md

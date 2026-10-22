@@ -335,7 +335,25 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
         "test_trading_days_censored_demand_and_outlier_hygiene"
     ),
+    "features.transform=clr": (
+        "tests/unit/test_simplex.py::test_single_series_simplex_fallback_and_features_integration"
+    ),
+    "features.transform=ilr": (
+        "tests/unit/test_simplex.py::test_single_series_simplex_fallback_and_features_integration"
+    ),
     # --- hierarchy -----------------------------------------------------------------------------
+    "hierarchy.cross_temporal=true": (
+        "tests/unit/test_temporal_reconciliation.py::"
+        "test_cross_temporal_reconciliation_simultaneous_coherence"
+    ),
+    "hierarchy.reconcile_temporal=true": (
+        "tests/unit/test_temporal_reconciliation.py::"
+        "test_cross_temporal_reconciliation_simultaneous_coherence"
+    ),
+    "hierarchy.reconciliation_methods=cross_temporal_mint": (
+        "tests/unit/test_temporal_reconciliation.py::"
+        "test_cross_temporal_reconciliation_simultaneous_coherence"
+    ),
     "hierarchy.reconciliation_methods=mint_nonneg": (
         "tests/unit/test_phase_g1_workbench.py::"
         "test_reconciliation_mint_nonneg_guarantees_nonnegative_coherent_forecasts"

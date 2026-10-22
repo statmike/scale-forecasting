@@ -28,6 +28,7 @@ from .monotonicity import infer_monotonic_constraints
 __all__ = [
     "EXPOSURE_TIERS",
     "SCALE_REGIMES",
+    "DataProfile",
     "PanelAutoProfile",
     "classify_scale_regime",
     "estimate_continue_confidence",
@@ -188,6 +189,15 @@ class PanelAutoProfile:
     hierarchy_node_count: int = 0
     cross_series_corr: float = 0.0
     monotonic_constraints: dict[str, int] = field(default_factory=dict)
+    is_compositional_simplex: bool = False
+    simplex_total: float = 0.0
+
+    @classmethod
+    def from_df(cls, data: Any, **kwargs: Any) -> PanelAutoProfile:
+        """Profile an in-memory DataFrame or BigQuery table via :func:`inspect_panel_for_auto`."""
+        from .auto import inspect_panel_for_auto
+
+        return inspect_panel_for_auto(data, **kwargs)
 
     @property
     def scale_regime(self) -> str:
@@ -342,10 +352,28 @@ class PanelAutoProfile:
                 ),
             },
         ]
+        if self.is_compositional_simplex:
+            rows.append(
+                {
+                    "dimension": "compositional_simplex",
+                    "signal": "compositional_simplex",
+                    "measured_value": (
+                        f"simplex_total={self.simplex_total:.2f} | "
+                        f"n_parts={self.n_series} | non_negative={self.non_negative}"
+                    ),
+                    "implication": (
+                        "Constant-sum compositional simplex detected; routes Aitchison "
+                        "log-ratio transforms (@transform_ilr / @transform_clr) with "
+                        f"features.simplex_sum={self.simplex_total:.2f}."
+                    ),
+                }
+            )
         return pd.DataFrame(
             rows,
             columns=["dimension", "signal", "measured_value", "implication"],
         )
+
+    to_dataframe = to_df
 
     def explain(self) -> str:
         """Return a formatted text summary of the Step 0 Data Profile & Readiness table."""
@@ -355,6 +383,9 @@ class PanelAutoProfile:
             f"({self.scale_regime}) | freq='{self.freq}' | H={self.horizon}"
         )
         return f"{header}\n\n{df.to_string(index=False)}"
+
+
+DataProfile = PanelAutoProfile
 
 
 def select_hierarchy_reconciliation_methods(
@@ -581,6 +612,7 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "synthesize_exog_lags": (0.92, 5.0),
             "inject_monotone_guardrails": (0.88, 4.2),
             "inject_transform_log1p": (0.92, 10.4),
+            "inject_transform_simplex": (0.87, 8.0),
             "inject_direct_horizon_models": (0.84, 5.7),
             "enable_level_shift": (0.92, 11.5),
             "enable_sliding_window_backtest": (0.67, 4.3),
@@ -588,6 +620,7 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "inject_intermittent_specialists": (0.68, 5.3),
             "enable_cold_start_pooling": (0.94, 3.4),
             "refine_hierarchical_coherence": (0.86, 10.5),
+            "enable_temporal_reconciliation": (0.78, 4.8),
             "refine_probabilistic_quantiles": (0.66, 2.9),
             "refine_censored_demand_models": (0.96, 7.2),
             "escalate_bigquery_foundation": (0.66, 2.0),
@@ -1032,9 +1065,43 @@ def select_tier_models_and_features(
             }
         )
 
-    # 3. Target Transformation (Box-Cox / Log1p)
+    # 3. Target Transformation (Box-Cox / Log1p / Compositional Simplex)
+    simplex_sum: float | None = None
+    if profile.is_compositional_simplex:
+        simplex_sum = round(float(profile.simplex_total or 1.0), 4)
+        rationales.append(
+            {
+                "category": "features",
+                "parameter": "features.simplex_sum",
+                "value": str(simplex_sum),
+                "evidence": (
+                    f"is_compositional_simplex=True, simplex_total={simplex_sum}, "
+                    f"n_series={profile.n_series}"
+                ),
+                "rationale": (
+                    "Series form a constant-sum compositional simplex across timestamps; "
+                    "enforces exact simplex closure and Aitchison log-ratio variants."
+                ),
+            }
+        )
+        if where != "bigquery":
+            _add_model(
+                "theta@transform_ilr",
+                "statistical",
+                "Isometric log-ratio (ILR) compositional simplex transform on Theta.",
+                f"simplex_total={simplex_sum}",
+            )
+            if tier != "first_light":
+                _add_model(
+                    "regression_lags@transform_clr",
+                    "ml",
+                    "Centered log-ratio (CLR) compositional simplex transform on ridge lags.",
+                    f"simplex_total={simplex_sum}",
+                )
+
     use_log1p = (
-        tier != "first_light"
+        not profile.is_compositional_simplex
+        and tier != "first_light"
         and profile.non_negative
         and not profile.integer_valued
         and profile.level_vol_corr >= float(th.get("log1p_level_vol_corr_min", 0.68))
@@ -1351,6 +1418,7 @@ def select_tier_models_and_features(
         "trim_leading_zeros": trim_leading_zeros,
         "grid_policy": grid_policy,
         "target_transform": target_transform,
+        "simplex_sum": simplex_sum,
         "outlier_policy": outlier_policy,
         "level_shift": level_shift,
         "trading_days": trading_days,
@@ -1477,6 +1545,7 @@ def propose_autofocus_pass(
         and not has_cold_start
         and not has_hierarchy
         and not is_probabilistic_goal
+        and not profile.is_compositional_simplex
         and abs(profile.end_to_start_ratio - 1.0) < float(th.get("white_noise_growth_tol", 0.15))
         and profile.median_acf_season < float(th.get("white_noise_acf_season_max", 0.18))
         and not profile.future_covariates
@@ -1624,7 +1693,8 @@ def propose_autofocus_pass(
         "@transform_log1p" in m or "@transform_boxcox" in m for m in current_models
     )
     if (
-        profile.non_negative
+        not profile.is_compositional_simplex
+        and profile.non_negative
         and not profile.integer_valued
         and not has_log_variant
         and (
@@ -1671,6 +1741,50 @@ def propose_autofocus_pass(
                     "rationale": (
                         "Residuals exhibit level-dependent variance; injecting @transform_log1p "
                         "variants while reusing Pass 1 linear models via cell borrowing."
+                    ),
+                }
+            )
+
+    # 2.5. Compositional Simplex Log-Ratio Exploration (@transform_ilr / @transform_clr)
+    if profile.is_compositional_simplex and where != "bigquery":
+        simplex_added: list[str] = []
+        simplex_total_val = round(float(profile.simplex_total or 1.0), 4)
+        for cand, tag in (
+            ("lightgbm", "transform_ilr"),
+            ("regression_lags", "transform_ilr"),
+            ("theta", "transform_clr"),
+            ("lightgbm", "transform_clr"),
+        ):
+            if cand in avail:
+                spec_s = f"{cand}@{tag}"
+                if spec_s not in current_models:
+                    current_models.append(spec_s)
+                    added_models.append(spec_s)
+                    simplex_added.append(spec_s)
+                if cand == "lightgbm" and tier in ("first_light", "wide_field"):
+                    model_params.setdefault(
+                        spec_s, {"n_estimators": int(th.get("tree_n_estimators_fast", 55))}
+                    )
+        features_cfg["simplex_sum"] = simplex_total_val
+        if simplex_added:
+            strats_s = list(ensemble_cfg.get("strategies", ["inverse_error"]))
+            if "champion" not in strats_s:
+                strats_s.append("champion")
+            ensemble_cfg["strategies"] = strats_s
+            mutations.append(
+                {
+                    "action": "inject_transform_simplex",
+                    "domain": "transform_and_hygiene",
+                    "parameter": "models + features.simplex_sum",
+                    "old_value": str(prior_config_dict.get("features", {}).get("simplex_sum")),
+                    "new_value": f"{', '.join(simplex_added)} (simplex_sum={simplex_total_val})",
+                    "evidence": (
+                        f"is_compositional_simplex=True, simplex_total={simplex_total_val}"
+                    ),
+                    "rationale": (
+                        "Panel series form a constant-sum compositional simplex; injecting "
+                        "Aitchison @transform_ilr and @transform_clr variants with exact "
+                        "post-forecast simplex closure."
                     ),
                 }
             )
@@ -1866,7 +1980,7 @@ def propose_autofocus_pass(
                 }
             )
 
-    # 7. Hierarchical Non-Negative Coherent Specialist Escalation (dgp_08 / dgp_14)
+    # 7. Hierarchical Non-Negative Coherent & Cross-Temporal Specialist Escalation (dgp_08 / dgp_14)
     if has_hierarchy:
         hier_added: list[str] = []
         for h_cand in ("holtwinters", "regression_lags", "xgboost"):
@@ -1880,6 +1994,11 @@ def propose_autofocus_pass(
                     )
         rec_methods = list(select_hierarchy_reconciliation_methods(profile, tier=tier))
         if hierarchy_cfg:
+            if profile.horizon >= 7 and profile.median_n_obs >= 28:
+                hierarchy_cfg["reconcile_temporal"] = True
+                hierarchy_cfg["cross_temporal"] = True
+                if "cross_temporal_mint" not in rec_methods:
+                    rec_methods.append("cross_temporal_mint")
             hierarchy_cfg["reconciliation_methods"] = rec_methods
         if hier_added:
             strats_h = list(ensemble_cfg.get("strategies", ["inverse_error"]))
@@ -1906,6 +2025,29 @@ def propose_autofocus_pass(
                     ),
                 }
             )
+    elif (
+        profile.is_compositional_simplex
+        and profile.horizon >= 7
+        and profile.median_n_obs >= 28
+        and where != "bigquery"
+        and not bool(hierarchy_cfg.get("reconcile_temporal", False))
+    ):
+        hierarchy_cfg["reconcile_temporal"] = True
+        hierarchy_cfg.setdefault("reconciliation_methods", ["wls_struct"])
+        mutations.append(
+            {
+                "action": "enable_temporal_reconciliation",
+                "domain": "regime_and_specialists",
+                "parameter": "hierarchy.reconcile_temporal",
+                "old_value": "False",
+                "new_value": "True (wls_struct)",
+                "evidence": f"freq='{profile.freq}', horizon={profile.horizon}",
+                "rationale": (
+                    "Enables multi-horizon THieF temporal hierarchy reconciliation across "
+                    "aggregated calendar horizons."
+                ),
+            }
+        )
 
     # 8. Probabilistic / Newsvendor Service-Level Quantile Refinement (dgp_10)
     if is_probabilistic_goal:
@@ -2040,6 +2182,8 @@ def propose_autofocus_pass(
                 if len(escalated) >= 2:
                     break
         if escalated:
+            if profile.horizon >= 7 and profile.median_n_obs >= 28 and where != "bigquery":
+                hierarchy_cfg["reconcile_temporal"] = True
             strats_esc = list(ensemble_cfg.get("strategies", ["inverse_error"]))
             if "champion" not in strats_esc:
                 strats_esc.append("champion")
@@ -2171,7 +2315,7 @@ def propose_autofocus_dag_branches(
                     b_added.append(m)
                     if m in full_params:
                         b_params[m] = dict(full_params[m])
-            for fkey in ("transform", "level_shift", "outlier_policy"):
+            for fkey in ("transform", "level_shift", "outlier_policy", "simplex_sum"):
                 if fkey in full_features:
                     b_features[fkey] = full_features[fkey]
             if "scheme" in full_backtest:
@@ -2210,10 +2354,19 @@ def propose_autofocus_dag_branches(
                         b_params[m] = dict(full_params[m])
             if "regime_routing" in full_features:
                 b_features["regime_routing"] = full_features["regime_routing"]
-            if full_hierarchy and "reconciliation_methods" in full_hierarchy:
-                b_hierarchy["reconciliation_methods"] = list(
-                    full_hierarchy["reconciliation_methods"]
-                )
+            if full_hierarchy:
+                if "reconciliation_methods" in full_hierarchy:
+                    b_hierarchy["reconciliation_methods"] = list(
+                        full_hierarchy["reconciliation_methods"]
+                    )
+                for hkey in (
+                    "reconcile_temporal",
+                    "temporal_aggregations",
+                    "cross_temporal",
+                    "spatial_temporal_weight",
+                ):
+                    if hkey in full_hierarchy:
+                        b_hierarchy[hkey] = full_hierarchy[hkey]
             for ok in ("point_forecast", "target_quantile"):
                 if ok in full_output:
                     b_output[ok] = full_output[ok]
@@ -2295,6 +2448,7 @@ def propose_autofocus_synthesis_pass(
                 "monotonic_constraints",
                 "holiday_window",
                 "transform",
+                "simplex_sum",
                 "level_shift",
                 "outlier_policy",
                 "regime_routing",
@@ -2309,6 +2463,16 @@ def propose_autofocus_synthesis_pass(
             b_hier = dict(b_cfg.get("hierarchy") or {})
             if "reconciliation_methods" in b_hier:
                 synth_hierarchy["reconciliation_methods"] = list(b_hier["reconciliation_methods"])
+            for hk in (
+                "reconcile_temporal",
+                "temporal_aggregations",
+                "cross_temporal",
+                "spatial_temporal_weight",
+            ):
+                if hk in b_hier and b_hier[hk] != (pass1_config_dict.get("hierarchy") or {}).get(
+                    hk
+                ):
+                    synth_hierarchy[hk] = b_hier[hk]
             b_out = dict(b_cfg.get("output", {}))
             for ok in ("point_forecast", "target_quantile"):
                 if ok in b_out and b_out[ok] is not None:
@@ -2435,12 +2599,14 @@ def estimate_continue_confidence(
             {
                 "prune_decoy_covariates": (0.88, 7.2),
                 "inject_transform_log1p": (0.86, 8.5),
+                "inject_transform_simplex": (0.87, 8.0),
                 "inject_direct_horizon_models": (0.82, 5.4),
                 "enable_level_shift": (0.84, 7.0),
                 "enable_stl_resid_outlier_scrubbing": (0.80, 5.0),
                 "inject_intermittent_specialists": (0.85, 6.2),
                 "enable_cold_start_pooling": (0.83, 6.0),
                 "refine_hierarchical_coherence": (0.82, 5.8),
+                "enable_temporal_reconciliation": (0.78, 4.8),
                 "refine_probabilistic_quantiles": (0.84, 6.4),
                 "synthesize_winning_dag_branches": (0.80, 4.5),
                 "escalate_model_diversity": (0.60, 2.6),

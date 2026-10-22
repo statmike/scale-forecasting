@@ -138,7 +138,7 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Submit surgical cell repair** | `python -m scale_forecasting.main --run-id <run_id> --retry --force --reason "..."` | `Forecaster(cfg).retry(confirm=True, reason="...")` |
 | **Full data-science run review** | — | `review_run(run_id)` / `Forecaster(cfg).review()` |
 | **Interval & arm calibration** | — | `calibration_report(run_id)` |
-| **Forecaster's Workbench & Inventory Policy** | — | `Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / `.exceptions_df()` / `.inventory_policy_df()` |
+| **Forecaster's Workbench, Goal-Seek & Temporal Reconciliation** | — | `Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / `.exceptions_df()` / `.inventory_policy_df()` / `.allocate_target()` / `.temporal_reconcile_df()` |
 | **Executive HTML + JSON report** | `python -m scale_forecasting.report --model holtwinters --output-dir ./report` | `Forecaster(cfg).export_report()` / `export_report(bench, './report')` |
 | **Glass-Box Auto-Forecaster & `autofocus`** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --tier first_light --autofocus --max-passes 3` | `Forecaster.profile_data(panel)` / `Forecaster.build_config(panel, tier='wide_field')` / `Forecaster.auto(panel, tier='first_light', autofocus=True)` |
 | **7-Question Practitioner Assessment & Model Comparison** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --autofocus` | `f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / `f.baseline_value_df()` / `f.hierarchy_value_df()` |

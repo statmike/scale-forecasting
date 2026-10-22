@@ -44,16 +44,18 @@ from .errors import (
     ConfigError,
     DataError,
     EngineError,
+    GoalSeekInfeasibleError,
     ModelError,
     RegistryError,
     ScaleForecastError,
+    ScaleForecastingError,
 )
 from .settings import Settings
 
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.5.0"
+    __version__ = "1.6.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -123,6 +125,83 @@ _LAZY: dict[str, tuple[str, str]] = {
     "reconcile_oof": (".reconciliation", "reconcile_oof"),
     "reconcile_cells": (".reconciliation", "reconcile_cells"),
     "verify_coherence": (".reconciliation", "verify_coherence"),
+    # Cross-temporal reconciliation, compositional simplex & goal-seek (Track K).
+    "TEMPORAL_RECONCILIATION_METHODS": (
+        ".temporal_reconciliation",
+        "TEMPORAL_RECONCILIATION_METHODS",
+    ),
+    "DEFAULT_TEMPORAL_FACTORS": (
+        ".temporal_reconciliation",
+        "DEFAULT_TEMPORAL_FACTORS",
+    ),
+    "TemporalHierarchySpec": (".temporal_reconciliation", "TemporalHierarchySpec"),
+    "default_temporal_aggregations": (
+        ".temporal_reconciliation",
+        "default_temporal_aggregations",
+    ),
+    "resolve_temporal_aggregations": (
+        ".temporal_reconciliation",
+        "resolve_temporal_aggregations",
+    ),
+    "build_temporal_hierarchy": (".temporal_reconciliation", "build_temporal_hierarchy"),
+    "build_temporal_summing_matrix": (
+        ".temporal_reconciliation",
+        "build_temporal_summing_matrix",
+    ),
+    "reconcile_temporal_matrix": (".temporal_reconciliation", "reconcile_temporal_matrix"),
+    "reconcile_series_temporal": (".temporal_reconciliation", "reconcile_series_temporal"),
+    "reconcile_temporal_series": (".temporal_reconciliation", "reconcile_temporal_series"),
+    "reconcile_cross_temporal": (".temporal_reconciliation", "reconcile_cross_temporal"),
+    "cross_temporal_mint": (".temporal_reconciliation", "cross_temporal_mint"),
+    "reconcile_forecasts_temporal": (
+        ".temporal_reconciliation",
+        "reconcile_forecasts_temporal",
+    ),
+    "reconcile_temporal_forecasts": (
+        ".temporal_reconciliation",
+        "reconcile_temporal_forecasts",
+    ),
+    "temporal_reconcile_df": (
+        ".temporal_reconciliation",
+        "temporal_reconcile_df",
+    ),
+    "sample_coherent_paths": (
+        ".temporal_reconciliation",
+        "sample_coherent_paths",
+    ),
+    "verify_temporal_coherence": (".temporal_reconciliation", "verify_temporal_coherence"),
+    "verify_cross_temporal_coherence": (
+        ".temporal_reconciliation",
+        "verify_cross_temporal_coherence",
+    ),
+    "SIMPLEX_TRANSFORMS": (".simplex", "SIMPLEX_TRANSFORMS"),
+    "SIMPLICIAL_TRANSFORMS": (".simplex", "SIMPLICIAL_TRANSFORMS"),
+    "DEFAULT_ZERO_DELTA": (".simplex", "DEFAULT_ZERO_DELTA"),
+    "close_simplex": (".simplex", "close_simplex"),
+    "verify_simplex": (".simplex", "verify_simplex"),
+    "verify_simplex_closure": (".simplex", "verify_simplex_closure"),
+    "verify_simplex_coherence": (".simplex", "verify_simplex_coherence"),
+    "forecast_simplex_panel": (".simplex", "forecast_simplex_panel"),
+    "multiplicative_zero_replacement": (".simplex", "multiplicative_zero_replacement"),
+    "replace_compositional_zeros": (".simplex", "replace_compositional_zeros"),
+    "clr_transform": (".simplex", "clr_transform"),
+    "clr_inverse": (".simplex", "clr_inverse"),
+    "inverse_clr_transform": (".simplex", "inverse_clr_transform"),
+    "helmert_sub_matrix": (".simplex", "helmert_sub_matrix"),
+    "ilr_transform": (".simplex", "ilr_transform"),
+    "ilr_inverse": (".simplex", "ilr_inverse"),
+    "inverse_ilr_transform": (".simplex", "inverse_ilr_transform"),
+    "transform_simplex_series": (".simplex", "transform_simplex_series"),
+    "inverse_transform_simplex_series": (".simplex", "inverse_transform_simplex_series"),
+    "apply_simplex_series_transform": (".simplex", "apply_simplex_series_transform"),
+    "inverse_simplex_series_transform": (".simplex", "inverse_simplex_series_transform"),
+    "close_simplex_predictions": (".simplex", "close_simplex_predictions"),
+    "should_close_simplex": (".simplex", "should_close_simplex"),
+    "GOAL_SEEK_COLUMNS": (".goal_seek", "GOAL_SEEK_COLUMNS"),
+    "allocate_target": (".goal_seek", "allocate_target"),
+    "allocate_forecast_target": (".goal_seek", "allocate_forecast_target"),
+    "summarize_goal_seek": (".goal_seek", "summarize_goal_seek"),
+    "plot_goal_seek": (".goal_seek", "plot_goal_seek"),
     # AI agent surfaces & MCP server.
     "probe_environment": (".agent_surfaces", "probe_environment"),
     "McpServer": (".mcp", "McpServer"),
@@ -190,6 +269,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "AutofocusPassRecord": (".auto", "AutofocusPassRecord"),
     "NextLoopPreview": (".auto", "NextLoopPreview"),
     "PanelAutoProfile": (".auto", "PanelAutoProfile"),
+    "DataProfile": (".auto", "DataProfile"),
     "inspect_panel_for_auto": (".auto", "inspect_panel_for_auto"),
     "build_config": (".auto", "build_config"),
     "auto_forecast": (".auto", "auto_forecast"),
@@ -228,8 +308,10 @@ __all__ = [
     "Fanout",
     "Settings",
     "ScaleForecastError",
+    "ScaleForecastingError",
     "ConfigError",
     "DataError",
+    "GoalSeekInfeasibleError",
     "ModelError",
     "RegistryError",
     "EngineError",
@@ -244,6 +326,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         SCALE_REGIMES,
         AutofocusPassRecord,
         ConfigBlueprint,
+        DataProfile,
         NextLoopPreview,
         PanelAutoProfile,
         auto_forecast,
@@ -308,6 +391,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         run_evolution,
     )
     from .features import compute_demand_profile  # noqa: F401
+    from .goal_seek import (  # noqa: F401
+        GOAL_SEEK_COLUMNS,
+        allocate_forecast_target,
+        allocate_target,
+        plot_goal_seek,
+        summarize_goal_seek,
+    )
     from .holiday_window import (  # noqa: F401
         HOLIDAY_WINDOW_COLUMNS,
         HolidayWindowConfig,
@@ -394,6 +484,51 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         build_explain_frame,
         build_trace_frame,
         plot_trace,
+    )
+    from .simplex import (  # noqa: F401
+        DEFAULT_ZERO_DELTA,
+        SIMPLEX_TRANSFORMS,
+        SIMPLICIAL_TRANSFORMS,
+        apply_simplex_series_transform,
+        close_simplex,
+        close_simplex_predictions,
+        clr_inverse,
+        clr_transform,
+        forecast_simplex_panel,
+        helmert_sub_matrix,
+        ilr_inverse,
+        ilr_transform,
+        inverse_clr_transform,
+        inverse_ilr_transform,
+        inverse_simplex_series_transform,
+        inverse_transform_simplex_series,
+        multiplicative_zero_replacement,
+        replace_compositional_zeros,
+        should_close_simplex,
+        transform_simplex_series,
+        verify_simplex,
+        verify_simplex_closure,
+        verify_simplex_coherence,
+    )
+    from .temporal_reconciliation import (  # noqa: F401
+        DEFAULT_TEMPORAL_FACTORS,
+        TEMPORAL_RECONCILIATION_METHODS,
+        TemporalHierarchySpec,
+        build_temporal_hierarchy,
+        build_temporal_summing_matrix,
+        cross_temporal_mint,
+        default_temporal_aggregations,
+        reconcile_cross_temporal,
+        reconcile_forecasts_temporal,
+        reconcile_series_temporal,
+        reconcile_temporal_forecasts,
+        reconcile_temporal_matrix,
+        reconcile_temporal_series,
+        resolve_temporal_aggregations,
+        sample_coherent_paths,
+        temporal_reconcile_df,
+        verify_cross_temporal_coherence,
+        verify_temporal_coherence,
     )
     from .worker import CellResult, run_cell  # noqa: F401
 

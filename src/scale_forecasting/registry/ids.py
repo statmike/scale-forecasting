@@ -157,6 +157,11 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "future_covariates"): [],
     ("features", "past_covariates"): [],
     ("features", "on_unsupported_covariates"): "fallback",
+    ("features", "simplex_sum"): None,
+    ("hierarchy", "reconcile_temporal"): False,
+    ("hierarchy", "temporal_aggregations"): None,
+    ("hierarchy", "cross_temporal"): False,
+    ("hierarchy", "spatial_temporal_weight"): "auto",
     ("hierarchy",): {
         "enabled": False,
         "levels": [],
@@ -336,6 +341,8 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         "outlier_sigma": eff_f.outlier_sigma if eff_f.outlier_policy != "none" else 3.5,
         "regime_routing": eff_f.regime_routing,
     }
+    if eff_f.simplex_sum is not None:
+        features_payload["simplex_sum"] = float(eff_f.simplex_sum)
     if eff_f.monotonic_constraints:
         features_payload["monotonic_constraints"] = dict(
             sorted(eff_f.monotonic_constraints.items())

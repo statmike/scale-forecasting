@@ -788,3 +788,223 @@ def test_custom_model_name_override_across_sdk_cli_and_mcp(
     assert mcp_env["isError"] is False
     mcp_payload = json.loads(mcp_env["content"][0]["text"])
     assert mcp_payload["model_name"] == "gemini-4-argon"
+
+
+def test_evolve_f10_post_blend_compositional_simplex_closure() -> None:
+    """F10: Per-series ensemble blending preserves compositional simplex closure (< 1e-6)."""
+    from scale_forecasting.evolve.evaluator import _blend_frame_with_series_weights
+    from scale_forecasting.simplex import verify_simplex_coherence
+
+    rng = np.random.default_rng(104)
+    dates = pd.date_range("2025-01-01", periods=32, freq="D")
+    raw_a = 0.50 + 0.08 * np.sin(np.arange(32) * 2.0 * np.pi / 7.0) + rng.normal(0.0, 0.01, 32)
+    raw_b = 0.30 + 0.05 * np.cos(np.arange(32) * 2.0 * np.pi / 7.0) + rng.normal(0.0, 0.01, 32)
+    raw_c = np.maximum(0.05, 1.0 - raw_a - raw_b)
+    totals = raw_a + raw_b + raw_c
+    shares = {"part_a": raw_a / totals, "part_b": raw_b / totals, "part_c": raw_c / totals}
+
+    rows: list[dict[str, Any]] = []
+    for tid, s_vals in shares.items():
+        for d, y_v in zip(dates, s_vals, strict=True):
+            rows.append({"ts_id": tid, "ds": d, "y": float(y_v)})
+    simplex_df = pd.DataFrame(rows)
+
+    # 1. Direct verification on heterogeneous per-series weights that would otherwise break sum=1
+    synth_pred_rows: list[dict[str, Any]] = []
+    for d in dates[:6]:
+        for tid, m1_share, m2_share in (
+            ("part_a", 0.60, 0.25),
+            ("part_b", 0.25, 0.50),
+            ("part_c", 0.15, 0.25),
+        ):
+            synth_pred_rows.append(
+                {
+                    "ts_id": tid,
+                    "forecast_date": d,
+                    "model_type": "m1",
+                    "yhat": m1_share,
+                    "yhat_lower": max(0.01, m1_share - 0.05),
+                    "yhat_upper": min(0.99, m1_share + 0.05),
+                }
+            )
+            synth_pred_rows.append(
+                {
+                    "ts_id": tid,
+                    "forecast_date": d,
+                    "model_type": "m2",
+                    "yhat": m2_share,
+                    "yhat_lower": max(0.01, m2_share - 0.05),
+                    "yhat_upper": min(0.99, m2_share + 0.05),
+                }
+            )
+    synth_preds = pd.DataFrame(synth_pred_rows)
+    het_weights = {
+        "part_a": {"m1": 0.9, "m2": 0.1},
+        "part_b": {"m1": 0.1, "m2": 0.9},
+        "part_c": {"m1": 0.5, "m2": 0.5},
+    }
+    blended = _blend_frame_with_series_weights(
+        synth_preds,
+        het_weights,
+        date_col="forecast_date",
+        simplex_sum=1.0,
+    )
+    disc_blend = verify_simplex_coherence(
+        blended,
+        value_col="yhat_blend",
+        date_col="forecast_date",
+        simplex_sum=1.0,
+    )
+    assert disc_blend < 1e-6
+
+    # 2. End-to-end Forecaster.evolve(target="ensemble") on compositional simplex panel
+    res = Forecaster.evolve(
+        simplex_df,
+        target="ensemble",
+        backend="mock",
+        max_evaluations=2,
+        horizon=4,
+    )
+    assert res.predictions_df is not None and not res.predictions_df.empty
+    disc_e2e = verify_simplex_coherence(res.predictions_df, simplex_sum=1.0)
+    assert disc_e2e < 1e-6
+    assert (res.predictions_df["yhat"] > 0.0).all()
+
+
+def test_evolve_f10_post_blend_hierarchy_coherence() -> None:
+    """F10: Per-series ensemble blending preserves cross-sectional hierarchy coherence (< 1e-6)."""
+    from scale_forecasting.evolve.evaluator import _blend_frame_with_series_weights
+    from scale_forecasting.reconciliation import HierarchySpec, verify_coherence
+
+    spec = HierarchySpec(
+        node_ids=("__total__", "region=East", "region=West", "s_e1", "s_e2", "s_w1"),
+        bottom_ids=("s_e1", "s_e2", "s_w1"),
+        level_nodes={
+            "__total__": ("__total__",),
+            "region": ("region=East", "region=West"),
+            "__bottom__": ("s_e1", "s_e2", "s_w1"),
+        },
+        summing_matrix=np.array(
+            [
+                [1.0, 1.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+    )
+    dates = pd.date_range("2025-02-01", periods=4, freq="D")
+    pred_rows: list[dict[str, Any]] = []
+    for d in dates:
+        b_m1 = np.array([10.0, 20.0, 30.0])
+        b_m2 = np.array([15.0, 25.0, 18.0])
+        y_m1 = spec.summing_matrix @ b_m1
+        y_m2 = spec.summing_matrix @ b_m2
+        for idx, nid in enumerate(spec.node_ids):
+            pred_rows.append(
+                {
+                    "ts_id": nid,
+                    "forecast_date": d,
+                    "model_type": "m1",
+                    "yhat": float(y_m1[idx]),
+                }
+            )
+            pred_rows.append(
+                {
+                    "ts_id": nid,
+                    "forecast_date": d,
+                    "model_type": "m2",
+                    "yhat": float(y_m2[idx]),
+                }
+            )
+    pred_df = pd.DataFrame(pred_rows)
+    incoherent_per_series_weights = {
+        "__total__": {"m1": 1.0, "m2": 0.0},
+        "region=East": {"m1": 0.2, "m2": 0.8},
+        "region=West": {"m1": 0.9, "m2": 0.1},
+        "s_e1": {"m1": 0.5, "m2": 0.5},
+        "s_e2": {"m1": 0.0, "m2": 1.0},
+        "s_w1": {"m1": 0.3, "m2": 0.7},
+    }
+    blended = _blend_frame_with_series_weights(
+        pred_df,
+        incoherent_per_series_weights,
+        date_col="forecast_date",
+        hierarchy_spec=spec,
+    )
+    disc = verify_coherence(
+        blended,
+        spec,
+        value_col="yhat_blend",
+        date_col="forecast_date",
+        atol=1e-6,
+    )
+    assert disc < 1e-6
+
+
+def test_evolve_f11_mutation_prompt_and_runner_structural_guardrails() -> None:
+    """F11: build_mutation_prompt() and run_evolution() pass Track J & K guardrail context."""
+    from scale_forecasting.evolve.targets import build_mutation_prompt
+
+    prompt = build_mutation_prompt(
+        "features",
+        get_target_seed("features").seed_code,
+        diagnostics={
+            "fva_pct": 2.5,
+            "dm_pvalue": 0.04,
+            "worst_decile_fva": 0.01,
+            "monotonic_constraints": {"price": -1, "promo": 1},
+            "is_compositional_simplex": True,
+            "simplex_total": 1.0,
+            "hierarchy_id_cols": ["region"],
+            "reconcile_temporal": True,
+        },
+        generation=2,
+    )
+    assert "monotonic_constraints={'price': -1, 'promo': 1}" in prompt
+    assert "is_compositional_simplex=True" in prompt
+    assert "simplex_total=1.0" in prompt
+    assert "hierarchy_id_cols=['region']" in prompt
+    assert "reconcile_temporal=True" in prompt
+
+
+def test_evolve_f12_policy_weights_and_seed_code_include_track_j_and_k_actions() -> None:
+    """F12: evolved_policy_thresholds and POLICY_SEED_CODE include Track J & K action priors."""
+    from scale_forecasting.auto_policy import evolved_policy_thresholds
+    from scale_forecasting.evolve.targets import (
+        AutoPolicyWeights,
+        deterministic_mock_candidates,
+        evolve_policy_weights,
+    )
+
+    th_actions = evolved_policy_thresholds()["action_weights"]
+    for action_key in (
+        "inject_monotone_guardrails",
+        "inject_transform_simplex",
+        "enable_temporal_reconciliation",
+    ):
+        assert action_key in th_actions
+        conf, gain = th_actions[action_key]
+        assert 0.0 < conf <= 1.0
+        assert gain > 0.0
+
+    updated = evolve_policy_weights(AutoPolicyWeights())
+    for action_key in (
+        "inject_monotone_guardrails",
+        "inject_transform_simplex",
+        "enable_temporal_reconciliation",
+    ):
+        assert action_key in updated.action_weights
+
+    mock_policy_code = deterministic_mock_candidates("policy", count=1)[0]
+    fn = compile_candidate_symbol(mock_policy_code, "evolve_policy_weights")
+    cand_weights = fn(AutoPolicyWeights())
+    for action_key in (
+        "inject_monotone_guardrails",
+        "inject_transform_simplex",
+        "enable_temporal_reconciliation",
+    ):
+        assert action_key in cand_weights.action_weights

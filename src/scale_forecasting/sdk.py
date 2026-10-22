@@ -195,12 +195,14 @@ class Forecaster:
         config: RunConfig | Mapping[str, Any],
         *,
         settings: Settings | None = None,
+        data: pd.DataFrame | None = None,
         oof_df: pd.DataFrame | None = None,
         predictions_df: pd.DataFrame | None = None,
     ) -> None:
         self._config = RunConfig.model_validate(config) if isinstance(config, Mapping) else config
         self._settings = settings
         self._auto_session: Any = None
+        self._data: pd.DataFrame | None = data
         self._oof_df: pd.DataFrame | None = oof_df
         self._predictions_df: pd.DataFrame | None = predictions_df
 
@@ -2278,6 +2280,429 @@ class Forecaster:
             title=title,
         )
 
+    def _resolve_track_k_frames(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        limit: int = 20000,
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
+        """Resolve `(predictions_df, oof_df, history_df)` from session, local data, or BQ."""
+        import pandas as pd
+
+        hist_df = data if data is not None else self._data
+        eff_oof = oof_df
+        preds_df = forecasts_df
+
+        if (
+            self._auto_session is not None
+            and self._auto_session.where == "local"
+            and (run_id is None or run_id == self.run_id)
+        ):
+            if hist_df is None:
+                hist_df = self._auto_session.data_df
+            if eff_oof is None and not self._auto_session.oof_df.empty:
+                eff_oof = self._auto_session.oof_df
+            if preds_df is None and not self._auto_session.raw_predictions_df.empty:
+                preds_df = self._auto_session.raw_predictions_df.copy()
+
+        if (
+            preds_df is None
+            and self._predictions_df is not None
+            and (run_id is None or run_id == self.run_id)
+        ):
+            preds_df = self._predictions_df.copy()
+            if "segment" in preds_df.columns:
+                preds_df = preds_df[preds_df["segment"] == "forecast"].copy()
+            if eff_oof is None and self._oof_df is not None:
+                eff_oof = self._oof_df.copy()
+
+        if preds_df is None and hist_df is not None and run_id is None:
+            from .engines.spark_io import run_group
+
+            models_to_run = (
+                [model_type] if model_type is not None else (list(self._config.models) or ["theta"])
+            )
+            cells, _ = run_group(hist_df, self._config, models=models_to_run)
+            ok_cells = [c for c in cells if c.status == "ok" and not c.predictions.empty]
+            if ok_cells:
+                preds_df = pd.concat(
+                    [
+                        c.predictions.assign(ts_id=c.ts_id, model_type=c.model_type)
+                        for c in ok_cells
+                    ],
+                    ignore_index=True,
+                )
+            oof_cells = [
+                c for c in cells if c.status == "ok" and c.oof is not None and not c.oof.empty
+            ]
+            if eff_oof is None and oof_cells:
+                eff_oof = pd.concat(
+                    [
+                        c.oof.assign(ts_id=c.ts_id, model_type=c.model_type)
+                        for c in oof_cells
+                        if c.oof is not None
+                    ],
+                    ignore_index=True,
+                )
+
+        if preds_df is None:
+            from .registry.reads import read_oof, read_predictions
+
+            rid = run_id or self.run_id
+            model_filter = [model_type] if model_type and model_type not in ("all", "*") else None
+            pred_rows = read_predictions(
+                rid, models=model_filter, limit=limit, settings=self._settings
+            )
+            preds_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+            if eff_oof is None:
+                oof_rows = read_oof(rid, models=model_filter, limit=limit, settings=self._settings)
+                eff_oof = pd.DataFrame.from_records(oof_rows) if oof_rows else None
+            if hist_df is None:
+                with contextlib.suppress(Exception):
+                    from .engines.bigquery_names import source_ref
+                    from .engines.bigquery_sql import series_filter
+                    from .registry.reads import resolve_settings
+
+                    resolved = resolve_settings(self._settings)
+                    source = source_ref(self._config, resolved.registry_dataset_ref)
+                    idc, datec = self._config.data.ts_id_col, self._config.data.date_col
+                    sfilter = series_filter(self._config, source, idc)
+                    where_clause = f" WHERE {sfilter}" if sfilter else ""
+                    sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
+                    client = bigquery_client(resolved.project_id)
+                    df_src = client.query(sql).to_dataframe()
+                    if not df_src.empty:
+                        hist_df = df_src
+
+        if preds_df is not None and "segment" in preds_df.columns:
+            fc_mask = preds_df["segment"] == "forecast"
+            if fc_mask.any():
+                preds_df = preds_df[fc_mask].copy()
+
+        return (
+            preds_df if preds_df is not None else pd.DataFrame(),
+            eff_oof,
+            hist_df,
+        )
+
+    def temporal_reconcile_df(
+        self,
+        *,
+        data: pd.DataFrame | None = None,
+        forecasts_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        method: str | None = None,
+        model_type: str | None = None,
+        aggregations: Sequence[int] | None = None,
+        temporal_aggregations: Sequence[int] | None = None,
+        cross_sectional: bool | None = None,
+        spatial_temporal_weight: float | str | None = None,
+        return_aggregations: bool = False,
+        limit: int = 20000,
+    ) -> Any:
+        """Reconcile forecasts across temporal aggregations (`THieF`) or simultaneously across
+        cross-sectional and temporal hierarchies (`cross_temporal_mint`).
+        """
+        from .reconciliation import build_hierarchy
+        from .temporal_reconciliation import (
+            reconcile_cross_temporal,
+            reconcile_temporal_forecasts,
+        )
+
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        if forecasts_df is None and not preds_df.empty and "model_type" in preds_df.columns:
+            target_models = (
+                {model_type}
+                if model_type is not None and model_type not in ("all", "*")
+                else set(self._config.models)
+            )
+            if target_models and any(
+                m in target_models for m in preds_df["model_type"].astype(str).unique()
+            ):
+                preds_df = preds_df[preds_df["model_type"].astype(str).isin(target_models)].copy()
+                if eff_oof is not None and not eff_oof.empty and "model_type" in eff_oof.columns:
+                    eff_oof = eff_oof[eff_oof["model_type"].astype(str).isin(target_models)].copy()
+        eff_aggs = (
+            temporal_aggregations
+            if temporal_aggregations is not None
+            else (
+                aggregations
+                if aggregations is not None
+                else self._config.hierarchy.temporal_aggregations
+            )
+        )
+        eff_method = method or (
+            self._config.hierarchy.reconciliation_methods[0]
+            if self._config.hierarchy.reconciliation_methods
+            else "mint_shrink"
+        )
+        use_cross_sectional = (
+            cross_sectional
+            if cross_sectional is not None
+            else bool(
+                self._config.hierarchy.cross_temporal
+                or eff_method == "cross_temporal_mint"
+                or (
+                    self._config.hierarchy.enabled
+                    and self._config.hierarchy.levels
+                    and hist_df is not None
+                    and not hist_df.empty
+                )
+            )
+        )
+        if (
+            use_cross_sectional
+            and self._config.hierarchy.levels
+            and hist_df is not None
+            and not hist_df.empty
+        ):
+            needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
+            if needed.issubset(hist_df.columns):
+                panel_df, hier_spec = build_hierarchy(hist_df, self._config)
+                return reconcile_cross_temporal(
+                    preds_df,
+                    hier_spec,
+                    history_df=panel_df,
+                    oof_df=eff_oof,
+                    cfg=self._config,
+                    freq=self._config.data.freq,
+                    temporal_aggregations=eff_aggs,
+                    method=eff_method,
+                    middle_level=self._config.hierarchy.middle_level,
+                    spatial_temporal_weight=spatial_temporal_weight,  # type: ignore[arg-type]
+                    return_aggregations=return_aggregations,
+                    ts_id_col=self._config.data.ts_id_col,
+                    target_col=self._config.data.target_col,
+                )
+
+        return reconcile_temporal_forecasts(
+            preds_df,
+            history_df=hist_df,
+            oof_df=eff_oof,
+            cfg=self._config,
+            freq=self._config.data.freq,
+            horizon=self._config.data.horizon,
+            temporal_aggregations=eff_aggs,
+            method=eff_method if eff_method != "cross_temporal_mint" else "mint_shrink",
+            model_type=model_type,
+            return_aggregations=return_aggregations,
+            ts_id_col=self._config.data.ts_id_col,
+            target_col=self._config.data.target_col,
+        )
+
+    temporal_reconcile = temporal_reconcile_df
+
+    def sample_coherent_paths(
+        self,
+        *,
+        data: pd.DataFrame | None = None,
+        forecasts_df: pd.DataFrame | None = None,
+        predictions_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        spec: Any = None,
+        hier_spec: Any = None,
+        model_type: str | None = None,
+        n_paths: int = 200,
+        seed: int = 42,
+        method: str | None = None,
+        nonneg: bool = False,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Draw ``n_paths`` coherent probabilistic trajectory scenarios satisfying cross-sectional
+        and/or temporal aggregation constraints (`temporal_reconciliation.sample_coherent_paths`).
+        """
+        from .reconciliation import build_hierarchy
+        from .temporal_reconciliation import sample_coherent_paths as _sample_coherent_paths
+
+        eff_fc = forecasts_df if forecasts_df is not None else predictions_df
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            forecasts_df=eff_fc,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        eff_spec = spec if spec is not None else hier_spec
+        if (
+            eff_spec is None
+            and self._config.hierarchy.levels
+            and hist_df is not None
+            and not hist_df.empty
+        ):
+            needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
+            if needed.issubset(hist_df.columns):
+                hist_df, eff_spec = build_hierarchy(hist_df, self._config)
+        eff_method = method or (
+            self._config.hierarchy.reconciliation_methods[0]
+            if self._config.hierarchy.reconciliation_methods
+            else "mint_shrink"
+        )
+        return _sample_coherent_paths(
+            preds_df,
+            eff_spec,
+            history_df=hist_df,
+            oof_df=eff_oof,
+            cfg=self._config,
+            n_paths=n_paths,
+            seed=seed,
+            method=eff_method,
+            nonneg=nonneg,
+        )
+
+    def allocate_target(
+        self,
+        target_total: Any = None,
+        _second_arg: Any = None,
+        *,
+        target: Any = None,
+        targets: Any = None,
+        target_sum: Any = None,
+        horizon_total: float | None = None,
+        forecasts_df: pd.DataFrame | None = None,
+        predictions_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        history_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        node_id: str | None = None,
+        target_node: str = "__total__",
+        period: Sequence[Any] | str | None = None,
+        target_dates: Sequence[Any] | str | None = None,
+        target_mode: str = "auto",
+        target_metric: str = "auto",
+        locked_nodes: Sequence[str] | Mapping[str, float] | None = None,
+        locks: Sequence[str] | Mapping[str, float] | None = None,
+        lower_bounds: Mapping[str, float] | Sequence[float] | Any = None,
+        upper_bounds: Mapping[str, float] | Sequence[float] | Any = None,
+        bounds: Any = None,
+        floor: float | None = 0.0,
+        cap: float | None = None,
+        ceiling: float | None = None,
+        nonneg: bool = True,
+        method: str = "mint_shrink",
+        weights: Any = None,
+        smoothness_weight: float = 0.0,
+        hier_spec: Any = None,
+        spec: Any = None,
+        model_type: str | None = None,
+        scenario: str | None = None,
+        price_col: str | Mapping[str, float] | float | None = None,
+        prices: Mapping[str, float] | float | pd.DataFrame | None = None,
+        unit_cost: float | Mapping[str, float] | str | None = None,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float | None = 0.95,
+        inventory_params: Mapping[str, Any] | None = None,
+        return_result: bool = False,
+        limit: int = 20000,
+    ) -> Any:
+        """Optimally disaggregate a top-down or regional target across leaf series and dates via
+        constrained Minimum-Trace Quadratic Programming (`goal_seek.allocate_target`).
+        """
+        import pandas as pd
+
+        from .goal_seek import allocate_target as _allocate_target
+
+        eff_forecasts = forecasts_df if forecasts_df is not None else predictions_df
+        eff_target = target_total
+        if (
+            isinstance(target_total, pd.DataFrame)
+            and ("yhat" in target_total.columns or "scenario_yhat" in target_total.columns)
+            and eff_forecasts is None
+        ):
+            eff_forecasts = target_total
+            eff_target = _second_arg
+
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            forecasts_df=eff_forecasts,
+            data=data if data is not None else history_df,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        return _allocate_target(
+            preds_df,
+            target_total=eff_target,
+            target=target,
+            targets=targets,
+            target_sum=target_sum,
+            horizon_total=horizon_total,
+            node_id=node_id,
+            target_node=target_node,
+            period=period,
+            target_dates=target_dates,
+            target_mode=target_mode,  # type: ignore[arg-type]
+            target_metric=target_metric,  # type: ignore[arg-type]
+            locked_nodes=locked_nodes,
+            locks=locks,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            bounds=bounds,
+            floor=floor if floor is not None else self._config.output.floor,
+            cap=cap
+            if cap is not None
+            else (ceiling if ceiling is not None else self._config.output.cap),
+            nonneg=nonneg,
+            method=method,
+            weights=weights,
+            smoothness_weight=smoothness_weight,
+            hier_spec=hier_spec,
+            spec=spec,
+            cfg=self._config,
+            history_df=hist_df,
+            oof_df=eff_oof,
+            price_col=price_col,
+            prices=prices,
+            unit_cost=unit_cost,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            inventory_params=inventory_params,
+            model_type=model_type,
+            scenario=scenario,
+            date_col=self._config.data.date_col,
+            ts_id_col=self._config.data.ts_id_col,
+            target_col=self._config.data.target_col,
+            return_result=return_result,
+        )
+
+    def plot_goal_seek(
+        self,
+        goal_seek_df: Any,
+        *,
+        ts_id: str | None = None,
+        top_n: int = 10,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot baseline vs. goal-seek allocated forecasts (`goal_seek.plot_goal_seek`)."""
+        from .goal_seek import plot_goal_seek as _plot_goal_seek
+
+        return _plot_goal_seek(
+            goal_seek_df,
+            ts_id=ts_id,
+            top_n=top_n,
+            ax=ax,
+            title=title,
+        )
+
     def audit_monotonicity_df(
         self,
         sim_df: pd.DataFrame,
@@ -2831,30 +3256,59 @@ class Forecaster:
         *,
         run_id: str | None = None,
         title: str | None = None,
+        predictions_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        leaderboard_df: pd.DataFrame | None = None,
         promo_elasticity_df: pd.DataFrame | None = None,
         scenarios_df: pd.DataFrame | None = None,
+        goal_seek_df: pd.DataFrame | None = None,
         write_json: bool = False,
     ) -> Any:
         """Export a self-contained `.html` report for ``run_id``."""
+        import pandas as pd
+
         from .report import export_report
 
         rid = run_id or self.run_id
+
+        def _safe_df(fn: Any) -> pd.DataFrame:
+            try:
+                return fn(rid)
+            except Exception:  # noqa: BLE001 - allow offline report export without SF_* env vars
+                return pd.DataFrame()
+
+        eff_preds = (
+            predictions_df
+            if predictions_df is not None
+            else (
+                self._predictions_df
+                if self._predictions_df is not None
+                else _safe_df(self.predictions_df)
+            )
+        )
+        eff_oof = oof_df if oof_df is not None else self._oof_df
         payload_dict: dict[str, Any] = {
             "run_id": rid,
-            "leaderboard_df": self.leaderboard_df(rid),
-            "fva_df": self.fva_df(rid),
-            "horizon_decay_df": self.horizon_decay_df(rid),
-            "bias_df": self.bias_report_df(rid),
-            "exceptions_df": self.exceptions_df(rid),
-            "inventory_policy_df": self.inventory_policy_df(rid),
-            "predictions_df": self.predictions_df(rid),
+            "leaderboard_df": (
+                leaderboard_df if leaderboard_df is not None else _safe_df(self.leaderboard_df)
+            ),
+            "fva_df": _safe_df(self.fva_df),
+            "horizon_decay_df": _safe_df(self.horizon_decay_df),
+            "bias_df": _safe_df(self.bias_report_df),
+            "exceptions_df": _safe_df(self.exceptions_df),
+            "inventory_policy_df": _safe_df(self.inventory_policy_df),
+            "predictions_df": eff_preds,
+            "oof_df": eff_oof,
             "promo_elasticity_df": promo_elasticity_df,
             "scenarios_df": scenarios_df,
+            "goal_seek_df": goal_seek_df,
         }
         if self._auto_session is not None:
             payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
             payload_dict["blueprint_rationale_df"] = self._auto_session.blueprint.rationale_df
             payload_dict["history_df"] = self._auto_session.data_df
+        elif self._data is not None:
+            payload_dict["history_df"] = self._data
         return export_report(
             payload_dict,
             out_path,
@@ -2862,6 +3316,7 @@ class Forecaster:
             metric=self._config.backtest.decision_metric,
             promo_elasticity_df=promo_elasticity_df,
             scenarios_df=scenarios_df,
+            goal_seek_df=goal_seek_df,
             write_json=write_json,
         )
 

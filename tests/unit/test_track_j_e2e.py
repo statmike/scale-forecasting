@@ -2027,3 +2027,111 @@ def test_tier4_scenario5_executive_glass_box_html_report_and_mcp_agent_roundtrip
     p1 = json.loads(r1["content"][0]["text"])
     p2 = json.loads(r2["content"][0]["text"])
     assert p1["status"] == "ok" and p2["status"] == "ok"
+
+
+def test_track_j_f8_practitioner_assessment_q3_causal_guardrails_and_elasticity_rec() -> None:
+    """F8: Question 3 reports monotonic_constraints, holiday_window, and f.promo_elasticity_df()."""
+    hist_df, fut_df = _make_collinear_price_promo_panel(n_days=70, horizon=7, seed=404)
+    f = Forecaster.auto(
+        hist_df,
+        future_df=fut_df,
+        holidays=["US"],
+        tier="first_light",
+        where="local",
+        horizon=7,
+        autofocus=False,
+    )
+    assess = f.practitioner_assessment_df()
+    q3 = assess[assess["question_id"] == "covariates_vs_overfitting"].iloc[0]
+    assert "monotonic_constraints=" in str(q3["evidence"])
+    assert "holiday_window=" in str(q3["evidence"])
+    assert "f.promo_elasticity_df()" in str(q3["recommendation"])
+    assert "f.attributions_df()" in str(q3["recommendation"])
+
+
+def test_track_k_f9_practitioner_assessment_q5_reconciliation_modes_and_simplex() -> None:
+    """F9: Question 5 distinguishes spatial_only, temporal_only, cross_temporal, and simplex."""
+    hist_df, fut_df = _make_collinear_price_promo_panel(n_days=56, horizon=7, seed=505)
+
+    # 1. Mode 2 (temporal_only on a flat panel)
+    flat_df = hist_df.drop(columns=["region"]).copy()
+    flat_fut = fut_df.drop(columns=["region"]).copy()
+    f_temp = Forecaster.auto(
+        flat_df,
+        future_df=flat_fut,
+        tier="first_light",
+        where="local",
+        horizon=7,
+        autofocus=False,
+        overrides={
+            "hierarchy": {
+                "enabled": False,
+                "reconcile_temporal": True,
+                "temporal_aggregations": [1, 7],
+                "reconciliation_methods": ["wls_struct"],
+            }
+        },
+    )
+    q5_temp = (
+        f_temp.practitioner_assessment_df()
+        .query("question_id == 'hierarchy_reconciliation'")
+        .iloc[0]
+    )
+    assert q5_temp["verdict"] == "temporal_coherent_and_verified"
+    assert "mode='temporal_only'" in str(q5_temp["evidence"])
+    assert "temporal_aggregations=[1, 7]" in str(q5_temp["evidence"])
+
+    # 2. Mode 3 (cross_temporal on a hierarchical panel)
+    f_ct = Forecaster.auto(
+        hist_df,
+        future_df=fut_df,
+        tier="first_light",
+        where="local",
+        horizon=7,
+        autofocus=False,
+        overrides={
+            "hierarchy": {
+                "enabled": True,
+                "levels": [["region"]],
+                "reconcile_temporal": True,
+                "cross_temporal": True,
+                "temporal_aggregations": [1, 7],
+                "reconciliation_methods": ["wls_struct", "cross_temporal_mint"],
+            }
+        },
+    )
+    q5_ct = (
+        f_ct.practitioner_assessment_df().query("question_id == 'hierarchy_reconciliation'").iloc[0]
+    )
+    assert q5_ct["verdict"] == "coherent_and_verified"
+    assert "mode='cross_temporal'" in str(q5_ct["evidence"])
+    assert "spatial_weight_alpha=" in str(q5_ct["evidence"])
+    assert "cross_temporal_beats_spatial=" in str(q5_ct["evidence"])
+
+    # 3. Compositional simplex closure on a flat panel
+    dates = pd.date_range("2025-01-01", periods=35, freq="D")
+    s_rows = []
+    for tid, share in (("seg_a", 0.55), ("seg_b", 0.30), ("seg_c", 0.15)):
+        for idx, d in enumerate(dates):
+            wobble = (
+                0.02 * np.sin(idx * 2.0 * np.pi / 7.0)
+                if tid == "seg_a"
+                else (-0.02 * np.sin(idx * 2.0 * np.pi / 7.0) if tid == "seg_b" else 0.0)
+            )
+            s_rows.append({"ts_id": tid, "ds": d, "y": share + wobble})
+    simplex_df = pd.DataFrame(s_rows)
+    f_sim = Forecaster.auto(
+        simplex_df,
+        tier="first_light",
+        where="local",
+        horizon=7,
+        autofocus=False,
+    )
+    q5_sim = (
+        f_sim.practitioner_assessment_df()
+        .query("question_id == 'hierarchy_reconciliation'")
+        .iloc[0]
+    )
+    assert q5_sim["verdict"] == "coherent_and_verified"
+    assert "is_compositional_simplex=True" in str(q5_sim["evidence"])
+    assert "strictly_positive=True" in str(q5_sim["evidence"])

@@ -127,7 +127,9 @@ def _score_panel_params(
     try:
         lams = {
             uid: fit_transform_lambda(
-                series_frames[uid][target_col].astype(float), cfg.features.transform
+                series_frames[uid][target_col].astype(float),
+                cfg.features.transform,
+                simplex_sum=cfg.features.simplex_sum,
             )
             for uid in uids
         }
@@ -276,7 +278,11 @@ def _score_params(
             # Box-Cox λ is per-series: fit it on this series and hand the same λ to both the
             # forward features and the folds' inverse (mirrors run_cell). None for none/log1p.
             target = series[model_cfg.data.target_col].astype(float)
-            lam = fit_transform_lambda(target, model_cfg.features.transform)
+            lam = fit_transform_lambda(
+                target,
+                model_cfg.features.transform,
+                simplex_sum=model_cfg.features.simplex_sum,
+            )
             static_covs = extract_static_covariates(series, model_cfg) or None
             # device="auto" is forced, not inherited. A trial may run on the driver — the Ray head
             # node, a Spark driver, an Airflow worker — none of which has an accelerator, and

@@ -16,8 +16,20 @@ class ScaleForecastError(Exception):
     """Base class for every error raised by this package."""
 
 
+ScaleForecastingError = ScaleForecastError
+
+
 class ConfigError(ScaleForecastError):
     """The run config is missing, malformed, or internally inconsistent."""
+
+
+class GoalSeekInfeasibleError(ConfigError, ValueError):
+    """Top-down target allocation (`allocate_target`) violates hard box bounds or locked nodes.
+
+    Inherits from both `ConfigError` (`ScaleForecastError`) and `ValueError` so callers catching
+    either the package error hierarchy or standard Python value errors handle infeasible target
+    disaggregation specifications cleanly.
+    """
 
 
 class DataError(ScaleForecastError):

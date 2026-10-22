@@ -214,6 +214,16 @@ class PlaygroundRun:
     series: pd.DataFrame
     backtest: bool
 
+    @property
+    def predictions(self) -> pd.DataFrame:
+        """Convenience alias for ``self.result.predictions``."""
+        return self.result.predictions
+
+    @property
+    def oof(self) -> pd.DataFrame | None:
+        """Convenience alias for ``self.result.oof``."""
+        return self.result.oof
+
     def horizon_decay_df(self, *, metric: str = "wape") -> pd.DataFrame:
         """Compute lead-time error decay across horizon steps for this run's backtest OOF."""
         from .diagnostics import compute_horizon_decay
@@ -430,17 +440,165 @@ class PlaygroundRun:
         )
         return compute_exceptions_queue(oof_df=oof, predictions_df=preds, top_n=top_n)
 
+    def temporal_reconcile_df(
+        self,
+        *,
+        method: str = "mint_shrink",
+        aggregations: list[int] | None = None,
+        temporal_aggregations: list[int] | None = None,
+        stamp_method: bool = False,
+    ) -> pd.DataFrame:
+        """Reconcile this run's forecast across temporal aggregations (`THieF`)."""
+        from .temporal_reconciliation import reconcile_temporal_forecasts
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        eff_aggs = temporal_aggregations if temporal_aggregations is not None else aggregations
+        rec = reconcile_temporal_forecasts(
+            preds,
+            history_df=self.series,
+            oof_df=oof,
+            temporal_aggregations=eff_aggs,
+            method=method,
+            stamp_method=stamp_method,
+        )
+        assert isinstance(rec, pd.DataFrame)
+        return rec
+
+    def sample_coherent_paths(
+        self,
+        *,
+        n_paths: int = 200,
+        seed: int = 42,
+        method: str = "mint_shrink",
+        nonneg: bool = False,
+    ) -> pd.DataFrame:
+        """Draw ``n_paths`` coherent probabilistic trajectory scenarios for this playground run."""
+        from .temporal_reconciliation import sample_coherent_paths as _sample_coherent_paths
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        return _sample_coherent_paths(
+            preds,
+            history_df=self.series,
+            oof_df=oof,
+            n_paths=n_paths,
+            seed=seed,
+            method=method,
+            nonneg=nonneg,
+        )
+
+    def allocate_target(
+        self,
+        target_total: Any = None,
+        *,
+        target: Any = None,
+        targets: Any = None,
+        target_sum: Any = None,
+        locked_nodes: Any = None,
+        locks: Any = None,
+        lower_bounds: Any = None,
+        upper_bounds: Any = None,
+        bounds: Any = None,
+        floor: float | None = 0.0,
+        cap: float | None = None,
+        method: str = "mint_shrink",
+        weights: Any = None,
+        smoothness_weight: float = 0.0,
+        price_col: str | dict[str, float] | float | None = None,
+        prices: dict[str, float] | float | pd.DataFrame | None = None,
+        unit_cost: float | dict[str, float] | str | None = None,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        inventory_params: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Allocate a top-down target across this series' forecast horizon
+        (`goal_seek.allocate_target`).
+        """
+        from .goal_seek import allocate_target as _allocate_target
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        out = _allocate_target(
+            preds,
+            target_total=target_total,
+            target=target,
+            targets=targets,
+            target_sum=target_sum,
+            locked_nodes=locked_nodes,
+            locks=locks,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            bounds=bounds,
+            floor=floor,
+            cap=cap,
+            method=method,
+            weights=weights,
+            smoothness_weight=smoothness_weight,
+            history_df=self.series,
+            oof_df=oof,
+            price_col=price_col,
+            prices=prices,
+            unit_cost=unit_cost,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            inventory_params=inventory_params,
+        )
+        assert isinstance(out, pd.DataFrame)
+        return out
+
+    def plot_goal_seek(
+        self,
+        goal_seek_df: Any,
+        *,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot baseline vs. goal-seek allocated trajectory for this playground run."""
+        from .goal_seek import plot_goal_seek as _plot_goal_seek
+
+        return _plot_goal_seek(goal_seek_df, ts_id=self.result.ts_id, ax=ax, title=title)
+
     def export_report(
         self,
         out_path: str | Any,
         *,
         title: str | None = None,
+        goal_seek_df: pd.DataFrame | None = None,
         write_json: bool = False,
     ) -> Any:
         """Export a self-contained `.html` report for this playground run."""
         from .report import export_report
 
-        return export_report(self, out_path, title=title, write_json=write_json)
+        return export_report(
+            self,
+            out_path,
+            title=title,
+            goal_seek_df=goal_seek_df,
+            write_json=write_json,
+        )
 
 
 @dataclass(frozen=True)
@@ -682,17 +840,172 @@ class BakeOff:
             top_n=top_n,
         )
 
+    def temporal_reconcile_df(
+        self,
+        *,
+        method: str = "mint_shrink",
+        model_type: str | None = None,
+        aggregations: list[int] | None = None,
+        temporal_aggregations: list[int] | None = None,
+    ) -> pd.DataFrame:
+        """Reconcile bake-off forecasts across temporal aggregations (`THieF`)."""
+        from .temporal_reconciliation import reconcile_temporal_forecasts
+
+        eff_aggs = temporal_aggregations if temporal_aggregations is not None else aggregations
+        rec = reconcile_temporal_forecasts(
+            self.predictions,
+            history_df=self.series,
+            oof_df=self.oof,
+            cfg=self.config,
+            freq=self.config.data.freq,
+            horizon=self.config.data.horizon,
+            temporal_aggregations=eff_aggs,
+            method=method,
+            model_type=model_type,
+        )
+        assert isinstance(rec, pd.DataFrame)
+        return rec
+
+    def sample_coherent_paths(
+        self,
+        *,
+        model_type: str | None = None,
+        n_paths: int = 200,
+        seed: int = 42,
+        method: str = "mint_shrink",
+        nonneg: bool = False,
+    ) -> pd.DataFrame:
+        """Draw ``n_paths`` coherent probabilistic trajectory scenarios for this bake-off."""
+        from .temporal_reconciliation import sample_coherent_paths as _sample_coherent_paths
+
+        eff_model = model_type
+        if eff_model is None and not self.leaderboard.empty:
+            for col in ("model_type", "model"):
+                if col in self.leaderboard.columns:
+                    eff_model = str(self.leaderboard[col].iloc[0])
+                    break
+        preds = self.predictions
+        if eff_model is not None and "model_type" in preds.columns:
+            preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+        return _sample_coherent_paths(
+            preds,
+            history_df=self.series,
+            oof_df=self.oof,
+            cfg=self.config,
+            n_paths=n_paths,
+            seed=seed,
+            method=method,
+            nonneg=nonneg,
+        )
+
+    def allocate_target(
+        self,
+        target_total: Any = None,
+        *,
+        target: Any = None,
+        targets: Any = None,
+        target_sum: Any = None,
+        model_type: str | None = None,
+        locked_nodes: Any = None,
+        locks: Any = None,
+        lower_bounds: Any = None,
+        upper_bounds: Any = None,
+        bounds: Any = None,
+        floor: float | None = 0.0,
+        cap: float | None = None,
+        method: str = "mint_shrink",
+        weights: Any = None,
+        smoothness_weight: float = 0.0,
+        price_col: str | dict[str, float] | float | None = None,
+        prices: dict[str, float] | float | pd.DataFrame | None = None,
+        unit_cost: float | dict[str, float] | str | None = None,
+        include_inventory_impact: bool = False,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        inventory_params: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        """Allocate a top-down target across this bake-off's forecasts
+        (`goal_seek.allocate_target`).
+        """
+        from .goal_seek import allocate_target as _allocate_target
+
+        eff_model = model_type
+        if eff_model is None and not self.leaderboard.empty:
+            for col in ("model_type", "model"):
+                if col in self.leaderboard.columns:
+                    eff_model = str(self.leaderboard[col].iloc[0])
+                    break
+        out = _allocate_target(
+            self.predictions,
+            target_total=target_total,
+            target=target,
+            targets=targets,
+            target_sum=target_sum,
+            model_type=eff_model,
+            locked_nodes=locked_nodes,
+            locks=locks,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            bounds=bounds,
+            floor=floor,
+            cap=cap,
+            method=method,
+            weights=weights,
+            smoothness_weight=smoothness_weight,
+            cfg=self.config,
+            history_df=self.series,
+            oof_df=self.oof,
+            price_col=price_col,
+            prices=prices,
+            unit_cost=unit_cost,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            inventory_params=inventory_params,
+        )
+        assert isinstance(out, pd.DataFrame)
+        return out
+
+    def plot_goal_seek(
+        self,
+        goal_seek_df: Any,
+        *,
+        ts_id: str | None = None,
+        top_n: int = 10,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot baseline vs. goal-seek allocated forecasts for this bake-off."""
+        from .goal_seek import plot_goal_seek as _plot_goal_seek
+
+        return _plot_goal_seek(
+            goal_seek_df,
+            ts_id=ts_id,
+            top_n=top_n,
+            ax=ax,
+            title=title,
+        )
+
     def export_report(
         self,
         out_path: str | Any,
         *,
         title: str | None = None,
+        goal_seek_df: pd.DataFrame | None = None,
         write_json: bool = False,
     ) -> Any:
         """Export a self-contained interactive `.html` report for this bake-off."""
         from .report import export_report
 
-        return export_report(self, out_path, title=title, write_json=write_json)
+        return export_report(
+            self,
+            out_path,
+            title=title,
+            goal_seek_df=goal_seek_df,
+            write_json=write_json,
+        )
 
 
 def bakeoff(
