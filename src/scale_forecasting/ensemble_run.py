@@ -511,19 +511,23 @@ def _ensemble_batch(
             )
 
     cached_history: pd.DataFrame | None = None
-    if (
-        ts_ids is None
-        and cfg.hierarchy.enabled
-        and (
-            cfg.hierarchy.cross_temporal
-            or cfg.hierarchy.reconcile_temporal
-            or "cross_temporal_mint" in cfg.hierarchy.reconciliation_methods
-        )
+    if ts_ids is None and (
+        cfg.hierarchy.cross_temporal
+        or cfg.hierarchy.reconcile_temporal
+        or "cross_temporal_mint" in cfg.hierarchy.reconciliation_methods
     ):
         cached_history = _query(build_history_query(cfg, dataset)).to_dataframe()
         hier_cols = {col for level in cfg.hierarchy.levels for col in level}
+        hist_cfg = cfg.model_copy(
+            update={
+                "data": cfg.data.model_copy(
+                    update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
+                )
+            }
+        )
         if (
-            cached_history is not None
+            cfg.hierarchy.enabled
+            and cached_history is not None
             and not cached_history.empty
             and hier_cols
             and hier_cols.issubset(cached_history.columns)
@@ -531,13 +535,6 @@ def _ensemble_batch(
             from .reconciliation import build_hierarchy, reconcile_oof
             from .temporal_reconciliation import reconcile_cross_temporal
 
-            hist_cfg = cfg.model_copy(
-                update={
-                    "data": cfg.data.model_copy(
-                        update={"ts_id_col": "ts_id", "date_col": "ds", "target_col": "y"}
-                    )
-                }
-            )
             cached_history, hier_spec = build_hierarchy(cached_history, hist_cfg)
             if pred_rows:
                 ct_ens_preds = reconcile_cross_temporal(
@@ -581,6 +578,74 @@ def _ensemble_batch(
                     target_col="y",
                     stamp_method=False,
                 )
+        elif (
+            not cfg.hierarchy.enabled
+            and cfg.hierarchy.reconcile_temporal
+            and cached_history is not None
+            and not cached_history.empty
+        ):
+            from .temporal_reconciliation import reconcile_temporal_forecasts
+
+            t_method = next(
+                (m for m in cfg.hierarchy.reconciliation_methods if m != "cross_temporal_mint"),
+                "mint_shrink",
+            )
+            if pred_rows:
+                t_ens_preds = reconcile_temporal_forecasts(
+                    pd.DataFrame(pred_rows),
+                    history_df=cached_history,
+                    oof_df=ens_oof if not ens_oof.empty else None,
+                    cfg=hist_cfg,
+                    method=t_method,
+                    stamp_method=False,
+                    return_aggregations=False,
+                    date_col="forecast_date",
+                    ts_id_col="ts_id",
+                    target_col="y",
+                )
+                assert isinstance(t_ens_preds, pd.DataFrame)
+                pred_rows = [
+                    {
+                        **{str(k): v for k, v in r.items()},
+                        "yhat_lower": None
+                        if r.get("yhat_lower") is None
+                        or (isinstance(r.get("yhat_lower"), float) and np.isnan(r["yhat_lower"]))
+                        else float(r["yhat_lower"]),
+                        "yhat_upper": None
+                        if r.get("yhat_upper") is None
+                        or (isinstance(r.get("yhat_upper"), float) and np.isnan(r["yhat_upper"]))
+                        else float(r["yhat_upper"]),
+                    }
+                    for r in t_ens_preds.to_dict(orient="records")
+                ]
+            if not ens_oof.empty:
+                fold_col = "fold_id" if "fold_id" in ens_oof.columns else "cutoff_date"
+                oof_parts: list[pd.DataFrame] = []
+                for _fkey, fold_slice in ens_oof.groupby(fold_col, sort=True):
+                    fold_hist = cached_history
+                    if "cutoff_date" in fold_slice.columns and "ds" in cached_history.columns:
+                        c_val = fold_slice["cutoff_date"].iloc[0]
+                        sub_h = cached_history[
+                            pd.to_datetime(cached_history["ds"]) <= pd.Timestamp(c_val)
+                        ]
+                        if not sub_h.empty:
+                            fold_hist = sub_h
+                    rec_fold = reconcile_temporal_forecasts(
+                        fold_slice,
+                        history_df=fold_hist,
+                        cfg=hist_cfg,
+                        horizon=int(fold_slice.groupby(["model_type", "ts_id"]).size().max()),
+                        method=t_method,
+                        stamp_method=False,
+                        return_aggregations=False,
+                        date_col="forecast_date",
+                        ts_id_col="ts_id",
+                        target_col="y",
+                    )
+                    assert isinstance(rec_fold, pd.DataFrame)
+                    oof_parts.append(rec_fold)
+                if oof_parts:
+                    ens_oof = pd.concat(oof_parts, ignore_index=True)
 
     stamp_ensemble_prediction_rows(
         pred_rows, run_id=run_id, ensemble_id=ensemble_id, created_at=created_at

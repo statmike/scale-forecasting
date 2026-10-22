@@ -696,15 +696,16 @@ def add_bucket(
     """
     from pyspark.sql import functions as F
 
+    from ..simplex import has_simplex_models
     from ..worker import is_panel_model
 
     key = [F.col(c) for c in bucket_key_cols(cfg)]
     flat = F.pmod(F.hash(*key), F.lit(n_buckets))
-    panel_models = [m for m in cfg.models if is_panel_model(m, cfg)]
-    if panel_models and not cfg.hierarchy.enabled:
+    panel_models = [m for m in cfg.models if is_panel_model(m, cfg) or has_simplex_models(cfg, [m])]
+    if panel_models and not cfg.hierarchy.enabled and not has_simplex_models(cfg):
         panel_flat = F.pmod(F.hash(F.col(_MODEL_COL)), F.lit(n_buckets))
         flat = F.when(F.col(_MODEL_COL).isin(panel_models), panel_flat).otherwise(flat)
-    if not allocation or cfg.hierarchy.enabled:
+    if not allocation or cfg.hierarchy.enabled or has_simplex_models(cfg):
         return df.withColumn(_BUCKET_COL, flat)
 
     panel_set = set(panel_models)

@@ -2909,3 +2909,104 @@ def test_t5_evolve_hierarchy_levels_assess_mode3_alpha_and_goal_seek_locked_aggr
     assert abs(gs_res.target_total - target_tot) < 1e-6
     assert gs_res.max_target_discrepancy < 1e-6
     assert gs_res.max_coherence_error < 1e-6
+
+
+def test_t6_multi_engine_sharding_mode2_ensemble_and_dgp_benchmark_parity() -> None:
+    """Verify Spark/Ray/Vertex multi-worker sharding on simplex & cross-temporal configs,
+    Mode 2 flat-panel temporal ensemble reconciliation, and synthetic DGP benchmark parity.
+    """
+    from scale_forecasting.benchmarks import list_benchmarks, load_benchmark
+    from scale_forecasting.engines.ray_io import chunk_cells
+    from scale_forecasting.engines.spark_io import bucket_key_cols
+    from scale_forecasting.engines.vertex_engine import (
+        WorkerTopology,
+        models_sharded_across_workers,
+        partition_models_for_worker,
+    )
+
+    # 1. Spark / Ray / Vertex worker sharding with compositional simplex (@transform_ilr)
+    simplex_panel = _make_compositional_panel(
+        n_brands=4, n_periods=36, simplex_sum=100.0, with_launch_zeros=True, seed=211
+    )
+    cfg_simplex = RunConfig.model_validate(
+        {
+            "run_name": "t6-simplex-sharding",
+            "data": {"source_table": "p.d.t", "freq": "MS", "horizon": 6},
+            "models": ["theta@transform_ilr", "naive_seasonal@transform_clr"],
+            "features": {"simplex_sum": 100.0},
+            "backtest": {"enabled": True, "n_folds": 1, "horizon": 6},
+        }
+    )
+    assert bucket_key_cols(cfg_simplex) == ["_sf_model"]
+    assert models_sharded_across_workers(cfg_simplex, cfg_simplex.models) is True
+
+    # Ray chunk_cells must keep each simplex model's full panel together in a single chunk
+    ray_chunks = chunk_cells(simplex_panel, cfg_simplex, cfg_simplex.models, n_chunks=8)
+    assert len(ray_chunks) == 2
+    for ch in ray_chunks:
+        assert int(ch["ts_id"].nunique()) == int(simplex_panel["ts_id"].nunique())
+        ch_results, _ = run_group(ch, cfg_simplex, cfg_simplex.models)
+        ch_preds = pd.concat(
+            [r.predictions.assign(ts_id=r.ts_id, model_type=r.model_type) for r in ch_results],
+            ignore_index=True,
+        )
+        assert verify_simplex(ch_preds, simplex_sum=100.0) < 1e-6
+
+    # Vertex multi-worker partitioning must assign whole models per worker rank
+    rank0_models = partition_models_for_worker(
+        cfg_simplex, cfg_simplex.models, WorkerTopology(rank=0, world_size=2)
+    )
+    rank1_models = partition_models_for_worker(
+        cfg_simplex, cfg_simplex.models, WorkerTopology(rank=1, world_size=2)
+    )
+    assert rank0_models == ["theta@transform_ilr"]
+    assert rank1_models == ["naive_seasonal@transform_clr"]
+
+    # 2. Mode 2 (Temporal-Only THieF on flat panel) nonlinear median ensemble temporal coherence
+    flat_panel = simplex_panel[simplex_panel["ts_id"].isin(["brand_0", "brand_1"])].copy()
+    cfg_m2 = RunConfig.model_validate(
+        {
+            "run_name": "t6-mode2-ensemble",
+            "data": {"source_table": "p.d.t", "freq": "MS", "horizon": 12},
+            "models": ["naive_mean", "naive_seasonal"],
+            "backtest": {"enabled": True, "n_folds": 1, "horizon": 12},
+            "hierarchy": {
+                "enabled": False,
+                "levels": [],
+                "reconcile_temporal": True,
+                "temporal_aggregations": [3, 6, 12],
+                "reconciliation_methods": ["mint_shrink"],
+            },
+            "ensemble": {"enabled": True, "strategies": ["median"]},
+        }
+    )
+    m2_cells, _ = run_group(flat_panel, cfg_m2, cfg_m2.models)
+    rec_m2 = [r for r in m2_cells if r.model_type.endswith("_mint_shrink")]
+    assert len(rec_m2) == 4  # 2 series * 2 models
+    ens_pred_raw = (
+        pd.concat(
+            [r.predictions.assign(ts_id=r.ts_id, model_type=r.model_type) for r in rec_m2],
+            ignore_index=True,
+        )
+        .groupby(["ts_id", "ds"], as_index=False)["yhat"]
+        .median()
+        .assign(model_type="ensemble_median")
+    )
+    ens_pred_rec = reconcile_temporal_forecasts(
+        ens_pred_raw,
+        history_df=flat_panel,
+        cfg=cfg_m2,
+        method="mint_shrink",
+        stamp_method=False,
+        return_aggregations=False,
+    )
+    assert isinstance(ens_pred_rec, pd.DataFrame)
+    assert verify_temporal_coherence(ens_pred_rec, cfg=cfg_m2) < 1e-6
+
+    # 3. Synthetic DGP benchmark suite sanity across hierarchical & compositional panels
+    b_names = list_benchmarks()
+    assert len(b_names) >= 20
+    for b_name in b_names[:3]:
+        b = load_benchmark(b_name)
+        bp = sf.Forecaster.build_config(b.df, horizon=b.spec.horizon, tier="first_light")
+        assert bp.config.data.horizon == b.spec.horizon
