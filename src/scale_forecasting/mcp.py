@@ -518,6 +518,36 @@ class McpServer:
                                 "stockout_cost, min_order_qty, order_multiple)."
                             ),
                         },
+                        "include_goal_seek": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve top-down constrained QP goal-seek target "
+                                "allocation on the forward forecast."
+                            ),
+                        },
+                        "target_total": {
+                            "description": (
+                                "Optional executive top-down target total (scalar or date map) "
+                                "for goal-seek allocation."
+                            ),
+                        },
+                        "reconcile_temporal": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, apply THieF temporal hierarchy reconciliation across "
+                                "aggregated calendar horizons."
+                            ),
+                        },
+                        "temporal_reconciliation_method": {
+                            "type": "string",
+                            "enum": ["ols", "wls_struct", "wls_var", "mint_shrink"],
+                            "default": "wls_struct",
+                            "description": (
+                                "Temporal reconciliation estimator when reconcile_temporal=True."
+                            ),
+                        },
                         "export_report_path": {
                             "type": "string",
                             "description": (
@@ -682,6 +712,36 @@ class McpServer:
                                 "(lead_time, lead_time_std, review_period, service_level, "
                                 "fill_rate, on_hand, on_order, backorders, holding_cost, "
                                 "stockout_cost, min_order_qty, order_multiple, model_type)."
+                            ),
+                        },
+                        "include_goal_seek": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve top-down constrained QP goal-seek target "
+                                "allocation on the run's forward predictions."
+                            ),
+                        },
+                        "target_total": {
+                            "description": (
+                                "Optional executive top-down target total (scalar or date map) "
+                                "for goal-seek allocation."
+                            ),
+                        },
+                        "reconcile_temporal": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, apply THieF temporal hierarchy reconciliation across "
+                                "the run's forward predictions."
+                            ),
+                        },
+                        "temporal_reconciliation_method": {
+                            "type": "string",
+                            "enum": ["ols", "wls_struct", "wls_var", "mint_shrink"],
+                            "default": "wls_struct",
+                            "description": (
+                                "Temporal reconciliation estimator when reconcile_temporal=True."
                             ),
                         },
                         "export_report_path": {
@@ -1326,9 +1386,30 @@ class McpServer:
                 out_pg["inventory_policy"] = run.inventory_policy_df(**inv_kw_pg).to_dict(
                     orient="records"
                 )
+            if bool(args.get("reconcile_temporal", False)):
+                t_method_pg = str(args.get("temporal_reconciliation_method", "wls_struct"))
+                trec_pg = run.temporal_reconcile_df(method=t_method_pg)
+                out_pg["temporal_reconciled_predictions"] = trec_pg.head(10).to_dict(
+                    orient="records"
+                )
+            gs_df_pg = None
+            if bool(args.get("include_goal_seek", False)) or args.get("target_total") is not None:
+                from .goal_seek import summarize_goal_seek
+
+                raw_target_pg = args.get("target_total")
+                eff_target_pg = (
+                    raw_target_pg
+                    if raw_target_pg is not None
+                    else float(run.predictions["yhat"].sum() * 1.15)
+                )
+                gs_df_pg = run.allocate_target(target_total=eff_target_pg)
+                out_pg["goal_seek"] = gs_df_pg.to_dict(orient="records")
+                out_pg["goal_seek_summary"] = summarize_goal_seek(gs_df_pg).to_dict(
+                    orient="records"
+                )
             rep_path = args.get("export_report_path")
             if rep_path:
-                written = run.export_report(str(rep_path))
+                written = run.export_report(str(rep_path), goal_seek_df=gs_df_pg)
                 out_pg["report_path"] = str(written)
             return out_pg
 
@@ -1525,8 +1606,21 @@ class McpServer:
             want_inv = bool(args.get("include_inventory_policy", False)) or isinstance(
                 inv_params_rev, dict
             )
+            want_gs = bool(args.get("include_goal_seek", False)) or (
+                args.get("target_total") is not None
+            )
+            want_trec = bool(args.get("reconcile_temporal", False))
             rep_path_rev = args.get("export_report_path")
-            if want_fva or want_decay or want_bias or want_exc or want_inv or rep_path_rev:
+            if (
+                want_fva
+                or want_decay
+                or want_bias
+                or want_exc
+                or want_inv
+                or want_gs
+                or want_trec
+                or rep_path_rev
+            ):
                 import pandas as pd
 
                 from .diagnostics import (
@@ -1536,8 +1630,10 @@ class McpServer:
                     compute_horizon_decay,
                     compute_inventory_policy,
                 )
+                from .goal_seek import allocate_target, summarize_goal_seek
                 from .registry.reads import read_oof, read_predictions
                 from .report import export_report
+                from .temporal_reconciliation import reconcile_forecasts_temporal
 
                 oof_rows = read_oof(run_id, limit=20000, settings=settings)
                 oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1555,7 +1651,7 @@ class McpServer:
                         oof_df=oof_df, metric=metric
                     ).to_dict(orient="records")
                 pred_df: pd.DataFrame | None = None
-                if want_inv or rep_path_rev:
+                if want_inv or want_gs or want_trec or rep_path_rev:
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
                 if want_inv and pred_df is not None:
@@ -1565,11 +1661,43 @@ class McpServer:
                         oof_df=oof_df if not oof_df.empty else None,
                         **inv_kw_rev,
                     ).to_dict(orient="records")
+                if want_trec and pred_df is not None and not pred_df.empty:
+                    t_method_rev = str(args.get("temporal_reconciliation_method", "wls_struct"))
+                    trec_rev = reconcile_forecasts_temporal(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        method=t_method_rev,
+                        stamp_method=False,
+                    )
+                    assert isinstance(trec_rev, pd.DataFrame)
+                    out["temporal_reconciled_predictions"] = trec_rev.head(20).to_dict(
+                        orient="records"
+                    )
+                gs_df_rev: pd.DataFrame | None = None
+                if want_gs and pred_df is not None and not pred_df.empty:
+                    raw_target_rev = args.get("target_total")
+                    eff_target_rev = (
+                        raw_target_rev
+                        if raw_target_rev is not None
+                        else float(pd.to_numeric(pred_df["yhat"], errors="coerce").sum() * 1.15)
+                    )
+                    gs_res_rev = allocate_target(
+                        pred_df,
+                        target_total=eff_target_rev,
+                        oof_df=oof_df if not oof_df.empty else None,
+                    )
+                    assert isinstance(gs_res_rev, pd.DataFrame)
+                    gs_df_rev = gs_res_rev
+                    out["goal_seek"] = gs_df_rev.to_dict(orient="records")
+                    out["goal_seek_summary"] = summarize_goal_seek(gs_df_rev).to_dict(
+                        orient="records"
+                    )
                 if rep_path_rev and pred_df is not None:
                     written_r = export_report(
                         {"run_id": run_id, "oof_df": oof_df, "predictions_df": pred_df},
                         str(rep_path_rev),
                         metric=metric,
+                        goal_seek_df=gs_df_rev,
                     )
                     out["report_path"] = str(written_r)
             return out
@@ -1994,6 +2122,96 @@ class McpServer:
                 "status": "ok",
                 "summary": summarize_scenarios(sim_df).to_dict(orient="records"),
                 "sample_rows": sim_df.head(10).to_dict(orient="records"),
+            }
+
+        if name in ("allocate_target", "allocate_forecast_target"):
+            import pandas as pd
+
+            from . import playground
+            from .goal_seek import GOAL_SEEK_COLUMNS, allocate_target, summarize_goal_seek
+
+            records_gs = args.get("records") or args.get("predictions")
+            if isinstance(records_gs, list) and records_gs:
+                pred_gs = pd.DataFrame.from_records(records_gs)
+                oof_gs = (
+                    pd.DataFrame.from_records(args["oof"])
+                    if isinstance(args.get("oof"), list) and args["oof"]
+                    else None
+                )
+            else:
+                pg_gs = playground.run_model(
+                    str(args.get("model", "holtwinters")),
+                    horizon=int(args.get("horizon", 7)),
+                    backtest=True,
+                )
+                pred_gs = pg_gs.predictions.assign(
+                    ts_id=pg_gs.result.ts_id, model_type=pg_gs.result.model_type
+                )
+                oof_gs = (
+                    pg_gs.oof.assign(ts_id=pg_gs.result.ts_id, model_type=pg_gs.result.model_type)
+                    if pg_gs.oof is not None and not pg_gs.oof.empty
+                    else None
+                )
+            target_gs = args.get("target_total")
+            if target_gs is None:
+                target_gs = float(pd.to_numeric(pred_gs["yhat"], errors="coerce").sum() * 1.15)
+            gs_out = allocate_target(
+                pred_gs,
+                target_total=target_gs,
+                oof_df=oof_gs,
+                weights=str(args.get("weights", "inverse_variance")),
+                locked_nodes=args.get("locked_nodes") or args.get("locked_series"),
+                bounds=args.get("bounds"),
+                nonneg=bool(args.get("nonneg", args.get("non_negative", True))),
+            )
+            assert isinstance(gs_out, pd.DataFrame)
+            return {
+                "status": "ok",
+                "columns": list(GOAL_SEEK_COLUMNS),
+                "summary": summarize_goal_seek(gs_out).to_dict(orient="records"),
+                "allocations": gs_out.to_dict(orient="records"),
+            }
+
+        if name == "temporal_reconcile":
+            import pandas as pd
+
+            from . import playground
+            from .temporal_reconciliation import reconcile_forecasts_temporal
+
+            records_tr = args.get("records") or args.get("predictions")
+            method_tr = str(args.get("method", "wls_struct"))
+            freq_tr = str(args.get("freq", "D"))
+            if isinstance(records_tr, list) and records_tr:
+                pred_tr = pd.DataFrame.from_records(records_tr)
+                oof_tr = (
+                    pd.DataFrame.from_records(args["oof"])
+                    if isinstance(args.get("oof"), list) and args["oof"]
+                    else None
+                )
+                trec_out = reconcile_forecasts_temporal(
+                    pred_tr,
+                    oof_df=oof_tr,
+                    freq=freq_tr,
+                    method=method_tr,
+                    aggregations=args.get("aggregations"),
+                    stamp_method=bool(args.get("stamp_method", False)),
+                )
+            else:
+                pg_tr = playground.run_model(
+                    str(args.get("model", "holtwinters")),
+                    horizon=int(args.get("horizon", 14)),
+                    backtest=True,
+                )
+                trec_out = pg_tr.temporal_reconcile_df(
+                    method=method_tr,
+                    aggregations=args.get("aggregations"),
+                    stamp_method=bool(args.get("stamp_method", False)),
+                )
+            assert isinstance(trec_out, pd.DataFrame)
+            return {
+                "status": "ok",
+                "method": method_tr,
+                "rows": trec_out.to_dict(orient="records"),
             }
 
         raise ValueError(f"Unknown tool: {name!r}")

@@ -469,6 +469,9 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     updated_actions["prune_decoy_covariates"] = (0.90, 7.5)
     updated_actions["inject_transform_log1p"] = (0.93, 10.8)
     updated_actions["inject_direct_horizon_models"] = (0.86, 6.2)
+    updated_actions["inject_monotone_guardrails"] = (0.88, 7.0)
+    updated_actions["inject_transform_simplex"] = (0.89, 8.4)
+    updated_actions["enable_temporal_reconciliation"] = (0.81, 5.2)
     return base_weights.with_updates(
         intermittent_share_min=0.16,
         log1p_level_vol_corr_min=0.60,
@@ -768,6 +771,9 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     updated_actions["prune_decoy_covariates"] = (0.90, 7.5)
     updated_actions["inject_transform_log1p"] = (0.93, 10.8)
     updated_actions["inject_direct_horizon_models"] = (0.86, 6.2)
+    updated_actions["inject_monotone_guardrails"] = (0.88, 7.0)
+    updated_actions["inject_transform_simplex"] = (0.89, 8.4)
+    updated_actions["enable_temporal_reconciliation"] = (0.81, 5.2)
     return base_weights.with_updates(
         intermittent_share_min=0.16,
         log1p_level_vol_corr_min=0.60,
@@ -986,7 +992,12 @@ def build_mutation_prompt(
         f"worst_decile_fva={diag_dict.get('worst_decile_fva', 0.0):.4f}, "
         f"horizon_decay={diag_dict.get('horizon_decay', 'stable')}, "
         f"inner_cv_score={diag_dict.get('inner_cv_score', 'n/a')}, "
-        f"baseline_score={diag_dict.get('baseline_score', 'n/a')}"
+        f"baseline_score={diag_dict.get('baseline_score', 'n/a')}, "
+        f"monotonic_constraints={diag_dict.get('monotonic_constraints', {})}, "
+        f"is_compositional_simplex={diag_dict.get('is_compositional_simplex', False)}, "
+        f"simplex_total={diag_dict.get('simplex_total')}, "
+        f"hierarchy_id_cols={diag_dict.get('hierarchy_id_cols', [])}, "
+        f"reconcile_temporal={diag_dict.get('reconcile_temporal', False)}"
     )
     return spec.mutation_prompt_template.format(
         generation=generation,
@@ -1139,6 +1150,9 @@ updated_actions["prune_decoy_covariates"] = (0.94, 8.8)
 updated_actions["inject_transform_log1p"] = (0.95, 11.4)
 updated_actions["inject_direct_horizon_models"] = (0.89, 6.8)
 updated_actions["enable_level_shift"] = (0.93, 12.0)
+updated_actions["inject_monotone_guardrails"] = (0.90, 7.4)
+updated_actions["inject_transform_simplex"] = (0.91, 8.8)
+updated_actions["enable_temporal_reconciliation"] = (0.83, 5.6)
 return base_weights.with_updates(
     intermittent_share_min=0.15,
     log1p_level_vol_corr_min=0.56,

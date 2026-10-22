@@ -386,6 +386,7 @@ def _extract_target_frames(
             "blueprint_rationale_df",
             "promo_elasticity_df",
             "scenarios_df",
+            "goal_seek_df",
         ):
             if target.get(k) is not None:
                 out[k] = target.get(k)
@@ -415,6 +416,7 @@ def build_report_payload(
     blueprint_rationale_df: pd.DataFrame | None = None,
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
+    goal_seek_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
@@ -450,6 +452,8 @@ def build_report_payload(
             promo_elasticity_df = ext.get("promo_elasticity_df")
         if scenarios_df is None:
             scenarios_df = ext.get("scenarios_df")
+        if goal_seek_df is None:
+            goal_seek_df = ext.get("goal_seek_df")
 
     if fva_df is None and oof_df is not None and not oof_df.empty:
         fva_df = compute_fva(oof_df, metric=metric, series_df=history_df)
@@ -497,6 +501,7 @@ def build_report_payload(
     bp_recs = _df_to_records(blueprint_rationale_df)
     promo_recs = _df_to_records(promo_elasticity_df)
     scen_recs = _df_to_records(scenarios_df)
+    gs_recs = _df_to_records(goal_seek_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -536,6 +541,7 @@ def build_report_payload(
         "blueprint_rationale": bp_recs,
         "promo_elasticity": promo_recs,
         "scenarios": scen_recs,
+        "goal_seek": gs_recs,
         "explorer": explorer,
     }
 
@@ -599,6 +605,7 @@ def render_html_report(
     blueprint_rationale_df: pd.DataFrame | None = None,
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
+    goal_seek_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
@@ -621,6 +628,7 @@ def render_html_report(
         blueprint_rationale_df=blueprint_rationale_df,
         promo_elasticity_df=promo_elasticity_df,
         scenarios_df=scenarios_df,
+        goal_seek_df=goal_seek_df,
         metric=metric,
     )
     title = str(payload.get("title", title))
@@ -652,6 +660,10 @@ def render_html_report(
     scen_html = _html_table(
         payload.get("scenarios", []),
         empty_msg="No counterfactual scenario simulation rows.",
+    )
+    gs_html = _html_table(
+        payload.get("goal_seek", []),
+        empty_msg="No top-down goal-seek target allocation rows.",
     )
     af_html = _html_table(
         payload["autofocus_ledger"],
@@ -864,6 +876,10 @@ def render_html_report(
     <h2>Counterfactual Scenario &amp; Gross-Margin Simulation</h2>
     {scen_html}
   </div>
+  <div class="card">
+    <h2>Top-Down Goal-Seek Target Allocation (<code>allocate_target</code>)</h2>
+    {gs_html}
+  </div>
 </section>
 
 <section id="tab-explorer" class="tab-panel">
@@ -896,7 +912,7 @@ def render_html_report(
 const EXPLORER_DATA = {explorer_json};
 
 function escHtml(s) {{
-  return String(s)
+  return String(s ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }}
@@ -1027,6 +1043,7 @@ def export_report(
     metric: str | None = None,
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
+    goal_seek_df: pd.DataFrame | None = None,
     write_json: bool = False,
 ) -> Path:
     """Export a self-contained `.html` report (and optional `.json` sidecar) from a `BakeOff`,
@@ -1046,6 +1063,7 @@ def export_report(
         run_id=run_id,
         promo_elasticity_df=promo_elasticity_df,
         scenarios_df=scenarios_df,
+        goal_seek_df=goal_seek_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
@@ -1057,6 +1075,7 @@ def export_report(
             run_id=run_id,
             promo_elasticity_df=promo_elasticity_df,
             scenarios_df=scenarios_df,
+            goal_seek_df=goal_seek_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")

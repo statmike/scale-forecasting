@@ -1561,6 +1561,7 @@ def _default_hierarchy_model(models: pd.Series) -> str:
     """Prefer a reconciled model (e.g. ``*_mint_shrink``) when ``model_type`` is omitted."""
     unique = [str(m) for m in dict.fromkeys(models.astype(str))]
     for suffix in (
+        "_cross_temporal_mint",
         "_mint_shrink",
         "_wls_var",
         "_wls_struct",

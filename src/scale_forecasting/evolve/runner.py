@@ -517,6 +517,43 @@ def run_evolution(
         freq=freq,
     )
 
+    prof_dict = evaluator.profile_dict
+    f_cfg = getattr(evaluator.forecaster, "config", None)
+    f_feats = getattr(f_cfg, "features", None) if f_cfg is not None else None
+    f_hier = getattr(f_cfg, "hierarchy", None) if f_cfg is not None else None
+    mono_constraints: dict[str, Any] = (
+        dict(getattr(f_feats, "monotonic_constraints", {}) or {}) if f_feats is not None else {}
+    )
+    if not mono_constraints and isinstance(prof_dict.get("monotonic_constraints"), Mapping):
+        mono_constraints = dict(prof_dict["monotonic_constraints"])
+    simplex_total = (
+        prof_dict.get("simplex_total")
+        if prof_dict.get("simplex_total") is not None
+        else (getattr(f_feats, "simplex_sum", None) if f_feats is not None else None)
+    )
+    is_simplex = bool(prof_dict.get("is_compositional_simplex", False) or simplex_total is not None)
+    hier_cols = list(
+        prof_dict.get("hierarchy_id_cols")
+        or (getattr(f_hier, "levels", []) if f_hier is not None else [])
+    )
+    rec_temporal = bool(
+        prof_dict.get("reconcile_temporal", False)
+        or (
+            f_hier is not None
+            and (
+                bool(getattr(f_hier, "reconcile_temporal", False))
+                or bool(getattr(f_hier, "cross_temporal", False))
+            )
+        )
+    )
+    structural_diag: dict[str, Any] = {
+        "monotonic_constraints": mono_constraints,
+        "is_compositional_simplex": is_simplex,
+        "simplex_total": simplex_total,
+        "hierarchy_id_cols": hier_cols,
+        "reconcile_temporal": rec_temporal,
+    }
+
     evaluations: list[CandidateEvaluation] = []
     current_parent_code = spec.seed_code
     last_diag: dict[str, Any] = {
@@ -526,6 +563,7 @@ def run_evolution(
         "horizon_decay": "baseline",
         "baseline_score": evaluator.baseline_score,
         "inner_cv_score": evaluator.baseline_score,
+        **structural_diag,
     }
 
     for gen in range(1, cfg.max_evaluations + 1):
@@ -545,6 +583,7 @@ def run_evolution(
             "horizon_decay": "improved" if cand_eval.gate1_passed else "degraded",
             "baseline_score": cand_eval.baseline_score,
             "inner_cv_score": cand_eval.inner_cv_score,
+            **structural_diag,
         }
         client.record_evaluation(
             program_id=cand_eval.candidate_id,

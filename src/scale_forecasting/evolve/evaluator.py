@@ -28,6 +28,7 @@ The 3-Gate Anti-Overfitting Ratchet
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import time
@@ -42,6 +43,8 @@ from ..auto import auto_forecast
 from ..diagnostics import diebold_mariano_test
 from ..errors import ConfigError
 from ..models.base_model import ModelContext
+from ..reconciliation import HierarchySpec, build_hierarchy, reconcile_matrix
+from ..simplex import enforce_simplex_closure
 from .sandbox import (
     compile_candidate_symbol,
     execute_in_sandbox,
@@ -828,11 +831,68 @@ def _resolve_series_weights(
     raise ValueError("compute_evolved_weights returned empty or unsupported weights structure.")
 
 
+def _project_blended_hierarchy(
+    blended: pd.DataFrame,
+    spec: HierarchySpec,
+    *,
+    date_col: str,
+    value_col: str = "yhat_blend",
+) -> pd.DataFrame:
+    """Project per-series blended predictions onto the coherent subspace ``y_t = S @ b_t``."""
+    if blended.empty or value_col not in blended.columns or date_col not in blended.columns:
+        return blended
+    ts_present = set(blended["ts_id"].astype(str))
+    if not set(spec.node_ids).issubset(ts_present):
+        return blended
+
+    g_mat = reconcile_matrix(spec, "wls_struct")
+    p_mat = spec.summing_matrix @ g_mat
+    s_mat = spec.summing_matrix
+    n_agg = spec.n_aggregated
+    all_vals = pd.to_numeric(blended[value_col], errors="coerce").to_numpy(dtype=float)
+    is_nonneg = bool(np.all(all_vals[np.isfinite(all_vals)] >= -1e-9))
+
+    out_parts: list[pd.DataFrame] = []
+    for _dt, grp in blended.groupby(date_col, sort=False):
+        indexed = grp.drop_duplicates(subset=["ts_id"], keep="first").set_index("ts_id")
+        aligned = indexed.reindex(list(spec.node_ids)).reset_index()
+        y_vec = pd.to_numeric(aligned[value_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        y_proj = p_mat @ y_vec
+        b_proj = y_proj[n_agg:]
+        if is_nonneg:
+            b_proj = np.maximum(0.0, b_proj)
+        y_coherent = s_mat @ b_proj
+        aligned[value_col] = y_coherent
+
+        for lo_col, hi_col in (
+            ("yhat_lower_blend", "yhat_upper_blend"),
+            ("yhat_lower", "yhat_upper"),
+        ):
+            if lo_col in aligned.columns and hi_col in aligned.columns:
+                lo_v = pd.to_numeric(aligned[lo_col], errors="coerce").to_numpy(dtype=float)
+                hi_v = pd.to_numeric(aligned[hi_col], errors="coerce").to_numpy(dtype=float)
+                if np.all(np.isfinite(lo_v)) and np.all(np.isfinite(hi_v)):
+                    hw = np.maximum(0.0, 0.5 * (hi_v - lo_v))
+                    hw_proj = np.sqrt(np.maximum(0.0, (p_mat**2) @ (hw**2)))
+                    lo_new = y_coherent - hw_proj
+                    hi_new = y_coherent + hw_proj
+                    if is_nonneg:
+                        lo_new = np.maximum(0.0, lo_new)
+                        hi_new = np.maximum(y_coherent, hi_new)
+                    aligned[lo_col] = lo_new
+                    aligned[hi_col] = hi_new
+        out_parts.append(aligned)
+
+    return pd.concat(out_parts, ignore_index=True) if out_parts else blended
+
+
 def _blend_frame_with_series_weights(
     frame: pd.DataFrame,
     weights: Any,
     *,
     date_col: str,
+    simplex_sum: float | None = None,
+    hierarchy_spec: HierarchySpec | None = None,
 ) -> pd.DataFrame:
     """Blend ``frame`` (`ts_id`, `date_col`, `model_type`, `yhat`) by ``weights``."""
     if frame.empty:
@@ -880,7 +940,26 @@ def _blend_frame_with_series_weights(
             grouped["yhat_upper_blend"] = grouped["wu_sum"] / denom
         parts.append(grouped)
 
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    if not parts:
+        return pd.DataFrame()
+
+    blended = pd.concat(parts, ignore_index=True)
+    if hierarchy_spec is not None:
+        blended = _project_blended_hierarchy(
+            blended,
+            hierarchy_spec,
+            date_col=date_col,
+            value_col="yhat_blend",
+        )
+    if simplex_sum is not None and float(simplex_sum) > 0.0:
+        blended = enforce_simplex_closure(
+            blended,
+            value_col="yhat_blend",
+            simplex_sum=float(simplex_sum),
+            ts_id_col="ts_id",
+            date_col=date_col,
+        )
+    return blended
 
 
 class EvolutionEvaluator:
@@ -1021,10 +1100,16 @@ class EvolutionEvaluator:
                     c
                     for c in self.lockdown_future_exog_df.columns
                     if c not in (self.ts_id_col, self.date_col, self.target_col)
+                    and pd.api.types.is_numeric_dtype(self.lockdown_future_exog_df[c])
                 ]
+                fut_exog_arg = (
+                    self.lockdown_future_exog_df[[self.ts_id_col, self.date_col, *exog_only_cols]]
+                    if exog_only_cols
+                    else None
+                )
                 cached_forecaster = auto_forecast(
                     self.inner_df,
-                    future_df=self.lockdown_future_exog_df if exog_only_cols else None,
+                    future_df=fut_exog_arg,
                     tier="wide_field",
                     where="local",
                     models=fast_models,
@@ -1049,6 +1134,27 @@ class EvolutionEvaluator:
             self.oof_df = self.session.oof_df.copy()
             self.raw_predictions_df = self.session.raw_predictions_df.copy()
 
+        self.simplex_sum: float | None = self._resolve_evaluator_simplex_sum()
+        self.hierarchy_spec: HierarchySpec | None = self._resolve_evaluator_hierarchy_spec()
+        if (
+            self.mode == "raw_panel"
+            and self.hierarchy_spec is not None
+            and not self.lockdown_truth_df.empty
+            and "__total__" not in set(self.lockdown_truth_df[self.ts_id_col].astype(str))
+        ):
+            f_cfg = getattr(self.forecaster, "config", None) or getattr(
+                self.forecaster, "_config", None
+            )
+            if (
+                f_cfg is not None
+                and getattr(f_cfg, "hierarchy", None) is not None
+                and f_cfg.hierarchy.enabled
+                and f_cfg.hierarchy.levels
+                and all(c in self.lockdown_truth_df.columns for c in f_cfg.hierarchy.levels)
+            ):
+                with contextlib.suppress(Exception):
+                    self.lockdown_truth_df, _ = build_hierarchy(self.lockdown_truth_df, f_cfg)
+
         # Precompute baseline inner CV losses and held-out lockdown fold losses for the target
         (
             self.baseline_score,
@@ -1056,6 +1162,124 @@ class EvolutionEvaluator:
             self.point_losses_base,
             self.lockdown_baseline_score,
         ) = self._compute_target_baselines()
+
+    def _resolve_evaluator_simplex_sum(self) -> float | None:
+        """Resolve compositional simplex constant sum `S` when active on the panel or config."""
+        f_cfg = getattr(self.forecaster, "config", None) or getattr(
+            self.forecaster, "_config", None
+        )
+        if f_cfg is not None and getattr(f_cfg, "features", None) is not None:
+            if f_cfg.features.simplex_sum is not None:
+                return float(f_cfg.features.simplex_sum)
+            if getattr(f_cfg.features, "transform", "none") in ("clr", "ilr"):
+                return float(self.profile_dict.get("simplex_total") or 1.0)
+        if bool(self.profile_dict.get("is_compositional_simplex", False)):
+            st = self.profile_dict.get("simplex_total")
+            return float(st) if st is not None else 1.0
+        if not self.oof_df.empty and "model_type" in self.oof_df.columns:
+            m_types = [str(m).lower() for m in self.oof_df["model_type"].unique()]
+            if any("@transform_clr" in m or "@transform_ilr" in m for m in m_types):
+                st = self.profile_dict.get("simplex_total")
+                return float(st) if st is not None else 1.0
+            if (
+                {"ts_id", "y_true"}.issubset(self.oof_df.columns)
+                and self.oof_df["ts_id"].nunique() >= 2
+                and "__total__" not in set(self.oof_df["ts_id"].astype(str))
+            ):
+                d_col = "ds" if "ds" in self.oof_df.columns else "forecast_date"
+                if d_col in self.oof_df.columns:
+                    first_m = self.oof_df["model_type"].iloc[0]
+                    sub_m = self.oof_df[self.oof_df["model_type"] == first_m]
+                    y_vals = pd.to_numeric(sub_m["y_true"], errors="coerce").to_numpy(dtype=float)
+                    if len(y_vals) > 0 and np.all(y_vals[np.isfinite(y_vals)] >= -1e-9):
+                        sums = sub_m.groupby(d_col)["y_true"].sum().to_numpy(dtype=float)
+                        if len(sums) >= 2:
+                            if np.all(np.abs(sums - 1.0) <= 1e-3):
+                                return 1.0
+                            if np.all(np.abs(sums - 100.0) <= 1e-2):
+                                return 100.0
+        return None
+
+    def _resolve_evaluator_hierarchy_spec(self) -> HierarchySpec | None:
+        """Resolve `HierarchySpec` when hierarchical reconciliation is active on the panel."""
+        if self.session is not None:
+            champ_out = getattr(self.session, "champion_outputs", None)
+            if isinstance(champ_out, Mapping) and isinstance(
+                champ_out.get("hierarchy_spec"), HierarchySpec
+            ):
+                return champ_out["hierarchy_spec"]
+        f_cfg = getattr(self.forecaster, "config", None) or getattr(
+            self.forecaster, "_config", None
+        )
+        if (
+            f_cfg is not None
+            and getattr(f_cfg, "hierarchy", None) is not None
+            and f_cfg.hierarchy.enabled
+            and f_cfg.hierarchy.levels
+            and isinstance(self.inner_df, pd.DataFrame)
+            and not self.inner_df.empty
+            and all(c in self.inner_df.columns for c in f_cfg.hierarchy.levels)
+        ):
+            try:
+                base_inner = self.inner_df[
+                    ~self.inner_df[self.ts_id_col].astype(str).str.contains("=|__total__")
+                ]
+                if not base_inner.empty:
+                    _, spec = build_hierarchy(base_inner, f_cfg)
+                    return spec
+            except Exception:  # noqa: BLE001 - fallback to OOF structure inspection
+                pass
+        if not self.oof_df.empty and "ts_id" in self.oof_df.columns:
+            all_ids = sorted(self.oof_df["ts_id"].astype(str).unique())
+            if "__total__" in all_ids:
+                bottom_ids = tuple(sorted(t for t in all_ids if t != "__total__" and "=" not in t))
+                mid_ids = tuple(sorted(t for t in all_ids if t != "__total__" and "=" in t))
+                if len(bottom_ids) >= 2:
+                    node_ids = ("__total__", *mid_ids, *bottom_ids)
+                    n_b = len(bottom_ids)
+                    s_rows: list[np.ndarray] = [np.ones(n_b, dtype=float)]
+                    d_col = "ds" if "ds" in self.oof_df.columns else "forecast_date"
+                    piv = (
+                        self.oof_df.groupby([d_col, "ts_id"], as_index=False)["y_true"]
+                        .first()
+                        .pivot(index=d_col, columns="ts_id", values="y_true")
+                    )
+                    b_mat = piv[list(bottom_ids)].to_numpy(dtype=float)
+                    for mid_id in mid_ids:
+                        y_m = piv[mid_id].to_numpy(dtype=float)
+                        matched_row: np.ndarray | None = None
+                        if n_b <= 12:
+                            for mask_int in range(1, 1 << n_b):
+                                row_cand = np.array(
+                                    [(mask_int >> j) & 1 for j in range(n_b)], dtype=float
+                                )
+                                if np.allclose(b_mat @ row_cand, y_m, atol=1e-4, equal_nan=True):
+                                    matched_row = row_cand
+                                    break
+                        if matched_row is None:
+                            ls_sol, _, _, _ = np.linalg.lstsq(b_mat, y_m, rcond=None)
+                            matched_row = np.asarray(
+                                np.clip(np.round(ls_sol), 0.0, 1.0), dtype=float
+                            )
+                        s_rows.append(matched_row)
+                    for idx_b in range(n_b):
+                        e_row = np.zeros(n_b, dtype=float)
+                        e_row[idx_b] = 1.0
+                        s_rows.append(e_row)
+                    s_mat = np.vstack(s_rows)
+                    level_nodes: dict[str, tuple[str, ...]] = {
+                        "__total__": ("__total__",),
+                        "__bottom__": bottom_ids,
+                    }
+                    if mid_ids:
+                        level_nodes["hierarchy"] = mid_ids
+                    return HierarchySpec(
+                        node_ids=node_ids,
+                        bottom_ids=bottom_ids,
+                        level_nodes=level_nodes,
+                        summing_matrix=s_mat,
+                    )
+        return None
 
     def _compute_target_baselines(
         self,
@@ -1288,7 +1512,13 @@ class EvolutionEvaluator:
     def _score_ensemble_weights_inner(self, weights: Any) -> tuple[list[float], list[float]]:
         """Blend ``self.oof_df`` using ``weights`` (global, per-series, or DataFrame)."""
         date_key = "ds" if "ds" in self.oof_df.columns else "forecast_date"
-        blended = _blend_frame_with_series_weights(self.oof_df, weights, date_col=date_key)
+        blended = _blend_frame_with_series_weights(
+            self.oof_df,
+            weights,
+            date_col=date_key,
+            simplex_sum=self.simplex_sum,
+            hierarchy_spec=self.hierarchy_spec,
+        )
         if blended.empty:
             return [float("inf")], [float("inf")]
 
@@ -1307,7 +1537,11 @@ class EvolutionEvaluator:
         if self.mode == "post_run_pool" and not self.lockdown_oof_df.empty:
             date_key = "ds" if "ds" in self.lockdown_oof_df.columns else "forecast_date"
             blended_lock = _blend_frame_with_series_weights(
-                self.lockdown_oof_df, weights, date_col=date_key
+                self.lockdown_oof_df,
+                weights,
+                date_col=date_key,
+                simplex_sum=self.simplex_sum,
+                hierarchy_spec=self.hierarchy_spec,
             )
             if blended_lock.empty:
                 return float("inf")
@@ -1319,7 +1553,11 @@ class EvolutionEvaluator:
             return float(np.mean(losses_pool)) if losses_pool else float("inf")
 
         blended = _blend_frame_with_series_weights(
-            self.raw_predictions_df, weights, date_col="forecast_date"
+            self.raw_predictions_df,
+            weights,
+            date_col="forecast_date",
+            simplex_sum=self.simplex_sum,
+            hierarchy_spec=self.hierarchy_spec,
         )
         if blended.empty:
             return float("inf")
@@ -1358,17 +1596,29 @@ class EvolutionEvaluator:
         eff_weights = weights
         if (
             isinstance(weights, Mapping)
-            and list(weights.keys()) == ["ensemble_mean"]
-            and "ensemble_mean" not in avail_pred_models
+            and len(weights) == 1
+            and not isinstance(next(iter(weights.values())), Mapping)
+            and str(next(iter(weights.keys()))) not in avail_pred_models
             and avail_pred_models
         ):
-            base_m = [
-                m for m in avail_pred_models if not m.startswith("ensemble_")
-            ] or avail_pred_models
+            only_key = str(next(iter(weights.keys())))
+            base_prefix = only_key.split("@", 1)[0]
+            matched_m = [
+                m for m in avail_pred_models if m == base_prefix or m.startswith(f"{base_prefix}_")
+            ]
+            base_m = (
+                matched_m
+                or [m for m in avail_pred_models if not m.startswith("ensemble_")]
+                or avail_pred_models
+            )
             eff_weights = {m: 1.0 / len(base_m) for m in base_m}
 
         blended_preds = _blend_frame_with_series_weights(
-            source_preds, eff_weights, date_col=date_col
+            source_preds,
+            eff_weights,
+            date_col=date_col,
+            simplex_sum=self.simplex_sum,
+            hierarchy_spec=self.hierarchy_spec,
         )
         if blended_preds.empty:
             return pd.DataFrame(
@@ -1377,7 +1627,13 @@ class EvolutionEvaluator:
 
         # Compute empirical 80th percentile absolute residual per series on OOF
         oof_date_col = "ds" if "ds" in self.oof_df.columns else "forecast_date"
-        blended_oof = _blend_frame_with_series_weights(self.oof_df, weights, date_col=oof_date_col)
+        blended_oof = _blend_frame_with_series_weights(
+            self.oof_df,
+            weights,
+            date_col=oof_date_col,
+            simplex_sum=self.simplex_sum,
+            hierarchy_spec=self.hierarchy_spec,
+        )
         q80_by_ts: dict[str, float] = {}
         if not blended_oof.empty and "y_true" in blended_oof.columns:
             for tid, grp_o in blended_oof.groupby("ts_id", sort=False):
@@ -1416,7 +1672,23 @@ class EvolutionEvaluator:
                     "model_type": model_label,
                 }
             )
-        return pd.DataFrame(out_rows)
+        out_df = pd.DataFrame(out_rows)
+        if self.hierarchy_spec is not None and not out_df.empty:
+            out_df = _project_blended_hierarchy(
+                out_df,
+                self.hierarchy_spec,
+                date_col="forecast_date",
+                value_col="yhat",
+            )
+        if self.simplex_sum is not None and float(self.simplex_sum) > 0.0 and not out_df.empty:
+            out_df = enforce_simplex_closure(
+                out_df,
+                value_col="yhat",
+                simplex_sum=float(self.simplex_sum),
+                ts_id_col="ts_id",
+                date_col="forecast_date",
+            )
+        return out_df
 
     def _eval_naive_baseline_inner(self) -> tuple[list[float], list[float]]:
         """Evaluate baseline rolling anchor on the inner evolution panel."""
