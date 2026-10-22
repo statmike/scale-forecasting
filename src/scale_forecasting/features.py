@@ -62,6 +62,7 @@ VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
     {
         "covariate_mode",
         "transform",
+        "simplex_sum",
         "exog",
         "future_covariates",
         "past_covariates",
@@ -150,15 +151,28 @@ VALID_ABLATION_MODES: frozenset[str] = frozenset(
 # --- transforms ----------------------------------------------------------------
 
 
-def fit_transform_lambda(y: pd.Series, transform: str) -> float | None:
+def fit_transform_lambda(
+    y: pd.Series,
+    transform: str,
+    *,
+    simplex_sum: float | None = None,
+) -> float | None:
     """Fit the transform's stateful parameter on ``y`` (the full series' target).
 
-    Only ``boxcox`` has one: its λ, fit by maximum likelihood (``scipy.stats.boxcox_normmax``)
-    on the raw target. Returns ``None`` for the stateless transforms (``none``/``log1p``), whose
-    inverse needs no fitted state. Box-Cox is defined only for **strictly positive** data, so a
-    non-positive value raises ``ConfigError`` naming the constraint (symmetric with log1p's
-    ``y >= -1`` rule — we *validate*, never silently shift). Deterministic: same series → same λ.
+    * ``boxcox``: its λ, fit by maximum likelihood (``scipy.stats.boxcox_normmax``) on the raw
+      target. Box-Cox is defined only for **strictly positive** data.
+    * ``clr`` / ``ilr``: the resolved compositional ``simplex_sum`` ($S = 1.0$ or $100.0$, or the
+      explicit ``simplex_sum`` override), validating that ``y >= 0``.
+    * ``none`` / ``log1p``: returns ``None`` (stateless).
     """
+    if transform in ("clr", "ilr"):
+        from .simplex import detect_simplex_sum
+
+        arr = y.to_numpy(dtype=float)
+        finite = arr[np.isfinite(arr)]
+        if finite.size > 0 and float(np.min(finite)) < 0.0:
+            raise ConfigError(f"{transform} transform requires non-negative y (got values < 0)")
+        return detect_simplex_sum(arr, simplex_sum=simplex_sum)
     if transform != "boxcox":
         return None
     from scipy.stats import boxcox_normmax
@@ -175,8 +189,8 @@ def fit_transform_lambda(y: pd.Series, transform: str) -> float | None:
 def apply_transform(y: pd.Series, transform: str, lam: float | None = None) -> pd.Series:
     """Apply the configured target transform to ``y`` (forward direction).
 
-    ``lam`` is the fitted Box-Cox λ from `fit_transform_lambda` (ignored by the stateless
-    transforms). Required when ``transform == "boxcox"``.
+    ``lam`` is the fitted Box-Cox λ from `fit_transform_lambda` (or the resolved ``simplex_sum``
+    when ``transform in ("clr", "ilr")``; ignored by the stateless transforms).
     """
     if transform == "none":
         return y
@@ -193,14 +207,18 @@ def apply_transform(y: pd.Series, transform: str, lam: float | None = None) -> p
         if not np.all(arr > 0):
             raise ConfigError("boxcox transform requires strictly positive y (got values <= 0)")
         return pd.Series(boxcox_apply(arr, lam), index=y.index, name=y.name)
+    if transform in ("clr", "ilr"):
+        from .simplex import apply_series_simplex_transform
+
+        return apply_series_simplex_transform(y, transform, simplex_sum=lam)
     raise ConfigError(f"unknown transform '{transform}'")
 
 
 def invert_transform(values: np.ndarray, transform: str, lam: float | None = None) -> np.ndarray:
     """Invert a transform on forecasts/bounds so the frame is in original units.
 
-    ``lam`` is the same fitted Box-Cox λ used in the forward direction (ignored by the stateless
-    transforms), so ``invert(apply(y)) == y``.
+    ``lam`` is the same fitted Box-Cox λ (or ``simplex_sum`` for ``clr``/``ilr``) used in the
+    forward direction, so ``invert(apply(y)) == y``.
     """
     arr = np.asarray(values, dtype=float)
     if transform == "none":
@@ -213,6 +231,10 @@ def invert_transform(values: np.ndarray, transform: str, lam: float | None = Non
         from scipy.special import inv_boxcox
 
         return np.asarray(inv_boxcox(arr, lam), dtype=float)
+    if transform in ("clr", "ilr"):
+        from .simplex import invert_series_simplex_transform
+
+        return invert_series_simplex_transform(arr, transform, simplex_sum=lam)
     raise ConfigError(f"unknown transform '{transform}'")
 
 
@@ -547,6 +569,8 @@ def resolve_model_variant(
             for multi_tr, tr_norm in (
                 ("transform_log1p", "log1p"),
                 ("transform_boxcox", "boxcox"),
+                ("transform_clr", "clr"),
+                ("transform_ilr", "ilr"),
                 ("transform_none", "none"),
             ):
                 if multi_tr in rem_tag:
@@ -573,10 +597,11 @@ def resolve_model_variant(
                     and "version" not in variant_explicit
                 ):
                     raw_params["version"] = tok.lstrip("v")
-                elif tok in ("log1p", "boxcox", "linear") and "transform" not in variant_explicit:
-                    raw_params["transform"] = (
-                        "log1p" if tok == "log1p" else ("boxcox" if tok == "boxcox" else "none")
-                    )
+                elif (
+                    tok in ("log1p", "boxcox", "clr", "ilr", "linear")
+                    and "transform" not in variant_explicit
+                ):
+                    raw_params["transform"] = "none" if tok == "linear" else tok
                 elif tok in ("direct", "recursive") and "strategy" not in variant_explicit:
                     raw_params["strategy"] = tok
                 elif tok in ("sba", "tsb", "classic") and "variant" not in variant_explicit:
@@ -641,17 +666,30 @@ def resolve_model_variant(
         new_level_shift = f.level_shift
         new_trading_days = f.trading_days
         new_transform = f.transform
+        new_simplex_sum = f.simplex_sum
         new_mono_constraints: dict[str, Any] = dict(f.monotonic_constraints)
         new_holiday_window = f.holiday_window
 
         if "transform" in raw_params and raw_params["transform"] is not None:
             tr_val = str(raw_params["transform"])
-            if tr_val not in ("none", "log1p", "boxcox"):
+            if tr_val not in ("none", "log1p", "boxcox", "clr", "ilr"):
                 raise ConfigError(
                     f"model_params.{model_name}.transform={tr_val!r} is invalid; "
-                    "must be 'none', 'log1p', or 'boxcox'"
+                    "must be 'none', 'log1p', 'boxcox', 'clr', or 'ilr'"
                 )
             new_transform = tr_val  # type: ignore[assignment]
+
+        if "simplex_sum" in raw_params:
+            raw_ss = raw_params["simplex_sum"]
+            if raw_ss is None:
+                new_simplex_sum = None
+            else:
+                ss_val = float(raw_ss)
+                if not np.isfinite(ss_val) or ss_val <= 0.0:
+                    raise ConfigError(
+                        f"model_params.{model_name}.simplex_sum={raw_ss!r} must be > 0"
+                    )
+                new_simplex_sum = ss_val
 
         if "covariate_mode" in raw_params and raw_params["covariate_mode"] is not None:
             cm = str(raw_params["covariate_mode"])
@@ -738,6 +776,7 @@ def resolve_model_variant(
         cand_features = f.model_copy(
             update={
                 "transform": new_transform,
+                "simplex_sum": new_simplex_sum,
                 "exog": new_exog,
                 "future_covariates": new_future,
                 "past_covariates": new_past,

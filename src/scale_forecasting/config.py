@@ -306,7 +306,8 @@ class FeaturesConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     holidays: list[str] = Field(default_factory=list)
-    transform: Literal["none", "log1p", "boxcox"] = "none"
+    transform: Literal["none", "log1p", "boxcox", "clr", "ilr"] = "none"
+    simplex_sum: float | None = Field(default=None, gt=0.0)
     exog: list[str] = Field(default_factory=list)
     static_covariates: list[str] = Field(default_factory=list)
     future_covariates: list[str] = Field(default_factory=list)
@@ -723,6 +724,7 @@ ReconciliationMethod = Literal[
     "wls_var",
     "mint_shrink",
     "mint_nonneg",
+    "cross_temporal_mint",
 ]
 RECONCILIATION_METHODS = frozenset(
     {
@@ -734,6 +736,7 @@ RECONCILIATION_METHODS = frozenset(
         "wls_var",
         "mint_shrink",
         "mint_nonneg",
+        "cross_temporal_mint",
     }
 )
 
@@ -746,8 +749,9 @@ class HierarchyConfig(BaseModel):
     with the total aggregate (``"__total__"``) prepended automatically and the bottom-level series
     (``data.ts_id_col``) at the leaves.
 
-    Implements the Hyndman & Athanasopoulos (FPP3 Ch. 11) reconciliation projection
-    ``y_tilde = S @ G @ y_hat`` across eight methods:
+    Implements the Hyndman & Athanasopoulos (FPP3 Ch. 11) and Athanasopoulos et al. (2017, THieF)
+    reconciliation projections ``y_tilde = S @ G @ y_hat`` across cross-sectional, temporal, and
+    cross-temporal hierarchies:
 
     * ``bottom_up`` — sum bottom-level forecasts upward via the summing matrix ``S``.
     * ``top_down`` — disaggregate the top-level forecast downward by average historical proportions
@@ -763,6 +767,8 @@ class HierarchyConfig(BaseModel):
       covariance of residuals, positive-definite even when ``n_series >> T_obs``.
     * ``mint_nonneg`` — active-set non-negative Minimum Trace reconciliation guaranteeing
       bottom-level forecasts ``>= 0`` while preserving exact additive coherence across all levels.
+    * ``cross_temporal_mint`` — simultaneous cross-sectional and temporal Minimum Trace
+      reconciliation guaranteeing exact coherence across both hierarchy nodes and temporal buckets.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -775,6 +781,24 @@ class HierarchyConfig(BaseModel):
         "mint_shrink",
     ]
     middle_level: list[str] | None = None
+    reconcile_temporal: bool = False
+    temporal_aggregations: list[int] | None = None
+    cross_temporal: bool = False
+    spatial_temporal_weight: float | Literal["auto"] = "auto"
+
+    @field_validator("spatial_temporal_weight", mode="before")
+    @classmethod
+    def _validate_spatial_temporal_weight(cls, v: Any) -> float | Literal["auto"]:
+        if v == "auto":
+            return "auto"
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(
+                "hierarchy.spatial_temporal_weight must be 'auto' or a float in [0.0, 1.0]."
+            )
+        w = float(v)
+        if not math.isfinite(w) or w < 0.0 or w > 1.0:
+            raise ValueError(f"hierarchy.spatial_temporal_weight must be in [0.0, 1.0], got {v!r}.")
+        return w
 
     @model_validator(mode="after")
     def _check_hierarchy(self) -> HierarchyConfig:
@@ -793,11 +817,49 @@ class HierarchyConfig(BaseModel):
                 f"hierarchy.middle_level {self.middle_level} must be one of hierarchy.levels "
                 f"{self.levels}"
             )
+        if self.temporal_aggregations is not None:
+            if not self.temporal_aggregations:
+                raise ValueError("hierarchy.temporal_aggregations cannot be empty when provided")
+            if len(set(self.temporal_aggregations)) != len(self.temporal_aggregations):
+                raise ValueError(
+                    "hierarchy.temporal_aggregations contains duplicates: "
+                    f"{self.temporal_aggregations}"
+                )
+            if any(int(m) < 1 for m in self.temporal_aggregations) or all(
+                int(m) <= 1 for m in self.temporal_aggregations
+            ):
+                raise ValueError(
+                    "hierarchy.temporal_aggregations must contain positive integer factors > 1; "
+                    f"got {self.temporal_aggregations}"
+                )
+        if self.cross_temporal and not self.levels:
+            raise ValueError(
+                "hierarchy.cross_temporal=true requires at least one aggregation level in "
+                "hierarchy.levels."
+            )
+        if self.cross_temporal or (
+            "cross_temporal_mint" in self.reconciliation_methods and bool(self.levels)
+        ):
+            object.__setattr__(self, "reconcile_temporal", True)
+            if self.levels:
+                object.__setattr__(self, "enabled", True)
+                object.__setattr__(self, "cross_temporal", True)
+            if "cross_temporal_mint" not in self.reconciliation_methods:
+                object.__setattr__(
+                    self,
+                    "reconciliation_methods",
+                    [*self.reconciliation_methods, "cross_temporal_mint"],
+                )
         if self.enabled:
-            if not self.levels:
+            if not self.levels and not self.reconcile_temporal and not self.cross_temporal:
                 raise ValueError(
                     "hierarchy.enabled=true requires at least one aggregation level in "
                     "hierarchy.levels (e.g. [['region'], ['region', 'category']])"
+                )
+            if self.cross_temporal and not self.levels:
+                raise ValueError(
+                    "hierarchy.cross_temporal=true requires at least one aggregation level in "
+                    "hierarchy.levels"
                 )
             if not self.reconciliation_methods:
                 raise ValueError(

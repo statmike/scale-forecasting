@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -97,6 +97,16 @@ class HierarchySpec:
     def structural_weights(self) -> np.ndarray:
         """Number of bottom-level series summed into each node (`w = S @ 1_{n_b}`)."""
         return self.summing_matrix.sum(axis=1)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, HierarchySpec):
+            return False
+        return (
+            self.node_ids == other.node_ids
+            and self.bottom_ids == other.bottom_ids
+            and self.level_nodes == other.level_nodes
+            and np.array_equal(self.summing_matrix, other.summing_matrix)
+        )
 
 
 def _level_key(cols: Sequence[str]) -> str:
@@ -344,7 +354,7 @@ def _historical_proportions(
     return props / total_prop
 
 
-def _residual_matrix(
+def residual_matrix(
     residuals_df: pd.DataFrame | None,
     node_ids: Sequence[str],
     *,
@@ -372,6 +382,9 @@ def _residual_matrix(
     if wide.empty:
         return None
     return wide.fillna(0.0).to_numpy(dtype=float)
+
+
+_residual_matrix = residual_matrix
 
 
 def reconcile_matrix(
@@ -594,9 +607,11 @@ def reconcile_forecasts(
     spec: HierarchySpec,
     method: ReconciliationMethod,
     *,
+    cfg: RunConfig | None = None,
     history_df: pd.DataFrame | None = None,
     oof_df: pd.DataFrame | None = None,
     middle_level: Sequence[str] | None = None,
+    spatial_temporal_weight: float | Literal["auto"] | None = None,
     date_col: str = "forecast_date",
     ts_id_col: str = "ts_id",
     target_col: str = "y",
@@ -605,7 +620,7 @@ def reconcile_forecasts(
     """Reconcile base forecasts across ``spec`` using ``method`` (pure).
 
     Applies ``y_tilde = S @ G @ y_hat`` at every forecast date (and per ``model_type`` when the
-     column is present). When ``stamp_method=True`` (default), stamps ``model_type`` as
+    column is present). When ``stamp_method=True`` (default), stamps ``model_type`` as
     ``f"{base_model}_{method}"`` so reconciled forecasts can sit alongside base forecasts in the
     registry and leaderboard.
     """
@@ -613,13 +628,34 @@ def reconcile_forecasts(
         return predictions_df.copy()
 
     dcol = date_col if date_col in predictions_df.columns else "ds"
+    if method == "cross_temporal_mint":
+        from .temporal_reconciliation import reconcile_cross_temporal
+
+        ct_res = reconcile_cross_temporal(
+            predictions_df,
+            spec,
+            history_df=history_df,
+            oof_df=oof_df,
+            cfg=cfg,
+            method="cross_temporal_mint",
+            middle_level=middle_level,
+            spatial_temporal_weight=spatial_temporal_weight,
+            stamp_method=stamp_method,
+            return_aggregations=False,
+            date_col=dcol,
+            ts_id_col=ts_id_col,
+            target_col=target_col,
+        )
+        assert isinstance(ct_res, pd.DataFrame)
+        return ct_res
+
     has_model_col = "model_type" in predictions_df.columns
-    group_Models = (
+    group_models = (
         predictions_df["model_type"].drop_duplicates().tolist() if has_model_col else [None]
     )
 
     reconciled_parts: list[pd.DataFrame] = []
-    for model_name in group_Models:
+    for model_name in group_models:
         model_preds = (
             predictions_df[predictions_df["model_type"] == model_name]
             if model_name is not None
@@ -665,11 +701,33 @@ def reconcile_forecasts(
                 rec_slice["model_type"] = f"{model_name}_{method}"
             reconciled_parts.append(rec_slice)
 
-    return (
+    out_df = (
         pd.concat(reconciled_parts, ignore_index=True)
         if reconciled_parts
         else predictions_df.copy()
     )
+    final_cs_disc = (
+        float(
+            verify_coherence(
+                out_df,
+                spec,
+                date_col=dcol,
+                ts_id_col=ts_id_col,
+                atol=float("inf"),
+            )
+        )
+        if not out_df.empty
+        else 0.0
+    )
+    out_df.attrs["cross_temporal_diagnostics"] = {
+        "mode": "spatial_only",
+        "spatial_weight_alpha": 1.0,
+        "cs_first_discrepancy": 0.0,
+        "temp_first_discrepancy": 0.0,
+        "final_cs_discrepancy": final_cs_disc,
+        "final_temp_discrepancy": 0.0,
+    }
+    return out_df
 
 
 def reconcile_oof(
@@ -680,6 +738,7 @@ def reconcile_oof(
     cfg: RunConfig | None = None,
     history_df: pd.DataFrame | None = None,
     middle_level: Sequence[str] | None = None,
+    spatial_temporal_weight: float | Literal["auto"] | None = None,
     ts_id_col: str = "ts_id",
     target_col: str = "y",
     stamp_method: bool = True,
@@ -708,6 +767,60 @@ def reconcile_oof(
             inner = m_oof[m_oof["fold_id"] != holdout]
             if not inner.empty:
                 fit_oof = inner
+
+        has_explicit_ct = (
+            cfg is not None and "cross_temporal_mint" in cfg.hierarchy.reconciliation_methods
+        )
+        if method == "cross_temporal_mint" or (
+            cfg is not None
+            and not has_explicit_ct
+            and (cfg.hierarchy.cross_temporal or cfg.hierarchy.reconcile_temporal)
+        ):
+            from .temporal_reconciliation import reconcile_cross_temporal
+
+            eff_st_weight = (
+                spatial_temporal_weight
+                if spatial_temporal_weight is not None
+                else (cfg.hierarchy.spatial_temporal_weight if cfg is not None else None)
+            )
+            if fold_col in m_oof.columns:
+                for _fkey, fold_slice in m_oof.groupby(fold_col, sort=True):
+                    ct_fold = reconcile_cross_temporal(
+                        fold_slice,
+                        spec,
+                        history_df=history_df,
+                        oof_df=fit_oof,
+                        cfg=cfg,
+                        method=method,
+                        middle_level=middle_level,
+                        spatial_temporal_weight=eff_st_weight,
+                        stamp_method=stamp_method,
+                        return_aggregations=False,
+                        date_col=dcol,
+                        ts_id_col=ts_id_col,
+                        target_col=target_col,
+                    )
+                    assert isinstance(ct_fold, pd.DataFrame)
+                    parts.append(ct_fold)
+            else:
+                ct_all = reconcile_cross_temporal(
+                    m_oof,
+                    spec,
+                    history_df=history_df,
+                    oof_df=fit_oof,
+                    cfg=cfg,
+                    method=method,
+                    middle_level=middle_level,
+                    spatial_temporal_weight=eff_st_weight,
+                    stamp_method=stamp_method,
+                    return_aggregations=False,
+                    date_col=dcol,
+                    ts_id_col=ts_id_col,
+                    target_col=target_col,
+                )
+                assert isinstance(ct_all, pd.DataFrame)
+                parts.append(ct_all)
+            continue
 
         g_mat = reconcile_matrix(
             spec,
@@ -746,7 +859,7 @@ def reconcile_oof(
 def reconcile_cells(
     results: Sequence[CellResult],
     cfg: RunConfig,
-    spec: HierarchySpec,
+    spec: HierarchySpec | None = None,
     *,
     history_df: pd.DataFrame | None = None,
 ) -> list[CellResult]:
@@ -761,7 +874,7 @@ def reconcile_cells(
     from .registry.ids import make_model_hash
     from .seasonality import seasonal_period
 
-    if not results or not cfg.hierarchy.enabled:
+    if not results or not (cfg.hierarchy.enabled or cfg.hierarchy.reconcile_temporal):
         return []
 
     id_col = cfg.data.ts_id_col
@@ -771,9 +884,12 @@ def reconcile_cells(
 
     # Index history per ts_id for MASE/RMSSE/MSIS scaling when scoring reconciled OOF.
     y_train_by_id: dict[str, np.ndarray] = {}
+    hist_by_id: dict[str, pd.DataFrame] = {}
     if history_df is not None and not history_df.empty:
         for tid, grp in history_df.groupby(id_col, sort=False):
-            y_train_by_id[str(tid)] = grp.sort_values(date_col)[target_col].to_numpy(dtype=float)
+            sorted_grp = grp.sort_values(date_col)
+            y_train_by_id[str(tid)] = sorted_grp[target_col].to_numpy(dtype=float)
+            hist_by_id[str(tid)] = sorted_grp
 
     by_model: dict[str, dict[str, CellResult]] = {}
     for res in results:
@@ -781,6 +897,126 @@ def reconcile_cells(
             by_model.setdefault(res.model_type, {})[res.ts_id] = res
 
     reconciled_results: list[CellResult] = []
+    if spec is None:
+        # Mode 2: Pure temporal reconciliation across flat panel series (predictions + OOF folds).
+        if not cfg.hierarchy.reconcile_temporal:
+            return []
+        from .temporal_reconciliation import reconcile_series_temporal
+
+        t_methods: list[str] = [
+            m for m in cfg.hierarchy.reconciliation_methods if m != "cross_temporal_mint"
+        ] or ["mint_shrink"]
+        for base_model, cell_map in by_model.items():
+            for method in t_methods:
+                rec_model_name = f"{base_model}_{method}"
+                for nid, base_cell in cell_map.items():
+                    hist_s = hist_by_id.get(nid)
+                    base_pred_src = base_cell.predictions.attrs.get(
+                        "unreconciled_predictions", base_cell.predictions
+                    )
+                    rec_pred, _ = reconcile_series_temporal(
+                        hist_s,
+                        base_pred_src,
+                        cfg,
+                        method=method,
+                        oof_df=base_cell.oof,
+                        date_col="ds",
+                        target_col=target_col,
+                    )
+                    rec_oof = base_cell.oof
+                    node_metrics = dict(base_cell.metrics)
+                    if base_cell.oof is not None and not base_cell.oof.empty:
+                        oof_dcol = (
+                            "ds"
+                            if "ds" in base_cell.oof.columns
+                            else (
+                                "forecast_date"
+                                if "forecast_date" in base_cell.oof.columns
+                                else date_col
+                            )
+                        )
+                        fold_col = (
+                            "fold_id"
+                            if "fold_id" in base_cell.oof.columns
+                            else ("cutoff_date" if "cutoff_date" in base_cell.oof.columns else None)
+                        )
+                        fit_oof = base_cell.oof
+                        if "fold_id" in base_cell.oof.columns:
+                            holdout = holdout_fold_id(cfg)
+                            inner = base_cell.oof[base_cell.oof["fold_id"] != holdout]
+                            if not inner.empty:
+                                fit_oof = inner
+                        fold_groups = (
+                            base_cell.oof.groupby(fold_col, sort=True)
+                            if fold_col is not None
+                            else [(0, base_cell.oof)]
+                        )
+                        rec_oof_parts: list[pd.DataFrame] = []
+                        for _fkey, fold_slice in fold_groups:
+                            fold_hist = hist_s
+                            if (
+                                hist_s is not None
+                                and not hist_s.empty
+                                and "cutoff_date" in fold_slice.columns
+                                and date_col in hist_s.columns
+                            ):
+                                cutoff_val = fold_slice["cutoff_date"].iloc[0]
+                                sub_h = hist_s[
+                                    pd.to_datetime(hist_s[date_col]) <= pd.Timestamp(cutoff_val)
+                                ]
+                                if not sub_h.empty:
+                                    fold_hist = sub_h
+                            rec_fold, _ = reconcile_series_temporal(
+                                fold_hist,
+                                fold_slice,
+                                cfg,
+                                horizon=len(fold_slice),
+                                method=method,
+                                oof_df=fit_oof,
+                                date_col=oof_dcol,
+                                target_col=target_col,
+                            )
+                            rec_oof_parts.append(rec_fold)
+                        rec_oof = (
+                            pd.concat(rec_oof_parts, ignore_index=True)
+                            if rec_oof_parts
+                            else base_cell.oof.copy()
+                        )
+                        if {"y_true", "yhat"}.issubset(rec_oof.columns):
+                            lower = (
+                                rec_oof["yhat_lower"].to_numpy(dtype=float)
+                                if "yhat_lower" in rec_oof.columns
+                                else None
+                            )
+                            upper = (
+                                rec_oof["yhat_upper"].to_numpy(dtype=float)
+                                if "yhat_upper" in rec_oof.columns
+                                else None
+                            )
+                            node_metrics = compute_metrics(
+                                rec_oof["y_true"].to_numpy(dtype=float),
+                                rec_oof["yhat"].to_numpy(dtype=float),
+                                lower=lower,
+                                upper=upper,
+                                y_train=y_train_by_id.get(nid),
+                                seasonal_period=period,
+                            )
+                    reconciled_results.append(
+                        replace(
+                            base_cell,
+                            model_type=rec_model_name,
+                            model_hash=make_model_hash(base_cell.run_id, nid, rec_model_name, cfg),
+                            predictions=rec_pred,
+                            oof=rec_oof,
+                            metrics=node_metrics,
+                        )
+                    )
+        return reconciled_results
+
+    has_explicit_ct = "cross_temporal_mint" in cfg.hierarchy.reconciliation_methods
+    use_cross_temporal_fallback = bool(
+        not has_explicit_ct and (cfg.hierarchy.cross_temporal or cfg.hierarchy.reconcile_temporal)
+    )
     for base_model, cell_map in by_model.items():
         if set(spec.node_ids) - set(cell_map):
             continue
@@ -803,33 +1039,71 @@ def reconcile_cells(
         all_oof = pd.concat(oof_frames, ignore_index=True) if oof_frames else pd.DataFrame()
 
         for method in cfg.hierarchy.reconciliation_methods:
-            rec_preds = reconcile_forecasts(
-                all_preds,
-                spec,
-                method,
-                history_df=history_df,
-                oof_df=all_oof if not all_oof.empty else None,
-                middle_level=cfg.hierarchy.middle_level,
-                date_col="ds",
-                ts_id_col=id_col,
-                target_col=target_col,
-                stamp_method=True,
-            )
-            rec_oof = (
-                reconcile_oof(
-                    all_oof,
+            if method == "cross_temporal_mint" or use_cross_temporal_fallback:
+                from .temporal_reconciliation import reconcile_cross_temporal
+
+                ct_preds = reconcile_cross_temporal(
+                    all_preds,
+                    spec,
+                    history_df=history_df,
+                    oof_df=all_oof if not all_oof.empty else None,
+                    cfg=cfg,
+                    method=method,
+                    middle_level=cfg.hierarchy.middle_level,
+                    spatial_temporal_weight=cfg.hierarchy.spatial_temporal_weight,
+                    stamp_method=True,
+                    return_aggregations=False,
+                    date_col="ds",
+                    ts_id_col=id_col,
+                    target_col=target_col,
+                )
+                assert isinstance(ct_preds, pd.DataFrame)
+                rec_preds = ct_preds
+                rec_oof = (
+                    reconcile_oof(
+                        all_oof,
+                        spec,
+                        "cross_temporal_mint" if method == "cross_temporal_mint" else method,
+                        cfg=cfg,
+                        history_df=history_df,
+                        middle_level=cfg.hierarchy.middle_level,
+                        spatial_temporal_weight=cfg.hierarchy.spatial_temporal_weight,
+                        ts_id_col=id_col,
+                        target_col=target_col,
+                        stamp_method=True,
+                    )
+                    if not all_oof.empty
+                    else pd.DataFrame()
+                )
+            else:
+                rec_preds = reconcile_forecasts(
+                    all_preds,
                     spec,
                     method,
                     cfg=cfg,
                     history_df=history_df,
+                    oof_df=all_oof if not all_oof.empty else None,
                     middle_level=cfg.hierarchy.middle_level,
+                    date_col="ds",
                     ts_id_col=id_col,
                     target_col=target_col,
                     stamp_method=True,
                 )
-                if not all_oof.empty
-                else pd.DataFrame()
-            )
+                rec_oof = (
+                    reconcile_oof(
+                        all_oof,
+                        spec,
+                        method,
+                        cfg=cfg,
+                        history_df=history_df,
+                        middle_level=cfg.hierarchy.middle_level,
+                        ts_id_col=id_col,
+                        target_col=target_col,
+                        stamp_method=True,
+                    )
+                    if not all_oof.empty
+                    else pd.DataFrame()
+                )
 
             rec_model_name = f"{base_model}_{method}"
             preds_by_id = {
@@ -897,6 +1171,7 @@ def verify_coherence(
     spec: HierarchySpec,
     *,
     value_col: str = "yhat",
+    target_col: str | None = None,
     date_col: str = "forecast_date",
     ts_id_col: str = "ts_id",
     atol: float = 1e-6,
@@ -908,15 +1183,29 @@ def verify_coherence(
     """
     if df.empty:
         return 0.0
-    dcol = date_col if date_col in df.columns else "ds"
-    group_cols = ["model_type", dcol] if "model_type" in df.columns else [dcol]
+    dcol = date_col
+    if dcol not in df.columns:
+        for cand in ("forecast_date", "ds", "date"):
+            if cand in df.columns:
+                dcol = cand
+                break
+    vcol = target_col if target_col is not None else value_col
+    if vcol not in df.columns:
+        for cand in ("yhat", "yhat_sample", "y_allocated", "allocated_yhat", "y_sample", "y"):
+            if cand in df.columns:
+                vcol = cand
+                break
+    group_cols: list[str] = []
+    for gc in ("path_id", "model_type", dcol):
+        if gc in df.columns and gc not in group_cols:
+            group_cols.append(gc)
     s_mat = spec.summing_matrix
     n_agg = spec.n_aggregated
 
     max_err = 0.0
     for _key, grp in df.groupby(group_cols, sort=False):
         indexed = grp.drop_duplicates(subset=[ts_id_col], keep="first").set_index(ts_id_col)
-        vals = indexed.reindex(list(spec.node_ids))[value_col].to_numpy(dtype=float)
+        vals = indexed.reindex(list(spec.node_ids))[vcol].to_numpy(dtype=float)
         bottom_vals = vals[n_agg:]
         expected = s_mat @ bottom_vals
         err = float(np.max(np.abs(vals - expected)))

@@ -678,7 +678,11 @@ def run_cell(
         # Fit the transform's stateful λ once per cell (None for none/log1p), on the cleaned target.
         # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
         # predict (the whole point of carrying it on the cell).
-        lam = fit_transform_lambda(raw_target_series, model_cfg.features.transform)
+        lam = fit_transform_lambda(
+            raw_target_series,
+            model_cfg.features.transform,
+            simplex_sum=model_cfg.features.simplex_sum,
+        )
         static_covs = extract_static_covariates(series, model_cfg) or None
         ctx = _model_context(
             model_cfg,
@@ -996,7 +1000,9 @@ def run_panel(
 
         lams: dict[str, float | None] = {
             uid: fit_transform_lambda(
-                _target(series_frames[uid], model_cfg), model_cfg.features.transform
+                _target(series_frames[uid], model_cfg),
+                model_cfg.features.transform,
+                simplex_sum=model_cfg.features.simplex_sum,
             )
             for uid in uids
         }
@@ -1279,6 +1285,13 @@ def run_panel(
                     n_hpo_fits=0,
                 )
             )
+        if (
+            model_cfg.features.transform in ("clr", "ilr")
+            or model_cfg.features.simplex_sum is not None
+        ):
+            from .simplex import close_simplex_cells
+
+            results = close_simplex_cells(results, model_cfg, history_df=panel)
         return results
     except Exception as e:  # noqa: BLE001
         return _panel_errors(e, engine, n_fits=n_fits)

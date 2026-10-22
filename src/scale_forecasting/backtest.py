@@ -967,7 +967,7 @@ def backtest_cell(
         it would be picked up as if it were a second model. It lives in ``oof["yhat_stale"]`` and is
         summarised once as ``outcome.staleness_gap``.
     """
-    from .features import regularize_series_grid
+    from .features import fit_transform_lambda, regularize_series_grid
 
     reg_series = regularize_series_grid(series, cfg)
     if cfg.data.date_col in reg_series.columns:
@@ -975,6 +975,16 @@ def backtest_cell(
             reg_series.sort_values(cfg.data.date_col)
             .drop_duplicates(subset=[cfg.data.date_col], keep="last")
             .reset_index(drop=True)
+        )
+    if (
+        lam is None
+        and cfg.features.transform in ("clr", "ilr")
+        and cfg.data.target_col in reg_series.columns
+    ):
+        lam = fit_transform_lambda(
+            reg_series[cfg.data.target_col].astype(float),
+            cfg.features.transform,
+            simplex_sum=cfg.features.simplex_sum,
         )
     y, X = build_features(reg_series, cfg, lam, owns_covariate_lags)
     raw_target_orig = (

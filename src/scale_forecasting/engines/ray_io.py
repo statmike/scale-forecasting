@@ -912,12 +912,13 @@ def chunk_cells(
     """
     import pandas as pd
 
+    from ..simplex import has_simplex_models
     from ..worker import is_panel_model
 
     if source.empty or not models:
         return []
 
-    if cfg.hierarchy.enabled:
+    if cfg.hierarchy.enabled or has_simplex_models(cfg, models):
         return [source.assign(**{_MODEL_COL: model}).reset_index(drop=True) for model in models]
 
     panel_models = [m for m in models if is_panel_model(m, cfg)]

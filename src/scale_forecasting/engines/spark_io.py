@@ -69,10 +69,15 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     """The columns whose hash defines a bucket — the engine's unit of independence.
 
     ``[ts_id, model_type]`` — a whole cell per bucket, so cells spread across tasks and a slow cell
-    can't block fast ones. When ``cfg.hierarchy.enabled`` is True, returns ``[_MODEL_COL]`` so each
-    model's full hierarchy lands in one bucket for coherent aggregation and reconciliation.
+    can't block fast ones. When ``cfg.hierarchy.enabled`` is True or compositional simplex closure
+    is active, returns ``[_MODEL_COL]`` so each model's full panel lands in one bucket for coherent
+    aggregation, reconciliation, and simplex closure.
     """
     if cfg.hierarchy.enabled:
+        return [_MODEL_COL]
+    from ..simplex import has_simplex_models
+
+    if has_simplex_models(cfg):
         return [_MODEL_COL]
     return [cfg.data.ts_id_col, _MODEL_COL]
 
@@ -403,9 +408,15 @@ def run_group(
             else:
                 for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
                     model_results.append(run_cell(sub, mname, cfg, by_model.get(mname)))
+            from ..simplex import close_simplex_cells, has_simplex_models
+
+            if has_simplex_models(cfg, [mname]):
+                model_results = close_simplex_cells(model_results, cfg, history_df=clean_panel)
 
             results.extend(model_results)
-            if spec is not None:
+            if spec is not None or (cfg.hierarchy.reconcile_temporal and not clean_panel.empty):
+                from ..reconciliation import reconcile_cells
+
                 results.extend(reconcile_cells(model_results, cfg, spec, history_df=clean_panel))
     else:
         # untagged frame: run any panel models (`global`/`hybrid`) across the whole group first,
@@ -426,8 +437,15 @@ def run_group(
             for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
                 for model_name in local_models:
                     results.append(run_cell(sub, model_name, cfg, by_model.get(model_name)))
+        if results and not clean_panel.empty:
+            from ..simplex import close_simplex_cells, has_simplex_models
 
-        if spec is not None:
+            if has_simplex_models(cfg, executed):
+                results = close_simplex_cells(results, cfg, history_df=clean_panel)
+
+        if spec is not None or (cfg.hierarchy.reconcile_temporal and not clean_panel.empty):
+            from ..reconciliation import reconcile_cells
+
             results.extend(reconcile_cells(results, cfg, spec, history_df=clean_panel))
 
     status = pd.DataFrame(

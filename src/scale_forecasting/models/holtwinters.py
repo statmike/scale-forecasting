@@ -48,15 +48,19 @@ class HoltWinters(BaseModel):
         damped = bool(self.params.get("damped_trend", False)) and trend is not None
         seasonal_mode = self.params.get("seasonal", "add")
         seasonal = seasonal_mode if (seasonal_mode is not None and len(y) >= 2 * period) else None
+        import warnings
+
         self._last_date = y.index[-1]
-        self._fitted = ExponentialSmoothing(
-            y.astype(float),
-            trend=trend,
-            damped_trend=damped,
-            seasonal=seasonal,
-            seasonal_periods=period if seasonal else None,
-            initialization_method="estimated",
-        ).fit()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._fitted = ExponentialSmoothing(
+                y.astype(float),
+                trend=trend,
+                damped_trend=damped,
+                seasonal=seasonal,
+                seasonal_periods=period if seasonal else None,
+                initialization_method="estimated",
+            ).fit()
         self._set_residuals(self._fitted.resid.to_numpy())
 
     def predict(
