@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -309,6 +310,149 @@ def _select_or_weight_models(
     return inverse_error_weights(filtered)
 
 
+def smooth_oof_losses_by_similarity(
+    losses_by_series: Mapping[str, np.ndarray],
+    similarity_matrix: pd.DataFrame | np.ndarray,
+    *,
+    smoothing: float = 0.0,
+    top_k_neighbors: int = 5,
+    series_ids: Sequence[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """Smooth per-series OOF loss vectors across the top-$K$ trajectory-similar neighbors.
+
+    For each series $i$ and candidate model $m$:
+    $$\\tilde{L}_{i, m} = (1 - \\alpha)\\,L_{i, m}
+      + \\alpha \\sum_{j \\in \\mathcal{N}_K(i)} \\tilde{S}_{i, j}\\,L_{j, m}$$
+    where $\\alpha = \\text{smoothing} \\in [0, 1]$ and $\\tilde{S}_{i, j}$ are the normalized
+    positive trajectory similarities over the top-$K$ peers $j \\ne i$ with $S_{i, j} > 0$.
+    """
+    if (
+        isinstance(smoothing, bool)
+        or not isinstance(smoothing, (int, float, np.number))
+        or not np.isfinite(float(smoothing))
+        or float(smoothing) < 0.0
+        or float(smoothing) > 1.0
+    ):
+        raise ConfigError(
+            f"similarity_smoothing must be a finite float in [0.0, 1.0], got {smoothing!r}"
+        )
+    alpha = float(smoothing)
+    ordered_ids = (
+        [str(s) for s in series_ids]
+        if series_ids is not None
+        else [str(k) for k in losses_by_series]
+    )
+    out: dict[str, np.ndarray] = {
+        str(k): np.asarray(v, dtype=float).copy() for k, v in losses_by_series.items()
+    }
+    if alpha <= 0.0 or len(ordered_ids) <= 1 or similarity_matrix is None:
+        return out
+
+    n_s = len(ordered_ids)
+    if isinstance(similarity_matrix, pd.DataFrame):
+        sim_arr = (
+            similarity_matrix.reindex(index=ordered_ids, columns=ordered_ids)
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+        )
+    else:
+        sim_arr = np.asarray(similarity_matrix, dtype=float).copy()
+        if sim_arr.shape != (n_s, n_s):
+            return out
+
+    k_max = max(1, int(top_k_neighbors))
+    for i, tid_i in enumerate(ordered_ids):
+        if tid_i not in out:
+            continue
+        base_loss = np.asarray(losses_by_series[tid_i], dtype=float)
+        n_m = len(base_loss)
+        peer_cands = [
+            (j, float(sim_arr[i, j]))
+            for j in range(n_s)
+            if j != i
+            and ordered_ids[j] in losses_by_series
+            and np.isfinite(sim_arr[i, j])
+            and float(sim_arr[i, j]) > 0.0
+        ]
+        if not peer_cands:
+            continue
+        peer_cands.sort(key=lambda pair: pair[1], reverse=True)
+        top_peers = peer_cands[:k_max]
+
+        smoothed = base_loss.copy()
+        for m in range(n_m):
+            if not np.isfinite(base_loss[m]):
+                continue
+            w_sum = 0.0
+            l_sum = 0.0
+            for j, s_ij in top_peers:
+                peer_vec = np.asarray(losses_by_series[ordered_ids[j]], dtype=float)
+                if m < len(peer_vec) and np.isfinite(peer_vec[m]):
+                    w_sum += s_ij
+                    l_sum += s_ij * float(peer_vec[m])
+            if w_sum > 1e-12:
+                neighbor_loss = l_sum / w_sum
+                smoothed[m] = (1.0 - alpha) * float(base_loss[m]) + alpha * neighbor_loss
+        out[tid_i] = smoothed
+    return out
+
+
+def _resolve_ensemble_similarity_matrix(
+    cfg: RunConfig,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    base_df: pd.DataFrame | None = None,
+) -> pd.DataFrame | np.ndarray | None:
+    """Resolve or compute the pairwise trajectory similarity matrix when smoothing is active."""
+    alpha = float(getattr(cfg.ensemble, "similarity_smoothing", 0.0))
+    if alpha <= 0.0:
+        return None
+    for frame in (oof_df, base_df):
+        if frame is not None:
+            sim_attr = frame.attrs.get("similarity_matrix")
+            if sim_attr is not None:
+                return sim_attr
+
+    from .similarity import compute_similarity_matrix
+
+    if (
+        oof_df is not None
+        and not oof_df.empty
+        and "ts_id" in oof_df.columns
+        and "y_true" in oof_df.columns
+        and int(oof_df["ts_id"].nunique()) >= 2
+    ):
+        dcol = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+        if dcol in oof_df.columns:
+            dedup = oof_df[["ts_id", dcol, "y_true"]].drop_duplicates(subset=["ts_id", dcol])
+            return compute_similarity_matrix(
+                dedup,
+                method="hybrid",
+                ts_id_col="ts_id",
+                date_col=dcol,
+                target_col="y_true",
+            ).matrix_df
+
+    if (
+        base_df is not None
+        and not base_df.empty
+        and "ts_id" in base_df.columns
+        and "yhat" in base_df.columns
+        and int(base_df["ts_id"].nunique()) >= 2
+    ):
+        dcol = "forecast_date" if "forecast_date" in base_df.columns else "ds"
+        if dcol in base_df.columns:
+            agg_base = base_df.groupby(["ts_id", dcol])["yhat"].mean().reset_index()
+            return compute_similarity_matrix(
+                agg_base,
+                method="hybrid",
+                ts_id_col="ts_id",
+                date_col=dcol,
+                target_col="yhat",
+            ).matrix_df
+    return None
+
+
 # --- OOF-space consensus (scoring) ---------------------------------------------
 
 # The columns of the OOF-blend frame combine_oof returns — the shape the scorer consumes.
@@ -415,6 +559,8 @@ def combine_oof(
     oof_df: pd.DataFrame,
     cfg: RunConfig,
     learned_weights: dict[str, dict[str, float]] | None = None,
+    *,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Blend base-model OOF forecasts into ensemble OOF, per requested strategy (pure).
 
@@ -470,6 +616,11 @@ def combine_oof(
     parts: list[pd.DataFrame] = []
     steps_arr = steps.to_numpy(dtype=float)
     folds_arr = fold_ids.to_numpy(dtype=float)
+    sim_mat = (
+        similarity_matrix
+        if similarity_matrix is not None
+        else _resolve_ensemble_similarity_matrix(cfg, oof_df=oof_df)
+    )
     for strategy in cfg.ensemble.strategies:
         yhat = _blend_oof_strategy(
             strategy,
@@ -482,6 +633,7 @@ def combine_oof(
             fit_rows,
             cfg,
             fold_ids=folds_arr,
+            similarity_matrix=sim_mat,
         )
         if yhat is None:
             continue
@@ -527,6 +679,7 @@ def _blend_oof_strategy(
     cfg: RunConfig,
     *,
     fold_ids: np.ndarray | None = None,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> np.ndarray | None:
     """The blended yhat for one strategy over the OOF value matrix, or ``None`` to skip it.
 
@@ -536,6 +689,8 @@ def _blend_oof_strategy(
     """
     top_k = cfg.ensemble.top_k
     margin = cfg.ensemble.parsimony_margin
+    sim_smoothing = float(getattr(cfg.ensemble, "similarity_smoothing", 0.0))
+    sim_k = int(getattr(cfg.ensemble, "similarity_top_k_neighbors", 5))
     if strategy in ("mean", "median") and top_k is None and margin == 0.0:
         if strategy == "mean":
             return _weighted_blend(vals, np.ones(len(models)))
@@ -550,6 +705,9 @@ def _blend_oof_strategy(
             fit_rows,
             top_k=top_k,
             parsimony_margin=margin,
+            similarity_smoothing=sim_smoothing,
+            similarity_top_k_neighbors=sim_k,
+            similarity_matrix=similarity_matrix,
         )
     if strategy in ("inverse_error", "champion"):
         return _inverse_error_blend(
@@ -562,6 +720,9 @@ def _blend_oof_strategy(
             parsimony_margin=margin,
             champion_only=(strategy == "champion"),
             fold_ids=fold_ids,
+            similarity_smoothing=sim_smoothing,
+            similarity_top_k_neighbors=sim_k,
+            similarity_matrix=similarity_matrix,
         )
     if strategy == "horizon_specialist":
         return _horizon_specialist_oof_blend(
@@ -616,15 +777,29 @@ def _filtered_unweighted_oof_blend(
     *,
     top_k: int | None,
     parsimony_margin: float,
+    similarity_smoothing: float = 0.0,
+    similarity_top_k_neighbors: int = 5,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> np.ndarray:
     """``mean`` or ``median`` after per-series ``top_k`` and ``parsimony_margin`` pruning."""
     out = np.full(vals.shape[0], np.nan)
-    for idx in _group_row_indices(ts_ids).values():
-        block = vals[idx]
+    grouped = _group_row_indices(ts_ids)
+    wape_by_series: dict[str, np.ndarray] = {}
+    for tid_key, idx in grouped.items():
         fit_idx = idx[fit_rows[idx]]
         if len(fit_idx) == 0:
             fit_idx = idx
-        wape = _series_oof_wape(vals[fit_idx], truth[fit_idx])
+        wape_by_series[str(tid_key)] = _series_oof_wape(vals[fit_idx], truth[fit_idx])
+    if similarity_smoothing > 0.0 and similarity_matrix is not None and len(wape_by_series) >= 2:
+        wape_by_series = smooth_oof_losses_by_similarity(
+            wape_by_series,
+            similarity_matrix,
+            smoothing=similarity_smoothing,
+            top_k_neighbors=similarity_top_k_neighbors,
+        )
+    for tid_key, idx in grouped.items():
+        block = vals[idx]
+        wape = wape_by_series[str(tid_key)]
         w = _select_or_weight_models(
             wape,
             models,
@@ -653,18 +828,71 @@ def _inverse_error_blend(
     parsimony_margin: float = 0.0,
     champion_only: bool = False,
     fold_ids: np.ndarray | None = None,
+    similarity_smoothing: float = 0.0,
+    similarity_top_k_neighbors: int = 5,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> np.ndarray:
     """Inverse-WAPE-weighted (or single-winner ``champion``) blend per ``ts_id`` from OOF."""
     out = np.full(vals.shape[0], np.nan)
-    for idx in _group_row_indices(ts_ids).values():
+    grouped = _group_row_indices(ts_ids)
+    wape_fit_by_series: dict[str, np.ndarray] = {}
+    for tid_key, idx in grouped.items():
+        fit_idx = idx[fit_rows[idx]]
+        if len(fit_idx) == 0:
+            fit_idx = idx
+        wape_fit_by_series[str(tid_key)] = _series_oof_wape(vals[fit_idx], truth[fit_idx])
+    if (
+        similarity_smoothing > 0.0
+        and similarity_matrix is not None
+        and len(wape_fit_by_series) >= 2
+    ):
+        wape_fit_by_series = smooth_oof_losses_by_similarity(
+            wape_fit_by_series,
+            similarity_matrix,
+            smoothing=similarity_smoothing,
+            top_k_neighbors=similarity_top_k_neighbors,
+        )
+
+    # Pre-smooth per-fold leave-one-fold-out WAPE across series when champion_only & multi-fold
+    wape_by_fold_series: dict[float, dict[str, np.ndarray]] = {}
+    if champion_only and fold_ids is not None:
+        all_finite_folds = np.unique(fold_ids[~np.isnan(fold_ids)])
+        if len(all_finite_folds) >= 2:
+            for f_val in all_finite_folds:
+                raw_fold_map: dict[str, np.ndarray] = {}
+                for tid_key, idx in grouped.items():
+                    s_folds = fold_ids[idx]
+                    other_idx = idx[s_folds != f_val]
+                    if len(other_idx) == 0:
+                        other_idx = idx
+                    raw_fold_map[str(tid_key)] = _series_oof_wape(vals[other_idx], truth[other_idx])
+                if (
+                    similarity_smoothing > 0.0
+                    and similarity_matrix is not None
+                    and len(raw_fold_map) >= 2
+                ):
+                    raw_fold_map = smooth_oof_losses_by_similarity(
+                        raw_fold_map,
+                        similarity_matrix,
+                        smoothing=similarity_smoothing,
+                        top_k_neighbors=similarity_top_k_neighbors,
+                    )
+                wape_by_fold_series[float(f_val)] = raw_fold_map
+
+    for tid_key, idx in grouped.items():
+        tid_str = str(tid_key)
         if champion_only and fold_ids is not None:
             s_folds = fold_ids[idx]
             unique_folds = np.unique(s_folds[~np.isnan(s_folds)])
             if len(unique_folds) >= 2:
                 for f_val in unique_folds:
                     f_mask = s_folds == f_val
-                    other_idx = idx[~f_mask]
-                    wape_f = _series_oof_wape(vals[other_idx], truth[other_idx])
+                    fold_map = wape_by_fold_series.get(float(f_val), {})
+                    if tid_str in fold_map:
+                        wape_f = fold_map[tid_str]
+                    else:
+                        other_idx = idx[~f_mask]
+                        wape_f = _series_oof_wape(vals[other_idx], truth[other_idx])
                     weights_f = _select_or_weight_models(
                         wape_f,
                         models,
@@ -675,7 +903,7 @@ def _inverse_error_blend(
                     out[idx[f_mask]] = _weighted_blend(vals[idx[f_mask]], weights_f)
                 nan_f = np.isnan(s_folds)
                 if np.any(nan_f):
-                    wape_all = _series_oof_wape(vals[idx], truth[idx])
+                    wape_all = wape_fit_by_series[tid_str]
                     w_all = _select_or_weight_models(
                         wape_all,
                         models,
@@ -686,10 +914,7 @@ def _inverse_error_blend(
                     out[idx[nan_f]] = _weighted_blend(vals[idx[nan_f]], w_all)
                 continue
         block = vals[idx]
-        fit_idx = idx[fit_rows[idx]]
-        if len(fit_idx) == 0:
-            fit_idx = idx
-        wape = _series_oof_wape(vals[fit_idx], truth[fit_idx])
+        wape = wape_fit_by_series[tid_str]
         weights = _select_or_weight_models(
             wape,
             models,
@@ -950,6 +1175,8 @@ def combine_calculated(
     cfg: RunConfig,
     metric_df: pd.DataFrame | None = None,
     oof_df: pd.DataFrame | None = None,
+    *,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     """Blend base predictions into ``ensemble_<s>`` rows for every calculated strategy (pure).
 
@@ -986,13 +1213,27 @@ def combine_calculated(
         has_selection_filter and ("mean" in calculated or "median" in calculated)
     ):
         ie_weights = _inverse_error_weight_matrix(
-            present, cfg, metric_df, ts_ids_arr, champion_only=False
+            present,
+            cfg,
+            metric_df,
+            ts_ids_arr,
+            champion_only=False,
+            oof_df=oof_df,
+            base_df=base_df,
+            similarity_matrix=similarity_matrix,
         )
 
     champ_weights: np.ndarray | None = None
     if "champion" in calculated:
         champ_weights = _inverse_error_weight_matrix(
-            present, cfg, metric_df, ts_ids_arr, champion_only=True, oof_df=oof_df
+            present,
+            cfg,
+            metric_df,
+            ts_ids_arr,
+            champion_only=True,
+            oof_df=oof_df,
+            base_df=base_df,
+            similarity_matrix=similarity_matrix,
         )
 
     hs_weights: np.ndarray | None = None
@@ -1041,6 +1282,8 @@ def _inverse_error_weight_matrix(
     *,
     champion_only: bool = False,
     oof_df: pd.DataFrame | None = None,
+    base_df: pd.DataFrame | None = None,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
 ) -> np.ndarray:
     """Inverse-error (or ``champion``) weights per prediction row, estimated **per series**."""
     n = len(models)
@@ -1066,10 +1309,31 @@ def _inverse_error_weight_matrix(
         .unstack("model_type")
         .reindex(columns=models)
     )
-    per_series: dict[str, np.ndarray] = {}
+    losses_by_series: dict[str, np.ndarray] = {}
     for ts_id, row in zip(mean_by_series.index, mean_by_series.to_numpy(), strict=True):
-        losses = np.array([loss_of(metric, float(v)) for v in row], dtype=float)
-        per_series[str(ts_id)] = _select_or_weight_models(
+        losses_by_series[str(ts_id)] = np.array(
+            [loss_of(metric, float(v)) for v in row], dtype=float
+        )
+
+    sim_smoothing = float(getattr(cfg.ensemble, "similarity_smoothing", 0.0))
+    sim_k = int(getattr(cfg.ensemble, "similarity_top_k_neighbors", 5))
+    if sim_smoothing > 0.0 and len(losses_by_series) >= 2:
+        sim_mat = similarity_matrix
+        if sim_mat is None:
+            sim_mat = metric_df.attrs.get("similarity_matrix")
+        if sim_mat is None:
+            sim_mat = _resolve_ensemble_similarity_matrix(cfg, oof_df=oof_df, base_df=base_df)
+        if sim_mat is not None:
+            losses_by_series = smooth_oof_losses_by_similarity(
+                losses_by_series,
+                sim_mat,
+                smoothing=sim_smoothing,
+                top_k_neighbors=sim_k,
+            )
+
+    per_series: dict[str, np.ndarray] = {}
+    for tid_str, losses in losses_by_series.items():
+        per_series[tid_str] = _select_or_weight_models(
             losses,
             models,
             top_k=top_k,
@@ -1488,3 +1752,6 @@ def calibrate_ensemble_predictions(
                 rec[bcol] = None
         result.append(rec)
     return result
+
+
+build_ensembles = combine_oof

@@ -483,3 +483,144 @@ def test_multi_family_covariates_and_all_21_metrics_across_reconciled_hierarchy(
                 assert np.isfinite(total_cell.metrics[metric_name]), (
                     f"{rec_name} metric {metric_name} was not finite on __total__"
                 )
+
+
+def test_latent_similarity_hierarchy_discovery_and_reconciliation() -> None:
+    """Verify F6 (`similarity_hierarchy=True`): auto-discovers latent cluster nodes on a flat panel,
+    remains idempotent across repeated `build_hierarchy` calls, and synthesizes missing aggregate
+    nodes in `reconcile_forecasts`, `reconcile_oof`, and `reconcile_cross_temporal`.
+    """
+    from scale_forecasting.reconciliation import (
+        ensure_hierarchy_nodes_present,
+        materialize_similarity_hierarchy,
+        reconcile_forecasts,
+        reconcile_oof,
+        reconcile_run,
+    )
+    from scale_forecasting.temporal_reconciliation import (
+        build_temporal_hierarchy,
+        reconcile_cross_temporal,
+        sample_coherent_paths,
+        verify_cross_temporal_coherence,
+    )
+
+    assert reconcile_run is reconcile_forecasts
+
+    dates = pd.date_range("2025-01-01", periods=35, freq="D")
+    t_idx = np.arange(len(dates), dtype=float)
+    rows: list[dict[str, object]] = []
+    for i in range(3):
+        y_wave = 50.0 + 15.0 * np.sin(2.0 * np.pi * t_idx / 7.0) + i * 1.5
+        for dt, yv in zip(dates, y_wave, strict=True):
+            rows.append({"ts_id": f"wave_{i}", "ds": dt, "y": float(yv)})
+    for i in range(3):
+        y_trend = 20.0 + 1.8 * t_idx + i * 2.0
+        for dt, yv in zip(dates, y_trend, strict=True):
+            rows.append({"ts_id": f"trend_{i}", "ds": dt, "y": float(yv)})
+    flat_panel = pd.DataFrame(rows)
+
+    cfg = _cfg(
+        models=["theta"],
+        hierarchy={
+            "enabled": True,
+            "levels": [],
+            "similarity_hierarchy": True,
+            "similarity_n_clusters": 2,
+            "reconciliation_methods": ["wls_struct", "mint_shrink"],
+        },
+    )
+
+    mat_df, cluster_map = materialize_similarity_hierarchy(flat_panel, cfg)
+    assert "similarity_cluster_id" in mat_df.columns
+    assert len(cluster_map) == 6
+    assert set(mat_df["similarity_cluster_id"].unique()) == {"cluster_0", "cluster_1"}
+
+    full_panel, spec = build_hierarchy(flat_panel, cfg)
+    assert "similarity_cluster_id" in spec.level_nodes
+    assert len(spec.level_nodes["similarity_cluster_id"]) == 2
+    assert spec.n_bottom == 6
+    assert spec.n_nodes == 1 + 2 + 6
+
+    # Idempotence: calling build_hierarchy again on the already-aggregated panel preserves spec
+    full_panel_2, spec_2 = build_hierarchy(full_panel, cfg)
+    assert spec_2.node_ids == spec.node_ids
+    assert len(full_panel_2) == len(full_panel)
+
+    # Leaf-only predictions: ensure_hierarchy_nodes_present + reconcile_forecasts synthesize nodes
+    f_dates = pd.date_range("2025-02-05", periods=7, freq="D")
+    leaf_pred_rows: list[dict[str, object]] = []
+    leaf_oof_rows: list[dict[str, object]] = []
+    for bid in spec.bottom_ids:
+        for dt in f_dates:
+            leaf_pred_rows.append(
+                {
+                    "ts_id": bid,
+                    "model_type": "theta",
+                    "forecast_date": dt,
+                    "ds": dt,
+                    "yhat": 40.0,
+                    "yhat_lower": 32.0,
+                    "yhat_upper": 48.0,
+                }
+            )
+        for dt in dates[-14:]:
+            leaf_oof_rows.append(
+                {
+                    "ts_id": bid,
+                    "model_type": "theta",
+                    "fold_id": 0,
+                    "cutoff_date": dates[-15],
+                    "forecast_date": dt,
+                    "ds": dt,
+                    "y_true": 42.0,
+                    "yhat": 40.0,
+                }
+            )
+    leaf_preds_df = pd.DataFrame(leaf_pred_rows)
+    leaf_oof_df = pd.DataFrame(leaf_oof_rows)
+
+    completed_preds = ensure_hierarchy_nodes_present(leaf_preds_df, spec, date_col="forecast_date")
+    assert set(completed_preds["ts_id"].unique()) == set(spec.node_ids)
+
+    for method in ("wls_struct", "mint_shrink"):
+        rec_preds = reconcile_forecasts(
+            leaf_preds_df,
+            spec,
+            method,  # type: ignore[arg-type]
+            cfg=cfg,
+            oof_df=leaf_oof_df,
+            history_df=full_panel,
+        )
+        assert not rec_preds.empty
+        assert set(rec_preds["ts_id"].unique()) == set(spec.node_ids)
+        assert verify_coherence(rec_preds, spec) < 1e-8
+
+        rec_oof = reconcile_oof(
+            leaf_oof_df,
+            spec,
+            method,  # type: ignore[arg-type]
+            cfg=cfg,
+            history_df=full_panel,
+        )
+        assert not rec_oof.empty
+        assert verify_coherence(rec_oof, spec, date_col="forecast_date") < 1e-8
+
+    # Cross-temporal reconciliation and coherent path sampling with leaf-only similarity hierarchy
+    temp_spec = build_temporal_hierarchy("D", 7, [7])
+    ct_df = reconcile_cross_temporal(
+        leaf_preds_df,
+        spec,
+        temp_spec,
+        oof_df=leaf_oof_df,
+        history_df=full_panel,
+    )
+    assert verify_cross_temporal_coherence(ct_df, spec, temp_spec) < 1e-6
+
+    paths_df = sample_coherent_paths(
+        leaf_preds_df,
+        history_df=flat_panel,
+        cfg=cfg,
+        n_paths=15,
+        seed=42,
+    )
+    assert set(paths_df["ts_id"].unique()) == set(spec.node_ids)

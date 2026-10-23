@@ -43,6 +43,7 @@ from .errors import ConfigError, DataError
 from .reconciliation import (
     HierarchySpec,
     build_hierarchy,
+    ensure_hierarchy_nodes_present,
     reconcile_forecasts,
     schafer_strimmer_shrinkage,
     verify_coherence,
@@ -1288,6 +1289,31 @@ def reconcile_cross_temporal(
         if date_col in predictions_df.columns
         else ("forecast_date" if "forecast_date" in predictions_df.columns else "ds")
     )
+    predictions_df = ensure_hierarchy_nodes_present(
+        predictions_df,
+        hier_spec,
+        ts_id_col=ts_id_col,
+        date_col=dcol,
+        target_col="yhat",
+    )
+    if oof_df is not None and not oof_df.empty:
+        oof_dcol = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+        oof_df = ensure_hierarchy_nodes_present(
+            oof_df,
+            hier_spec,
+            ts_id_col=ts_id_col,
+            date_col=oof_dcol,
+            target_col="yhat",
+        )
+    if history_df is not None and not history_df.empty:
+        hist_dcol = "ds" if "ds" in history_df.columns else dcol
+        history_df = ensure_hierarchy_nodes_present(
+            history_df,
+            hier_spec,
+            ts_id_col=ts_id_col,
+            date_col=hist_dcol,
+            target_col=target_col,
+        )
     eff_freq = freq or (cfg.data.freq if cfg is not None else "D")
     eff_aggs = temporal_aggregations
     if eff_aggs is None and cfg is not None:
@@ -1653,11 +1679,11 @@ def sample_coherent_paths(
         eff_spec is None
         and cfg is not None
         and cfg.hierarchy.enabled
-        and cfg.hierarchy.levels
+        and (cfg.hierarchy.levels or getattr(cfg.hierarchy, "similarity_hierarchy", False))
         and history_df is not None
         and not history_df.empty
     ):
-        needed_cols = {c for lvl in cfg.hierarchy.levels for c in lvl}
+        needed_cols = {c for lvl in cfg.hierarchy.levels for c in lvl} - {"similarity_cluster_id"}
         if needed_cols.issubset(history_df.columns):
             _, eff_spec = build_hierarchy(history_df, cfg)
 
@@ -1669,6 +1695,14 @@ def sample_coherent_paths(
             if cand in predictions_df.columns:
                 dcol = cand
                 break
+    if eff_spec is not None:
+        predictions_df = ensure_hierarchy_nodes_present(
+            predictions_df,
+            eff_spec,
+            ts_id_col=ts_id_col,
+            date_col=dcol,
+            target_col="yhat",
+        )
 
     eff_aggs = temporal_aggregations if temporal_aggregations is not None else aggregations
     if eff_aggs is None and cfg is not None:

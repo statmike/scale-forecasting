@@ -434,6 +434,85 @@ def _estimate_cross_series_correlation(
     return np.eye(n_series, dtype=float)
 
 
+def _resolve_similarity_shrinkage_weight(
+    n_series: int,
+    n_samples: int,
+    weight: float | Literal["auto"] = "auto",
+) -> float:
+    """Resolve the convex similarity shrinkage weight $\\lambda_{\\text{sim}} \\in [0, 1]$."""
+    if isinstance(weight, str):
+        if weight != "auto":
+            raise ConfigError(
+                f"similarity_weight must be 'auto' or a float in [0.0, 1.0], got {weight!r}"
+            )
+        n_s = max(1, int(n_series))
+        t_obs = max(0, int(n_samples))
+        lam = float(np.clip(n_s / float(n_s + 2 * t_obs), 0.10, 0.75))
+        if t_obs < 3:
+            lam = max(lam, 0.50)
+        return lam
+
+    if isinstance(weight, bool) or not isinstance(weight, (int, float, np.number)):
+        raise ConfigError(
+            f"similarity_weight must be 'auto' or a float in [0.0, 1.0], got {weight!r}"
+        )
+    w_val = float(weight)
+    if not np.isfinite(w_val) or w_val < 0.0 or w_val > 1.0:
+        raise ConfigError(f"similarity_weight must be in [0.0, 1.0], got {weight!r}")
+    return w_val
+
+
+def shrink_correlation_toward_similarity(
+    emp_corr: np.ndarray,
+    sim_matrix: np.ndarray | pd.DataFrame,
+    *,
+    n_samples: int = 0,
+    weight: float | Literal["auto"] = "auto",
+    series_ids: Sequence[str] | None = None,
+) -> np.ndarray:
+    """Shrink an empirical $(N, N)$ correlation matrix toward a trajectory similarity prior.
+
+    Computes
+    $$R_{\\text{reg}} = \\text{NearestPSD}\\!\\big((1 - \\lambda_{\\text{sim}})\\,
+    \\hat{R}_{\\text{emp}} + \\lambda_{\\text{sim}}\\,\\text{NearestPSD}(S_{\\text{sim}})\\big)$$
+    where $\\lambda_{\\text{sim}} = \\text{clip}(N / (N + 2 T_{\\text{OOF}}), 0.10, 0.75)$ (with a
+    minimum floor of $0.50$ when $T_{\\text{OOF}} < 3$) when ``weight="auto"``.
+    """
+    emp_arr = np.asarray(emp_corr, dtype=float)
+    if emp_arr.ndim != 2 or emp_arr.shape[0] != emp_arr.shape[1]:
+        raise ConfigError(f"emp_corr must be a square 2D matrix, got shape {emp_arr.shape}")
+    n_series = int(emp_arr.shape[0])
+    if n_series <= 1:
+        return np.ones((max(1, n_series), max(1, n_series)), dtype=float)
+
+    if isinstance(sim_matrix, pd.DataFrame):
+        if series_ids is not None:
+            aligned_df = sim_matrix.reindex(index=list(series_ids), columns=list(series_ids))
+            sim_arr = aligned_df.to_numpy(dtype=float).copy()
+            nan_mask = ~np.isfinite(sim_arr)
+            sim_arr[nan_mask] = 0.0
+            np.fill_diagonal(sim_arr, 1.0)
+        else:
+            sim_arr = sim_matrix.to_numpy(dtype=float).copy()
+    else:
+        sim_arr = np.asarray(sim_matrix, dtype=float).copy()
+
+    if sim_arr.shape != (n_series, n_series):
+        raise ConfigError(
+            f"sim_matrix shape {sim_arr.shape} does not match emp_corr shape {(n_series, n_series)}"
+        )
+
+    lam = _resolve_similarity_shrinkage_weight(n_series, n_samples, weight)
+    emp_psd = _nearest_correlation_matrix(emp_arr)
+    if lam <= 0.0:
+        return emp_psd
+    sim_psd = _nearest_correlation_matrix(sim_arr)
+    if lam >= 1.0:
+        return sim_psd
+    blended = (1.0 - lam) * emp_psd + lam * sim_psd
+    return _nearest_correlation_matrix(blended)
+
+
 def _sample_copula_uniforms(
     corr_h: np.ndarray,
     n_paths: int,
@@ -643,6 +722,10 @@ def sample_trajectories(
     floor: float | None = None,
     cap: float | None = None,
     discrete_pit: bool | None = None,
+    similarity_shrinkage: bool = True,
+    similarity_weight: float | Literal["auto"] = "auto",
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
     seed: int = 42,
     random_seed: int | None = None,
     ts_id_col: str = "ts_id",
@@ -657,7 +740,7 @@ def sample_trajectories(
         oof_df: Optional out-of-fold backtest DataFrame with ``y_true`` and ``yhat`` used to
             estimate empirical error autocorrelation and cross-series covariance.
         history_df: Optional historical training DataFrame used when ``oof_df`` is absent or to
-            build hierarchy specs.
+            build hierarchy specs and trajectory similarity priors.
         cfg: Optional `RunConfig` supplying ``output.floor``, ``output.cap``,
             ``features.simplex_sum``, and ``hierarchy`` settings.
         hier_spec: Optional compiled `HierarchySpec` for cross-sectional or cross-temporal
@@ -680,6 +763,13 @@ def sample_trajectories(
         floor: Optional hard lower bound applied to every sampled path.
         cap: Optional hard upper bound applied to every sampled path.
         discrete_pit: Optional override enabling randomized PIT for discrete count residuals.
+        similarity_shrinkage: When ``True`` (default), regularizes the cross-series correlation
+            matrix toward the pairwise trajectory similarity matrix when OOF samples are scarce or
+            high-dimensional.
+        similarity_weight: Shrinkage weight $\\lambda_{\\text{sim}} \\in [0, 1]$ or ``"auto"``.
+        similarity_matrix: Optional precomputed $(N, N)$ pairwise trajectory similarity matrix.
+        similarity_method: Similarity kernel method used when computing the similarity prior on
+            the fly (default ``"hybrid"``).
         seed: Deterministic random seed.
         random_seed: Alias for ``seed``.
         ts_id_col: Series identifier column name.
@@ -704,6 +794,7 @@ def sample_trajectories(
     eff_df_t = float(df if df is not None else df_t)
     if eff_df_t <= 2.0:
         raise ConfigError(f"Student-t degrees of freedom df_t must be > 2.0, got {eff_df_t}")
+    _ = _resolve_similarity_shrinkage_weight(2, 0, similarity_weight)
 
     if predictions_df is None or predictions_df.empty:
         return pd.DataFrame(
@@ -741,11 +832,11 @@ def sample_trajectories(
         eff_hier_spec is None
         and cfg is not None
         and cfg.hierarchy.enabled
-        and cfg.hierarchy.levels
+        and (cfg.hierarchy.levels or getattr(cfg.hierarchy, "similarity_hierarchy", False))
         and history_df is not None
         and not history_df.empty
     ):
-        needed_cols = {c for lvl in cfg.hierarchy.levels for c in lvl}
+        needed_cols = {c for lvl in cfg.hierarchy.levels for c in lvl} - {"similarity_cluster_id"}
         if needed_cols.issubset(history_df.columns):
             _, eff_hier_spec = build_hierarchy(history_df, cfg)
 
@@ -796,6 +887,8 @@ def sample_trajectories(
     agg_by_path_node_k: dict[tuple[int, str, int], np.ndarray] = {}
     agg_by_node_k_p0: dict[tuple[str, int], np.ndarray] = {}
     resolved_tspec: TemporalHierarchySpec | None = eff_temp_spec
+    last_sim_shrinkage_weight: float = 0.0
+    last_corr_n: np.ndarray | None = None
 
     for m_name in models:
         m_df = work_df[work_df["model_type"].astype(str) == m_name].copy()
@@ -848,6 +941,93 @@ def sample_trajectories(
                 model_type=m_name,
                 ts_id_col=ts_id_col,
             )
+            if similarity_shrinkage:
+                n_oof_dates = 0
+                if oof_df is not None and not oof_df.empty and ts_id_col in oof_df.columns:
+                    oof_sub = oof_df[oof_df[ts_id_col].astype(str).isin(series_ids)]
+                    if "model_type" in oof_sub.columns:
+                        m_sub = oof_sub[oof_sub["model_type"].astype(str) == m_name]
+                        if not m_sub.empty:
+                            oof_sub = m_sub
+                    oof_dcol = (
+                        "forecast_date"
+                        if "forecast_date" in oof_sub.columns
+                        else ("ds" if "ds" in oof_sub.columns else None)
+                    )
+                    if oof_dcol is not None and not oof_sub.empty:
+                        n_oof_dates = int(oof_sub[oof_dcol].nunique())
+
+                sim_prior: pd.DataFrame | np.ndarray | None = similarity_matrix
+                if sim_prior is None:
+                    sim_prior = predictions_df.attrs.get("similarity_matrix")
+                if sim_prior is None:
+                    from .similarity import compute_similarity_matrix
+
+                    if (
+                        history_df is not None
+                        and not history_df.empty
+                        and ts_id_col in history_df.columns
+                    ):
+                        h_dcol = (
+                            "ds"
+                            if "ds" in history_df.columns
+                            else (
+                                "forecast_date" if "forecast_date" in history_df.columns else dcol
+                            )
+                        )
+                        h_ycol = (
+                            target_col
+                            if target_col in history_df.columns
+                            else ("y" if "y" in history_df.columns else "y_true")
+                        )
+                        h_sub = history_df[history_df[ts_id_col].astype(str).isin(series_ids)]
+                        if not h_sub.empty and h_dcol in h_sub.columns and h_ycol in h_sub.columns:
+                            sim_prior = compute_similarity_matrix(
+                                h_sub,
+                                method=similarity_method,
+                                ts_id_col=ts_id_col,
+                                date_col=h_dcol,
+                                target_col=h_ycol,
+                            ).matrix_df
+                    elif (
+                        oof_df is not None
+                        and not oof_df.empty
+                        and ts_id_col in oof_df.columns
+                        and "y_true" in oof_df.columns
+                    ):
+                        o_dcol = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+                        o_sub = oof_df[oof_df[ts_id_col].astype(str).isin(series_ids)]
+                        if not o_sub.empty and o_dcol in o_sub.columns:
+                            sim_prior = compute_similarity_matrix(
+                                o_sub,
+                                method=similarity_method,
+                                ts_id_col=ts_id_col,
+                                date_col=o_dcol,
+                                target_col="y_true",
+                            ).matrix_df
+                    elif h >= 3 and "yhat" in m_df.columns:
+                        sim_prior = compute_similarity_matrix(
+                            m_df,
+                            method=similarity_method,
+                            ts_id_col=ts_id_col,
+                            date_col=dcol,
+                            target_col="yhat",
+                        ).matrix_df
+
+                if sim_prior is not None:
+                    last_sim_shrinkage_weight = _resolve_similarity_shrinkage_weight(
+                        n_series,
+                        n_oof_dates,
+                        similarity_weight,
+                    )
+                    corr_n = shrink_correlation_toward_similarity(
+                        corr_n,
+                        sim_prior,
+                        n_samples=n_oof_dates,
+                        weight=similarity_weight,
+                        series_ids=series_ids,
+                    )
+            last_corr_n = corr_n
             u_all = _sample_copula_uniforms(
                 mean_corr_h,
                 n_paths,
@@ -1073,6 +1253,9 @@ def sample_trajectories(
     out_df.attrs["copula_type_selected"] = selected_copula
     out_df.attrs["df_t"] = eff_df_t
     out_df.attrs["cross_series"] = bool(cross_series)
+    out_df.attrs["similarity_shrinkage_weight"] = float(last_sim_shrinkage_weight)
+    if last_corr_n is not None:
+        out_df.attrs["cross_series_correlation"] = last_corr_n
     if eff_hier_spec is not None:
         out_df.attrs["hierarchy_spec"] = eff_hier_spec
     if resolved_tspec is not None:
@@ -1613,6 +1796,7 @@ __all__ = [
     "sample_copula_trajectories",
     "sample_joint_trajectories",
     "sample_trajectories",
+    "shrink_correlation_toward_similarity",
     "summarize_trajectory_risk",
     "tail_risk_df",
 ]

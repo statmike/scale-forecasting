@@ -306,7 +306,7 @@ def test_sdk_playground_report_and_mcp_goal_seek_integration(tmp_path) -> None:
 
     # MCP server integration (`run_playground` + direct `allocate_target` alias)
     srv = McpServer()
-    assert len(srv.list_tools()) == 11
+    assert len(srv.list_tools()) == 12
     assert len(srv.list_resources()) == 7
     mcp_pg = srv._dispatch_tool(
         "run_playground",
@@ -430,3 +430,50 @@ def test_allocate_target_smoothness_weight_reduces_temporal_roughness() -> None:
     for bad_sw in (-1.0, float("nan"), True):
         with pytest.raises(ConfigError, match="smoothness_weight"):
             allocate_target(preds_df, target_total=780.0, smoothness_weight=bad_sw)  # type: ignore[arg-type]
+
+
+def test_allocate_target_with_similarity_hierarchy_and_cluster_node_target() -> None:
+    """Verify F6 (`similarity_hierarchy=True`) in `allocate_target`: auto-discovers latent
+    `similarity_cluster_id=cluster_*` nodes from a flat leaf panel and supports targeting a
+    specific cluster node directly.
+    """
+    preds_df, hist_df, oof_df = _flat_forecasts_and_history()
+
+    # 1. Total target allocation with auto-discovered similarity hierarchy
+    res = allocate_target(
+        preds_df,
+        target=480.0,
+        history_df=hist_df,
+        oof_df=oof_df,
+        similarity_hierarchy=True,
+        similarity_n_clusters=2,
+        return_result=True,
+    )
+    assert isinstance(res, GoalSeekResult)
+    assert res.max_target_discrepancy < 1e-6
+    assert res.max_coherence_discrepancy < 1e-6
+    cluster_nodes = [
+        nid
+        for nid in res.dataframe["ts_id"].unique()
+        if str(nid).startswith("similarity_cluster_id=")
+    ]
+    assert len(cluster_nodes) == 2
+
+    # 2. Target a specific discovered cluster node (`similarity_cluster_id=cluster_0`) on flat input
+    c0_node = sorted(cluster_nodes)[0]
+    alloc_c0 = allocate_target(
+        preds_df,
+        target=240.0,
+        node_id=c0_node,
+        history_df=hist_df,
+        oof_df=oof_df,
+        similarity_hierarchy=True,
+        similarity_n_clusters=2,
+        return_result=True,
+    )
+    assert isinstance(alloc_c0, GoalSeekResult)
+    c0_sum = float(
+        alloc_c0.dataframe.loc[alloc_c0.dataframe["ts_id"] == c0_node, "y_allocated"].sum()
+    )
+    assert abs(c0_sum - 240.0) < 1e-6
+    assert alloc_c0.max_coherence_discrepancy < 1e-6

@@ -265,3 +265,74 @@ def test_hierarchy_coherence_and_inventory_deltas_and_history_only_input() -> No
         )
     with pytest.raises((ConfigError, ValueError)):
         optimize_scenario(leaf_df, objective="invalid_obj")  # type: ignore[arg-type]
+
+
+def test_scenario_optimizer_similarity_weighted_cross_sku_cannibalization() -> None:
+    """Verify F8 (`use_similarity_priors=True` and explicit `similarity_matrix` in
+    `optimize_scenario`): weights off-diagonal cross-SKU cannibalization by normalized positive
+    trajectory similarity.
+    """
+    from scale_forecasting.scenario_optimizer import _estimate_sku_structural_params
+
+    hist_df, _ = make_confounded_promo_dgp(n_days=90, n_series=3, seed=42)
+    hist_df["promo"] = hist_df["promo_flag"]
+    hist_df["price"] = np.where(hist_df["promo"] > 0.5, 8.5, 10.0)
+    sku_ids = sorted(str(x) for x in hist_df["ts_id"].unique())
+
+    sim_df = pd.DataFrame(
+        [
+            [1.0, 0.95, 0.05],
+            [0.95, 1.0, 0.05],
+            [0.05, 0.05, 1.0],
+        ],
+        index=sku_ids,
+        columns=sku_ids,
+    )
+    _, _, _, cannib_sim = _estimate_sku_structural_params(
+        bottom_ids=sku_ids,
+        horizon=7,
+        base_yhat=np.full((3, 7), 100.0),
+        base_price=np.full((3, 7), 10.0),
+        base_promo=np.zeros((3, 7)),
+        history_df=hist_df,
+        ts_id_col="ts_id",
+        date_col="ds",
+        target_col="y",
+        promo_col="promo",
+        price_col="price",
+        pull_forward_lags=2,
+        cannibalization_weight=1.0,
+        use_similarity_priors=True,
+        similarity_matrix=sim_df,
+    )
+    _, _, _, cannib_unif = _estimate_sku_structural_params(
+        bottom_ids=sku_ids,
+        horizon=7,
+        base_yhat=np.full((3, 7), 100.0),
+        base_price=np.full((3, 7), 10.0),
+        base_promo=np.zeros((3, 7)),
+        history_df=hist_df,
+        ts_id_col="ts_id",
+        date_col="ds",
+        target_col="y",
+        promo_col="promo",
+        price_col="price",
+        pull_forward_lags=2,
+        cannibalization_weight=1.0,
+        use_similarity_priors=False,
+    )
+    # Under similarity priors, twin SKUs (0, 1) exert ~19x stronger cannibalization than SKU 2
+    assert abs(float(cannib_sim[0, 1])) > abs(float(cannib_sim[0, 2])) * 10.0
+    assert abs(float(cannib_unif[0, 1]) - float(cannib_unif[0, 2])) < 1e-9
+
+    res = optimize_scenario(
+        hist_df,
+        horizon=7,
+        unit_cost=4.5,
+        max_promo_days=2,
+        use_similarity_priors=True,
+        similarity_matrix=sim_df,
+    )
+    assert isinstance(res, ScenarioOptimizationResult)
+    assert res.feasibility_status == "optimal"
+    assert res.optimal_objective_value >= res.baseline_objective_value - 1e-6

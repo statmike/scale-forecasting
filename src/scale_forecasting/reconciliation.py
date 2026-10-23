@@ -117,6 +117,77 @@ def _format_node_id(cols: Sequence[str], values: tuple[object, ...]) -> str:
     return "/".join(f"{col}={val}" for col, val in zip(cols, values, strict=True))
 
 
+def materialize_similarity_hierarchy(
+    panel: pd.DataFrame,
+    cfg: RunConfig | None = None,
+    *,
+    n_clusters: int | Literal["auto"] = "auto",
+    method: str = "hybrid",
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    cluster_col: str = "similarity_cluster_id",
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Cluster bottom-level series by trajectory similarity and attach ``similarity_cluster_id``."""
+    id_col = cfg.data.ts_id_col if cfg is not None else ts_id_col
+    dcol = cfg.data.date_col if cfg is not None else date_col
+    tcol = cfg.data.target_col if cfg is not None else target_col
+    if cfg is not None:
+        if n_clusters == "auto":
+            n_clusters = getattr(cfg.hierarchy, "similarity_n_clusters", "auto")
+        if method == "hybrid":
+            method = str(getattr(cfg.hierarchy, "similarity_method", "hybrid"))
+
+    if panel.empty:
+        out = panel.copy()
+        if cluster_col not in out.columns:
+            out[cluster_col] = pd.Series(dtype=str)
+        return out, {}
+
+    from .similarity import cluster_by_similarity_df
+
+    id_series = panel[id_col].astype(str)
+    is_agg = id_series.str.startswith(TOTAL_NODE_ID) | id_series.str.contains("=", regex=False)
+    bottom_only = panel[~is_agg].copy()
+    if bottom_only.empty:
+        bottom_only = panel.copy()
+
+    eff_min_size = 1 if (isinstance(n_clusters, int) or bottom_only[id_col].nunique() < 4) else 2
+    cluster_res = cluster_by_similarity_df(
+        bottom_only,
+        n_clusters=n_clusters,
+        method=method,
+        min_cluster_size=eff_min_size,
+        ts_id_col=id_col,
+        date_col=dcol,
+        target_col=tcol,
+        cluster_col=cluster_col,
+    )
+    if isinstance(cluster_res, tuple):
+        _, cluster_map = cluster_res
+    else:
+        c_col = (
+            cluster_col
+            if cluster_col in cluster_res.columns
+            else (
+                "similarity_cluster_id"
+                if "similarity_cluster_id" in cluster_res.columns
+                else "cluster_id"
+            )
+        )
+        t_col_res = id_col if id_col in cluster_res.columns else "ts_id"
+        cluster_map = dict(
+            zip(
+                cluster_res[t_col_res].astype(str),
+                cluster_res[c_col].astype(str),
+                strict=False,
+            )
+        )
+    out = panel.copy()
+    out[cluster_col] = out[id_col].astype(str).map(cluster_map).fillna(TOTAL_NODE_ID)
+    return out, dict(cluster_map)
+
+
 def build_hierarchy(
     panel: pd.DataFrame,
     cfg: RunConfig,
@@ -124,8 +195,9 @@ def build_hierarchy(
     """Aggregate a bottom-level panel across ``cfg.hierarchy.levels`` and build ``S`` (pure).
 
     Given a bottom-level DataFrame containing ``cfg.data.ts_id_col``, ``cfg.data.date_col``,
-    ``cfg.data.target_col``, the hierarchy attribute columns named in ``cfg.hierarchy.levels``, and
-    any declared covariates:
+    ``cfg.data.target_col``, the hierarchy attribute columns named in ``cfg.hierarchy.levels``
+    (including auto-discovered ``similarity_cluster_id`` when ``cfg.hierarchy.similarity_hierarchy``
+    is enabled), and any declared covariates:
 
     1. Prepends the top-level total series (``ts_id == "__total__"``).
     2. Builds one aggregated series per distinct group tuple at each level in
@@ -138,25 +210,43 @@ def build_hierarchy(
 
     Returns ``(hierarchical_panel, HierarchySpec)``.
     """
-    if not cfg.hierarchy.levels:
+    eff_levels_attr = getattr(cfg.hierarchy, "effective_levels", None)
+    raw_levels = eff_levels_attr if eff_levels_attr is not None else cfg.hierarchy.levels
+    levels: list[list[str]] = [list(lvl) for lvl in raw_levels]
+    if (
+        getattr(cfg.hierarchy, "similarity_hierarchy", False)
+        and ["similarity_cluster_id"] not in levels
+    ):
+        levels.append(["similarity_cluster_id"])
+
+    if not levels:
         raise ConfigError(
             "build_hierarchy requires at least one level in cfg.hierarchy.levels "
-            "(e.g. [['region'], ['region', 'category']])"
+            "(e.g. [['region'], ['region', 'category']]) or similarity_hierarchy=True"
         )
 
     id_col = cfg.data.ts_id_col
     date_col = cfg.data.date_col
     target_col = cfg.data.target_col
 
-    required_cols = {id_col, date_col, target_col}
-    for level in cfg.hierarchy.levels:
-        required_cols.update(level)
+    all_level_cols = {col for level in levels for col in level}
+    if "similarity_cluster_id" in all_level_cols and "similarity_cluster_id" not in panel.columns:
+        panel, _ = materialize_similarity_hierarchy(
+            panel,
+            cfg,
+            ts_id_col=id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+
+    required_cols = {id_col, date_col, target_col, *all_level_cols}
     missing = sorted(required_cols - set(panel.columns))
     if missing:
         raise DataError(f"Panel is missing required hierarchy/data columns: {missing}")
 
     # Filter out any pre-existing aggregate nodes if build_hierarchy is called idempotently.
-    bottom_df = panel[~panel[id_col].astype(str).str.startswith(TOTAL_NODE_ID)].copy()
+    agg_prefixes = (TOTAL_NODE_ID, *(f"{col}=" for col in all_level_cols))
+    bottom_df = panel[~panel[id_col].astype(str).str.startswith(agg_prefixes)].copy()
     bottom_df[id_col] = bottom_df[id_col].astype(str)
     bottom_ids = tuple(sorted(bottom_df[id_col].unique()))
     if not bottom_ids:
@@ -166,7 +256,7 @@ def build_hierarchy(
     n_b = len(bottom_ids)
 
     # Map each bottom series to its hierarchy attributes (one row per bottom series).
-    attr_cols = sorted({col for level in cfg.hierarchy.levels for col in level})
+    attr_cols = sorted(all_level_cols)
     series_attrs = (
         bottom_df[[id_col, *attr_cols]]
         .drop_duplicates(subset=[id_col], keep="first")
@@ -208,9 +298,9 @@ def build_hierarchy(
     node_ids.append(TOTAL_NODE_ID)
     level_nodes[TOTAL_NODE_ID] = (TOTAL_NODE_ID,)
 
-    # 2. Intermediate levels in cfg.hierarchy.levels.
+    # 2. Intermediate levels in levels.
     seen_nodes: set[str] = {TOTAL_NODE_ID, *bottom_ids}
-    for level in cfg.hierarchy.levels:
+    for level in levels:
         lkey = _level_key(level)
         current_level_nodes: list[str] = []
         for raw_vals, grp in bottom_df.groupby(list(level), sort=True):
@@ -489,9 +579,19 @@ def reconcile_matrix(
 
     w_shrink, _lam = schafer_strimmer_shrinkage(res_mat)
     # Solve W_shrink @ X = S for X = W_shrink^{-1} @ S, then G = (S.T @ X)^{-1} @ X.T.
-    winv_s = np.linalg.solve(w_shrink, s_mat)
-    st_winv_s = s_mat.T @ winv_s
-    return np.linalg.solve(st_winv_s, winv_s.T)
+    try:
+        winv_s = np.linalg.solve(w_shrink, s_mat)
+        st_winv_s = s_mat.T @ winv_s
+        return np.linalg.solve(st_winv_s, winv_s.T)
+    except np.linalg.LinAlgError:
+        reg = 1e-8 * max(float(np.trace(w_shrink)) / max(1, n_nodes), 1.0)
+        w_reg = w_shrink + reg * np.eye(n_nodes, dtype=float)
+        winv_s = np.linalg.solve(w_reg, s_mat)
+        st_winv_s = s_mat.T @ winv_s
+        return np.linalg.solve(
+            st_winv_s + 1e-10 * np.eye(n_bottom, dtype=float),
+            winv_s.T,
+        )
 
 
 def _mint_whitener(
@@ -602,6 +702,105 @@ def _project_slice(
     return out
 
 
+def ensure_hierarchy_nodes_present(
+    df: pd.DataFrame,
+    spec: HierarchySpec,
+    *,
+    ts_id_col: str = "ts_id",
+    date_col: str = "forecast_date",
+    target_col: str = "yhat",
+) -> pd.DataFrame:
+    """Synthesize any missing upper-level hierarchy nodes from bottom-level rows when all bottom
+    series in ``spec.bottom_ids`` are present.
+    """
+    if df is None or df.empty or ts_id_col not in df.columns or spec.n_aggregated == 0:
+        return df
+
+    present_ids = set(df[ts_id_col].astype(str).unique())
+    agg_ids = list(spec.node_ids[: spec.n_aggregated])
+    bottom_ids = list(spec.bottom_ids)
+    # Fast path: all nodes already present, or bottom nodes themselves are incomplete.
+    if all(nid in present_ids for nid in spec.node_ids) or not all(
+        bid in present_ids for bid in bottom_ids
+    ):
+        return df
+
+    dcol = date_col
+    if dcol not in df.columns:
+        for cand in ("forecast_date", "ds", "date"):
+            if cand in df.columns:
+                dcol = cand
+                break
+    if dcol not in df.columns:
+        return df
+
+    group_cols = [c for c in ("model_type", "fold_id", "cutoff_date", dcol) if c in df.columns]
+    s_agg = spec.summing_matrix[: spec.n_aggregated]
+    sum_cols = [
+        c
+        for c in ("yhat", "yhat_raw", "yhat_adjusted", "y_true", "y", target_col)
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    # Deduplicate sum_cols while preserving order.
+    sum_cols = list(dict.fromkeys(sum_cols))
+    has_intervals = (
+        "yhat" in df.columns
+        and "yhat_lower" in df.columns
+        and "yhat_upper" in df.columns
+        and pd.api.types.is_numeric_dtype(df["yhat_lower"])
+        and pd.api.types.is_numeric_dtype(df["yhat_upper"])
+    )
+
+    synth_rows: list[dict[str, Any]] = []
+    for _gkey, grp in df.groupby(group_cols, sort=False):
+        grp_ids = set(grp[ts_id_col].astype(str).unique())
+        missing_agg_indices = [i for i, nid in enumerate(agg_ids) if nid not in grp_ids]
+        if not missing_agg_indices or not all(bid in grp_ids for bid in bottom_ids):
+            continue
+
+        indexed = grp.drop_duplicates(subset=[ts_id_col], keep="first").set_index(ts_id_col)
+        b_slice = indexed.reindex(bottom_ids)
+        template_row = b_slice.iloc[0].to_dict()
+
+        col_mats: dict[str, np.ndarray] = {}
+        for col in sum_cols:
+            col_mats[col] = s_agg @ b_slice[col].to_numpy(dtype=float)
+
+        hw_agg: np.ndarray | None = None
+        if has_intervals:
+            b_hw = 0.5 * np.maximum(
+                0.0,
+                b_slice["yhat_upper"].to_numpy(dtype=float)
+                - b_slice["yhat_lower"].to_numpy(dtype=float),
+            )
+            hw_agg = np.sqrt(np.maximum(0.0, s_agg @ (b_hw**2)))
+
+        for agg_idx in missing_agg_indices:
+            nid = agg_ids[agg_idx]
+            row_dict: dict[str, Any] = {str(k): v for k, v in template_row.items()}
+            row_dict[ts_id_col] = nid
+            for col, agg_vals in col_mats.items():
+                row_dict[col] = float(agg_vals[agg_idx])
+            if hw_agg is not None and "yhat" in col_mats:
+                yhat_val = float(col_mats["yhat"][agg_idx])
+                row_dict["yhat_lower"] = yhat_val - float(hw_agg[agg_idx])
+                row_dict["yhat_upper"] = yhat_val + float(hw_agg[agg_idx])
+            if "residual" in row_dict and "y_true" in row_dict and "yhat" in row_dict:
+                row_dict["residual"] = float(row_dict["y_true"]) - float(row_dict["yhat"])
+            synth_rows.append(row_dict)
+
+    if not synth_rows:
+        return df
+
+    synth_df = pd.DataFrame(synth_rows, columns=df.columns)
+    out = pd.concat([df, synth_df], ignore_index=True)
+    out.attrs.update(df.attrs)
+    return out
+
+
+_ensure_hierarchy_nodes_present = ensure_hierarchy_nodes_present
+
+
 def reconcile_forecasts(
     predictions_df: pd.DataFrame,
     spec: HierarchySpec,
@@ -628,6 +827,22 @@ def reconcile_forecasts(
         return predictions_df.copy()
 
     dcol = date_col if date_col in predictions_df.columns else "ds"
+    predictions_df = ensure_hierarchy_nodes_present(
+        predictions_df,
+        spec,
+        ts_id_col=ts_id_col,
+        date_col=dcol,
+        target_col="yhat",
+    )
+    if oof_df is not None and not oof_df.empty:
+        oof_dcol = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+        oof_df = ensure_hierarchy_nodes_present(
+            oof_df,
+            spec,
+            ts_id_col=ts_id_col,
+            date_col=oof_dcol,
+            target_col="yhat",
+        )
     if method == "cross_temporal_mint":
         from .temporal_reconciliation import reconcile_cross_temporal
 
@@ -730,6 +945,9 @@ def reconcile_forecasts(
     return out_df
 
 
+reconcile_run = reconcile_forecasts
+
+
 def reconcile_oof(
     oof_df: pd.DataFrame,
     spec: HierarchySpec,
@@ -754,6 +972,13 @@ def reconcile_oof(
         return oof_df.copy()
 
     dcol = "forecast_date" if "forecast_date" in oof_df.columns else "ds"
+    oof_df = ensure_hierarchy_nodes_present(
+        oof_df,
+        spec,
+        ts_id_col=ts_id_col,
+        date_col=dcol,
+        target_col="yhat",
+    )
     fold_col = "cutoff_date" if "cutoff_date" in oof_df.columns else "fold_id"
     has_model_col = "model_type" in oof_df.columns
     models = oof_df["model_type"].drop_duplicates().tolist() if has_model_col else [None]

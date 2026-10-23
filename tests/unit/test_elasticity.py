@@ -149,3 +149,64 @@ def test_all_zero_promo_col_with_active_price_discounts_recovers_dips() -> None:
     r_p = compute_promo_elasticity_decomposition(dgp_p, promo_col="promo_flag", price_col="price")
     assert float(r_p["pull_forward_dip"].min()) < -1.0
     assert float(r_p["cannibalization_effect"].min()) < -1.0
+
+
+def test_similarity_weighted_cannibalization_priors_and_top_cannibal_columns() -> None:
+    """Verify F8 (`use_similarity_priors=True` in `compute_promo_elasticity_decomposition` /
+    `estimate_promo_elasticity`): populates `top_cannibal_ts_id` and `cannibal_similarity_score`
+    and weights cross-SKU cannibalization pressure by normalized trajectory similarity.
+    """
+    import numpy as np
+
+    from scale_forecasting.elasticity import estimate_promo_elasticity
+
+    assert estimate_promo_elasticity is compute_promo_elasticity_decomposition
+
+    dates = pd.date_range("2025-01-01", periods=120, freq="D")
+    t_idx = np.arange(len(dates), dtype=float)
+    # sku_A and sku_B share an identical seasonal phase portrait; sku_C is an unrelated step trend
+    base_ab = 100.0 + 25.0 * np.sin(2.0 * np.pi * t_idx / 7.0)
+    base_c = 60.0 + 0.4 * t_idx
+
+    promo_a = np.zeros(len(dates), dtype=float)
+    promo_b = np.zeros(len(dates), dtype=float)
+    promo_c = np.zeros(len(dates), dtype=float)
+    promo_a[[10, 24, 38, 52, 66, 80, 94]] = 1.0
+    promo_b[[17, 31, 45, 59, 73, 87, 101]] = 1.0
+    promo_c[[12, 26, 40, 54, 68, 82, 96]] = 1.0
+
+    y_a = base_ab + 35.0 * promo_a - 14.0 * promo_b
+    y_b = base_ab + 35.0 * promo_b - 14.0 * promo_a
+    y_c = base_c + 20.0 * promo_c
+
+    panel = pd.concat(
+        [
+            pd.DataFrame({"ts_id": "sku_A", "ds": dates, "y": y_a, "promo_flag": promo_a}),
+            pd.DataFrame({"ts_id": "sku_B", "ds": dates, "y": y_b, "promo_flag": promo_b}),
+            pd.DataFrame({"ts_id": "sku_C", "ds": dates, "y": y_c, "promo_flag": promo_c}),
+        ],
+        ignore_index=True,
+    )
+
+    decomp = estimate_promo_elasticity(panel, promo_col="promo_flag", use_similarity_priors=True)
+    assert "top_cannibal_ts_id" in decomp.columns
+    assert "cannibal_similarity_score" in decomp.columns
+
+    row_a = decomp[decomp["ts_id"] == "sku_A"].iloc[0]
+    row_b = decomp[decomp["ts_id"] == "sku_B"].iloc[0]
+    assert row_a["top_cannibal_ts_id"] == "sku_B"
+    assert row_b["top_cannibal_ts_id"] == "sku_A"
+    assert float(row_a["cannibal_similarity_score"]) > 0.50
+
+    w_mat = np.asarray(decomp.attrs["similarity_weights"], dtype=float)
+    assert w_mat.shape == (3, 3)
+    np.testing.assert_allclose(np.diag(w_mat), 0.0, atol=1e-7)
+    np.testing.assert_allclose(w_mat.sum(axis=1), 1.0, atol=1e-6)
+    # Weight between twin SKUs (0, 1) exceeds weight toward orthogonal SKU (0, 2)
+    assert float(w_mat[0, 1]) > float(w_mat[0, 2])
+
+    summary = summarize_promo_elasticity(decomp)
+    assert "top_cannibal_ts_id" in summary.columns
+    assert "cannibal_similarity_score" in summary.columns
+    summ_a = summary[summary["ts_id"] == "sku_A"].iloc[0]
+    assert summ_a["top_cannibal_ts_id"] == "sku_B"
