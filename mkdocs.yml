@@ -176,6 +176,7 @@ nav:
       - Temporal hierarchy reconciliation: api/temporal_reconciliation.md
       - Top-down goal-seek allocation: api/goal_seek.md
       - Cold-start & NPI analog transfer: api/cold_start.md
+      - Time-series similarity & clustering: api/similarity.md
       - Online adaptive conformal inference: api/aci.md
       - Joint trajectory copulas: api/copula.md
       - Portfolio inventory optimizer: api/inventory_optimizer.md

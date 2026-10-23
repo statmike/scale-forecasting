@@ -115,6 +115,8 @@ Any of the 37 registered models can be listed multiple times in `models` using t
   - `@cov_drop_<col>` — drops `<col>` (and `<col>_lag_*`) while keeping all other covariates (leave-one-covariate-out ablation).
   - `@no_holidays` — drops country-holiday indicator columns while keeping all other features.
   - `@no_lags` — drops engineered exogenous lag columns (`*_lag_*`) while keeping contemporaneous covariates.
+  - `@similarity_global` — partitions the panel into $K$ homogeneous behavioral clusters via [`similarity.compute_similarity()`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py) strictly within each fold cutoff (`features.similarity_method`, `features.similarity_n_clusters`) and fits a dedicated cross-series global model per cluster (`_run_similarity_global_panel_model` in [`worker.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/worker.py)), preventing negative cross-learning transfer across incompatible regimes.
+  - `@similarity_cold_start` — routes short-history cold-start / NPI series ($n < \text{cold\_start\_min\_obs}$) through multi-lens digital-twin donor matching (`cold_start_matching="similarity"` via [`similarity.find_digital_twins()`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py)) for that variant so heuristic vs. similarity-based cold-start transfer can be compared side-by-side in a single run.
 
 ### 1. Statistical family (`statistical`)
 
@@ -315,6 +317,8 @@ When `ensemble.enabled: true`, the driver combines base-model forecasts into one
 | **`nnls`** | Learned Stacking | Yes | [`scipy`](https://scipy.org/) | Non-Negative Least Squares (`scipy.optimize.nnls`) fit on out-of-fold predictions (`w_m >= 0`, normalized to sum to $1$, with optional shrinkage toward $1/K$ via `ensemble.weight_shrinkage`). |
 | **`ridge`** | Learned Stacking | Yes | [`numpy`](https://numpy.org/) | Closed-form L2-regularized linear meta-learner ($\alpha = 1.0$) fit on the out-of-fold matrix; allows negative corrective weights. |
 | **`xgb`** | Learned Stacking | Yes | [`xgboost`](https://xgboost.readthedocs.io/) | Non-linear gradient-boosted tree meta-learner (`XGBRegressor`) trained on out-of-fold predictions. |
+
+When `ensemble.similarity_smoothing: true` is set (`ensemble.similarity_smoothing_gamma: 1.0` default), per-series out-of-fold losses are smoothed across each series' top-$k$ digital-twin neighbors via the affinity kernel $K_{ij} = \exp(-\gamma \tilde{d}_{ij}^2)$ ([`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py)) before `"champion"` winner selection or `"inverse_error"` / `"nnls"` weight computation, stabilizing model selection on short or noisy series.
 
 ---
 

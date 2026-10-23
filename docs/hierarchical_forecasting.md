@@ -6,8 +6,8 @@ Enterprise supply-chain, retail, and financial planning require forecasts that a
 
 ```mermaid
 flowchart TD
-    subgraph S1["1. Cross-Sectional Hierarchy (reconciliation.py)"]
-        CS1["Build Aggregation Tree & Summing Matrix S_cs<br/>hierarchy.levels = [['region'], ['region', 'category']]<br/>__total__ + intermediate nodes + bottom leaf series"]
+    subgraph S1["1. Cross-Sectional & Latent Similarity Hierarchy (reconciliation.py · similarity.py)"]
+        CS1["Build Explicit Tree or Latent Similarity Hierarchy & Summing Matrix S_cs<br/>hierarchy.levels = [['region'], ['region', 'category']] OR hierarchy.similarity_hierarchy = true<br/>__total__ + intermediate / similarity_cluster_id nodes + bottom leaf series"]
         CS2["Project Base & OOF Forecasts onto Coherent Subspace<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg"]
         CS3["Verify Cross-Sectional Coherence<br/>verify_coherence(reconciled_df, spec) < 1e-6"]
         CS1 --> CS2 --> CS3
@@ -38,9 +38,13 @@ flowchart TD
 
 | Mode | Configuration Trigger | `spatial_weight_alpha` | Operational & Leaderboard Behavior |
 | :--- | :--- | :--- | :--- |
-| **Mode 1: Spatial-Only** (`"spatial_only"`) | `hierarchy.levels` non-empty, `reconcile_temporal = false` (default) | `1.0` | Reconciles strictly across the organizational/spatial tree ($\mathbf{S}_{\text{cs}}$: e.g., `store -> region -> __total__`) at each timestamp without altering temporal trajectories. |
+| **Mode 1: Spatial-Only** (`"spatial_only"`) | `hierarchy.levels` non-empty (or `similarity_hierarchy = true`), `reconcile_temporal = false` (default) | `1.0` | Reconciles strictly across the organizational/spatial tree ($\mathbf{S}_{\text{cs}}$: e.g., `store -> region -> __total__` or `ts_id -> similarity_cluster_id -> __total__`) at each timestamp without altering temporal trajectories. |
 | **Mode 2: Temporal-Only (`THieF`)** (`"temporal_only"`) | `hierarchy.levels = []`, `hierarchy.reconcile_temporal = true` | `0.0` | Reconciles each flat-panel series across calendar aggregation buckets ($\mathbf{S}_{\text{temp}}$: e.g., `Daily -> Weekly -> Bi-Weekly -> 4-Week`) on both forward `predictions` and rolling-origin `oof` folds, recomputing cell `metrics` (`compute_metrics`) so `<model>_<method>` is scored on `v_model_leaderboard`. |
-| **Mode 3: Joint Cross-Temporal** (`"cross_temporal"`) | `hierarchy.levels` non-empty + `cross_temporal = true` (or `"cross_temporal_mint"` in `reconciliation_methods`) | `"auto"` ($\alpha^* \in [0, 1]$) or explicit float | Auto-enables `reconcile_temporal = true` and `enabled = true`, appends `"cross_temporal_mint"`, keeps standard spatial methods (`<model>_mint_nonneg`, `<model>_mint_shrink`) as **pure spatial ($\mathbf{S}_{\text{cs}}$)** entries on the leaderboard alongside `<model>_cross_temporal_mint`, and refines via alternating projections to $< 10^{-6}$ discrepancy on both axes simultaneously. |
+| **Mode 3: Joint Cross-Temporal** (`"cross_temporal"`) | (`hierarchy.levels` non-empty or `similarity_hierarchy = true`) + `cross_temporal = true` (or `"cross_temporal_mint"` in `reconciliation_methods`) | `"auto"` ($\alpha^* \in [0, 1]$) or explicit float | Auto-enables `reconcile_temporal = true` and `enabled = true`, appends `"cross_temporal_mint"`, keeps standard spatial methods (`<model>_mint_nonneg`, `<model>_mint_shrink`) as **pure spatial ($\mathbf{S}_{\text{cs}}$)** entries on the leaderboard alongside `<model>_cross_temporal_mint`, and refines via alternating projections to $< 10^{-6}$ discrepancy on both axes simultaneously. |
+
+### Latent Similarity Hierarchy Discovery on Flat Panels (`hierarchy.similarity_hierarchy`)
+
+Many real-world panels (IoT telemetry, SaaS usage metrics, financial tickers, uncataloged SKUs) lack explicit `region` or `category` grouping columns, yet exhibit strong latent dynamical clusters. Setting `hierarchy.similarity_hierarchy = true` (with optional `hierarchy.similarity_n_clusters` and `hierarchy.similarity_method`, default `"hybrid"`) when `hierarchy.levels = []` automatically clusters the bottom-level series via [`cluster_by_similarity_df()`](./api/similarity.md), synthesizes a `"similarity_cluster_id"` grouping column (`levels = [["similarity_cluster_id"]]`), and builds a 2-level hierarchy (`__total__ -> similarity_cluster_id -> leaf series`) that reconciles cleanly (`< 1e-6`) with `mint_shrink`, `mint_nonneg`, `cross_temporal_mint`, `sample_coherent_paths()`, and `allocate_target()`.
 
 ### Cross-Sectional & Cross-Temporal Methods (`reconciliation_methods`)
 

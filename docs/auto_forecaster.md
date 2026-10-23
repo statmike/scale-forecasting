@@ -217,8 +217,8 @@ In real-world forecasting reviews, stakeholders and senior practitioners rarely 
 | **1. *"Is this model really better than Model X (or a simple baseline)?"*** | Scores every candidate on identical expanding/sliding backtest folds against a **4-anchor Baseline Ladder** (`naive_seasonal`, plain univariate `theta`/`arima_plus@univariate`, and zero-shot foundation `chronos_bolt`/`timesfm`), reporting FVA %, series-by-series win rate %, and Diebold–Mariano $p$-value. | `f.compare_models(model_a, model_b)`<br/>`f.baseline_value_df()` |
 | **2. *"Do ensembles actually help here, or is a single model better?"*** | Evaluates consensus and learned stackers (`inverse_error`, `nnls`, `ridge`, `xgb`, `horizon_specialist`) against the best single base model and enforces a **parsimony margin (`0.5%`)**: an ensemble is only crowned if it beats the best single model by a meaningful margin. | `f.practitioner_assessment_df()`<br/>`f.leaderboard_df()` |
 | **3. *"Do covariates (promos, price) help, or are they just overfitting noise?"*** | Benchmarks multivariate models (`@cov_all`) against paired univariate twins (`@univariate`), computes feature attributions (`TreeSHAP` / linear shares), and automatically prunes noisy ("decoy") covariates in Branch `2B`. If all extra columns are noise, a plain univariate model wins and lists the complex models it beat. | `f.attributions_df()`<br/>`f.baseline_value_df()` |
-| **4. *"Does cross-series `@global` pooling beat per-series `@local` fitting?"*** | Classifies the panel into 5 scale regimes (`micro` to `hyperscale`) and measures cross-series correlation (`cross_series_corr`). Defers heavy `@global` neural nets on tiny panels where they overfit, and runs `@local` vs. `@global` head-to-head on `small`/`medium`/`large` panels. | `f.profile_df()`<br/>`f.compare_models()` |
-| **5. *"Is hierarchical reconciliation done properly without hurting good levels?"*** | Estimates error covariance strictly inside each backtest fold (zero lookahead leakage), selects scale-appropriate reconciliation (`mint_nonneg`, `wls_struct`, `wls_var`, `bottom_up`), verifies exact additive coherence (`0.000000` gap) and `0` negative leaves, and reports accuracy lift at `Root`, `Intermediate`, and `Leaf` levels. | `f.hierarchy_value_df()`<br/>`f.hierarchy_df()` |
+| **4. *"Does cross-series `@global` pooling beat per-series `@local` fitting?"*** | Classifies the panel into 5 scale regimes (`micro` to `hyperscale`), measures cross-series correlation (`cross_series_corr`), and profiles multi-lens similarity clusters (`optimal_similarity_clusters`, `similarity_silhouette_score`). Runs `@local` vs. `@global` vs. cluster-aware `<model>@similarity_global` head-to-head and activates kinematic launch-prefix matching (`cold_start_matching="hybrid"`) when cold-start series exist. | `f.profile_df()`<br/>`f.similarity_clusters_df()`<br/>`f.compare_models()` |
+| **5. *"Is hierarchical reconciliation done properly without hurting good levels?"*** | Estimates error covariance strictly inside each backtest fold (zero lookahead leakage), selects scale-appropriate reconciliation (`mint_nonneg`, `mint_shrink`, `wls_struct`, `wls_var`, `bottom_up`, or auto-discovered `similarity_hierarchy` on flat panels), verifies exact additive coherence (`0.000000` gap) and `0` negative leaves, and reports accuracy lift at `Root`, `Intermediate`, and `Leaf` levels. | `f.hierarchy_value_df()`<br/>`f.hierarchy_df()` |
 | **6. *"Does accuracy hold up across the whole horizon, or fade after a few days?"*** | Measures step-by-step error from $h = 1 \dots H$ (`late_horizon_degradation_ratio`), identifies the horizon crossover step $h^*$, and injects `@direct` multi-horizon models + `horizon_specialist` blending when recursive rollouts decay. | `f.horizon_decay_df()`<br/>`f.practitioner_assessment_df()` |
 | **7. *"How do I trust this forecast in production?"*** | Combines distribution-free conformal prediction intervals, directional bias & Trigg Tracking Signal audits, a residual white-noise stop gate, and the **Champion Ratchet** (guaranteeing a later `autofocus` pass can never overwrite a better earlier pass). | `f.assess()`<br/>`f.explain_auto_decisions_df()` |
 
@@ -228,7 +228,7 @@ Every `ConfigBlueprint` (`bp = Forecaster.build_config(...)`) and `Forecaster` (
 
 | Lifecycle Stage | Method / Property | What It Returns & Why You Use It |
 | :--- | :--- | :--- |
-| **1. Pre-Run Data & Blueprint Inspection (`bp`)** | `Forecaster.profile_data(data)` / `bp.profile_df()` | **7-Dimension Step 0 Data Profile:** Summarizes scale regime, SBC demand regime, seasonality/`log1p`, breaks/outliers, calendar/gaps, covariates, and hierarchy tree before fitting any models. |
+| **1. Pre-Run Data & Blueprint Inspection (`bp`)** | `Forecaster.profile_data(data)` / `bp.profile_df()` | **7-Dimension Step 0 Data Profile:** Summarizes scale regime, SBC demand regime, seasonality/`log1p`, breaks/outliers, calendar/gaps, covariates, similarity clusters (`optimal_similarity_clusters`, `similarity_silhouette_score`), and hierarchy tree before fitting any models. |
 | | `bp.explain()` / `bp.rationale_df` | **Plain-English Compiler Rationale:** Row-by-row table showing every synthesized `RunConfig` parameter, its chosen value, the empirical evidence from Step 0, and any `[PINNED]` user constraints. |
 | | `bp.duration_estimate` / `bp.cost_estimate_usd` | **Parametric Runtime & Cloud Cost Estimate:** Predicted `P50` / `P90` wall-clock minutes (`bp.estimated_minutes_p50`) and approximate cloud spend ceiling (`USD`). |
 | | `bp.with_overrides(...)` / `bp.to_file(path)` | **Zero-Cost Re-Compilation & JSON Export:** Modify any dial or `RunConfig` field without re-profiling the data, or export a standard `RunConfig` JSON file for CLI/Git/CI. |
@@ -242,11 +242,12 @@ Every `ConfigBlueprint` (`bp = Forecaster.build_config(...)`) and `Forecaster` (
 | | `f.preview_next_loop()` / `f.step()` | **Human-in-the-Loop Stepping:** Preview proposed next-pass mutations, borrowed models, and `continue_confidence` before executing one pass at a time. |
 | **3. Forecasts, Diagnostics & Operational Actions (`f`)** | `f.leaderboard_df(all_metrics=True)` | **Model Leaderboard:** Ranked out-of-fold accuracy across all evaluated base models and ensemble strategies (pass `all_metrics=True` for all 21 metrics). |
 | | `f.predictions_df()` / `f.plot_forecasts()` | **Forecasts & Visual Trajectories:** Tidy `DataFrame` and matplotlib plot combining historical actuals, out-of-fold backtests, and future forecasts with prediction intervals. |
+| | `f.similarity_df()` / `f.similarity_clusters_df()` / `f.find_similar_series_df()` / `f.plot_similarity_map()` | **Multi-Lens Time-Series Similarity & Digital-Twin Search (`similarity.py`):** Pairwise PSD similarity & lead-lag shifts across 7 lenses, spectral cluster assignments, top-$K$ analog search, and 4-panel phase-space/MDS similarity map. |
 | | `f.attributions_df()` / `f.horizon_decay_df()` / `f.bias_report_df()` | **Deep Diagnostics:** Covariate/lag attribution shares (`TreeSHAP`/linear), step-by-step horizon accuracy decay ($h=1\dots H$), and directional bias / Trigg Tracking Signal flags. |
 | | `f.inventory_policy_df()` / `f.simulate_scenarios()` | **Operational Replenishment & What-If Scenarios:** Reorder points (`ROP`), safety stock (`SS`), and counterfactual promo/price shock simulations. |
 | | `f.detect_anomalies_df()` / `f.detect_change_points_df()` / `f.exceptions_df()` | **Anomaly, Regime Break & Exception Triage:** Historical/live anomaly detection, structural regime change points, and Top-$N$ operational exception queue. |
-| | `f.export_report("report.html")` | **Self-Contained HTML Executive Report:** Exports leaderboards, `autofocus` ledger, FVA ladder, bias/exception queues, and forecast plots into a single shareable `.html` file. |
-| **4. Opt-In Runtime & Post-Run Evolution (`Forecaster.evolve` / `f.evolve`)** | `Forecaster.evolve(data, target=..., backend=...)`<br/>`f.evolve(target="ensemble")`<br/>`Forecaster.evolve(from_run_ids=[...])` | **Opt-In `# EVOLVE-BLOCK` Code & Multi-Run Super-Ensemble Evolution ([`alphaevolve_runner.md`](./alphaevolve_runner.md)):** Evolves causal domain features, per-series adaptive ensemble weights (on `Forecaster.auto()`, a single manual `Forecaster` run `f.evolve()`, or across multiple BigQuery runs via `from_run_ids`), `BaseModel` plugins, or `AutoPolicyWeights` under an AST sandbox, `+1e6` lookahead probe, and 3-Gate Anti-Overfitting Ratchet. |
+| | `f.export_report("report.html")` | **Self-Contained HTML Executive Report:** Exports leaderboards, `autofocus` ledger, FVA ladder, similarity clusters, bias/exception queues, and forecast plots into a single shareable `.html` file. |
+| **4. Opt-In Runtime & Post-Run Evolution (`Forecaster.evolve` / `f.evolve`)** | `Forecaster.evolve(data, target=..., backend=...)`<br/>`f.evolve(target="ensemble")`<br/>`Forecaster.evolve(from_run_ids=[...])` | **Opt-In `# EVOLVE-BLOCK` Code & Multi-Run Super-Ensemble Evolution ([`alphaevolve_runner.md`](./alphaevolve_runner.md)):** Evolves causal domain features (`"features"`), per-series adaptive ensemble weights (`"ensemble"`), `BaseModel` plugins (`"model"`), `AutoPolicyWeights` (`"policy"`), or custom PSD similarity kernels (`"similarity_kernel"`) under an AST sandbox, `+1e6` lookahead probe, and 3-Gate Anti-Overfitting Ratchet. |
 
 ---
 
@@ -255,7 +256,7 @@ Every `ConfigBlueprint` (`bp = Forecaster.build_config(...)`) and `Forecaster` (
 ```mermaid
 flowchart TD
     subgraph Step0["Step 0: Data Profile & Readiness Scan (Forecaster.profile_data)"]
-        P0["7-Dimension Panel Profile<br/>scale_regime · SBC demand regime · seasonality & log1p scaling<br/>breaks & spikes · hygiene & calendar · covariates · hierarchy tree"]
+        P0["7-Dimension Panel Profile<br/>scale_regime · SBC demand regime · seasonality & log1p scaling<br/>breaks & spikes · hygiene & calendar · covariates · similarity clusters & hierarchy tree"]
     end
 
     subgraph Dials["1. Your Dials & Optional Pins"]
@@ -270,9 +271,9 @@ flowchart TD
 
     subgraph DAG["3. Multi-Branch 'autofocus' Tournament (When autofocus=True)"]
         Pass1["Pass 1: Initial Baseline Run<br/>Measures accuracy & checks out-of-fold residual errors"]
-        B2A["Branch 2A: Scale & Clean-Up<br/>Tests @transform_log1p, level_shift & stl_resid spike scrubbing"]
-        B2B["Branch 2B: Features & Horizon<br/>Prunes decoy covariates, synthesizes exog_lags & adds @direct models"]
-        B2C["Branch 2C: Special Regimes<br/>Intermittent Croston · Cold-start · Hierarchy mint_nonneg · Stockouts"]
+        B2A["Branch 2A: Scale & Clean-Up<br/>Tests @transform_log1p / @transform_ilr, level_shift & stl_resid spike scrubbing"]
+        B2B["Branch 2B: Features, @monotone, @similarity_global & Horizon<br/>Prunes decoy covariates, adds @monotone, @similarity_global & @direct models"]
+        B2C["Branch 2C: Special Regimes & Similarity Hierarchies<br/>Intermittent Croston · @similarity_cold_start · mint_nonneg / similarity_hierarchy · Stockouts"]
         Pass3["Pass 3: Combine Winners, Champion Ratchet & 7-Question Assessment<br/>Borrows Pass 1 models + blends winning branches + outputs practitioner_assessment_df()"]
         Pass1 --> B2A & B2B & B2C
         B2A & B2B & B2C -->|"Borrow finished models"| Pass3

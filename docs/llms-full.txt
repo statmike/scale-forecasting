@@ -23,11 +23,11 @@
 ## Reference & Operations
 
 - [Configuration Reference (`RunConfig`)](https://statmike.github.io/scale-forecasting/configuration_reference/): Complete JSON configuration guide.
-- [Forecaster's Workbench](https://statmike.github.io/scale-forecasting/forecaster_workbench/): Physical bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, THieF temporal & cross-temporal reconciliation, top-down Goal-Seek QP (`allocate_target`), compositional simplex (`clr`/`ilr`), Double-ML promo elasticity (`promo_elasticity_df`), cold-start NPI donor transfer (`cold_start_transfer_df`), online ACI conformal calibration (`aci_df`), joint copula trajectories & tail risk (`sample_trajectories`, `tail_risk_df`), portfolio inventory optimization (`optimize_inventory_df`), prescriptive price & promo optimization (`optimize_scenario`), scenarios, and executive HTML/JSON reports.
+- [Forecaster's Workbench](https://statmike.github.io/scale-forecasting/forecaster_workbench/): Physical bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, THieF temporal & cross-temporal reconciliation, top-down Goal-Seek QP (`allocate_target`), compositional simplex (`clr`/`ilr`), Double-ML promo elasticity (`promo_elasticity_df`), cold-start NPI donor transfer (`cold_start_transfer_df`), online ACI conformal calibration (`aci_df`), joint copula trajectories & tail risk (`sample_trajectories`, `tail_risk_df`), time-series similarity, donor matching & cluster hierarchies (`similarity_df`, `find_similar_series_df`, `cluster_by_similarity_df`, `compute_time_series_similarity`), portfolio inventory optimization (`optimize_inventory_df`), prescriptive price & promo optimization (`optimize_scenario`), scenarios, and executive HTML/JSON reports.
 - [Auto-Forecaster & Bounded `autofocus`](https://statmike.github.io/scale-forecasting/auto_forecaster/): Step 0 data profiling (`Forecaster.profile_data`), observational exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`), multi-branch `autofocus` refinement with cell borrowing, 7-Question Practitioner Assessment (`f.practitioner_assessment_df()`, `f.compare_models()`), 7-runtime parametric wall-clock predictor, 20 synthetic DGP benchmarks, and AlphaEvolve calibration.
 - [Auto-Forecaster Benchmarks (29 Datasets & AlphaEvolve)](https://statmike.github.io/scale-forecasting/auto_forecaster_benchmarks/): Full 4-tier × `autofocus` progression across 20 synthetic DGP recipes, 8 AlphaEvolve evolution stages, and 9 public open-data benchmarks (`M5`, `Favorita`, `M4`, `Monash`, `ETT`).
 - [Auto-Forecaster Cloud Scale (7 Runtimes & AutoML)](https://statmike.github.io/scale-forecasting/auto_forecaster_cloud_scale/): 70+ live Google Cloud runs (`10` -> `100,000` series) across `bigquery`, `spark`, `vertex` (`L4` GPU & CPU), `gce`, `gke`, `ray`, and `vertex_automl` (`vertex_tide`, `vertex_l2l`), plus cross-run cell borrowing.
-- [AlphaEvolve Runtime Harness (Opt-In)](https://statmike.github.io/scale-forecasting/alphaevolve_runner/): Opt-in evolutionary code discovery (`Forecaster.evolve`, `python -m scale_forecasting.evolve`) across `# EVOLVE-BLOCK` targets (`features`, `ensemble`, `model`, `policy`) with AST security sandbox, temporal lookahead probe, and 3-Gate Anti-Overfitting Ratchet (default `backend='alphaevolve'` on Gemini Enterprise Discovery Engine + `backend='vertex_gemini'` backup on Vertex AI Gemini).
+- [AlphaEvolve Runtime Harness (Opt-In)](https://statmike.github.io/scale-forecasting/alphaevolve_runner/): Opt-in evolutionary code discovery (`Forecaster.evolve`, `python -m scale_forecasting.evolve`) across `# EVOLVE-BLOCK` targets (`features`, `ensemble`, `model`, `policy`, `similarity_kernel`) with AST security sandbox, temporal lookahead probe, and 3-Gate Anti-Overfitting Ratchet (default `backend='alphaevolve'` on Gemini Enterprise Discovery Engine + `backend='vertex_gemini'` backup on Vertex AI Gemini).
 - [Models Reference (37 Models)](https://statmike.github.io/scale-forecasting/models_reference/): All 37 models, covariate support, explainability, and granular extras.
 - [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
 - [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
@@ -110,13 +110,17 @@ Target transforms (including compositional `clr`/`ilr` simplex transforms), coun
 | `outlier_sigma` | `float` | `3.5` | `> 0.0` |
 | `regime_routing` | `bool` | `false` | — |
 | `include_univariate_baselines` | `bool` | `false` | — |
-| `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
+| `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'similarity_global' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
 | `ablation_models` | `list[str]` | `[]` | — |
 | `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | — |
 | `holiday_window` | `HolidayWindowConfig \| None` | `null` | — |
 | `cold_start_transfer` | `bool` | `false` | — |
 | `cold_start_min_obs` | `int` | `14` | `>= 1` |
 | `cold_start_method` | `'auto' \| 'analog_transfer' \| 'bass_diffusion' \| 'weibull_lifecycle'` | `"auto"` | — |
+| `cold_start_matching` | `'auto' \| 'attribute' \| 'similarity' \| 'hybrid'` | `"auto"` | — |
+| `similarity_cluster_feature` | `bool` | `false` | — |
+| `similarity_method` | `'hybrid' \| 'physics_attractor' \| 'spectral_phase' \| 'elastic_dtw' \| 'minirocket' \| 'structural_signature' \| 'foundation_latent'` | `"hybrid"` | — |
+| `similarity_n_clusters` | `int \| 'auto'` | `"auto"` | — |
 
 ### `backtest (BacktestConfig)`
 
@@ -181,6 +185,7 @@ Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xg
 | `top_k` | `int \| None` | `null` | `> 0` |
 | `parsimony_margin` | `float` | `0.0` | `>= 0.0` |
 | `variant_policy` | `'all' \| 'best_per_base_model' \| 'primary_only'` | `"all"` | — |
+| `similarity_smoothing` | `float` | `0.0` | `>= 0.0`, `<= 1.0` |
 
 ### `hierarchy (HierarchyConfig)`
 
@@ -196,6 +201,9 @@ Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, `mint_shri
 | `temporal_aggregations` | `list[int] \| None` | `null` | — |
 | `cross_temporal` | `bool` | `false` | — |
 | `spatial_temporal_weight` | `float \| 'auto'` | `"auto"` | — |
+| `similarity_hierarchy` | `bool` | `false` | — |
+| `similarity_n_clusters` | `int \| 'auto'` | `"auto"` | — |
+| `similarity_method` | `'hybrid' \| 'physics_attractor' \| 'spectral_phase' \| 'elastic_dtw' \| 'minirocket' \| 'structural_signature' \| 'foundation_latent'` | `"hybrid"` | — |
 
 ### `compute (ComputeConfig)`
 
@@ -353,6 +361,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `<model>@transform_log1p` / `<model>@transform_boxcox` / `<model>@transform_clr` / `<model>@transform_ilr` / `<model>@transform_none` | Per-model target transform override (including compositional simplex `transform_clr` and `transform_ilr` isometric log-ratio transforms). |
 | `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`). |
 | `<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized` | Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized CQR (`aci_normalized`) interval calibration override. |
+| `<model>@similarity_global` / `<model>@similarity_cold_start` | Enable similarity-clustered global pooling (`@similarity_global`, injecting `__similarity_cluster_id__`) or similarity-driven cold-start donor transfer (`@similarity_cold_start`, `cold_start_matching = 'similarity'`). |
 
 ---
 
@@ -366,6 +375,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 6. **Covariate & Compositional Simplex Hygiene (`features`):** `future_covariates` and `past_covariates` must be disjoint; `static_covariates` must be disjoint from dynamic covariates; every key in `exog_lags` and `monotonic_constraints` must name a declared covariate; `transform` in `('clr', 'ilr')` automatically sets `simplex_sum = 1.0` when unset.
 7. **Hierarchy & Cross-Temporal Hygiene (`hierarchy`):** When `hierarchy.enabled = true`, both `levels` and `reconciliation_methods` must be non-empty. `hierarchy.cross_temporal = true` or `'cross_temporal_mint'` in `reconciliation_methods` automatically enables `reconcile_temporal = true` and validates `spatial_temporal_weight` (`'auto'` or float in `[0, 1]`).
 8. **Per-Family Runtime & Hardware Constraints (`compute.families`):** Only `deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`. Family `automl` must use `runtime = "vertex_automl"`. `runtime = "gce"` is strictly single-VM (`workers = 1`).
+9. **Time-Series Similarity & Analog Clustering (`features`, `hierarchy`, `ensemble`):** `features.cold_start_matching = 'similarity'` uses hybrid/DTW/MP/Wasserstein launch-prefix donor matching (`similarity_method`). `features.similarity_cluster_feature = true` or `<model>@similarity_global` injects cluster labels into global models. `hierarchy.similarity_hierarchy = true` auto-discovers latent cluster hierarchies on flat panels, and `ensemble.similarity_smoothing = true` applies Laplacian graph smoothing across per-series stacker weights.
 
 ---
 
@@ -795,11 +805,12 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Interval & arm calibration** | — | `calibration_report(run_id)` |
 | **Forecaster's Workbench, Goal-Seek & Temporal Reconciliation** | — | `Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / `.exceptions_df()` / `.promo_elasticity_df()` / `.inventory_policy_df()` / `.allocate_target()` / `.temporal_reconcile_df()` |
 | **Cold-Start NPI, Online ACI, Copula Tail-Risk & Prescriptive Optimization** | — | `Forecaster(cfg).cold_start_transfer_df()` / `.aci_df()` / `.sample_trajectories()` / `.tail_risk_df()` / `.optimize_inventory_df()` / `.optimize_scenario()` |
+| **Time-Series Similarity, Donor Matching & Cluster Hierarchies** | — | `Forecaster(cfg).similarity_df()` / `.find_similar_series_df()` / `.cluster_by_similarity_df()` / `compute_time_series_similarity` |
 | **Executive HTML + JSON report** | `python -m scale_forecasting.report --model holtwinters --output-dir ./report` | `Forecaster(cfg).export_report()` / `export_report(bench, './report')` |
 | **Glass-Box Auto-Forecaster & `autofocus`** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --tier first_light --autofocus --max-passes 3` | `Forecaster.profile_data(panel)` / `Forecaster.build_config(panel, tier='wide_field')` / `Forecaster.auto(panel, tier='first_light', autofocus=True)` |
 | **7-Question Practitioner Assessment & Model Comparison** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --autofocus` | `f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / `f.baseline_value_df()` / `f.hierarchy_value_df()` |
 | **Auto-Forecaster Composer 3 / Airflow DAG Emission** | `python -m scale_forecasting.main --auto --table source_series_native --tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | `bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |
-| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
+| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `f.evolve(target='similarity_kernel')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
 
 ---
 

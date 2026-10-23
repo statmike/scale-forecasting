@@ -140,11 +140,12 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **Interval & arm calibration** | — | `calibration_report(run_id)` |
 | **Forecaster's Workbench, Goal-Seek & Temporal Reconciliation** | — | `Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / `.exceptions_df()` / `.promo_elasticity_df()` / `.inventory_policy_df()` / `.allocate_target()` / `.temporal_reconcile_df()` |
 | **Cold-Start NPI, Online ACI, Copula Tail-Risk & Prescriptive Optimization** | — | `Forecaster(cfg).cold_start_transfer_df()` / `.aci_df()` / `.sample_trajectories()` / `.tail_risk_df()` / `.optimize_inventory_df()` / `.optimize_scenario()` |
+| **Time-Series Similarity, Donor Matching & Cluster Hierarchies** | — | `Forecaster(cfg).similarity_df()` / `.find_similar_series_df()` / `.cluster_by_similarity_df()` / `compute_time_series_similarity` |
 | **Executive HTML + JSON report** | `python -m scale_forecasting.report --model holtwinters --output-dir ./report` | `Forecaster(cfg).export_report()` / `export_report(bench, './report')` |
 | **Glass-Box Auto-Forecaster & `autofocus`** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --tier first_light --autofocus --max-passes 3` | `Forecaster.profile_data(panel)` / `Forecaster.build_config(panel, tier='wide_field')` / `Forecaster.auto(panel, tier='first_light', autofocus=True)` |
 | **7-Question Practitioner Assessment & Model Comparison** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --autofocus` | `f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / `f.baseline_value_df()` / `f.hierarchy_value_df()` |
 | **Auto-Forecaster Composer 3 / Airflow DAG Emission** | `python -m scale_forecasting.main --auto --table source_series_native --tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | `bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |
-| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
+| **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `f.evolve(target='similarity_kernel')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
 
 ---
 

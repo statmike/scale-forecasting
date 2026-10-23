@@ -9,7 +9,7 @@ When your organization operates a proprietary dataset with domain-specific non-l
 `Forecaster.evolve()` works in **two complementary modes**—either on top of `Forecaster.auto()` and `autofocus`, or **directly on top of any completed manual `Forecaster` run (`f.evolve()`) or pool of prior BigQuery runs (`from_run_ids=[...]`) without using `autofocus` or Auto-Forecaster exposure tiers**:
 1. **Mode 1 — Raw-Panel Evolution on Top of `Forecaster.auto()`:** Splits your panel into an **Inner Evolution Panel** and an **Unseen Held-Out Lockdown Fold**, runs `Forecaster.auto()` once on the inner panel to establish the baseline accuracy score and out-of-fold (`backtest_oof`) prediction bank, and **reuses ("borrows") finished `(ts_id, model_type)` cells** across candidate evaluations via `make_model_spec_hash`.
 2. **Mode 2 — Post-Run & Multi-Run Super-Ensembling (`f.evolve()`, `from_runs`, `from_run_ids` — Zero Base-Model Refitting):** Accepts an already-executed manual `Forecaster` instance (`f.evolve(target="ensemble")`) or a list of completed BigQuery `run_id`s (`Forecaster.evolve(from_run_ids=["run_a", "run_b"], target="ensemble")`). It pools all base models across those runs (disambiguating distinct HPO/feature fits as `<model_type>@<run_short_id>`), sets the baseline to beat as the **reigning #1 single model or built-in `ensemble_*` strategy** (`ensemble_inverse_error`, `ensemble_nnls`, `ensemble_champion`, `ensemble_horizon_specialist`), withholds the final OOF window as the **Gate 3 Held-Out Lockdown Fold**, evolves **per-series adaptive ensemble weights**, and materializes the blended forward forecast with empirical conformal intervals in `result.predictions_df`—in seconds, with **zero base-model refitting**.
-3. **Evolves Bounded `# EVOLVE-BLOCK` Python Code Across 4 Targets:** You choose whether to evolve causal domain covariates (`target="features"`), global or per-series adaptive out-of-fold ensemble blending logic (`target="ensemble"`), a custom `BaseModel` residual/state-space forecaster (`target="model"`), or custom `AutoPolicyWeights` thresholds (`target="policy"`).
+3. **Evolves Bounded `# EVOLVE-BLOCK` Python Code Across 5 Targets:** You choose whether to evolve causal domain covariates (`target="features"`), global or per-series adaptive out-of-fold ensemble blending logic (`target="ensemble"`), a custom `BaseModel` residual/state-space forecaster (`target="model"`), custom `AutoPolicyWeights` thresholds (`target="policy"`), or a custom positive semi-definite (PSD) multi-lens similarity kernel (`target="similarity_kernel"`).
 4. **Enforces an AST Security Sandbox, Temporal Lookahead Probe & 3-Gate Anti-Overfitting Ratchet:** Every mutated candidate is statically verified via Python's `ast` module, tested against a `+1e6` future-perturbation causality probe (`verify_no_future_leakage`), and required to pass **three sequential promotion gates**—including a **Held-Out Lockdown Fold that the evolutionary loop never sees**. If a candidate overfits the inner cross-validation folds, the ratchet rejects it automatically and retains the reigning baseline (`promoted=False`).
 
 ---
@@ -33,7 +33,7 @@ When your organization operates a proprietary dataset with domain-specific non-l
 
 | Dimension | Built-In Auto-Forecaster (`Forecaster.auto()`) | Primary Evolution Backend (`backend="alphaevolve"`, Default) | Backup Evolution Backend (`backend="vertex_gemini"`, Non-Default) | Offline Test Backend (`backend="mock"`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **When to Use It** | Everyday production forecasting and multi-branch `autofocus` tournaments (`95%+` of workloads). | Discovering custom domain features, ensemble rules, models, or policy weights with managed multi-island evolution. | Running runtime `# EVOLVE-BLOCK` evolution on standard GCP projects without Gemini Enterprise AlphaEvolve entitlement. | Unit tests, CI pipelines, and `--dry-run` verification in `<2s` with zero network calls. |
+| **When to Use It** | Everyday production forecasting and multi-branch `autofocus` tournaments (`95%+` of workloads). | Discovering custom domain features, ensemble rules, models, policy weights, or similarity kernels with managed multi-island evolution. | Running runtime `# EVOLVE-BLOCK` evolution on standard GCP projects without Gemini Enterprise AlphaEvolve entitlement. | Unit tests, CI pipelines, and `--dry-run` verification in `<2s` with zero network calls. |
 | **Licensing & Entitlement Required** | **None** *(100% pure Python shipped in `auto_policy.py`)* | **Gemini Enterprise license + AlphaEvolve entitlement** on the GCP organization/project | **Standard Google Cloud project** with Vertex AI API enabled *(no Gemini Enterprise license required)* | **None** *(100% offline deterministic mutations)* |
 | **Google Cloud API Endpoint** | None *(or chosen compute runtime for jobs)* | `discoveryengine.googleapis.com/v1alpha` (`alphaEvolveExperiments` `:acquirePrograms` & `:submitProgramsEvaluations`, default `model_name="gemini-3.8-flash"`) | `aiplatform.googleapis.com` (`google.genai.Client(vertexai=True)`, default `model_name="gemini-3.8-flash"`) | None |
 | **Terraform Variable** | Default (`enable_alphaevolve = false`) | Set **`enable_alphaevolve = true`** *(enables `discoveryengine.googleapis.com` + `roles/discoveryengine.admin` on runner SA)* | Default (`enable_alphaevolve = false`; uses standard `aiplatform.googleapis.com` already enabled by default) | None |
@@ -60,7 +60,7 @@ flowchart TB
     end
 
     subgraph Loop["3. Dual-Backend Evolutionary Mutation Loop (# EVOLVE-BLOCK)"]
-        Target["4 Evolvable Targets (EVOLVE_TARGETS)<br/>'features' · 'ensemble' (Global or Per-Series Weights) · 'model' · 'policy'"]
+        Target["5 Evolvable Targets (EVOLVE_TARGETS)<br/>'features' · 'ensemble' · 'model' · 'policy' · 'similarity_kernel'"]
         Primary["Primary Default: backend='alphaevolve'<br/>Gemini Enterprise Discovery Engine (v1alpha)<br/>:acquirePrograms / :submitProgramsEvaluations"]
         Backup["Non-Default Backup: backend='vertex_gemini'<br/>Standard Vertex AI Gemini (aiplatform.googleapis.com)<br/>+ In-Process MAP-Elites Island Population"]
         Auto --> Target --> Primary & Backup
@@ -93,7 +93,7 @@ Rather than evolving a forecasting pipeline from a blank slate, `Forecaster.evol
    Before profiling or fitting any model, `run_evolution()` reserves the final `horizon` timestamps (`t > T - H_lockdown`) of every series as a **Held-Out Lockdown Fold**. The evolutionary loop (`acquire_programs` $\rightarrow$ evaluate $\rightarrow$ `submit_evaluations`) only ever sees the **Inner Evolution Panel** (`t <= T - H_lockdown`).
 2. **Baseline Establishment & `model_spec_hash` Cell Borrowing (`reuse_prior_runs=True`):**
    `Forecaster.evolve()` executes `Forecaster.auto()` on the Inner Evolution Panel once to compute:
-   - The **`PanelAutoProfile`** (scale regime, SBC demand regime, seasonality, structural breaks, covariate structure, hierarchy tree).
+   - The **`PanelAutoProfile`** (scale regime, SBC demand regime, seasonality, structural breaks, covariate structure, similarity clusters, hierarchy tree).
    - The **Baseline Champion Score (`baseline_score`)**—set to the best model or built-in `ensemble_*` strategy on the inner walk-forward cross-validation folds.
    - The **Cached Out-of-Fold (`backtest_oof`) Prediction Bank**, allowing `"ensemble"` and `"policy"` mutations to evaluate in milliseconds and `"features"` / `"model"` mutations to borrow unchanged `(ts_id, model_type)` cells without re-training the entire model portfolio.
 3. **Structured Diagnostic Feedback to the Mutator:**
@@ -130,16 +130,17 @@ When you call `f.evolve(target="ensemble")` or `Forecaster.evolve(from_run_ids=[
 
 ---
 
-## 3. The 4 Evolvable `# EVOLVE-BLOCK` Targets (`EVOLVE_TARGETS`)
+## 3. The 5 Evolvable `# EVOLVE-BLOCK` Targets (`EVOLVE_TARGETS`)
 
-Every evolutionary run targets one of four modular Python contracts defined in [`scale_forecasting.evolve.targets`](api/evolve.md). Only the code between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END` is mutated; the outer function signature, type contract, and backtest harness remain immutable:
+Every evolutionary run targets one of five modular Python contracts defined in [`scale_forecasting.evolve.targets`](api/evolve.md). Only the code between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END` is mutated; the outer function signature, type contract, and backtest harness remain immutable:
 
 | Target (`target=...`) | Function / Class Evolved | How It Plugs Into `Forecaster.auto()` | Best Used When |
 | :--- | :--- | :--- | :--- |
 | **`"features"`** | `synthesize_evolved_features(df, profile=None) -> pd.DataFrame` | Synthesizes new causal covariate columns (`evolved_feat_*`) from past target lags, rolling volatility, or non-linear promo/price interactions, then feeds them into the `Forecaster.auto()` tree/linear/global model bank. | Your domain has non-linear promotion saturation, price elasticity thresholds, or multi-lag pull-forward effects (`dgp_04`, `dgp_18`). |
 | **`"ensemble"`** | `compute_evolved_weights(oof_df, profile=None) -> dict[str, float] \| dict[str, dict[str, float]] \| pd.DataFrame` | Learns custom global or **per-series adaptive blending weights** (temperature-scaled inverse-loss, trimmed consensus, or empirical-Bayes shrinkage toward the global winner) over the cached `backtest_oof` bank from `Forecaster.auto()`, a single manual `Forecaster` run (`f.evolve()`), or a multi-run pool (`from_run_ids=[...]`), and materializes `result.predictions_df`. | You want to beat the reigning #1 model and built-in `ensemble_*` strategies in seconds with zero base-model refitting—including across multiple prior runs. |
 | **`"model"`** | `EvolvedForecaster(BaseModel)` (`fit` & `predict`) | Evolves a custom `BaseModel` plugin using `numpy`, `scipy`, and `statsmodels` primitives and benchmarks it head-to-head against the 37 built-in models on identical backtest folds. | Your series follow a domain-specific state-space, damped-trend, or harmonic decay law. |
-| **`"policy"`** | `evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights` | Tunes the continuous decision thresholds in [`AutoPolicyWeights`](api/auto.md) (such as `log1p_cv_threshold`, `decoy_prune_min_share`, `horizon_decay_threshold`, `parsimony_margin`) for your specific dataset family. | You want to calibrate `auto_policy.py` thresholds once on a representative enterprise panel and export them for zero-LLM daily runs. |
+| **`"policy"`** | `evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights` | Tunes the continuous decision thresholds in [`AutoPolicyWeights`](api/auto.md) (such as `log1p_cv_threshold`, `decoy_prune_min_share`, `horizon_decay_threshold`, `parsimony_margin`, `enable_similarity_global`, `similarity_silhouette_threshold`) for your specific dataset family. | You want to calibrate `auto_policy.py` thresholds once on a representative enterprise panel and export them for zero-LLM daily runs. |
+| **`"similarity_kernel"`** | `compute_evolved_similarity_kernel(features_mat: np.ndarray, profile: dict \| None = None) -> np.ndarray` | Evolves a custom symmetric positive semi-definite (PSD) similarity kernel ($S_{i,i}=1, S_{i,j} \in [0, 1]$) combining structural, spectral/Kuramoto phase, physics-attractor (Takens/Lyapunov/Hurst), and convolutional feature blocks, scored via k-NN analog holdout accuracy across the 3-Gate Ratchet. | Your multi-regime or cold-start panel benefits from domain-tailored distance weighting across dynamical and spectral lenses (`similarity.py`). |
 
 ### Example `# EVOLVE-BLOCK` Seed Contract (`target="features"`)
 
@@ -218,7 +219,7 @@ ds = load_benchmark("dgp_04_true_vs_decoy_covs", n_series=8)
 #             Default model_name="gemini-3.8-flash"; pass model_name="..." to select any Gemini model
 result = Forecaster.evolve(
     ds.panel_df,
-    target="features",          # "features" | "ensemble" | "model" | "policy"
+    target="features",          # "features" | "ensemble" | "model" | "policy" | "similarity_kernel"
     backend="alphaevolve",      # "alphaevolve" (default) | "vertex_gemini" (backup) | "mock"
     model_name="gemini-3.8-flash",  # default "gemini-3.8-flash" (or e.g. "gemini-4-argon")
     tier="first_light",
@@ -309,7 +310,7 @@ dag_py = result.emit_airflow_dag(
 
 ### 5.5. Surface 4 — Built-in MCP Server (`run_auto_forecast` with `evolve_target`, `evolve_model_name` & `evolve_from_run_ids`)
 
-AI coding agents connected to `python -m scale_forecasting.mcp` can trigger `Forecaster.evolve()` directly through the existing `run_auto_forecast` MCP tool by passing `evolve_target` (`"features"`, `"ensemble"`, `"model"`, or `"policy"`), `evolve_backend` (`"alphaevolve"`, `"vertex_gemini"`, or `"mock"`), `evolve_model_name` (defaults to `"gemini-3.8-flash"`; pass any supported Gemini model name to override), `evolve_max_evaluations`, and optional `evolve_from_run_ids` (`list[str]`) to evolve a post-hoc super-ensemble across completed BigQuery runs.
+AI coding agents connected to `python -m scale_forecasting.mcp` can trigger `Forecaster.evolve()` directly through the existing `run_auto_forecast` MCP tool by passing `evolve_target` (`"features"`, `"ensemble"`, `"model"`, `"policy"`, or `"similarity_kernel"`), `evolve_backend` (`"alphaevolve"`, `"vertex_gemini"`, or `"mock"`), `evolve_model_name` (defaults to `"gemini-3.8-flash"`; pass any supported Gemini model name to override), `evolve_max_evaluations`, and optional `evolve_from_run_ids` (`list[str]`) to evolve a post-hoc super-ensemble across completed BigQuery runs.
 
 ---
 
