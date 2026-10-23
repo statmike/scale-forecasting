@@ -53,6 +53,7 @@ from .metrics import compute_metrics, loss_of
 
 __all__ = [
     "BASELINE_CANDIDATES",
+    "INVENTORY_POLICY_COLUMNS",
     "PROMO_ELASTICITY_COLUMNS",
     "compute_anomalies",
     "compute_bias_report",
@@ -2088,6 +2089,8 @@ _INVENTORY_POLICY_COLUMNS: tuple[str, ...] = (
     "expected_stockout_cost",
     "expected_total_cost",
 )
+
+INVENTORY_POLICY_COLUMNS: tuple[str, ...] = _INVENTORY_POLICY_COLUMNS
 
 
 def _normal_loss(z: float) -> float:

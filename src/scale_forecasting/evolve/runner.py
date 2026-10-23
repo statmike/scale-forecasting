@@ -546,12 +546,39 @@ def run_evolution(
             )
         )
     )
+    f_cal = getattr(f_cfg, "calibration", None) if f_cfg is not None else None
+    regime_shares_dict = dict(prof_dict.get("regime_shares") or {})
+    cs_frac = float(
+        prof_dict.get(
+            "cold_start_fraction",
+            regime_shares_dict.get("cold_start", 0.0),
+        )
+        or 0.0
+    )
+    has_cs = bool(
+        prof_dict.get("has_cold_start", False)
+        or cs_frac > 0.0
+        or (getattr(f_feats, "cold_start_transfer", False) if f_feats is not None else False)
+    )
     structural_diag: dict[str, Any] = {
         "monotonic_constraints": mono_constraints,
         "is_compositional_simplex": is_simplex,
         "simplex_total": simplex_total,
         "hierarchy_id_cols": hier_cols,
         "reconcile_temporal": rec_temporal,
+        "has_cold_start": has_cs,
+        "cold_start_fraction": cs_frac,
+        "cold_start_donor_similarity": float(prof_dict.get("cold_start_donor_similarity", 0.0)),
+        "calibration_method": str(
+            prof_dict.get(
+                "calibration_method",
+                getattr(f_cal, "method", "conformal") if f_cal is not None else "conformal",
+            )
+        ),
+        "residual_drift_ks_stat": float(prof_dict.get("residual_drift_ks_stat", 0.0)),
+        "cross_series_residual_corr": float(
+            prof_dict.get("cross_series_residual_corr", prof_dict.get("cross_series_corr", 0.0))
+        ),
     }
 
     evaluations: list[CandidateEvaluation] = []

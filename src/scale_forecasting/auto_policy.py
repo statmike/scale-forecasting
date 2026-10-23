@@ -191,6 +191,8 @@ class PanelAutoProfile:
     monotonic_constraints: dict[str, int] = field(default_factory=dict)
     is_compositional_simplex: bool = False
     simplex_total: float = 0.0
+    cold_start_donor_similarity: float = 0.0
+    residual_drift_ks_stat: float = 0.0
 
     @classmethod
     def from_df(cls, data: Any, **kwargs: Any) -> PanelAutoProfile:
@@ -240,7 +242,8 @@ class PanelAutoProfile:
                 "measured_value": (
                     f"regime='{self.dominant_regime}' | zeros={self.zero_fraction:.1%} | "
                     f"ADI={self.median_adi:.2f} | CV²={self.median_cv2:.2f} | "
-                    f"cold_start={cold_share:.1%}"
+                    f"cold_start={cold_share:.1%} | "
+                    f"donor_sim={self.cold_start_donor_similarity:.2f}"
                 ),
                 "implication": (
                     "Intermittent/lumpy zeros trigger MASE scoring and Croston/TSB specialists "
@@ -283,7 +286,8 @@ class PanelAutoProfile:
                 "signal": "structural_break_share · outlier_spike_share",
                 "measured_value": (
                     f"breaks={self.structural_break_share:.1%} | "
-                    f"spikes={self.outlier_spike_share:.1%}"
+                    f"spikes={self.outlier_spike_share:.1%} | "
+                    f"ks_drift={self.residual_drift_ks_stat:.2f}"
                 ),
                 "implication": (
                     "Elevated structural shifts or >6-sigma spikes trigger level_shift indicators "
@@ -619,6 +623,10 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "enable_stl_resid_outlier_scrubbing": (0.96, 5.9),
             "inject_intermittent_specialists": (0.68, 5.3),
             "enable_cold_start_pooling": (0.94, 3.4),
+            "enable_cold_start_transfer": (0.85, 5.2),
+            "enable_cold_start_donor_transfer": (0.85, 5.2),
+            "enable_adaptive_conformal": (0.82, 4.1),
+            "enable_aci_conformal_tracking": (0.82, 4.1),
             "refine_hierarchical_coherence": (0.86, 10.5),
             "enable_temporal_reconciliation": (0.78, 4.8),
             "refine_probabilistic_quantiles": (0.66, 2.9),
@@ -1242,6 +1250,23 @@ def select_tier_models_and_features(
                 ),
             }
         )
+    if has_cold_start:
+        rationales.append(
+            {
+                "category": "cold_start_transfer",
+                "parameter": "cold_start_donor_transfer",
+                "value": f"donor_similarity={profile.cold_start_donor_similarity:.2f}",
+                "evidence": (
+                    f"cold_start_share={profile.regime_shares.get('cold_start', 0.0):.1%}, "
+                    f"min_n_obs={profile.min_n_obs}"
+                ),
+                "rationale": (
+                    "Short-history cold-start series detected; analog donor prior transfer and "
+                    "SBC regime routing blend mature donor seasonal profiles with empirical-Bayes "
+                    "shrinkage."
+                ),
+            }
+        )
 
     # 7. Physical Output Constraints & Goal Alignment
     floor: float | None = 0.0 if profile.non_negative else None
@@ -1449,16 +1474,16 @@ def select_tier_models_and_features(
 
 
 def propose_autofocus_pass(
-    profile: PanelAutoProfile,
-    prior_config_dict: dict[str, Any],
-    pass_index: int,
-    diagnostics_summary: dict[str, Any],
+    profile: PanelAutoProfile | dict[str, Any],
+    prior_config_dict: dict[str, Any] | PanelAutoProfile,
+    pass_index: int | dict[str, Any] = 2,
+    diagnostics_summary: dict[str, Any] | None = None,
     *,
     tier: str = "wide_field",
     where: str = "auto",
     goal: str = "accuracy",
     available_models: Sequence[str] | None = None,
-) -> dict[str, Any]:
+) -> Any:
     """Closed-Loop `Observe -> Review -> Re-Plan`: propose surgical mutations for Pass `pass_index`.
 
     Inspects out-of-fold econometric diagnostics from Pass `pass_index - 1` (FVA waterfall,
@@ -1466,6 +1491,27 @@ def propose_autofocus_pass(
     sparsity/cold-start share, hierarchy structure, and residual heteroskedasticity/autocorrelation)
     and returns a dictionary of targeted config updates plus structured evidence rationales.
     """
+    _return_mutations_only = False
+    if isinstance(profile, dict) and isinstance(prior_config_dict, PanelAutoProfile):
+        _return_mutations_only = True
+        _real_prior = dict(profile)
+        _real_profile = prior_config_dict
+        if isinstance(pass_index, dict):
+            _real_diag = dict(pass_index)
+            _real_pass_idx = int(diagnostics_summary) if isinstance(diagnostics_summary, int) else 2
+        else:
+            _real_pass_idx = int(pass_index)
+            _real_diag = dict(diagnostics_summary or {})
+        profile = _real_profile
+        prior_config_dict = _real_prior
+        pass_index = _real_pass_idx
+        diagnostics_summary = _real_diag
+    else:
+        assert isinstance(profile, PanelAutoProfile)
+        assert isinstance(prior_config_dict, dict)
+        pass_index = int(pass_index) if isinstance(pass_index, int) else 2
+        diagnostics_summary = dict(diagnostics_summary or {})
+
     avail = set(
         available_models
         if available_models is not None
@@ -1546,6 +1592,8 @@ def propose_autofocus_pass(
         and not has_hierarchy
         and not is_probabilistic_goal
         and not profile.is_compositional_simplex
+        and not bool(diagnostics_summary.get("coverage_drift_detected", False))
+        and not bool(diagnostics_summary.get("cold_start_donor_transfer_recommended", False))
         and abs(profile.end_to_start_ratio - 1.0) < float(th.get("white_noise_growth_tol", 0.15))
         and profile.median_acf_season < float(th.get("white_noise_acf_season_max", 0.18))
         and not profile.future_covariates
@@ -1553,6 +1601,8 @@ def propose_autofocus_pass(
         and profile.outlier_spike_share < 0.10
         and diagnostics_summary.get("white_noise_residuals", False)
     ):
+        if _return_mutations_only:
+            return mutations
         return {
             "models": current_models,
             "added_models": added_models,
@@ -1942,8 +1992,15 @@ def propose_autofocus_pass(
                 }
             )
 
-    # 6. Cold-Start & Mixed-History Cross-Series Pooling Escalation (dgp_11)
-    if has_cold_start and not is_intermittent_heavy:
+    # 6. Cold-Start & Mixed-History Cross-Series Pooling / Donor Transfer Escalation (dgp_11)
+    cold_start_donor_sim = max(
+        float(getattr(profile, "cold_start_donor_similarity", 0.0)),
+        float(diagnostics_summary.get("cold_start_donor_similarity", 0.0)),
+    )
+    cold_start_rec = bool(diagnostics_summary.get("cold_start_donor_transfer_recommended", False))
+    if (
+        has_cold_start or cold_start_donor_sim > 0.0 or cold_start_rec
+    ) and not is_intermittent_heavy:
         cs_added: list[str] = []
         for cs_cand in ("holtwinters", "regression_lags", "xgboost"):
             if cs_cand in avail and cs_cand not in current_models:
@@ -1954,8 +2011,15 @@ def propose_autofocus_pass(
                     model_params.setdefault(
                         cs_cand, {"n_estimators": int(th.get("tree_n_estimators_fast", 55))}
                     )
-        if cs_added:
+        donor_transfer_active = (
+            cold_start_rec
+            or cold_start_donor_sim >= 0.65
+            or (has_cold_start and profile.n_series >= 2 and profile.min_n_obs < 14)
+        )
+        if cs_added or donor_transfer_active:
             features_cfg["regime_routing"] = True
+            if donor_transfer_active:
+                features_cfg["cold_start_transfer"] = True
             strats_cs = list(ensemble_cfg.get("strategies", ["inverse_error"]))
             if "champion" not in strats_cs:
                 strats_cs.append("champion")
@@ -1964,18 +2028,26 @@ def propose_autofocus_pass(
             ensemble_cfg["strategies"] = strats_cs
             mutations.append(
                 {
-                    "action": "enable_cold_start_pooling",
+                    "action": (
+                        "enable_cold_start_transfer"
+                        if donor_transfer_active
+                        else "enable_cold_start_pooling"
+                    ),
                     "domain": "regime_and_specialists",
-                    "parameter": "models + features.regime_routing",
+                    "parameter": "models + features.regime_routing + features.cold_start_transfer",
                     "old_value": f"{len(current_models) - len(cs_added)} models",
-                    "new_value": f"+{', '.join(cs_added)}, regime_routing=True",
+                    "new_value": (
+                        f"+{', '.join(cs_added) or 'existing'}, regime_routing=True, "
+                        f"cold_start_transfer={donor_transfer_active}"
+                    ),
                     "evidence": (
                         f"cold_start_share={profile.regime_shares.get('cold_start', 0.0):.1%}, "
-                        f"min_n_obs={profile.min_n_obs}"
+                        f"min_n_obs={profile.min_n_obs}, "
+                        f"cold_start_donor_similarity={cold_start_donor_sim:.2f}"
                     ),
                     "rationale": (
-                        "Panel mixes mature and short-history cold-start series; adding seasonal "
-                        "exponential smoothing and regularized lag models with SBC regime routing."
+                        "Panel mixes mature donor series and short-history cold-start series; "
+                        "enabling k-NN analog donor shrinkage transfer and SBC regime routing."
                     ),
                 }
             )
@@ -2091,6 +2163,35 @@ def propose_autofocus_pass(
                     ),
                 }
             )
+
+    # 8.2. Non-Exchangeable Drift -> Adaptive Conformal Inference (ACI / CQR) Escalation
+    ks_drift = max(
+        float(getattr(profile, "residual_drift_ks_stat", 0.0)),
+        float(diagnostics_summary.get("residual_drift_ks_stat", 0.0)),
+    )
+    cov_drift = bool(diagnostics_summary.get("coverage_drift_detected", False)) or (
+        is_probabilistic_goal and ks_drift >= 0.28
+    )
+    old_cal = str(output_cfg.get("calibration_method", "conformal"))
+    if cov_drift and old_cal == "conformal":
+        output_cfg["calibration_method"] = "aci_normalized"
+        output_cfg.setdefault("aci_gamma", 0.05)
+        mutations.append(
+            {
+                "action": "enable_adaptive_conformal",
+                "domain": "regime_and_specialists",
+                "parameter": "output.calibration_method",
+                "old_value": old_cal,
+                "new_value": f"aci_normalized (aci_gamma={output_cfg['aci_gamma']})",
+                "evidence": (
+                    f"coverage_drift_detected={cov_drift}, residual_drift_ks_stat={ks_drift:.2f}"
+                ),
+                "rationale": (
+                    "Non-exchangeable residual drift detected across backtest folds; escalating "
+                    "prediction intervals to Adaptive Conformal Inference (ACI) online tracking."
+                ),
+            }
+        )
 
     # 8.5. Censored Demand / Stockout Reconstruction Specialist Escalation (dgp_07)
     has_censored = bool(profile.censored_col) or bool(features_cfg.get("censored_col"))
@@ -2209,6 +2310,9 @@ def propose_autofocus_pass(
             if any(m.split("@", 1)[0] == lag_m for m in current_models):
                 model_params.setdefault(lag_m, {}).setdefault("lags", list(freq_lags_p2))
 
+    if _return_mutations_only:
+        return mutations
+
     return {
         "models": current_models,
         "added_models": added_models,
@@ -2223,10 +2327,10 @@ def propose_autofocus_pass(
 
 
 def propose_autofocus_dag_branches(
-    profile: PanelAutoProfile,
-    prior_config_dict: dict[str, Any],
-    pass_index: int,
-    diagnostics_summary: dict[str, Any],
+    profile: PanelAutoProfile | dict[str, Any],
+    prior_config_dict: dict[str, Any] | PanelAutoProfile,
+    pass_index: int | dict[str, Any] = 2,
+    diagnostics_summary: dict[str, Any] | None = None,
     *,
     tier: str = "wide_field",
     where: str = "auto",
@@ -2242,10 +2346,25 @@ def propose_autofocus_dag_branches(
     (`pass_id="2A"`, `"2B"`, `"2C"`) that each branch off Pass 1 (`parent_pass_ids=("1",)`),
     enabling isolated attribution of every mutation before Level-3 synthesis.
     """
+    if (
+        isinstance(profile, dict)
+        and isinstance(prior_config_dict, PanelAutoProfile)
+        and isinstance(pass_index, dict)
+        and diagnostics_summary is None
+    ):
+        diagnostics_summary = pass_index
+        pass_index = 2
+        profile, prior_config_dict = prior_config_dict, profile
+    assert isinstance(profile, PanelAutoProfile)
+    assert isinstance(prior_config_dict, dict)
+    if diagnostics_summary is None:
+        diagnostics_summary = {}
+    pass_idx_int = int(pass_index) if isinstance(pass_index, int) else 2
+
     full_proposal = propose_autofocus_pass(
         profile,
         prior_config_dict,
-        pass_index,
+        pass_idx_int,
         diagnostics_summary,
         tier=tier,
         where=where,
@@ -2261,6 +2380,11 @@ def propose_autofocus_dag_branches(
         ("covariates_and_horizon", "Covariate Pruning & Direct Horizon Specialists"),
         ("regime_and_specialists", "Regime Routing & Domain Model Specialists"),
     )
+    domain_canonical_suffix = {
+        "transform_and_hygiene": "A",
+        "covariates_and_horizon": "B",
+        "regime_and_specialists": "C",
+    }
     muts_by_domain: dict[str, list[dict[str, str]]] = {
         dom: [m for m in all_mutations if m.get("domain", "regime_and_specialists") == dom]
         for dom, _ in domain_order
@@ -2268,12 +2392,16 @@ def propose_autofocus_dag_branches(
     active_domains = [(dom, title) for dom, title in domain_order if muts_by_domain[dom]]
 
     if len(active_domains) <= 1:
+        single_dom = active_domains[0][0] if active_domains else "regime_and_specialists"
         single_title = active_domains[0][1] if active_domains else "Targeted Refinement"
+        canon_branch_id = f"{pass_idx_int}{domain_canonical_suffix.get(single_dom, 'C')}"
         return [
             {
                 **full_proposal,
-                "pass_id": str(pass_index),
-                "parent_pass_ids": (str(pass_index - 1),),
+                "pass_id": str(pass_idx_int),
+                "branch_id": canon_branch_id,
+                "domain": single_dom,
+                "parent_pass_ids": (str(pass_idx_int - 1),),
                 "branch_hypothesis": single_title,
             }
         ]
@@ -2296,7 +2424,8 @@ def propose_autofocus_dag_branches(
     branches: list[dict[str, Any]] = []
     suffixes = ("A", "B", "C")
     for idx, (dom, title) in enumerate(active_domains):
-        branch_id = f"{pass_index}{suffixes[idx]}"
+        branch_id = f"{pass_idx_int}{suffixes[idx]}"
+        canon_branch_id = f"{pass_idx_int}{domain_canonical_suffix.get(dom, suffixes[idx])}"
         dom_muts = muts_by_domain[dom]
         b_models = list(base_models)
         b_added: list[str] = []
@@ -2352,8 +2481,9 @@ def propose_autofocus_dag_branches(
                     b_added.append(m)
                     if m in full_params:
                         b_params[m] = dict(full_params[m])
-            if "regime_routing" in full_features:
-                b_features["regime_routing"] = full_features["regime_routing"]
+            for rf_key in ("regime_routing", "cold_start_transfer"):
+                if rf_key in full_features:
+                    b_features[rf_key] = full_features[rf_key]
             if full_hierarchy:
                 if "reconciliation_methods" in full_hierarchy:
                     b_hierarchy["reconciliation_methods"] = list(
@@ -2367,7 +2497,7 @@ def propose_autofocus_dag_branches(
                 ):
                     if hkey in full_hierarchy:
                         b_hierarchy[hkey] = full_hierarchy[hkey]
-            for ok in ("point_forecast", "target_quantile"):
+            for ok in ("point_forecast", "target_quantile", "calibration_method", "aci_gamma"):
                 if ok in full_output:
                     b_output[ok] = full_output[ok]
             for s_tag in full_proposal.get("ensemble", {}).get("strategies", []):
@@ -2378,6 +2508,8 @@ def propose_autofocus_dag_branches(
         branches.append(
             {
                 "pass_id": branch_id,
+                "branch_id": canon_branch_id,
+                "domain": dom,
                 "parent_pass_ids": ("1",),
                 "branch_hypothesis": title,
                 "models": b_models,
@@ -2452,6 +2584,7 @@ def propose_autofocus_synthesis_pass(
                 "level_shift",
                 "outlier_policy",
                 "regime_routing",
+                "cold_start_transfer",
             ):
                 if fk in b_feat and b_feat[fk] != pass1_config_dict.get("features", {}).get(fk):
                     synth_features[fk] = b_feat[fk]
@@ -2474,7 +2607,7 @@ def propose_autofocus_synthesis_pass(
                 ):
                     synth_hierarchy[hk] = b_hier[hk]
             b_out = dict(b_cfg.get("output", {}))
-            for ok in ("point_forecast", "target_quantile"):
+            for ok in ("point_forecast", "target_quantile", "calibration_method", "aci_gamma"):
                 if ok in b_out and b_out[ok] is not None:
                     synth_output[ok] = b_out[ok]
             for s in b_cfg.get("ensemble", {}).get("strategies", []):
@@ -2605,6 +2738,10 @@ def estimate_continue_confidence(
                 "enable_stl_resid_outlier_scrubbing": (0.80, 5.0),
                 "inject_intermittent_specialists": (0.85, 6.2),
                 "enable_cold_start_pooling": (0.83, 6.0),
+                "enable_cold_start_transfer": (0.85, 6.5),
+                "enable_cold_start_donor_transfer": (0.85, 6.5),
+                "enable_adaptive_conformal": (0.82, 5.2),
+                "enable_aci_conformal_tracking": (0.82, 5.2),
                 "refine_hierarchical_coherence": (0.82, 5.8),
                 "enable_temporal_reconciliation": (0.78, 4.8),
                 "refine_probabilistic_quantiles": (0.84, 6.4),

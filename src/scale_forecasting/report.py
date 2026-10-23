@@ -356,19 +356,37 @@ def _extract_target_frames(
     # 4. Forecaster duck-typing
     elif hasattr(target, "leaderboard_df") and hasattr(target, "fva_df"):
         eff_run_id = getattr(target, "run_id", eff_run_id)
-        out["leaderboard_df"] = target.leaderboard_df(eff_run_id)
-        out["fva_df"] = target.fva_df(eff_run_id, metric=metric)
-        out["horizon_decay_df"] = target.horizon_decay_df(eff_run_id, metric=metric)
-        out["bias_df"] = target.bias_report_df(eff_run_id)
-        out["predictions_df"] = target.predictions_df(eff_run_id)
+
+        def _try_df(fn: Any, *args: Any, **kwargs: Any) -> pd.DataFrame | None:
+            try:
+                res_df = fn(*args, **kwargs)
+                return res_df if isinstance(res_df, pd.DataFrame) else None
+            except Exception:  # noqa: BLE001 - offline report fallback when registry env vars unset
+                return None
+
+        out["leaderboard_df"] = _try_df(target.leaderboard_df, eff_run_id)
+        out["fva_df"] = _try_df(target.fva_df, eff_run_id, metric=metric)
+        out["horizon_decay_df"] = _try_df(target.horizon_decay_df, eff_run_id, metric=metric)
+        out["bias_df"] = _try_df(target.bias_report_df, eff_run_id)
+        out["predictions_df"] = _try_df(target.predictions_df, eff_run_id)
+        if hasattr(target, "oof_df"):
+            out["oof_df"] = _try_df(target.oof_df, eff_run_id)
         if hasattr(target, "exceptions_df"):
-            out["exceptions_df"] = target.exceptions_df(eff_run_id)
+            out["exceptions_df"] = _try_df(target.exceptions_df, eff_run_id)
         if hasattr(target, "inventory_policy_df"):
-            out["inventory_policy_df"] = target.inventory_policy_df(eff_run_id)
+            out["inventory_policy_df"] = _try_df(target.inventory_policy_df, eff_run_id)
+        if hasattr(target, "aci_df"):
+            out["aci_df"] = _try_df(target.aci_df)
+        if hasattr(target, "tail_risk_df"):
+            out["tail_risk_df"] = _try_df(target.tail_risk_df)
+        if hasattr(target, "cold_start_transfer_df"):
+            out["cold_start_df"] = _try_df(target.cold_start_transfer_df)
         if hasattr(target, "autofocus_ledger_df"):
-            out["autofocus_ledger_df"] = target.autofocus_ledger_df()
+            out["autofocus_ledger_df"] = _try_df(target.autofocus_ledger_df)
         if getattr(target, "blueprint", None) is not None:
             out["blueprint_rationale_df"] = target.blueprint.rationale_df
+        if getattr(target, "_data", None) is not None:
+            out["history_df"] = getattr(target, "_data", None)
     # 5. Mapping of DataFrames
     elif isinstance(target, dict):
         eff_run_id = str(target.get("run_id", eff_run_id))
@@ -387,6 +405,11 @@ def _extract_target_frames(
             "promo_elasticity_df",
             "scenarios_df",
             "goal_seek_df",
+            "aci_df",
+            "tail_risk_df",
+            "cold_start_df",
+            "inventory_opt_df",
+            "scenario_opt_df",
         ):
             if target.get(k) is not None:
                 out[k] = target.get(k)
@@ -417,6 +440,11 @@ def build_report_payload(
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
     goal_seek_df: pd.DataFrame | None = None,
+    aci_df: pd.DataFrame | None = None,
+    tail_risk_df: pd.DataFrame | None = None,
+    cold_start_df: pd.DataFrame | None = None,
+    inventory_opt_df: pd.DataFrame | None = None,
+    scenario_opt_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
@@ -454,6 +482,16 @@ def build_report_payload(
             scenarios_df = ext.get("scenarios_df")
         if goal_seek_df is None:
             goal_seek_df = ext.get("goal_seek_df")
+        if aci_df is None:
+            aci_df = ext.get("aci_df")
+        if tail_risk_df is None:
+            tail_risk_df = ext.get("tail_risk_df")
+        if cold_start_df is None:
+            cold_start_df = ext.get("cold_start_df")
+        if inventory_opt_df is None:
+            inventory_opt_df = ext.get("inventory_opt_df")
+        if scenario_opt_df is None:
+            scenario_opt_df = ext.get("scenario_opt_df")
 
     if fva_df is None and oof_df is not None and not oof_df.empty:
         fva_df = compute_fva(oof_df, metric=metric, series_df=history_df)
@@ -469,7 +507,11 @@ def build_report_payload(
             stability_df=stability_df,
             metric=metric,
         )
-    if inventory_policy_df is None and predictions_df is not None and not predictions_df.empty:
+    if (
+        (inventory_policy_df is None or inventory_policy_df.empty)
+        and predictions_df is not None
+        and not predictions_df.empty
+    ):
         inventory_policy_df = compute_inventory_policy(predictions_df, oof_df=oof_df)
     if promo_elasticity_df is None and history_df is not None and not history_df.empty:
         lower_cols = {str(c).lower() for c in history_df.columns}
@@ -502,6 +544,11 @@ def build_report_payload(
     promo_recs = _df_to_records(promo_elasticity_df)
     scen_recs = _df_to_records(scenarios_df)
     gs_recs = _df_to_records(goal_seek_df)
+    aci_recs = _df_to_records(aci_df)
+    tail_risk_recs = _df_to_records(tail_risk_df)
+    cold_start_recs = _df_to_records(cold_start_df)
+    inv_opt_recs = _df_to_records(inventory_opt_df)
+    scen_opt_recs = _df_to_records(scenario_opt_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -542,6 +589,11 @@ def build_report_payload(
         "promo_elasticity": promo_recs,
         "scenarios": scen_recs,
         "goal_seek": gs_recs,
+        "aci": aci_recs,
+        "tail_risk": tail_risk_recs,
+        "cold_start": cold_start_recs,
+        "inventory_optimization": inv_opt_recs,
+        "scenario_optimization": scen_opt_recs,
         "explorer": explorer,
     }
 
@@ -606,6 +658,11 @@ def render_html_report(
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
     goal_seek_df: pd.DataFrame | None = None,
+    aci_df: pd.DataFrame | None = None,
+    tail_risk_df: pd.DataFrame | None = None,
+    cold_start_df: pd.DataFrame | None = None,
+    inventory_opt_df: pd.DataFrame | None = None,
+    scenario_opt_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
@@ -629,6 +686,11 @@ def render_html_report(
         promo_elasticity_df=promo_elasticity_df,
         scenarios_df=scenarios_df,
         goal_seek_df=goal_seek_df,
+        aci_df=aci_df,
+        tail_risk_df=tail_risk_df,
+        cold_start_df=cold_start_df,
+        inventory_opt_df=inventory_opt_df,
+        scenario_opt_df=scenario_opt_df,
         metric=metric,
     )
     title = str(payload.get("title", title))
@@ -664,6 +726,26 @@ def render_html_report(
     gs_html = _html_table(
         payload.get("goal_seek", []),
         empty_msg="No top-down goal-seek target allocation rows.",
+    )
+    aci_html = _html_table(
+        payload.get("aci", []),
+        empty_msg="No Adaptive Conformal Inference (ACI) rows.",
+    )
+    tail_risk_html = _html_table(
+        payload.get("tail_risk", []),
+        empty_msg="No joint copula VaR / CVaR tail-risk rows.",
+    )
+    cold_start_html = _html_table(
+        payload.get("cold_start", []),
+        empty_msg="No cold-start / NPI donor-transfer rows.",
+    )
+    inv_opt_html = _html_table(
+        payload.get("inventory_optimization", []),
+        empty_msg="No portfolio-constrained inventory optimization rows.",
+    )
+    scen_opt_html = _html_table(
+        payload.get("scenario_optimization", []),
+        empty_msg="No prescriptive scenario optimization rows.",
     )
     af_html = _html_table(
         payload["autofocus_ledger"],
@@ -861,6 +943,18 @@ def render_html_report(
     <h2>Directional Bias &amp; Trigg Tracking Signal Audit</h2>
     {bias_html}
   </div>
+  <div class="card">
+    <h2>Adaptive Conformal Inference (ACI) Online Calibration</h2>
+    {aci_html}
+  </div>
+  <div class="card">
+    <h2>Joint Copula Portfolio VaR / CVaR Tail Risk</h2>
+    {tail_risk_html}
+  </div>
+  <div class="card">
+    <h2>Cold-Start &amp; NPI Analog Donor Transfer</h2>
+    {cold_start_html}
+  </div>
 </section>
 
 <section id="tab-inventory" class="tab-panel">
@@ -869,12 +963,20 @@ def render_html_report(
     {inv_html}
   </div>
   <div class="card">
+    <h2>Portfolio-Constrained Multi-SKU Inventory Optimization</h2>
+    {inv_opt_html}
+  </div>
+  <div class="card">
     <h2>Promo &amp; Price Elasticity Decomposition (Double-ML)</h2>
     {promo_html}
   </div>
   <div class="card">
     <h2>Counterfactual Scenario &amp; Gross-Margin Simulation</h2>
     {scen_html}
+  </div>
+  <div class="card">
+    <h2>Prescriptive Price &amp; Promo Scenario Optimization</h2>
+    {scen_opt_html}
   </div>
   <div class="card">
     <h2>Top-Down Goal-Seek Target Allocation (<code>allocate_target</code>)</h2>
@@ -1044,7 +1146,13 @@ def export_report(
     promo_elasticity_df: pd.DataFrame | None = None,
     scenarios_df: pd.DataFrame | None = None,
     goal_seek_df: pd.DataFrame | None = None,
+    aci_df: pd.DataFrame | None = None,
+    tail_risk_df: pd.DataFrame | None = None,
+    cold_start_df: pd.DataFrame | None = None,
+    inventory_opt_df: pd.DataFrame | None = None,
+    scenario_opt_df: pd.DataFrame | None = None,
     write_json: bool = False,
+    include_json_sidecar: bool = False,
 ) -> Path:
     """Export a self-contained `.html` report (and optional `.json` sidecar) from a `BakeOff`,
     `PlaygroundRun`, `Forecaster`, `AutoForecastSession`, or dictionary of DataFrames.
@@ -1064,11 +1172,16 @@ def export_report(
         promo_elasticity_df=promo_elasticity_df,
         scenarios_df=scenarios_df,
         goal_seek_df=goal_seek_df,
+        aci_df=aci_df,
+        tail_risk_df=tail_risk_df,
+        cold_start_df=cold_start_df,
+        inventory_opt_df=inventory_opt_df,
+        scenario_opt_df=scenario_opt_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
 
-    if write_json:
+    if write_json or include_json_sidecar:
         payload = build_report_payload(
             target,
             title=eff_title,
@@ -1076,6 +1189,11 @@ def export_report(
             promo_elasticity_df=promo_elasticity_df,
             scenarios_df=scenarios_df,
             goal_seek_df=goal_seek_df,
+            aci_df=aci_df,
+            tail_risk_df=tail_risk_df,
+            cold_start_df=cold_start_df,
+            inventory_opt_df=inventory_opt_df,
+            scenario_opt_df=scenario_opt_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")

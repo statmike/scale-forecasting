@@ -1345,6 +1345,48 @@ class Forecaster:
         ):
             return self._auto_session.leaderboard_df.copy()
 
+        if (
+            self._auto_session is None
+            and (self._oof_df is not None or self._data is not None)
+            and (run_id is None or run_id == self.run_id)
+        ):
+            import numpy as np
+            import pandas as pd
+
+            _, loc_oof, _ = self._resolve_track_k_frames()
+            if loc_oof is not None and not loc_oof.empty and "model_type" in loc_oof.columns:
+                rows: list[dict[str, Any]] = []
+                for mtype, grp in loc_oof.groupby("model_type", sort=False):
+                    yt = pd.to_numeric(grp["y_true"], errors="coerce").to_numpy(dtype=np.float64)
+                    yh = pd.to_numeric(grp["yhat"], errors="coerce").to_numpy(dtype=np.float64)
+                    mask = np.isfinite(yt) & np.isfinite(yh)
+                    denom = float(np.sum(np.abs(yt[mask]))) if np.any(mask) else 0.0
+                    wape = (
+                        float(np.sum(np.abs(yt[mask] - yh[mask])) / denom) if denom > 1e-12 else 0.0
+                    )
+                    mae = float(np.mean(np.abs(yt[mask] - yh[mask]))) if np.any(mask) else 0.0
+                    n_cells = int(grp["ts_id"].nunique()) if "ts_id" in grp.columns else 1
+                    rows.append(
+                        {
+                            "rank": 0,
+                            "model_type": str(mtype),
+                            "family": "statistical",
+                            "n_cells": n_cells,
+                            "mean_wape": wape,
+                            "mean_mae": mae,
+                            "wape": wape,
+                            "mae": mae,
+                        }
+                    )
+                lb = (
+                    pd.DataFrame(rows)
+                    .sort_values("mean_wape", kind="mergesort")
+                    .reset_index(drop=True)
+                )
+                if not lb.empty:
+                    lb["rank"] = np.arange(1, len(lb) + 1, dtype=int)
+                return lb
+
         from .review import build_leaderboard_frame
 
         return build_leaderboard_frame(self.review_run(run_id), all_metrics=all_metrics)
@@ -1365,6 +1407,14 @@ class Forecaster:
         import pandas as pd
 
         from .registry.reads import read_oof
+
+        if (
+            self._oof_df is None
+            and self._auto_session is None
+            and self._data is not None
+            and (run_id is None or run_id == self.run_id)
+        ):
+            self._resolve_track_k_frames(limit=limit)
 
         if self._oof_df is not None and (run_id is None or run_id == self.run_id):
             df = self._oof_df.copy()
@@ -1417,6 +1467,14 @@ class Forecaster:
         """
         from .registry.reads import read_oof, read_predictions, read_series_history
         from .review import build_predictions_frame
+
+        if (
+            self._predictions_df is None
+            and self._auto_session is None
+            and self._data is not None
+            and (run_id is None or run_id == self.run_id)
+        ):
+            self._resolve_track_k_frames(limit=limit)
 
         if self._predictions_df is not None and (run_id is None or run_id == self.run_id):
             df = self._predictions_df.copy()
@@ -1876,6 +1934,20 @@ class Forecaster:
             eff_metric = metric or self._config.backtest.decision_metric
             return compute_fva(self._auto_session.oof_df, baseline=baseline, metric=eff_metric)
 
+        if (
+            self._auto_session is None
+            and (self._oof_df is not None or self._data is not None)
+            and (run_id is None or run_id == self.run_id)
+        ):
+            _, loc_oof, loc_hist = self._resolve_track_k_frames(limit=limit)
+            eff_metric = metric or self._config.backtest.decision_metric
+            return compute_fva(
+                loc_oof if loc_oof is not None else pd.DataFrame(),
+                baseline=baseline,
+                metric=eff_metric,
+                series_df=loc_hist,
+            )
+
         rid = run_id or self.run_id
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
         oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1940,6 +2012,19 @@ class Forecaster:
                 self._auto_session.oof_df, metric=eff_metric, baseline=baseline
             )
 
+        if (
+            self._auto_session is None
+            and (self._oof_df is not None or self._data is not None)
+            and (run_id is None or run_id == self.run_id)
+        ):
+            _, loc_oof, _ = self._resolve_track_k_frames(limit=limit)
+            eff_metric = metric or self._config.backtest.decision_metric
+            return compute_horizon_decay(
+                loc_oof if loc_oof is not None else pd.DataFrame(),
+                metric=eff_metric,
+                baseline=baseline,
+            )
+
         rid = run_id or self.run_id
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
         oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1986,6 +2071,18 @@ class Forecaster:
         ):
             return compute_bias_report(
                 self._auto_session.oof_df,
+                threshold_pct=threshold_pct,
+                tracking_signal_limit=tracking_signal_limit,
+            )
+
+        if (
+            self._auto_session is None
+            and (self._oof_df is not None or self._data is not None)
+            and (run_id is None or run_id == self.run_id)
+        ):
+            _, loc_oof, _ = self._resolve_track_k_frames(limit=limit)
+            return compute_bias_report(
+                loc_oof if loc_oof is not None else pd.DataFrame(),
                 threshold_pct=threshold_pct,
                 tracking_signal_limit=tracking_signal_limit,
             )
@@ -2057,6 +2154,19 @@ class Forecaster:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | Mapping[str, float] | str = 1.0,
+        unit_volume: float | Mapping[str, float] | str = 1.0,
+        vendor_moq: float | Mapping[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
         limit: int = 20000,
     ) -> pd.DataFrame:
         """Translate ``run_id`` calibrated forecasts into operational inventory & replenishment
@@ -2066,12 +2176,58 @@ class Forecaster:
         (`ROP`)**, **Safety Stock (`SS`)**, **Order-Up-To Levels ($S$)**, **Recommended Order
         Quantities ($Q$)**, and **Expected Holding vs. Stockout Cost** tables using AR(1)
         multi-step forecast error covariance ($\\hat{\\rho}_1$ from ``backtest_oof``) and supplier
-        lead-time variability ($\\mu_L, \\sigma_L$).
+        lead-time variability ($\\mu_L, \\sigma_L$). When portfolio constraints (`max_budget`,
+        `max_volume`, `max_total_units`, `target_portfolio_fill_rate`, or `vendor_moq`) are
+        supplied, delegates to :func:`inventory_optimizer.optimize_inventory_portfolio`.
         """
         import pandas as pd
 
         from .diagnostics import compute_inventory_policy
         from .registry.reads import read_oof, read_predictions
+
+        has_portfolio_constraints = (
+            max_budget is not None
+            or max_volume is not None
+            or max_total_units is not None
+            or target_portfolio_fill_rate is not None
+            or vendor_moq is not None
+            or uncertainty_source == "copula"
+            or trajectories_df is not None
+            or copula_paths is not None
+        )
+        if has_portfolio_constraints:
+            return self.optimize_inventory_df(
+                run_id=run_id,
+                inventory_df=inventory_df,
+                trajectories_df=trajectories_df,
+                copula_paths=copula_paths,
+                model_name=model_name,
+                model_type=model_type,
+                lead_time=lead_time,
+                lead_time_std=lead_time_std,
+                review_period=review_period,
+                service_level=service_level if service_level is not None else 0.95,
+                fill_rate=fill_rate,
+                target_portfolio_fill_rate=target_portfolio_fill_rate,
+                max_budget=max_budget,
+                max_volume=max_volume,
+                max_total_units=max_total_units,
+                holding_cost=holding_cost,
+                stockout_cost=stockout_cost,
+                unit_cost=unit_cost,
+                unit_volume=unit_volume,
+                min_order_qty=min_order_qty,
+                order_multiple=order_multiple,
+                vendor_moq=vendor_moq,
+                on_hand=on_hand,
+                on_order=on_order,
+                backorders=backorders,
+                uncertainty_source=uncertainty_source,
+                copula_type=copula_type,
+                n_paths=n_paths,
+                seed=seed,
+                limit=limit,
+            )
 
         rid = run_id or self.run_id
         eff_model = model_name or model_type
@@ -2085,6 +2241,30 @@ class Forecaster:
             return compute_inventory_policy(
                 pred_df,
                 oof_df=oof_df,
+                inventory_df=inventory_df,
+                model_name=eff_model,
+                lead_time=lead_time,
+                lead_time_std=lead_time_std,
+                review_period=review_period,
+                service_level=service_level,
+                fill_rate=fill_rate,
+                on_hand=on_hand,
+                on_order=on_order,
+                backorders=backorders,
+                holding_cost=holding_cost,
+                stockout_cost=stockout_cost,
+                min_order_qty=min_order_qty,
+                order_multiple=order_multiple,
+            )
+        if (
+            self._auto_session is None
+            and (self._predictions_df is not None or self._data is not None)
+            and (run_id is None or run_id == self.run_id)
+        ):
+            loc_pred, loc_oof, _ = self._resolve_track_k_frames(model_type=eff_model, limit=limit)
+            return compute_inventory_policy(
+                loc_pred,
+                oof_df=loc_oof,
                 inventory_df=inventory_df,
                 model_name=eff_model,
                 lead_time=lead_time,
@@ -2143,6 +2323,19 @@ class Forecaster:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | Mapping[str, float] | str = 1.0,
+        unit_volume: float | Mapping[str, float] | str = 1.0,
+        vendor_moq: float | Mapping[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
         max_rows: int = 15,
         limit: int = 20000,
         ax: Any = None,
@@ -2170,6 +2363,19 @@ class Forecaster:
             stockout_cost=stockout_cost,
             min_order_qty=min_order_qty,
             order_multiple=order_multiple,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            unit_cost=unit_cost,
+            unit_volume=unit_volume,
+            vendor_moq=vendor_moq,
+            uncertainty_source=uncertainty_source,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
             limit=limit,
         )
         return plot_inventory_policy(
@@ -2217,6 +2423,10 @@ class Forecaster:
                 fut_df = self._auto_session.future_df
             if eff_oof is None and not self._auto_session.oof_df.empty:
                 eff_oof = self._auto_session.oof_df
+        if panel is None and self._data is not None:
+            panel = self._data
+            if eff_oof is None and self._oof_df is not None:
+                eff_oof = self._oof_df
         if panel is None and run_id is not None:
             try:
                 from .engines.bigquery_names import source_ref
@@ -2326,7 +2536,33 @@ class Forecaster:
             models_to_run = (
                 [model_type] if model_type is not None else (list(self._config.models) or ["theta"])
             )
-            cells, _ = run_group(hist_df, self._config, models=models_to_run)
+            run_cfg = self._config
+            id_col = run_cfg.data.ts_id_col
+            if not hist_df.empty and id_col in hist_df.columns:
+                max_len = int(hist_df.groupby(id_col).size().max())
+                bt = run_cfg.backtest
+                needed = bt.min_train + bt.horizon + max(0, bt.n_folds - 1) * bt.step + bt.gap
+                if max_len < needed and max_len >= 6:
+                    eff_h = min(bt.horizon, max(1, max_len // 3))
+                    eff_n_folds = max(1, bt.n_folds)
+                    eff_step = min(bt.step, eff_h)
+                    eff_min_train = min(
+                        bt.min_train,
+                        max(2, max_len - eff_h - (eff_n_folds - 1) * eff_step - bt.gap),
+                    )
+                    run_cfg = run_cfg.model_copy(
+                        update={
+                            "backtest": bt.model_copy(
+                                update={
+                                    "enabled": True,
+                                    "horizon": eff_h,
+                                    "step": eff_step,
+                                    "min_train": eff_min_train,
+                                }
+                            )
+                        }
+                    )
+            cells, _ = run_group(hist_df, run_cfg, models=models_to_run)
             ok_cells = [c for c in cells if c.status == "ok" and not c.predictions.empty]
             if ok_cells:
                 preds_df = pd.concat(
@@ -2348,6 +2584,11 @@ class Forecaster:
                     ],
                     ignore_index=True,
                 )
+            if data is None and model_type is None:
+                if preds_df is not None and self._predictions_df is None:
+                    self._predictions_df = preds_df.copy()
+                if eff_oof is not None and self._oof_df is None:
+                    self._oof_df = eff_oof.copy()
 
         if preds_df is None:
             from .registry.reads import read_oof, read_predictions
@@ -2813,6 +3054,528 @@ class Forecaster:
             )
         return plot_promo_elasticity(decomp, ts_id=ts_id, ax=ax, title=title)
 
+    def cold_start_transfer_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        min_obs: int | None = None,
+        min_history_points: int = 14,
+        method: str | None = None,
+        top_k_donors: int = 3,
+        model_type: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Synthesize cold-start / NPI trajectories via analog donor matching & seasonal shape
+        transfer (`cold_start.cold_start_transfer_df`).
+        """
+        from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
+
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        panel = hist_df if hist_df is not None else data
+        if panel is None or panel.empty:
+            from . import playground
+
+            panel = playground.sample_data(
+                n_series=min(self._config.data.series_limit or 3, 5),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        return _cold_start_transfer_df(
+            panel,
+            cfg=self._config,
+            forecasts_df=preds_df if not preds_df.empty else None,
+            oof_df=eff_oof,
+            min_obs=min_obs if min_obs is not None else min_history_points,
+            method=method,  # type: ignore[arg-type]
+            static_covariates=self._config.features.static_covariates,
+            hierarchy_cols=[c for lvl in self._config.hierarchy.levels for c in lvl],
+            top_k_donors=top_k_donors,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            horizon=self._config.data.horizon,
+            freq=self._config.data.freq,
+        )
+
+    def plot_cold_start_transfer(
+        self,
+        transfer_df: Any = None,
+        *,
+        data: pd.DataFrame | None = None,
+        history_df: pd.DataFrame | None = None,
+        ts_id: str | None = None,
+        ax: Any = None,
+    ) -> Any:
+        """Plot cold-start transferred forecast vs. donor trajectories
+        (`cold_start.plot_cold_start_transfer`).
+        """
+        from .cold_start import plot_cold_start_transfer as _plot_cold_start_transfer
+
+        eff_hist = (
+            history_df
+            if history_df is not None
+            else (
+                data
+                if data is not None
+                else (
+                    self._data
+                    if self._data is not None
+                    else (self._auto_session.data_df if self._auto_session is not None else None)
+                )
+            )
+        )
+        eff_df = (
+            transfer_df if transfer_df is not None else self.cold_start_transfer_df(data=eff_hist)
+        )
+        return _plot_cold_start_transfer(
+            eff_df,
+            panel_df=eff_hist,
+            ts_id=ts_id,
+            ax=ax,
+        )
+
+    def aci_df(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        actuals_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        gamma: float | None = None,
+        target_coverage: float = 0.80,
+        target_alpha: float | None = None,
+        normalized: bool = True,
+        method: str | None = None,
+        horizon_delay: bool = True,
+        model_type: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute Adaptive Conformal Inference (ACI) online coverage tracking and recalibrated
+        forward intervals (`aci.compute_aci_df`).
+        """
+        from .aci import compute_aci_df
+
+        preds_df, eff_oof, _ = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        eff_gamma = gamma if gamma is not None else float(self._config.output.aci_gamma)
+        eff_cov = (1.0 - float(target_alpha)) if target_alpha is not None else target_coverage
+        eff_method = method or self._config.output.calibration_method
+        if eff_method == "conformal":
+            eff_method = "aci_normalized" if normalized else "aci"
+        source_oof = (
+            eff_oof
+            if (eff_oof is not None and not eff_oof.empty)
+            else (actuals_df if actuals_df is not None else preds_df)
+        )
+        return compute_aci_df(
+            source_oof,
+            predictions_df=preds_df if not preds_df.empty else None,
+            gamma=eff_gamma,
+            target_coverage=eff_cov,
+            normalized=normalized,
+            method=eff_method,  # type: ignore[arg-type]
+            horizon_delay=horizon_delay,
+            ts_id_col=self._config.data.ts_id_col,
+        )
+
+    def plot_aci(
+        self,
+        aci_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+    ) -> Any:
+        """Plot ACI rolling empirical coverage and adaptive miscoverage rate (`aci.plot_aci`)."""
+        from .aci import plot_aci as _plot_aci
+
+        eff_df = aci_df if aci_df is not None else self.aci_df()
+        return _plot_aci(eff_df, ts_id=ts_id, ax=ax)
+
+    def sample_trajectories(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        n_paths: int = 500,
+        copula_type: str = "auto",
+        df_t: float = 4.0,
+        cross_series: bool = True,
+        reconcile: bool = True,
+        reconcile_hierarchy: bool = True,
+        floor: float | None = None,
+        cap: float | None = None,
+        seed: int = 42,
+        model_type: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Generate joint cross-series & cross-horizon copula trajectory paths
+        (`copula.sample_trajectories`).
+        """
+        from .copula import sample_trajectories as _sample_trajectories
+        from .reconciliation import build_hierarchy
+
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        eff_reconcile = reconcile and reconcile_hierarchy
+        hier_spec = None
+        if (
+            eff_reconcile
+            and self._config.hierarchy.levels
+            and hist_df is not None
+            and not hist_df.empty
+        ):
+            needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
+            if needed.issubset(hist_df.columns):
+                _, hier_spec = build_hierarchy(hist_df, self._config)
+        return _sample_trajectories(
+            preds_df,
+            oof_df=eff_oof,
+            history_df=hist_df,
+            cfg=self._config,
+            hier_spec=hier_spec,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            df_t=df_t,
+            cross_series=cross_series,
+            reconcile=eff_reconcile,
+            simplex_sum=self._config.features.simplex_sum,
+            floor=floor if floor is not None else self._config.output.floor,
+            cap=cap if cap is not None else self._config.output.cap,
+            seed=seed,
+        )
+
+    def tail_risk_df(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        actuals_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        lead_time: int | None = None,
+        window: int = 7,
+        alphas: Sequence[float] = (0.90, 0.95, 0.99),
+        alpha: float = 0.95,
+        threshold: float | Mapping[str, float] | None = None,
+        holding_cost: float | Mapping[str, float] | None = None,
+        stockout_cost: float | Mapping[str, float] | None = None,
+        n_paths: int = 300,
+        copula_type: str = "auto",
+        seed: int = 42,
+        model_type: str | None = None,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Compute portfolio Value-at-Risk (VaR) and Conditional Value-at-Risk (CVaR / Expected
+        Shortfall) across joint copula trajectories (`copula.compute_tail_risk`).
+        """
+        from .copula import compute_tail_risk
+
+        preds_df, eff_oof, _ = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            limit=limit,
+        )
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(
+                forecasts_df=preds_df,
+                oof_df=eff_oof,
+                data=data,
+                run_id=run_id,
+                n_paths=n_paths,
+                copula_type=copula_type,
+                seed=seed,
+                model_type=model_type,
+                limit=limit,
+            )
+        )
+        return compute_tail_risk(
+            eff_traj,
+            predictions_df=preds_df if not preds_df.empty else None,
+            actuals_df=actuals_df,
+            oof_df=eff_oof,
+            lead_time=lead_time,
+            window=window,
+            alphas=alphas,
+            alpha=alpha,
+            threshold=threshold,
+            holding_cost=holding_cost,  # type: ignore[arg-type]
+            stockout_cost=stockout_cost,  # type: ignore[arg-type]
+        )
+
+    def plot_trajectories(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        ts_id: str | None = None,
+        max_paths_shown: int = 40,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot joint copula trajectory spaghetti fan and VaR/CVaR tail distribution
+        (`copula.plot_trajectories`).
+        """
+        from .copula import plot_trajectories as _plot_trajectories
+
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(n_paths=200)
+        )
+        return _plot_trajectories(
+            eff_traj,
+            ts_id=ts_id,
+            max_spaghetti_paths=max_paths_shown,
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_inventory_df(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None = None,
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        review_period: float = 0.0,
+        service_level: float = 0.95,
+        fill_rate: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        holding_cost: float = 1.0,
+        stockout_cost: float = 9.0,
+        unit_cost: float | Mapping[str, float] | str = 10.0,
+        unit_volume: float | Mapping[str, float] | str = 1.0,
+        min_order_qty: float = 0.0,
+        order_multiple: float = 0.0,
+        vendor_moq: float | Mapping[str, float] | str | None = None,
+        on_hand: float = 0.0,
+        on_order: float = 0.0,
+        backorders: float = 0.0,
+        uncertainty_source: str = "analytical",
+        copula_type: str = "auto",
+        n_paths: int = 300,
+        seed: int = 42,
+        limit: int = 20000,
+    ) -> pd.DataFrame:
+        """Solve multi-SKU portfolio-constrained inventory replenishment under working-capital,
+        warehouse-volume, or aggregate service-level targets
+        (`inventory_optimizer.optimize_inventory_portfolio`).
+        """
+        from .inventory_optimizer import optimize_inventory_portfolio
+
+        eff_model = model_name or model_type
+        preds_df, eff_oof, _ = self._resolve_track_k_frames(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=eff_model,
+            limit=limit,
+        )
+        eff_unc = "copula" if uncertainty_source == "copula" else "analytical"
+        return optimize_inventory_portfolio(
+            preds_df,
+            oof_df=eff_oof,
+            inventory_df=inventory_df,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            model_name=eff_model,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level if service_level is not None else 0.95,
+            fill_rate=fill_rate,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            unit_cost=unit_cost,  # type: ignore[arg-type]
+            unit_volume=unit_volume,  # type: ignore[arg-type]
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+            vendor_moq=vendor_moq if vendor_moq is not None else min_order_qty,  # type: ignore[arg-type]
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            uncertainty_source=eff_unc,  # type: ignore[arg-type]
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
+        )
+
+    def plot_inventory_frontier(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot working-capital vs. expected fill-rate / cost Pareto frontier and SKU order bars
+        (`inventory_optimizer.plot_inventory_frontier`).
+        """
+        from .inventory_optimizer import plot_inventory_frontier as _plot_inventory_frontier
+
+        target = (
+            opt_result_or_df
+            if opt_result_or_df is not None
+            else self.optimize_inventory_df(**kwargs)
+        )
+        return _plot_inventory_frontier(target, ax=ax, title=title)
+
+    def optimize_scenario(
+        self,
+        *,
+        data: pd.DataFrame | None = None,
+        future_covariates_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        objective: str = "gross_profit",
+        price_col: str | None = None,
+        promo_col: str | None = None,
+        price_bounds: tuple[float, float] = (-0.15, 0.15),
+        price_grid: Sequence[float] | None = None,
+        max_promo_days: int | None = None,
+        max_promo_periods: int | None = None,
+        min_cooldown_days: int = 0,
+        min_promo_gap: int = 0,
+        min_margin_pct: float | None = None,
+        min_total_units: float | None = None,
+        max_total_units: float | None = None,
+        max_promo_budget: float | None = None,
+        inventory_cap: float | Mapping[str, float] | None = None,
+        unit_cost: float | str | Mapping[str, float] | None = None,
+        promo_fixed_cost: float = 0.0,
+        risk_aversion_lambda: float = 0.0,
+        cvar_alpha: float = 0.95,
+        reconcile: bool = True,
+        include_inventory_impact: bool = True,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float = 0.95,
+        n_paths: int = 250,
+        copula_type: str = "auto",
+        seed: int = 42,
+        oof_df: pd.DataFrame | None = None,
+        model_type: str | None = None,
+        strict_feasibility: bool = False,
+    ) -> Any:
+        """Solve prescriptive price & promotional calendar optimization over Double-ML elasticity
+        surfaces (`scenario_optimizer.optimize_scenario`).
+        """
+        from . import playground
+        from .scenario_optimizer import optimize_scenario as _optimize_scenario
+
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        panel = hist_df if hist_df is not None else data
+        if panel is None or panel.empty:
+            panel = playground.sample_data(
+                n_series=min(self._config.data.series_limit or 3, 5),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        return _optimize_scenario(
+            panel,
+            config=self._config,
+            predictions_df=preds_df if not preds_df.empty else None,
+            oof_df=eff_oof,
+            history_df=panel,
+            future_covariates_df=future_covariates_df,
+            model_type=model_type,
+            objective=objective,  # type: ignore[arg-type]
+            price_col=price_col,
+            promo_col=promo_col,
+            price_bounds=price_bounds,
+            price_grid=price_grid,
+            max_promo_days=max_promo_days if max_promo_days is not None else max_promo_periods,
+            min_cooldown_days=min_cooldown_days if min_cooldown_days else min_promo_gap,
+            unit_cost=unit_cost,  # type: ignore[arg-type]
+            promo_fixed_cost=promo_fixed_cost,
+            min_margin_pct=min_margin_pct,
+            min_total_units=min_total_units,
+            max_total_units=max_total_units,
+            max_promo_budget=max_promo_budget,
+            inventory_cap=inventory_cap,
+            risk_aversion_lambda=risk_aversion_lambda,
+            cvar_alpha=cvar_alpha,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            seed=seed,
+            strict_feasibility=strict_feasibility,
+        )
+
+    def plot_optimal_scenario(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot optimal price/promo schedule vs. baseline gross margin / revenue / units
+        (`scenario_optimizer.plot_optimal_scenario`).
+        """
+        from .scenario_optimizer import plot_optimal_scenario as _plot_optimal_scenario
+
+        target = opt_result_or_df if opt_result_or_df is not None else self.optimize_scenario()
+        return _plot_optimal_scenario(
+            target,
+            ts_id=ts_id,
+            ax=ax,
+            title=title,
+        )
+
     def score_realized(
         self,
         actuals_df: pd.DataFrame,
@@ -3224,6 +3987,24 @@ class Forecaster:
                 metric=self._config.backtest.decision_metric,
                 top_n=top_n,
             )
+        if (
+            self._auto_session is None
+            and (
+                self._predictions_df is not None
+                or self._oof_df is not None
+                or self._data is not None
+            )
+            and (run_id is None or run_id == self.run_id)
+        ):
+            loc_pred, loc_oof, _ = self._resolve_track_k_frames(limit=limit)
+            return compute_exceptions_queue(
+                oof_df=loc_oof,
+                predictions_df=loc_pred.rename(columns={"forecast_date": "ds"}),
+                floor=self._config.output.floor,
+                cap=self._config.output.cap,
+                metric=self._config.backtest.decision_metric,
+                top_n=top_n,
+            )
         pred_rows = read_predictions(rid, limit=limit, settings=self._settings)
         oof_rows = read_oof(rid, limit=limit, settings=self._settings)
         pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
@@ -3262,7 +4043,13 @@ class Forecaster:
         promo_elasticity_df: pd.DataFrame | None = None,
         scenarios_df: pd.DataFrame | None = None,
         goal_seek_df: pd.DataFrame | None = None,
+        aci_df: pd.DataFrame | None = None,
+        tail_risk_df: pd.DataFrame | None = None,
+        cold_start_df: pd.DataFrame | None = None,
+        inventory_opt_df: pd.DataFrame | None = None,
+        scenario_opt_df: pd.DataFrame | None = None,
         write_json: bool = False,
+        include_json_sidecar: bool = False,
     ) -> Any:
         """Export a self-contained `.html` report for ``run_id``."""
         import pandas as pd
@@ -3302,6 +4089,11 @@ class Forecaster:
             "promo_elasticity_df": promo_elasticity_df,
             "scenarios_df": scenarios_df,
             "goal_seek_df": goal_seek_df,
+            "aci_df": aci_df,
+            "tail_risk_df": tail_risk_df,
+            "cold_start_df": cold_start_df,
+            "inventory_opt_df": inventory_opt_df,
+            "scenario_opt_df": scenario_opt_df,
         }
         if self._auto_session is not None:
             payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
@@ -3317,7 +4109,13 @@ class Forecaster:
             promo_elasticity_df=promo_elasticity_df,
             scenarios_df=scenarios_df,
             goal_seek_df=goal_seek_df,
+            aci_df=aci_df,
+            tail_risk_df=tail_risk_df,
+            cold_start_df=cold_start_df,
+            inventory_opt_df=inventory_opt_df,
+            scenario_opt_df=scenario_opt_df,
             write_json=write_json,
+            include_json_sidecar=include_json_sidecar,
         )
 
     def reensemble(

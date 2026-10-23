@@ -276,8 +276,63 @@ class PlaygroundRun:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | dict[str, float] | str = 1.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        vendor_moq: float | dict[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
     ) -> pd.DataFrame:
         """Translate this run's calibrated forecasts into an operational inventory policy."""
+        if (
+            max_budget is not None
+            or max_volume is not None
+            or max_total_units is not None
+            or target_portfolio_fill_rate is not None
+            or vendor_moq is not None
+            or uncertainty_source == "copula"
+            or trajectories_df is not None
+            or copula_paths is not None
+        ):
+            out = self.optimize_inventory_df(
+                inventory_df=inventory_df,
+                trajectories_df=trajectories_df,
+                copula_paths=copula_paths,
+                lead_time=lead_time,
+                lead_time_std=lead_time_std,
+                review_period=review_period,
+                service_level=service_level,
+                fill_rate=fill_rate,
+                target_portfolio_fill_rate=target_portfolio_fill_rate,
+                max_budget=max_budget,
+                max_volume=max_volume,
+                max_total_units=max_total_units,
+                holding_cost=holding_cost,
+                stockout_cost=stockout_cost,
+                unit_cost=unit_cost,
+                unit_volume=unit_volume,
+                min_order_qty=min_order_qty,
+                order_multiple=order_multiple,
+                vendor_moq=vendor_moq,
+                on_hand=on_hand,
+                on_order=on_order,
+                backorders=backorders,
+                uncertainty_source=uncertainty_source,
+                copula_type=copula_type,
+                n_paths=n_paths,
+                seed=seed,
+                return_result=False,
+            )
+            assert isinstance(out, pd.DataFrame)
+            return out
+
         from .diagnostics import compute_inventory_policy
 
         preds = self.result.predictions.assign(
@@ -322,6 +377,19 @@ class PlaygroundRun:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | dict[str, float] | str = 1.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        vendor_moq: float | dict[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
         ax: Any = None,
         title: str | None = None,
     ) -> Any:
@@ -342,6 +410,19 @@ class PlaygroundRun:
             stockout_cost=stockout_cost,
             min_order_qty=min_order_qty,
             order_multiple=order_multiple,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            unit_cost=unit_cost,
+            unit_volume=unit_volume,
+            vendor_moq=vendor_moq,
+            uncertainty_source=uncertainty_source,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
         )
         return plot_inventory_policy(df, ax=ax, title=title)
 
@@ -581,13 +662,473 @@ class PlaygroundRun:
 
         return _plot_goal_seek(goal_seek_df, ts_id=self.result.ts_id, ax=ax, title=title)
 
+    def cold_start_transfer_df(
+        self,
+        *,
+        min_obs: int | None = None,
+        min_history_points: int = 14,
+        method: Any = None,
+        top_k_donors: int = 3,
+        donor_pool_df: pd.DataFrame | None = None,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
+        from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
+
+        _ = return_result
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        panel = donor_pool_df if donor_pool_df is not None else self.series
+        return _cold_start_transfer_df(
+            panel,
+            forecasts_df=preds,
+            oof_df=oof,
+            min_obs=min_obs if min_obs is not None else min_history_points,
+            method=method,
+            top_k_donors=top_k_donors,
+            horizon=len(self.result.predictions) or 14,
+        )
+
+    def plot_cold_start_transfer(
+        self,
+        transfer_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot cold-start transferred forecast vs. donor trajectories (`cold_start`)."""
+        from .cold_start import plot_cold_start_transfer
+
+        _ = title
+        eff_df = transfer_df if transfer_df is not None else self.cold_start_transfer_df()
+        return plot_cold_start_transfer(
+            eff_df,
+            panel_df=self.series,
+            ts_id=ts_id or self.result.ts_id,
+            ax=ax,
+        )
+
+    def aci_df(
+        self,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        target_coverage: float = 0.80,
+        target_alpha: float | None = None,
+        gamma: float = 0.05,
+        normalized: bool = True,
+        method: Any = "aci_normalized",
+        horizon_delay: bool = True,
+        window: int | None = None,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Compute Adaptive Conformal Inference (ACI) online coverage tracking (`aci`)."""
+        from .aci import compute_aci_df
+
+        _ = (window, return_result)
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        eff_cov = (1.0 - float(target_alpha)) if target_alpha is not None else target_coverage
+        source_oof = (
+            oof
+            if (oof is not None and not oof.empty)
+            else (
+                actuals_df
+                if actuals_df is not None
+                else self.series.assign(
+                    y_true=self.series["y"],
+                    yhat=self.series["y"].rolling(3, min_periods=1).mean(),
+                    model_type=self.result.model_type,
+                )
+            )
+        )
+        return compute_aci_df(
+            source_oof,
+            predictions_df=preds if not preds.empty else None,
+            gamma=gamma,
+            target_coverage=eff_cov,
+            normalized=normalized,
+            method=method,
+            horizon_delay=horizon_delay,
+        )
+
+    def plot_aci(
+        self,
+        aci_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot ACI rolling empirical coverage (`aci.plot_aci`)."""
+        from .aci import plot_aci
+
+        _ = title
+        eff_df = aci_df if aci_df is not None else self.aci_df()
+        return plot_aci(eff_df, ts_id=ts_id or self.result.ts_id, ax=ax)
+
+    def sample_trajectories(
+        self,
+        *,
+        n_paths: int = 500,
+        copula_type: str = "auto",
+        df_t: float = 4.0,
+        cross_series: bool = True,
+        reconcile: bool = True,
+        floor: float | None = None,
+        cap: float | None = None,
+        seed: int = 42,
+        nonneg: bool = False,
+        return_result: bool = False,
+        **_kwargs: Any,
+    ) -> pd.DataFrame:
+        """Generate joint copula trajectory paths (`copula.sample_trajectories`)."""
+        from .copula import sample_trajectories as _sample_trajectories
+
+        _ = return_result
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        eff_floor = 0.0 if (nonneg and floor is None) else floor
+        return _sample_trajectories(
+            preds,
+            oof_df=oof,
+            history_df=self.series,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            df_t=df_t,
+            cross_series=cross_series,
+            reconcile=reconcile,
+            floor=eff_floor,
+            cap=cap,
+            seed=seed,
+        )
+
+    def tail_risk_df(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        lead_time: int | float | None = None,
+        window: int = 7,
+        alphas: tuple[float, ...] = (0.90, 0.95, 0.99),
+        alpha: float = 0.95,
+        threshold: float | dict[str, float] | None = None,
+        holding_cost: float | None = None,
+        stockout_cost: float | None = None,
+        n_paths: int = 300,
+        copula_type: str = "auto",
+        seed: int = 42,
+        **_kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute VaR and CVaR tail-risk summary (`copula.compute_tail_risk`)."""
+        from .copula import compute_tail_risk
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(n_paths=n_paths, copula_type=copula_type, seed=seed)
+        )
+        return compute_tail_risk(
+            eff_traj,
+            predictions_df=preds,
+            actuals_df=actuals_df,
+            oof_df=oof,
+            lead_time=lead_time,
+            window=window,
+            alphas=alphas,
+            alpha=alpha,
+            threshold=threshold,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+        )
+
+    def plot_trajectories(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        tail_risk: pd.DataFrame | None = None,
+        ts_id: str | None = None,
+        max_spaghetti_paths: int = 40,
+        max_paths_shown: int | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot joint copula trajectory spaghetti fan (`copula.plot_trajectories`)."""
+        from .copula import plot_trajectories
+
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(n_paths=200)
+        )
+        return plot_trajectories(
+            eff_traj,
+            tail_risk=tail_risk,
+            ts_id=ts_id or self.result.ts_id,
+            max_spaghetti_paths=(
+                max_paths_shown if max_paths_shown is not None else max_spaghetti_paths
+            ),
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_inventory_df(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        lead_time: float | dict[str, float] = 7.0,
+        lead_time_std: float | dict[str, float] = 0.0,
+        review_period: float | dict[str, float] = 0.0,
+        service_level: float | str | dict[str, float | str] | None = 0.95,
+        fill_rate: float | dict[str, float] | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        min_portfolio_fill_rate: float | None = None,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        holding_cost: float | dict[str, float] = 1.0,
+        stockout_cost: float | dict[str, float] = 9.0,
+        unit_cost: float | dict[str, float] | str = 10.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        min_order_qty: float | dict[str, float] = 0.0,
+        order_multiple: float | dict[str, float] | None = None,
+        vendor_moq: float | dict[str, float] | None = None,
+        on_hand: float | dict[str, float] = 0.0,
+        on_order: float | dict[str, float] = 0.0,
+        backorders: float | dict[str, float] = 0.0,
+        uncertainty_source: str = "copula",
+        copula_type: str = "auto",
+        n_paths: int = 300,
+        seed: int = 42,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Solve portfolio-constrained inventory replenishment (`inventory_optimizer`)."""
+        from .inventory_optimizer import optimize_inventory_portfolio
+
+        _ = return_result
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        eff_source: Any = "analytical" if uncertainty_source == "ar1" else uncertainty_source
+        eff_uc = unit_cost if not isinstance(unit_cost, str) else 10.0
+        eff_uv = unit_volume if not isinstance(unit_volume, str) else 1.0
+        return optimize_inventory_portfolio(
+            preds,
+            oof_df=oof,
+            inventory_df=inventory_df,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            min_portfolio_fill_rate=min_portfolio_fill_rate,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            unit_cost=eff_uc,
+            unit_volume=eff_uv,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+            vendor_moq=vendor_moq,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            uncertainty_source=eff_source,
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
+        )
+
+    def plot_inventory_frontier(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        budgets: list[float] | None = None,
+        n_points: int = 8,
+        max_rows: int = 15,
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot working-capital vs. expected fill-rate Pareto frontier (`inventory_optimizer`)."""
+        from .inventory_optimizer import plot_inventory_frontier
+
+        target = (
+            opt_result_or_df
+            if opt_result_or_df is not None
+            else self.optimize_inventory_df(**kwargs)
+        )
+        return plot_inventory_frontier(
+            target,
+            budgets=budgets,
+            n_points=n_points,
+            max_rows=max_rows,
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_scenario(
+        self,
+        *,
+        future_covariates_df: pd.DataFrame | None = None,
+        trajectories_df: pd.DataFrame | None = None,
+        objective: Any = "gross_profit",
+        price_col: str | None = None,
+        promo_col: str | None = None,
+        price_bounds: tuple[float, float] = (-0.15, 0.15),
+        price_grid: Any = None,
+        promo_bounds: tuple[float, float] = (0.0, 1.0),
+        binary_promo: bool = True,
+        max_promo_days: int | dict[str, int] | None = None,
+        max_promo_periods: int | dict[str, int] | None = None,
+        min_cooldown_days: int = 0,
+        min_promo_gap: int = 0,
+        min_margin_pct: float | None = None,
+        min_gross_margin: float | None = None,
+        min_total_units: float | None = None,
+        max_total_units: float | None = None,
+        target_total_units: float | None = None,
+        max_promo_budget: float | None = None,
+        inventory_cap: float | dict[str, float] | None = None,
+        unit_cost: float | dict[str, float] | None = 4.0,
+        promo_fixed_cost: float | dict[str, float] = 0.0,
+        risk_aversion_lambda: float = 0.0,
+        cvar_alpha: float = 0.95,
+        pull_forward_lags: int = 3,
+        cannibalization_weight: float = 1.0,
+        reconcile: bool = True,
+        include_inventory_impact: bool = True,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float | None = 0.95,
+        n_paths: int = 250,
+        copula_type: str = "auto",
+        seed: int = 42,
+        **_kwargs: Any,
+    ) -> Any:
+        """Solve prescriptive price & promotional calendar optimization (`scenario_optimizer`)."""
+        from .scenario_optimizer import optimize_scenario as _optimize_scenario
+
+        preds = self.result.predictions.assign(
+            ts_id=self.result.ts_id, model_type=self.result.model_type
+        )
+        oof = (
+            self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
+            if self.result.oof is not None and not self.result.oof.empty
+            else None
+        )
+        return _optimize_scenario(
+            self.series,
+            predictions_df=preds,
+            oof_df=oof,
+            history_df=self.series,
+            future_covariates_df=future_covariates_df,
+            trajectories_df=trajectories_df,
+            model_type=self.result.model_type,
+            objective=objective,
+            price_col=price_col,
+            promo_col=promo_col,
+            price_bounds=price_bounds,
+            price_grid=price_grid,
+            promo_bounds=promo_bounds,
+            binary_promo=binary_promo,
+            max_promo_days=max_promo_days if max_promo_days is not None else max_promo_periods,
+            min_cooldown_days=min_cooldown_days if min_cooldown_days else min_promo_gap,
+            unit_cost=unit_cost,
+            promo_fixed_cost=promo_fixed_cost,
+            min_margin_pct=min_margin_pct,
+            min_gross_margin=min_gross_margin,
+            min_total_units=min_total_units,
+            max_total_units=max_total_units,
+            target_total_units=target_total_units,
+            max_promo_budget=max_promo_budget,
+            inventory_cap=inventory_cap,
+            risk_aversion_lambda=risk_aversion_lambda,
+            cvar_alpha=cvar_alpha,
+            pull_forward_lags=pull_forward_lags,
+            cannibalization_weight=cannibalization_weight,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            seed=seed,
+            horizon=len(self.result.predictions) or 14,
+        )
+
+    def plot_optimal_scenario(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        **_kwargs: Any,
+    ) -> Any:
+        """Plot optimal price/promo schedule (`scenario_optimizer.plot_optimal_scenario`)."""
+        from .scenario_optimizer import plot_optimal_scenario
+
+        target = opt_result_or_df if opt_result_or_df is not None else self.optimize_scenario()
+        return plot_optimal_scenario(
+            target,
+            ts_id=ts_id or self.result.ts_id,
+            ax=ax,
+            title=title,
+        )
+
     def export_report(
         self,
         out_path: str | Any,
         *,
         title: str | None = None,
         goal_seek_df: pd.DataFrame | None = None,
+        aci_df: pd.DataFrame | None = None,
+        tail_risk_df: pd.DataFrame | None = None,
+        cold_start_df: pd.DataFrame | None = None,
+        inventory_opt_df: pd.DataFrame | None = None,
+        scenario_opt_df: pd.DataFrame | None = None,
         write_json: bool = False,
+        include_json_sidecar: bool = False,
     ) -> Any:
         """Export a self-contained `.html` report for this playground run."""
         from .report import export_report
@@ -597,7 +1138,13 @@ class PlaygroundRun:
             out_path,
             title=title,
             goal_seek_df=goal_seek_df,
+            aci_df=aci_df,
+            tail_risk_df=tail_risk_df,
+            cold_start_df=cold_start_df,
+            inventory_opt_df=inventory_opt_df,
+            scenario_opt_df=scenario_opt_df,
             write_json=write_json,
+            include_json_sidecar=include_json_sidecar,
         )
 
 
@@ -685,8 +1232,64 @@ class BakeOff:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | dict[str, float] | str = 1.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        vendor_moq: float | dict[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
     ) -> pd.DataFrame:
         """Translate bake-off forecasts across all models into operational inventory policies."""
+        if (
+            max_budget is not None
+            or max_volume is not None
+            or max_total_units is not None
+            or target_portfolio_fill_rate is not None
+            or vendor_moq is not None
+            or uncertainty_source == "copula"
+            or trajectories_df is not None
+            or copula_paths is not None
+        ):
+            out = self.optimize_inventory_df(
+                inventory_df=inventory_df,
+                trajectories_df=trajectories_df,
+                copula_paths=copula_paths,
+                model_name=model_name or model_type,
+                lead_time=lead_time,
+                lead_time_std=lead_time_std,
+                review_period=review_period,
+                service_level=service_level,
+                fill_rate=fill_rate,
+                target_portfolio_fill_rate=target_portfolio_fill_rate,
+                max_budget=max_budget,
+                max_volume=max_volume,
+                max_total_units=max_total_units,
+                holding_cost=holding_cost,
+                stockout_cost=stockout_cost,
+                unit_cost=unit_cost,
+                unit_volume=unit_volume,
+                min_order_qty=min_order_qty,
+                order_multiple=order_multiple,
+                vendor_moq=vendor_moq,
+                on_hand=on_hand,
+                on_order=on_order,
+                backorders=backorders,
+                uncertainty_source=uncertainty_source,
+                copula_type=copula_type,
+                n_paths=n_paths,
+                seed=seed,
+                return_result=False,
+            )
+            assert isinstance(out, pd.DataFrame)
+            return out
+
         from .diagnostics import compute_inventory_policy
 
         return compute_inventory_policy(
@@ -726,6 +1329,19 @@ class BakeOff:
         stockout_cost: float = 9.0,
         min_order_qty: float = 0.0,
         order_multiple: float = 0.0,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        unit_cost: float | dict[str, float] | str = 1.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        vendor_moq: float | dict[str, float] | None = None,
+        uncertainty_source: str = "ar1",
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        copula_type: str = "gaussian",
+        n_paths: int = 300,
+        seed: int = 42,
         max_rows: int = 15,
         ax: Any = None,
         title: str | None = None,
@@ -748,6 +1364,19 @@ class BakeOff:
             stockout_cost=stockout_cost,
             min_order_qty=min_order_qty,
             order_multiple=order_multiple,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            unit_cost=unit_cost,
+            unit_volume=unit_volume,
+            vendor_moq=vendor_moq,
+            uncertainty_source=uncertainty_source,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
         )
         return plot_inventory_policy(df, max_rows=max_rows, ax=ax, title=title)
 
@@ -988,13 +1617,491 @@ class BakeOff:
             title=title,
         )
 
+    def _champion_model(self, model_type: str | None = None) -> str | None:
+        if model_type is not None:
+            return model_type
+        if not self.leaderboard.empty:
+            for col in ("model_type", "model"):
+                if col in self.leaderboard.columns:
+                    return str(self.leaderboard[col].iloc[0])
+        return None
+
+    def cold_start_transfer_df(
+        self,
+        *,
+        min_obs: int | None = None,
+        min_history_points: int = 14,
+        method: Any = None,
+        top_k_donors: int = 3,
+        donor_pool_df: pd.DataFrame | None = None,
+        model_type: str | None = None,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
+        from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
+
+        _ = return_result
+        eff_model = self._champion_model(model_type)
+        preds = self.predictions
+        if eff_model is not None and "model_type" in preds.columns:
+            preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+        panel = donor_pool_df if donor_pool_df is not None else self.series
+        return _cold_start_transfer_df(
+            panel,
+            cfg=self.config,
+            forecasts_df=preds,
+            oof_df=self.oof,
+            min_obs=min_obs if min_obs is not None else min_history_points,
+            method=method,
+            static_covariates=self.config.features.static_covariates,
+            hierarchy_cols=[c for lvl in self.config.hierarchy.levels for c in lvl],
+            top_k_donors=top_k_donors,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            horizon=self.config.data.horizon,
+            freq=self.config.data.freq,
+        )
+
+    def plot_cold_start_transfer(
+        self,
+        transfer_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot cold-start transferred forecast vs. donor trajectories (`cold_start`)."""
+        from .cold_start import plot_cold_start_transfer
+
+        _ = title
+        eff_df = transfer_df if transfer_df is not None else self.cold_start_transfer_df()
+        return plot_cold_start_transfer(
+            eff_df,
+            panel_df=self.series,
+            ts_id=ts_id,
+            ax=ax,
+        )
+
+    def aci_df(
+        self,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        target_coverage: float = 0.80,
+        target_alpha: float | None = None,
+        gamma: float | None = None,
+        normalized: bool = True,
+        method: Any = None,
+        horizon_delay: bool = True,
+        window: int | None = None,
+        model_type: str | None = None,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Compute Adaptive Conformal Inference (ACI) online coverage tracking (`aci`)."""
+        from .aci import compute_aci_df
+
+        _ = (window, return_result)
+        eff_model = self._champion_model(model_type)
+        preds = self.predictions
+        oof = self.oof
+        if eff_model is not None:
+            if "model_type" in preds.columns:
+                preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+            if oof is not None and not oof.empty and "model_type" in oof.columns:
+                oof = oof[oof["model_type"].astype(str) == eff_model].copy()
+        eff_gamma = gamma if gamma is not None else float(self.config.output.aci_gamma)
+        eff_cov = (1.0 - float(target_alpha)) if target_alpha is not None else target_coverage
+        eff_method = method or self.config.output.calibration_method
+        if eff_method == "conformal":
+            eff_method = "aci_normalized" if normalized else "aci"
+        source_oof = (
+            oof
+            if (oof is not None and not oof.empty)
+            else (actuals_df if actuals_df is not None else preds)
+        )
+        return compute_aci_df(
+            source_oof,
+            predictions_df=preds if not preds.empty else None,
+            gamma=eff_gamma,
+            target_coverage=eff_cov,
+            normalized=normalized,
+            method=eff_method,
+            horizon_delay=horizon_delay,
+            ts_id_col=self.config.data.ts_id_col,
+        )
+
+    def plot_aci(
+        self,
+        aci_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot ACI rolling empirical coverage (`aci.plot_aci`)."""
+        from .aci import plot_aci
+
+        _ = title
+        eff_df = aci_df if aci_df is not None else self.aci_df()
+        return plot_aci(eff_df, ts_id=ts_id, ax=ax)
+
+    def sample_trajectories(
+        self,
+        *,
+        n_paths: int = 500,
+        copula_type: str = "auto",
+        df_t: float = 4.0,
+        cross_series: bool = True,
+        reconcile: bool = True,
+        reconcile_hierarchy: bool = True,
+        floor: float | None = None,
+        cap: float | None = None,
+        seed: int = 42,
+        nonneg: bool = False,
+        model_type: str | None = None,
+        return_result: bool = False,
+        **_kwargs: Any,
+    ) -> pd.DataFrame:
+        """Generate joint copula trajectory paths (`copula.sample_trajectories`)."""
+        from .copula import sample_trajectories as _sample_trajectories
+
+        _ = return_result
+        eff_model = self._champion_model(model_type)
+        preds = self.predictions
+        oof = self.oof
+        if eff_model is not None:
+            if "model_type" in preds.columns:
+                preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+            if oof is not None and not oof.empty and "model_type" in oof.columns:
+                oof = oof[oof["model_type"].astype(str) == eff_model].copy()
+        eff_floor = floor if floor is not None else (0.0 if nonneg else self.config.output.floor)
+        eff_cap = cap if cap is not None else self.config.output.cap
+        return _sample_trajectories(
+            preds,
+            oof_df=oof,
+            history_df=self.series,
+            cfg=self.config,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            df_t=df_t,
+            cross_series=cross_series,
+            reconcile=reconcile and reconcile_hierarchy,
+            floor=eff_floor,
+            cap=eff_cap,
+            seed=seed,
+        )
+
+    def tail_risk_df(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        actuals_df: pd.DataFrame | None = None,
+        lead_time: int | float | None = None,
+        window: int = 7,
+        alphas: tuple[float, ...] = (0.90, 0.95, 0.99),
+        alpha: float = 0.95,
+        threshold: float | dict[str, float] | None = None,
+        holding_cost: float | None = None,
+        stockout_cost: float | None = None,
+        n_paths: int = 300,
+        copula_type: str = "auto",
+        seed: int = 42,
+        model_type: str | None = None,
+        **_kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute VaR and CVaR tail-risk summary (`copula.compute_tail_risk`)."""
+        from .copula import compute_tail_risk
+
+        eff_model = self._champion_model(model_type)
+        preds = self.predictions
+        oof = self.oof
+        if eff_model is not None:
+            if "model_type" in preds.columns:
+                preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+            if oof is not None and not oof.empty and "model_type" in oof.columns:
+                oof = oof[oof["model_type"].astype(str) == eff_model].copy()
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(
+                n_paths=n_paths, copula_type=copula_type, seed=seed, model_type=model_type
+            )
+        )
+        return compute_tail_risk(
+            eff_traj,
+            predictions_df=preds,
+            actuals_df=actuals_df,
+            oof_df=oof,
+            lead_time=lead_time,
+            window=window,
+            alphas=alphas,
+            alpha=alpha,
+            threshold=threshold,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+        )
+
+    def plot_trajectories(
+        self,
+        trajectories_df: pd.DataFrame | None = None,
+        *,
+        tail_risk: pd.DataFrame | None = None,
+        ts_id: str | None = None,
+        max_spaghetti_paths: int = 40,
+        max_paths_shown: int | None = None,
+        ax: Any = None,
+        title: str | None = None,
+    ) -> Any:
+        """Plot joint copula trajectory spaghetti fan (`copula.plot_trajectories`)."""
+        from .copula import plot_trajectories
+
+        eff_traj = (
+            trajectories_df
+            if trajectories_df is not None
+            else self.sample_trajectories(n_paths=200)
+        )
+        return plot_trajectories(
+            eff_traj,
+            tail_risk=tail_risk,
+            ts_id=ts_id,
+            max_spaghetti_paths=(
+                max_paths_shown if max_paths_shown is not None else max_spaghetti_paths
+            ),
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_inventory_df(
+        self,
+        *,
+        inventory_df: pd.DataFrame | dict[str, dict[str, Any]] | None = None,
+        trajectories_df: pd.DataFrame | None = None,
+        copula_paths: pd.DataFrame | None = None,
+        model_name: str | None = None,
+        model_type: str | None = None,
+        lead_time: float | dict[str, float] = 7.0,
+        lead_time_std: float | dict[str, float] = 0.0,
+        review_period: float | dict[str, float] = 0.0,
+        service_level: float | str | dict[str, float | str] | None = 0.95,
+        fill_rate: float | dict[str, float] | None = None,
+        target_portfolio_fill_rate: float | None = None,
+        min_portfolio_fill_rate: float | None = None,
+        max_budget: float | None = None,
+        max_volume: float | None = None,
+        max_total_units: float | None = None,
+        holding_cost: float | dict[str, float] = 1.0,
+        stockout_cost: float | dict[str, float] = 9.0,
+        unit_cost: float | dict[str, float] | str = 10.0,
+        unit_volume: float | dict[str, float] | str = 1.0,
+        min_order_qty: float | dict[str, float] = 0.0,
+        order_multiple: float | dict[str, float] | None = None,
+        vendor_moq: float | dict[str, float] | None = None,
+        on_hand: float | dict[str, float] = 0.0,
+        on_order: float | dict[str, float] = 0.0,
+        backorders: float | dict[str, float] = 0.0,
+        uncertainty_source: str = "copula",
+        copula_type: str = "auto",
+        n_paths: int = 300,
+        seed: int = 42,
+        return_result: bool = False,
+    ) -> pd.DataFrame:
+        """Solve portfolio-constrained inventory replenishment (`inventory_optimizer`)."""
+        from .inventory_optimizer import optimize_inventory_portfolio
+
+        _ = return_result
+        eff_model = self._champion_model(model_name or model_type)
+        eff_source: Any = "analytical" if uncertainty_source == "ar1" else uncertainty_source
+        eff_uc = unit_cost if not isinstance(unit_cost, str) else 10.0
+        eff_uv = unit_volume if not isinstance(unit_volume, str) else 1.0
+        return optimize_inventory_portfolio(
+            self.predictions,
+            oof_df=self.oof,
+            inventory_df=inventory_df,
+            trajectories_df=trajectories_df,
+            copula_paths=copula_paths,
+            model_name=eff_model,
+            model_type=eff_model,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            review_period=review_period,
+            service_level=service_level,
+            fill_rate=fill_rate,
+            target_portfolio_fill_rate=target_portfolio_fill_rate,
+            min_portfolio_fill_rate=min_portfolio_fill_rate,
+            max_budget=max_budget,
+            max_volume=max_volume,
+            max_total_units=max_total_units,
+            holding_cost=holding_cost,
+            stockout_cost=stockout_cost,
+            unit_cost=eff_uc,
+            unit_volume=eff_uv,
+            min_order_qty=min_order_qty,
+            order_multiple=order_multiple,
+            vendor_moq=vendor_moq,
+            on_hand=on_hand,
+            on_order=on_order,
+            backorders=backorders,
+            uncertainty_source=eff_source,
+            copula_type=copula_type,
+            n_paths=n_paths,
+            seed=seed,
+        )
+
+    def plot_inventory_frontier(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        budgets: list[float] | None = None,
+        n_points: int = 8,
+        max_rows: int = 15,
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot working-capital vs. expected fill-rate Pareto frontier (`inventory_optimizer`)."""
+        from .inventory_optimizer import plot_inventory_frontier
+
+        target = (
+            opt_result_or_df
+            if opt_result_or_df is not None
+            else self.optimize_inventory_df(**kwargs)
+        )
+        return plot_inventory_frontier(
+            target,
+            budgets=budgets,
+            n_points=n_points,
+            max_rows=max_rows,
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_scenario(
+        self,
+        *,
+        future_covariates_df: pd.DataFrame | None = None,
+        trajectories_df: pd.DataFrame | None = None,
+        objective: Any = "gross_profit",
+        price_col: str | None = None,
+        promo_col: str | None = None,
+        price_bounds: tuple[float, float] = (-0.15, 0.15),
+        price_grid: Any = None,
+        promo_bounds: tuple[float, float] = (0.0, 1.0),
+        binary_promo: bool = True,
+        max_promo_days: int | dict[str, int] | None = None,
+        max_promo_periods: int | dict[str, int] | None = None,
+        min_cooldown_days: int = 0,
+        min_promo_gap: int = 0,
+        min_margin_pct: float | None = None,
+        min_gross_margin: float | None = None,
+        min_total_units: float | None = None,
+        max_total_units: float | None = None,
+        target_total_units: float | None = None,
+        max_promo_budget: float | None = None,
+        inventory_cap: float | dict[str, float] | None = None,
+        unit_cost: float | dict[str, float] | None = 4.0,
+        promo_fixed_cost: float | dict[str, float] = 0.0,
+        risk_aversion_lambda: float = 0.0,
+        cvar_alpha: float = 0.95,
+        pull_forward_lags: int = 3,
+        cannibalization_weight: float = 1.0,
+        reconcile: bool = True,
+        include_inventory_impact: bool = True,
+        lead_time: float = 7.0,
+        lead_time_std: float = 0.0,
+        service_level: float | None = 0.95,
+        n_paths: int = 250,
+        copula_type: str = "auto",
+        seed: int = 42,
+        model_type: str | None = None,
+        **_kwargs: Any,
+    ) -> Any:
+        """Solve prescriptive price & promotional calendar optimization (`scenario_optimizer`)."""
+        from .scenario_optimizer import optimize_scenario as _optimize_scenario
+
+        eff_model = self._champion_model(model_type)
+        preds = self.predictions
+        oof = self.oof
+        if eff_model is not None:
+            if "model_type" in preds.columns:
+                preds = preds[preds["model_type"].astype(str) == eff_model].copy()
+            if oof is not None and not oof.empty and "model_type" in oof.columns:
+                oof = oof[oof["model_type"].astype(str) == eff_model].copy()
+        return _optimize_scenario(
+            self.series,
+            config=self.config,
+            predictions_df=preds,
+            oof_df=oof,
+            history_df=self.series,
+            future_covariates_df=future_covariates_df,
+            trajectories_df=trajectories_df,
+            model_type=eff_model,
+            objective=objective,
+            price_col=price_col,
+            promo_col=promo_col,
+            price_bounds=price_bounds,
+            price_grid=price_grid,
+            promo_bounds=promo_bounds,
+            binary_promo=binary_promo,
+            max_promo_days=max_promo_days if max_promo_days is not None else max_promo_periods,
+            min_cooldown_days=min_cooldown_days if min_cooldown_days else min_promo_gap,
+            unit_cost=unit_cost,
+            promo_fixed_cost=promo_fixed_cost,
+            min_margin_pct=min_margin_pct,
+            min_gross_margin=min_gross_margin,
+            min_total_units=min_total_units,
+            max_total_units=max_total_units,
+            target_total_units=target_total_units,
+            max_promo_budget=max_promo_budget,
+            inventory_cap=inventory_cap,
+            risk_aversion_lambda=risk_aversion_lambda,
+            cvar_alpha=cvar_alpha,
+            pull_forward_lags=pull_forward_lags,
+            cannibalization_weight=cannibalization_weight,
+            reconcile=reconcile,
+            include_inventory_impact=include_inventory_impact,
+            lead_time=lead_time,
+            lead_time_std=lead_time_std,
+            service_level=service_level,
+            n_paths=n_paths,
+            copula_type=copula_type,
+            seed=seed,
+            horizon=self.config.data.horizon,
+            freq=self.config.data.freq,
+        )
+
+    def plot_optimal_scenario(
+        self,
+        opt_result_or_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        **_kwargs: Any,
+    ) -> Any:
+        """Plot optimal price/promo schedule (`scenario_optimizer.plot_optimal_scenario`)."""
+        from .scenario_optimizer import plot_optimal_scenario
+
+        target = opt_result_or_df if opt_result_or_df is not None else self.optimize_scenario()
+        return plot_optimal_scenario(
+            target,
+            ts_id=ts_id,
+            ax=ax,
+            title=title,
+        )
+
     def export_report(
         self,
         out_path: str | Any,
         *,
         title: str | None = None,
         goal_seek_df: pd.DataFrame | None = None,
+        aci_df: pd.DataFrame | None = None,
+        tail_risk_df: pd.DataFrame | None = None,
+        cold_start_df: pd.DataFrame | None = None,
+        inventory_opt_df: pd.DataFrame | None = None,
+        scenario_opt_df: pd.DataFrame | None = None,
         write_json: bool = False,
+        include_json_sidecar: bool = False,
     ) -> Any:
         """Export a self-contained interactive `.html` report for this bake-off."""
         from .report import export_report
@@ -1004,7 +2111,13 @@ class BakeOff:
             out_path,
             title=title,
             goal_seek_df=goal_seek_df,
+            aci_df=aci_df,
+            tail_risk_df=tail_risk_df,
+            cold_start_df=cold_start_df,
+            inventory_opt_df=inventory_opt_df,
+            scenario_opt_df=scenario_opt_df,
             write_json=write_json,
+            include_json_sidecar=include_json_sidecar,
         )
 
 
