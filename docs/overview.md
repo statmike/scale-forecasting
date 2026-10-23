@@ -116,8 +116,8 @@ A single JSON file (or Python dictionary validated by `RunConfig`) defines an ex
 | `data` | Source table (native BigQuery or BigLake Iceberg), `series_limit`, series/date/target columns, frequency, and `horizon`. |
 | `models` | Model identifiers to fit, grouped automatically into `statistical`, `ml`, `deep_learning`, `automl`, and `native` families. |
 | `compute` | Default and per-family `runtime`, mode (`spark_mode`, `gke_mode`, `ray_mode`, `automl_mode`), `machine_type`, `workers`, GPUs, and regional fallback. |
-| `backtest` | Cross-validation scheme (`expanding`, `sliding`, `expanding_frozen`, `sliding_frozen`), fold count, `decision_metric`, and conformal interval calibration. |
-| `features` | Country holidays, multi-day `holiday_window` (`pre_holiday_days`, `post_holiday_days`), Fourier seasonality, level-shift indicators, `static_covariates`, `future_covariates`, `past_covariates`, `exog_lags`, and `monotonic_constraints` (`@monotone`). |
+| `backtest` | Cross-validation scheme (`expanding`, `sliding`, `expanding_frozen`, `sliding_frozen`), fold count, `decision_metric`, and conformal / online ACI interval calibration (`output.calibration_method`). |
+| `features` | Country holidays, multi-day `holiday_window` (`pre_holiday_days`, `post_holiday_days`), Fourier seasonality, level-shift indicators, `static_covariates`, `future_covariates`, `past_covariates`, `exog_lags`, `monotonic_constraints` (`@monotone`), compositional simplex (`clr` / `ilr`), and cold-start / NPI analog transfer (`cold_start_transfer`, `cold_start_min_obs`, `cold_start_method`). |
 | `hpo` | Optuna trial budget, search spaces, and fleet-wide vs. per-series tuning. |
 | `ensemble` | Consensus (`mean`, `median`, `inverse_error`) and learned stackers (`nnls`, `ridge`, `xgb`), plus `barrier` or `microbatch` execution. |
 | `hierarchy` | Aggregation levels (`levels`) and coherent reconciliation methods (`reconciliation_methods`). |
@@ -178,11 +178,11 @@ Every model inherits from [`BaseModel`](https://github.com/statmike/scale-foreca
 
 ### Platform capability tree
 
-- **Feature Engineering, Causal Guardrails & Compositional Simplex** — [Features, covariates & simplex](./features_and_covariates.md)
+- **Feature Engineering, Causal Guardrails, Compositional Simplex & Cold-Start Transfer** — [Features, covariates & simplex](./features_and_covariates.md)
   - **3-tier covariates & calendar signals:** Future (`price`, `promo`), past-only, and static covariates, country holidays, automatic Fourier harmonics, and structural level-shift detection.
   - **Economic sign & monotonicity guardrails (`@monotone`):** Enforce downward-sloping price response (`-1`) and upward promo lift (`+1`) across `lightgbm`, `xgboost`, `catboost`, and `regression_lags` (`ridge_lags`) via `features.monotonic_constraints`.
   - **Moving-holiday lead/lag ramps (`holiday_window`):** Expand point holidays into asymmetric pre-holiday build-up (`pre_holiday_days`) and post-holiday slump (`post_holiday_days`) windows.
-  - **Compositional market-share simplex (`@transform_ilr`, `@transform_clr`):** Forecast brand or channel shares in Aitchison log-ratio space (`simplex_sum`) so components stay strictly positive and sum to `1.0` or `100.0` at every horizon step.
+  - **Compositional market-share simplex (`@transform_ilr`, `@transform_clr`) & Cold-Start Analog Transfer (`cold_start_transfer`):** Forecast brand or channel shares in Aitchison log-ratio space (`simplex_sum`) and synthesize short-history NPI series ($n < \text{min\_obs}$) via analog donor matching or Bass/Weibull lifecycle curves (`cold_start_transfer_df`).
 - **3-Mode Hierarchical Reconciliation (`THieF` & Cross-Temporal)** — [Hierarchical & cross-temporal forecasting](./hierarchical_forecasting.md)
   - **Mode 1 — Spatial hierarchies:** Reconcile product/geography trees (`hierarchy.levels`) via all 8 Hyndman FPP3 methods (`mint_nonneg`, `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, `middle_out`).
   - **Mode 2 — Temporal hierarchies (`THieF`):** Opt-in `hierarchy.reconcile_temporal: true` reconciles any flat panel across calendar frequencies (`Daily <-> Weekly <-> Monthly <-> Annual`) on both forward horizons and backtest folds.
@@ -195,11 +195,11 @@ Every model inherits from [`BaseModel`](https://github.com/statmike/scale-foreca
 - **Glass-Box Auto-Forecaster, Multi-Branch `autofocus` & Opt-In `Forecaster.evolve`** — [Auto-forecaster & `autofocus`](./auto_forecaster.md) · [AlphaEvolve Runtime Harness](./alphaevolve_runner.md)
   - **4 exposure tiers & 7-Question Practitioner Assessment:** Compile transparent `ConfigBlueprint` configs (`Forecaster.build_config()` / `--init-config`) or run multi-branch `autofocus=True` tournaments (`Forecaster.auto()`) across `first_light`, `wide_field`, `deep_sky`, and `deep_field`, evolved with **AlphaEvolve on Gemini Enterprise** across 20 synthetic DGPs and 9 public open-data benchmarks.
   - **Runtime `# EVOLVE-BLOCK` evolution (`Forecaster.evolve`):** Evolve custom `"features"`, `"ensemble"`, `"model"`, or `"policy"` logic via Gemini Enterprise AlphaEvolve (`backend="alphaevolve"` default, `enable_alphaevolve = true`) or standard Vertex AI Gemini (`backend="vertex_gemini"` backup) under an AST security sandbox, `+1e6` lookahead probe, and 3-Gate Anti-Overfitting Ratchet.
-- **Forecaster Decision Workbench, Scenarios, Goal-Seek QP & Inventory** — [Forecaster workbench](./forecaster_workbench.md)
+- **Forecaster Decision Workbench, Online ACI, Copula Risk, Portfolio Inventory & Prescriptive Optimization** — [Forecaster workbench](./forecaster_workbench.md)
   - **Double/Debiased ML promo & price decomposition:** Robinson/Chernozhukov partialing-out (`promo_elasticity_df`) into `baseline_yhat`, `incremental_promo_lift`, `pull_forward_dip`, `cannibalization_effect`, and `net_causal_elasticity`.
-  - **5-stage full-chain What-If scenarios:** Propagate price/promo shocks (`simulate_scenarios(..., unit_cost=..., reconcile=True, include_inventory_impact=True)`) through base models, ensembles, `mint_nonneg` reconciliation, gross margin (`gross_margin_delta`), and inventory $\Delta\text{ROP}$ / $\Delta\text{SS}$.
-  - **Top-down Goal-Seek constrained QP:** Solve covariance-weighted target disaggregations (`allocate_target`) with equality targets, `locked_nodes`, capacity `[lower_bounds, upper_bounds]`, and multi-period `smoothness_weight`.
-  - **Inventory policies, FVA audits & HTML reports:** Physical bounds (`floor`, `cap`, `cumulative_round`), monotone percentile fans (`output.quantiles`), Newsvendor `underage_cost` / `overage_cost`, SBC intermittent routing, modified Diebold–Mariano $p$-values (`compute_fva`), $(s, S)$ / $(R, S)$ / Fill Rate policies (`inventory_policy_df`), Top-$N$ exception queues (`exceptions_df`), and interactive HTML reports (`export_report`).
+  - **Online Adaptive Conformal Inference (`aci.py`) & Joint Copula Tail Risk (`copula.py`):** Non-exchangeable online coverage updates (`output.calibration_method = "aci" | "aci_normalized"`, `aci_df`) and Gaussian/Student-$t$ copula trajectory fans (`sample_trajectories`) with portfolio VaR and CVaR (`tail_risk_df`).
+  - **5-stage What-If scenarios & Prescriptive Price/Promo Calendar Optimizer (`scenario_optimizer.py`):** Propagate price/promo shocks (`simulate_scenarios`) or solve for the gross-margin / CVaR-optimal forward price and promotional schedule (`optimize_scenario`, `plot_optimal_scenario`).
+  - **Top-down Goal-Seek QP & Multi-SKU Portfolio Inventory Optimizer (`inventory_optimizer.py`):** Solve covariance-weighted target disaggregations (`allocate_target`) and multi-SKU replenishment under shared working-capital (`max_budget`), warehouse volume (`max_volume`), aggregate fill-rate, and MOQ constraints (`optimize_inventory_df`, `plot_inventory_frontier`), plus interactive HTML reports (`export_report`).
 
 Full catalog: [Models and ensembles reference](./models_reference.md), [Forecaster workbench](./forecaster_workbench.md), and [Runtime dependencies](./runtime_dependencies.md).
 

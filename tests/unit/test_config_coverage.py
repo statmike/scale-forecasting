@@ -284,6 +284,18 @@ UNPROVEN: dict[str, str] = {
         )
         for m in sorted(VALID_ABLATION_MODES)
     },
+    "features.cold_start_method=analog_transfer": (
+        "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
+    ),
+    "features.cold_start_method=bass_diffusion": (
+        "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
+    ),
+    "features.cold_start_method=weibull_lifecycle": (
+        "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
+    ),
+    "features.cold_start_transfer=true": (
+        "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
+    ),
     "features.holiday_window.enabled=false": (
         "tests/unit/test_holiday_window.py::test_holiday_window_kernels_and_enabled_toggle"
     ),
@@ -378,6 +390,12 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_automl_engine.py::test_automl_mode_and_family_runtime_resolution"
     ),
     # --- output ------------------------------------------------------------------------------
+    "output.calibration_method=aci": (
+        "tests/unit/test_aci.py::test_aci_config_and_calibration_dispatch"
+    ),
+    "output.calibration_method=aci_normalized": (
+        "tests/unit/test_aci.py::test_aci_config_and_calibration_dispatch"
+    ),
     "output.integer_rounding=ceil": (
         "tests/unit/test_phase_g1_workbench.py::"
         "test_output_constraints_floor_cap_and_rounding_modes"

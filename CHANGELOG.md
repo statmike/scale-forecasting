@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-10-22
+
+### Added
+
+- **Cold-Start & New Product Introduction (NPI) Analog Transfer & Diffusion (`features.cold_start_transfer`, [`cold_start.py`](./src/scale_forecasting/cold_start.py)):**
+  - Added [`cold_start.py`](./src/scale_forecasting/cold_start.py) (`cold_start_transfer_df`, `match_cold_start_donors`, `fit_bass_diffusion`, `fit_weibull_lifecycle`, `plot_cold_start_transfer`, `ColdStartResult`) and `FeaturesConfig.cold_start_transfer: bool = False`, `FeaturesConfig.cold_start_min_obs: int = 14`, and `FeaturesConfig.cold_start_method: Literal["auto", "analog_transfer", "bass_diffusion", "weibull_lifecycle"] = "auto"` in [`config.py`](./src/scale_forecasting/config.py).
+  - Synthesizes forward forecasts and prediction intervals for ultra-short-history series ($n < \text{cold\_start\_min\_obs}$) via composite donor similarity matching (static attributes, hierarchy lineage overlap, and normalized early-ramp shape correlation) or empirical-Bayes regularized Bass (1969) innovation/imitation S-curves (`bass_diffusion`) and Weibull launch-peak-decay curves (`weibull_lifecycle`).
+  - Integrated into [`worker.py`](./src/scale_forecasting/worker.py), Step 0 panel profiling (`n_cold_start_series`, `cold_start_fraction` in [`auto.py`](./src/scale_forecasting/auto.py)), `autofocus` Branch `2C` (`cold_start_analog_transfer` in [`auto_policy.py`](./src/scale_forecasting/auto_policy.py)), Practitioner Assessment Question 4, `Forecaster.cold_start_transfer_df()` (`sdk.py`), `BakeOff.cold_start_transfer_df()` (`playground.py`), and benchmark `dgp_19` (`cold_start_short_history` in [`benchmarks.py`](./src/scale_forecasting/benchmarks.py)).
+- **Online Adaptive Conformal Inference (`output.calibration_method = "aci" | "aci_normalized"`, [`aci.py`](./src/scale_forecasting/aci.py)):**
+  - Added [`aci.py`](./src/scale_forecasting/aci.py) (`compute_aci_trajectory`, `compute_aci_df`, `calibrate_intervals_aci`, `plot_aci`, `ACIResult`) implementing Gibbs & Candès (2021) online Adaptive Conformal Inference ($\alpha_{t+1} = \operatorname{clip}(\alpha_t + \gamma(\alpha - \operatorname{err}_{t-h+1}), [0.001, 0.999])$) with $h$-step feedback delay buffering (`horizon_delay=True`) and EWMA residual volatility normalization (`aci_normalized`), plus `OutputConfig.calibration_method` and `OutputConfig.aci_gamma: float = 0.05` in [`config.py`](./src/scale_forecasting/config.py).
+  - Wired into [`calibration.py`](./src/scale_forecasting/calibration.py), [`worker.py`](./src/scale_forecasting/worker.py), `Forecaster.aci_df()` / `Forecaster.plot_aci()` (`sdk.py`), `PlaygroundRun` / `BakeOff` (`playground.py`), executive HTML/JSON reports (`report.py`), MCP (`mcp.py`), and benchmark `dgp_20` (`regime_shift_volatility_drift` in [`benchmarks.py`](./src/scale_forecasting/benchmarks.py)).
+- **Joint Cross-Series & Cross-Horizon Copula Trajectory Simulation & Portfolio Tail Risk ([`copula.py`](./src/scale_forecasting/copula.py)):**
+  - Added [`copula.py`](./src/scale_forecasting/copula.py) (`sample_trajectories`, `compute_tail_risk`, `plot_trajectories`, `CopulaTrajectoryResult`) fitting shrinkage-regularized Gaussian and heavy-tailed Student-$t$ ($\nu = 4$) copulas over out-of-fold residual rank correlations across $(H \times N)$ series-horizon cells while enforcing per-path `floor`/`cap` bounds, simplex closure (`simplex_sum`), and cross-sectional hierarchical coherence (`reconcile=True`).
+  - Computes cumulative lead-time demand Value-at-Risk (`var_alpha`), Conditional Value-at-Risk / Expected Shortfall (`cvar_alpha`), `stockout_prob`, and `expected_shortfall_cost`, exposed via `Forecaster.sample_trajectories()`, `Forecaster.tail_risk_df()`, and `Forecaster.plot_trajectories()`.
+- **Multi-SKU Portfolio-Constrained Inventory Replenishment Optimizer ([`inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py)):**
+  - Added [`inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py) (`optimize_inventory_portfolio`, `plot_inventory_frontier`, `InventoryOptimizationResult`) solving joint multi-SKU replenishment (`recommended_order_qty`, `reorder_point`, `safety_stock`, `order_up_to_level`, `achieved_service_level`, `achieved_fill_rate`, `expected_total_cost`, `shadow_price_budget`) under shared working-capital (`max_budget`), warehouse capacity (`max_volume`, `max_total_units`), aggregate portfolio fill-rate (`target_portfolio_fill_rate`), and discrete `vendor_moq` / `order_multiple` constraints across analytical or copula-trajectory uncertainty (`Forecaster.optimize_inventory_df()`, `Forecaster.plot_inventory_frontier()`).
+- **Prescriptive Price & Promotional Calendar Optimizer ([`scenario_optimizer.py`](./src/scale_forecasting/scenario_optimizer.py)):**
+  - Added [`scenario_optimizer.py`](./src/scale_forecasting/scenario_optimizer.py) (`optimize_scenario`, `plot_optimal_scenario`, `ScenarioOptimizationResult`) solving for the forward price and promotional calendar that maximizes `gross_profit`, `revenue`, `units`, or `risk_adjusted_profit` ($\mathbb{E}[\text{Profit}] - \lambda \cdot \text{CVaR}_\alpha(\text{Loss})$) over the Double-ML causal elasticity surface (`elasticity.py`), subject to `price_bounds`, `max_promo_days`, `min_cooldown_days`, `min_margin_pct`, `max_promo_budget`, and `inventory_cap` (`Forecaster.optimize_scenario()`, `Forecaster.plot_optimal_scenario()`).
+
+---
+
 ## [1.6.0] - 2026-10-21
 
 ### Added

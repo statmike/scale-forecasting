@@ -1,6 +1,6 @@
-# Feature Engineering, Three-Tier Covariates & Compositional Simplex Transforms
+# Feature Engineering, Three-Tier Covariates, Compositional Simplex & Cold-Start Transfer
 
-`scale-forecasting` provides a declarative, leak-free feature engineering and target-transformation pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), and [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
+`scale-forecasting` provides a declarative, leak-free feature engineering, target-transformation, and cold-start transfer pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), and [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
 
 ```mermaid
 flowchart TD
@@ -18,11 +18,12 @@ flowchart TD
         C1 --> C2 --> C3
     end
 
-    subgraph S3["3. Model Variants, Guardrails & Ablation Ladders"]
+    subgraph S3["3. Model Variants, Guardrails, Ablation Ladders & Cold-Start Transfer"]
         V1["Capability-Aware Routing & Fallback<br/>features.on_unsupported_covariates = 'fallback' | 'error'"]
         V2["Monotonic Economic Sign Constraints<br/>features.monotonic_constraints = {'price_index': -1, 'promo_flag': 1} (@monotone)"]
         V3["Orthogonal Variant Taxonomy & Ablation Ladders<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @local"]
-        V1 --> V2 --> V3
+        V4["Cold-Start & NPI Analog Donor Transfer (cold_start.py)<br/>features.cold_start_transfer · cold_start_min_obs · cold_start_method"]
+        V1 --> V2 --> V3 --> V4
     end
 
     S1 --> S2 --> S3
@@ -67,7 +68,22 @@ Forecasting each share independently in raw space produces predictions that drif
 
 ---
 
-## 3. Declarative `RunConfig` & Python SDK Examples
+## 3. Cold-Start & New Product Introduction (NPI) Analog Transfer (`cold_start.py`)
+
+When launching **new SKUs, newly opened stores, or short-history products** with fewer than `features.cold_start_min_obs` observations (default `14`), univariate local statistical models lack sufficient degrees of freedom to estimate seasonal profiles or trend slopes reliably. Setting `features.cold_start_transfer = True` activates [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py):
+
+| `features.cold_start_method` | Mechanism | Best For |
+| :--- | :--- | :--- |
+| **`"auto"`** *(default)* | Selects `"analog_transfer"` when mature donor series ($n \ge \max(2 \cdot \text{min\_obs}, m + H)$) exist in the panel and falls back to `"bass_diffusion"` / `"weibull_lifecycle"` otherwise. | Heterogeneous enterprise catalogs mixing mature and newly launched series (`cold_start_short_history`). |
+| **`"analog_transfer"`** | Computes a composite donor similarity score combining static covariate affinity, hierarchical lineage overlap, and normalized early-ramp trajectory correlation over the $k$ observed post-launch periods, then transfers the top-$K$ donors' seasonal shape scaled by empirical-Bayes level shrinkage. | Retail SKU launches, new store openings, and replacement product rollouts with peer history. |
+| **`"bass_diffusion"`** | Fits the Bass (1969) innovation/imitation S-curve $y(t) = m \cdot \frac{(p+q)^2}{p} \frac{e^{-(p+q)t}}{(1 + (q/p)e^{-(p+q)t})^2}$ regularized toward panel priors $(\bar{p}, \bar{q})$. | Technology adoption, subscription cohorts, and cumulative launch ramps without close analogs. |
+| **`"weibull_lifecycle"`** | Fits a 3-parameter Weibull launch-peak-decay curve $y(t) = A \cdot (k/\lambda)(t/\lambda)^{k-1} e^{-(t/\lambda)^k}$ with empirical-Bayes shape stabilization. | Fashion, seasonal apparel, media, and promotional limited-edition lifecycles. |
+
+`Forecaster.profile_data()` automatically counts short-history series (`n_cold_start_series`, `cold_start_fraction`), `Forecaster.auto()` evaluates Branch 2c (`cold_start_analog_transfer`) when cold-start series are detected, and `f.assess()` reports cold-start transfer lift in Question 4.
+
+---
+
+## 4. Declarative `RunConfig` & Python SDK Examples
 
 ```json
 {
@@ -88,7 +104,10 @@ Forecasting each share independently in raw space produces predictions that drif
     "transform": "ilr",
     "simplex_sum": 100.0,
     "future_covariates": ["is_holiday", "promo_flag"],
-    "on_unsupported_covariates": "fallback"
+    "on_unsupported_covariates": "fallback",
+    "cold_start_transfer": true,
+    "cold_start_min_obs": 14,
+    "cold_start_method": "auto"
   },
   "backtest": {
     "enabled": true,
@@ -122,7 +141,12 @@ ilr_preds = sf.forecast_simplex_panel(
 )
 print("Max simplex discrepancy:", sf.verify_simplex(ilr_preds, simplex_sum=100.0))
 
-# 3. Run an automated bake-off with @transform_clr / @transform_ilr variants and inspect the 7-Question Assessment
+# 3. Synthesize cold-start / NPI trajectories on dgp_11_cold_start_mixed
+cs_bench = sf.load_benchmark("dgp_11_cold_start_mixed")
+cs_df = sf.cold_start_transfer_df(cs_bench.df, min_obs=14, method="auto", horizon=14)
+print(cs_df[["ts_id", "n_obs", "is_cold_start", "selected_archetype", "donor_ts_ids", "yhat_mean"]].head())
+
+# 4. Run an automated bake-off and inspect the 7-Question Assessment
 f = sf.Forecaster.auto(
     data=bench.df,
     target_col="y",
@@ -136,4 +160,5 @@ See also:
 - [Notebook 05: Covariates and Global Models](./notebooks/05_covariates_and_global_models.ipynb)
 - [Notebook 06: Hierarchical Reconciliation, THieF & Compositional Simplex](./notebooks/06_hierarchical_reconciliation.ipynb)
 - [Configuration Reference](./configuration_reference.md)
-- [API Reference: `features`](./api/features.md), [`simplex`](./api/simplex.md), [`monotonicity`](./api/monotonicity.md), [`holiday_window`](./api/holiday_window.md)
+- [API Reference: `features`](./api/features.md), [`simplex`](./api/simplex.md), [`monotonicity`](./api/monotonicity.md), [`holiday_window`](./api/holiday_window.md), [`cold_start`](./api/cold_start.md)
+

@@ -162,9 +162,29 @@ def test_skill_md_and_extension_manifests() -> None:
         "Forecaster.profile_data",
         "Forecaster.build_config",
         "Forecaster.auto",
+        "Forecaster.evolve",
         "practitioner_assessment_df",
+        "promo_elasticity_df",
+        "temporal_reconcile_df",
+        "allocate_target",
+        "cold_start_transfer_df",
+        "aci_df",
+        "sample_trajectories",
+        "tail_risk_df",
+        "optimize_inventory_df",
+        "optimize_scenario",
     ):
         assert auto_token in text
+    for fm_token in (
+        "AlphaEvolve",
+        "Double-ML",
+        "THieF",
+        "Goal-Seek",
+        "cold-start NPI",
+        "copula",
+        "VaR/CVaR",
+    ):
+        assert fm_token in frontmatter
 
     # Google Antigravity workspace auto-discovery (.agents/skills.json + .agents/skills/ symlink)
     agents_skills_json = REPO_ROOT / ".agents" / "skills.json"
@@ -255,3 +275,26 @@ def test_bump_version_updates_all_version_locked_files(
 
     with pytest.raises(ValueError, match="Invalid semantic version"):
         agent_surfaces.bump_version("not-a-semver", tmp_path)
+
+
+def test_variant_tags_and_track_l_enums_have_zero_drift() -> None:
+    """R3.3 tripwire: verify `_VARIANT_SYNTAX_ROWS` and `probe_environment()` stay in sync with
+    `config.VALID_VARIANT_TAGS`, `config.COLD_START_METHODS`, and `copula.COPULA_TYPES`.
+    """
+    import re
+
+    from scale_forecasting import config
+    from scale_forecasting.copula import COPULA_TYPES
+
+    syntax_text = " ".join(row[0] for row in agent_surfaces._VARIANT_SYNTAX_ROWS)
+    documented_tags = set(re.findall(r"<model>@([a-z0-9_]+)", syntax_text))
+    assert documented_tags == set(config.VALID_VARIANT_TAGS)
+
+    probe = agent_surfaces.probe_environment()
+    assert tuple(probe["auto_forecaster"]["cold_start_archetypes"]) == config.COLD_START_METHODS
+    assert tuple(probe["auto_forecaster"]["calibration_methods"]) == config.CALIBRATION_METHODS
+
+    norm_text = " ".join(agent_surfaces._NORMALIZATION_RULES)
+    assert "output.include_trajectories" not in norm_text
+    for cop_t in COPULA_TYPES:
+        assert f'"{cop_t}"' in norm_text

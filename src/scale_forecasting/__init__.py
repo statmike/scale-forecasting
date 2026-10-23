@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.6.0"
+    __version__ = "1.7.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -295,6 +295,56 @@ _LAZY: dict[str, tuple[str, str]] = {
     "EvolveConfig": (".evolve", "EvolveConfig"),
     "EvolveResult": (".evolve", "EvolveResult"),
     "run_evolution": (".evolve", "run_evolution"),
+    # Cold-start NPI, online ACI, copula risk, inventory & scenario optimization (Track L).
+    "DonorProfile": (".cold_start", "DonorProfile"),
+    "ColdStartDonorPool": (".cold_start", "ColdStartDonorPool"),
+    "ColdStartDonorCatalog": (".cold_start", "ColdStartDonorCatalog"),
+    "ColdStartForecastResult": (".cold_start", "ColdStartForecastResult"),
+    "build_cold_start_donor_pool": (".cold_start", "build_cold_start_donor_pool"),
+    "build_cold_start_donor_catalog": (".cold_start", "build_cold_start_donor_catalog"),
+    "fit_bass_diffusion": (".cold_start", "fit_bass_diffusion"),
+    "fit_weibull_lifecycle": (".cold_start", "fit_weibull_lifecycle"),
+    "forecast_cold_start_series": (".cold_start", "forecast_cold_start_series"),
+    "cold_start_transfer_df": (".cold_start", "cold_start_transfer_df"),
+    "cold_start_diagnostic_df": (".cold_start", "cold_start_diagnostic_df"),
+    "cold_start_report_df": (".cold_start", "cold_start_report_df"),
+    "plot_cold_start_transfer": (".cold_start", "plot_cold_start_transfer"),
+    "AciCalibrationState": (".aci", "AciCalibrationState"),
+    "compute_aci_df": (".aci", "compute_aci_df"),
+    "aci_df": (".aci", "aci_df"),
+    "aci_trajectory_df": (".aci", "aci_trajectory_df"),
+    "update_aci_online": (".aci", "update_aci_online"),
+    "aci_report_df": (".aci", "aci_report_df"),
+    "calibrate_aci_from_oof": (".aci", "calibrate_aci_from_oof"),
+    "plot_aci": (".aci", "plot_aci"),
+    "COPULA_TYPES": (".copula", "COPULA_TYPES"),
+    "VALID_COPULA_TYPES": (".copula", "VALID_COPULA_TYPES"),
+    "CopulaRiskSummary": (".copula", "CopulaRiskSummary"),
+    "sample_trajectories": (".copula", "sample_trajectories"),
+    "sample_copula_trajectories": (".copula", "sample_copula_trajectories"),
+    "sample_joint_trajectories": (".copula", "sample_joint_trajectories"),
+    "compute_tail_risk": (".copula", "compute_tail_risk"),
+    "tail_risk_df": (".copula", "tail_risk_df"),
+    "summarize_trajectory_risk": (".copula", "summarize_trajectory_risk"),
+    "evaluate_trajectory_paths": (".copula", "evaluate_trajectory_paths"),
+    "plot_trajectories": (".copula", "plot_trajectories"),
+    "INVENTORY_OPTIMIZER_COLUMNS": (".inventory_optimizer", "INVENTORY_OPTIMIZER_COLUMNS"),
+    "INVENTORY_POLICY_COLUMNS": (".inventory_optimizer", "INVENTORY_POLICY_COLUMNS"),
+    "compute_inventory_frontier": (".inventory_optimizer", "compute_inventory_frontier"),
+    "optimize_inventory_df": (".inventory_optimizer", "optimize_inventory_df"),
+    "optimize_inventory_portfolio": (".inventory_optimizer", "optimize_inventory_portfolio"),
+    "plot_inventory_frontier": (".inventory_optimizer", "plot_inventory_frontier"),
+    "SCENARIO_OPTIMIZATION_COLUMNS": (
+        ".scenario_optimizer",
+        "SCENARIO_OPTIMIZATION_COLUMNS",
+    ),
+    "SCENARIO_OPTIMIZATION_SUMMARY_COLUMNS": (
+        ".scenario_optimizer",
+        "SCENARIO_OPTIMIZATION_SUMMARY_COLUMNS",
+    ),
+    "ScenarioOptimizationResult": (".scenario_optimizer", "ScenarioOptimizationResult"),
+    "optimize_scenario": (".scenario_optimizer", "optimize_scenario"),
+    "plot_optimal_scenario": (".scenario_optimizer", "plot_optimal_scenario"),
 }
 
 __all__ = [
@@ -320,6 +370,16 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports (re-exported below)
+    from .aci import (  # noqa: F401
+        AciCalibrationState,
+        aci_df,
+        aci_report_df,
+        aci_trajectory_df,
+        calibrate_aci_from_oof,
+        compute_aci_df,
+        plot_aci,
+        update_aci_online,
+    )
     from .agent_surfaces import probe_environment  # noqa: F401
     from .auto import (  # noqa: F401
         EXPOSURE_TIERS,
@@ -349,6 +409,34 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         list_public_benchmarks,
         load_benchmark,
         public_benchmark_catalog,
+    )
+    from .cold_start import (  # noqa: F401
+        ColdStartDonorCatalog,
+        ColdStartDonorPool,
+        ColdStartForecastResult,
+        DonorProfile,
+        build_cold_start_donor_catalog,
+        build_cold_start_donor_pool,
+        cold_start_diagnostic_df,
+        cold_start_report_df,
+        cold_start_transfer_df,
+        fit_bass_diffusion,
+        fit_weibull_lifecycle,
+        forecast_cold_start_series,
+        plot_cold_start_transfer,
+    )
+    from .copula import (  # noqa: F401
+        COPULA_TYPES,
+        VALID_COPULA_TYPES,
+        CopulaRiskSummary,
+        compute_tail_risk,
+        evaluate_trajectory_paths,
+        plot_trajectories,
+        sample_copula_trajectories,
+        sample_joint_trajectories,
+        sample_trajectories,
+        summarize_trajectory_risk,
+        tail_risk_df,
     )
     from .dag import DagNode  # noqa: F401
     from .diagnostics import (  # noqa: F401
@@ -402,6 +490,14 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         HOLIDAY_WINDOW_COLUMNS,
         HolidayWindowConfig,
         build_holiday_window_features,
+    )
+    from .inventory_optimizer import (  # noqa: F401
+        INVENTORY_OPTIMIZER_COLUMNS,
+        INVENTORY_POLICY_COLUMNS,
+        compute_inventory_frontier,
+        optimize_inventory_df,
+        optimize_inventory_portfolio,
+        plot_inventory_frontier,
     )
     from .main import run  # noqa: F401
     from .mcp import McpServer  # noqa: F401
@@ -466,6 +562,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         review_run,
     )
     from .router import split_by_runtime  # noqa: F401
+    from .scenario_optimizer import (  # noqa: F401
+        SCENARIO_OPTIMIZATION_COLUMNS,
+        SCENARIO_OPTIMIZATION_SUMMARY_COLUMNS,
+        ScenarioOptimizationResult,
+        optimize_scenario,
+        plot_optimal_scenario,
+    )
     from .scenarios import (  # noqa: F401
         apply_scenario_shocks,
         compare_scenario_margin_curves,

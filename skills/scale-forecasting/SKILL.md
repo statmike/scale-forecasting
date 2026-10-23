@@ -1,10 +1,10 @@
 ---
 name: scale-forecasting
-description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting pipelines on Google Cloud or offline using scale-forecasting (37 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; Glass-Box Auto-Forecaster across 4 exposure tiers, multi-branch autofocus, 20 synthetic DGP benchmarks + 9 public open-data benchmarks, and 7-Question Practitioner Assessment; BigQuery lineage and leaderboards). Use whenever a user asks to forecast time series, profile a dataset, auto-compile or hand-author a RunConfig JSON, run multi-branch autofocus tournaments, answer practitioner trust questions (baseline lift, ensemble parsimony, covariate overfitting, global vs local, hierarchy reconciliation), launch or schedule jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit a Cloud Composer 3 Airflow DAG, inspect BigQuery forecast registries, or surgically repair failed (ts_id, model_type) cells.
+description: Configure, validate, dry-run, execute, review, and repair enterprise time-series forecasting and prescriptive optimization pipelines on Google Cloud or offline using scale-forecasting (37 models across statistical, ML, deep learning, Vertex AI AutoML, and BigQuery ML; 21 metrics; 7 runtimes; 5 execution paths; Glass-Box Auto-Forecaster across 4 exposure tiers, multi-branch autofocus, AlphaEvolve/Vertex Gemini code evolution, 20 synthetic DGP + 9 public benchmarks, and 7-Question Practitioner Assessment; causal @monotone guardrails & Double-ML promo elasticity; 3-mode spatial/temporal THieF & cross_temporal_mint reconciliation, @transform_ilr/@transform_clr compositional simplex, and top-down Goal-Seek QP; cold-start NPI analog/Bass/Weibull transfer, online Adaptive Conformal Inference ACI, joint Gaussian/Student-t copula trajectories & VaR/CVaR tail risk, multi-SKU portfolio inventory optimization, and prescriptive price/promo scenario optimization). Use whenever a user asks to forecast time series, profile a dataset, auto-compile or hand-author a RunConfig JSON, run autofocus or Forecaster.evolve(), answer practitioner trust questions, analyze promo/price elasticity, reconcile spatial/temporal hierarchies or market-share simplexes, disaggregate top-down targets, handle cold-start NPI launches, simulate copula tail risk, optimize inventory budgets/MOQs or promo/price calendars, launch jobs on Spark/Ray/Vertex/GCE/GKE/AutoML/BigQuery, emit an Airflow DAG, inspect BigQuery forecast registries, or surgically repair failed cells.
 license: Apache-2.0
 metadata:
   author: statmike
-  version: 1.6.0
+  version: 1.7.0
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide
@@ -80,7 +80,7 @@ bp = Forecaster.build_config(
 print(bp.explain())  # Plain-English rationale table + P50/P90 runtime & cost estimate
 bp.to_file("/tmp/compiled_config.json")  # Standard editable RunConfig JSON
 ```
-- Pin any user constraint (`models`, `include_models`, `exclude_models`, `allowed_families`, `decision_metric`, `n_folds`, `hpo`, `ensemble`, `holidays`, `baselines`, `max_minutes`, `max_usd`) — pinned rules are marked `[PINNED]` and respected across every pass.
+- Pin any user constraint (`models`, `include_models`, `exclude_models`, `allowed_families`, `decision_metric`, `n_folds`, `hpo`, `ensemble`, `holidays`, `baselines`, `max_minutes`, `max_usd`) — pinned rules are marked `[PINNED]` and respected across every pass. When `price` or `discount` covariates are present, the compiler automatically synthesizes downward-sloping `monotonic_constraints` (`{"price": -1}`) and `<model>@monotone` variants.
 
 #### Option 1B — Hand-Author `RunConfig` Directly
 Always include `"$schema": "https://statmike.github.io/scale-forecasting/schemas/run_config.schema.json"` at the top of generated JSON files (it provides IDE autocomplete and is stripped before `run_id` hashing).
@@ -93,14 +93,17 @@ Always include `"$schema": "https://statmike.github.io/scale-forecasting/schemas
    - Deep learning and open-weight foundation models (`deep_learning` family: `chronos2`, `chronos_bolt`, `neuralprophet`, `patchtst`, `tft`, `tide`, `timesfm_torch`, `tsmixer`) run on Python runtimes and support GPU acceleration (`hardware: "gpu"`).
    - Vertex AI AutoML models (`automl` family: `vertex_l2l`, `vertex_seq2seq`, `vertex_tft`, `vertex_tide`) require `compute.families.automl.runtime = "vertex_automl"`.
    - BigQuery-native models (`native` family: `arima_plus`, `timesfm` / alias `bq_timesfm`) execute as in-warehouse SQL on `bigquery`.
-3. **Learned Ensembles & HPO Require Backtesting:**
+3. **Learned Ensembles, Cross-Run Blending & HPO Require Backtesting:**
    - `hpo.enabled = true` requires `backtest.enabled = true`.
-   - If `ensemble.strategies` includes learned stackers (`"nnls"`, `"ridge"`, or `"xgb"`), you **must** set `"backtest": {"enabled": true, ...}` so out-of-fold (`backtest_oof`) predictions exist to train the combiner weights; otherwise `RunConfig` drops the learned strategies down to `"mean"` with a warning.
+   - If `ensemble.strategies` includes learned stackers (`"nnls"`, `"ridge"`, or `"xgb"`), you **must** set `"backtest": {"enabled": true, ...}` so out-of-fold (`backtest_oof`) predictions exist to train the combiner weights; otherwise `RunConfig` drops the learned strategies down to `"mean"` with a warning. Use `ensemble.from_run_ids` to blend models across completed historical runs without refitting.
 4. **Covariate Declarations (`features`):**
    - Known-in-advance future drivers (promotions, planned prices) go in `features.future_covariates` (`list[str]`) and `data.future_covariates_table`.
    - Historical-only drivers (observed weather, foot traffic) go in `features.past_covariates` (`list[str]`).
    - Time-invariant series attributes go in `features.static_covariates` (`list[str]`). All three lists must be mutually disjoint.
-5. **Per-Family Compute Routing (`compute.families.<family>`):**
+5. **Composable `<model>@<tag>` Variants & 3-Mode Hierarchy Reconciliation:**
+   - Any model in `models` can append `@` tags to race side-by-side variants in one run: scope (`@local`, `@global`, `@hybrid`), covariates (`@univariate`, `@cov_all`, `@cov_<col>`, `@cov_drop_<col>`), transforms (`@transform_log1p`, `@transform_boxcox`, `@transform_clr`, `@transform_ilr`), causal sign constraints (`@monotone`), cold-start NPI archetypes (`@cold_start`, `@analog_transfer`, `@bass_diffusion`, `@weibull_lifecycle`), and online adaptive conformal intervals (`@aci`, `@aci_norm`, `@aci_normalized`).
+   - Set `hierarchy.levels` for Mode 1 spatial reconciliation (`bottom_up`, `wls_struct`, `mint_shrink`, `mint_nonneg`), `hierarchy.reconcile_temporal = true` for Mode 2 `THieF` temporal reconciliation on flat panels, or `hierarchy.cross_temporal = true` (with `"cross_temporal_mint"` in `hierarchy.methods` and `spatial_temporal_weight = "auto"`) for Mode 3 simultaneous cross-temporal coherence.
+6. **Per-Family Compute Routing (`compute.families.<family>`):**
    - `scale-forecasting` dispatches **1 independent job per active model family in parallel** (`statistical`, `ml`, `deep_learning`, `automl`, `native`) so fast CPU families tear down immediately without waiting for GPU jobs.
    - Keep `machine_type: "auto"` unless pinning a specific shape from `resources/catalog.py`. Only `deep_learning` and `automl` families may set `hardware: "gpu"` or `gpu_type`.
    - On single-VM `gce`, `workers` must be `1`. On `vertex` and `gke` Indexed Jobs, `workers > 1` shards `ts_id` ranges across workers via BigQuery Storage Read API `row_restriction`.
@@ -162,7 +165,16 @@ Every cloud run persists structured lineage and outputs to 5 BigQuery tables (`r
    f = Forecaster.from_run_id("ensemble-demo-8ca68173be52")
    policy_df = f.inventory_policy_df(lead_time=7.0, service_level=0.95)
    ```
-   Or via MCP: `review_run(run_id="...", include_inventory_policy=True, inventory_params={"lead_time": 7.0, "service_level": 0.95})`. Returns `best_overall`, `best_per_family`, `ensemble_lift`, full model leaderboard (`score`, `pooled_wape`, `n_comparable_series`, `cohort`), point-forecast arm win-rate (`arms`), empirical vs. nominal interval coverage (`coverage`, `mean_coverage`, `worst_step`), and optional Forecaster Workbench diagnostics (`fva`, `horizon_decay`, `bias_report`, `exceptions`, `inventory_policy`, `scenarios`).
+
+   | Workbench Surface | SDK / Config Entrypoint | Purpose |
+   | :--- | :--- | :--- |
+   | **Promo Elasticity & What-If Scenarios** | `f.promo_elasticity_df()`, `f.simulate_scenarios(scenarios)` | Double-ML causal price/promo decomposition, pull-forward dip, cannibalization, and counterfactual lift. |
+   | **Temporal & Cross-Temporal (`THieF`) + Simplex** | `f.temporal_reconcile_df(method="cross_temporal_mint")`, `"<model>@transform_clr"`, `"<model>@transform_ilr"` | Multi-frequency temporal/cross-temporal coherence and compositional simplex closure (`sum = S`). |
+   | **Top-Down Goal-Seek QP** | `f.allocate_target(target_total, locked_nodes=..., smoothness_weight=...)` | Variance-weighted QP target disaggregation with hard locks/bounds (`GoalSeekInfeasibleError`). |
+   | **Cold-Start & Online ACI** | `f.cold_start_transfer_df()`, `f.aci_df()`, `"<model>@cold_start"`, `"<model>@aci_norm"` | Empirical-Bayes analog/Bass/Weibull NPI transfer and Gibbs-Candès online adaptive conformal intervals. |
+   | **Joint Copula Risk & Optimizers** | `f.sample_trajectories()`, `f.tail_risk_df()`, `f.optimize_inventory_df()`, `f.optimize_scenario()` | Gaussian/Student-$t$ trajectories, portfolio VaR/CVaR, KKT+MILP replenishment, and MILP+SLSQP price/promo calendars. |
+
+   Or via MCP: `review_run(run_id="...", include_inventory_policy=True, inventory_params={"lead_time": 7.0, "service_level": 0.95}, include_cold_start=True, include_aci=True, include_tail_risk=True)`. Returns `best_overall`, `best_per_family`, `ensemble_lift`, full model leaderboard (`score`, `pooled_wape`, `n_comparable_series`, `cohort`), point-forecast arm win-rate (`arms`), empirical vs. nominal interval coverage (`coverage`, `mean_coverage`, `worst_step`), and optional Forecaster Workbench diagnostics (`fva`, `horizon_decay`, `bias_report`, `exceptions`, `inventory_policy`, `scenarios`, `cold_start`, `aci`, `trajectories`, `tail_risk`, `optimized_inventory`, `optimized_scenario`).
 3. **Surgical Repair of Failed or Partial Runs (Never Re-Run Everything Blindly):**
    - **Preview or submit surgical cell repair (`retry_run`):** Re-runs only missing or failed `(ts_id, model_type)` cells and re-runs the ensemble barrier if any cell was repaired:
      ```bash
