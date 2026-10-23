@@ -202,6 +202,11 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "ablation_models"): [],
     ("features", "monotonic_constraints"): {},
     ("features", "holiday_window"): None,
+    ("features", "cold_start_transfer"): False,
+    ("features", "cold_start_min_obs"): 14,
+    ("features", "cold_start_method"): "auto",
+    ("output", "calibration_method"): "conformal",
+    ("output", "aci_gamma"): 0.05,
 }
 
 
@@ -349,6 +354,17 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         )
     if eff_f.holiday_window is not None and uses_py_calendar and eff_f.holidays:
         features_payload["holiday_window"] = eff_f.holiday_window.model_dump(mode="json")
+    if eff_f.cold_start_transfer:
+        features_payload["cold_start_transfer"] = True
+        features_payload["cold_start_min_obs"] = eff_f.cold_start_min_obs
+        features_payload["cold_start_method"] = eff_f.cold_start_method
+
+    output_payload = spec.effective_cfg.output.model_dump(mode="json")
+    if output_payload.get("calibration_method") == "conformal":
+        output_payload.pop("calibration_method", None)
+    if output_payload.get("aci_gamma") == 0.05:
+        output_payload.pop("aci_gamma", None)
+
     spec_payload: dict[str, Any] = {
         "base_model": spec.base_model,
         "training_mode": spec.training_mode,
@@ -367,7 +383,7 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
             "trim_leading_zeros": cfg.data.trim_leading_zeros,
         },
         "backtest": cfg.backtest.model_dump(mode="json"),
-        "output": cfg.output.model_dump(mode="json"),
+        "output": output_payload,
         "hpo": cfg.hpo.model_dump(mode="json"),
     }
     raw = json.dumps(spec_payload, sort_keys=True, separators=(",", ":"))

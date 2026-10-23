@@ -186,6 +186,46 @@ _RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$")
 
 GridPolicy = Literal["strict", "fill_zero", "zero_fill", "ffill", "linear"]
 OutlierPolicy = Literal["none", "winsorize", "interpolate", "flag", "stl_resid"]
+ColdStartMethod = Literal["auto", "analog_transfer", "bass_diffusion", "weibull_lifecycle"]
+COLD_START_METHODS: tuple[str, ...] = (
+    "auto",
+    "analog_transfer",
+    "bass_diffusion",
+    "weibull_lifecycle",
+)
+CalibrationMethod = Literal["conformal", "aci", "aci_normalized"]
+CALIBRATION_METHODS: tuple[str, ...] = ("conformal", "aci", "aci_normalized")
+VALID_VARIANT_TAGS: frozenset[str] = frozenset(
+    {
+        "univariate",
+        "cov_none",
+        "cov_all",
+        "cov_future_only",
+        "cov_past_only",
+        "cov_static_only",
+        "cov_dynamic",
+        "cov_future_static",
+        "cov_past_static",
+        "local",
+        "global",
+        "hybrid",
+        "transform_log1p",
+        "transform_boxcox",
+        "transform_clr",
+        "transform_ilr",
+        "transform_none",
+        "direct",
+        "recursive",
+        "monotone",
+        "cold_start",
+        "analog_transfer",
+        "bass_diffusion",
+        "weibull_lifecycle",
+        "aci",
+        "aci_norm",
+        "aci_normalized",
+    }
+)
 AblationMode = Literal[
     "univariate",
     "cov_none",
@@ -326,6 +366,9 @@ class FeaturesConfig(BaseModel):
     ablation_models: list[str] = Field(default_factory=list)
     monotonic_constraints: dict[str, Literal[-1, 0, 1]] = Field(default_factory=dict)
     holiday_window: HolidayWindowConfig | None = None
+    cold_start_transfer: bool = False
+    cold_start_min_obs: int = Field(default=14, ge=1)
+    cold_start_method: ColdStartMethod = "auto"
 
     @field_validator("monotonic_constraints", mode="before")
     @classmethod
@@ -477,8 +520,8 @@ class BacktestConfig(BaseModel):
     min_train: int = Field(default=180, gt=0)
     decision_metric: DecisionMetric = "wape"
 
-    # What a series too short for the full fold grid gets. Resolved by `backtest.resolve_geometry`;
-    # see the class docstring for what each branch trades away.
+    # What a series too short for the requested fold grid gets. Resolved by
+    # `backtest.resolve_geometry`; see the class docstring for what each branch trades away.
     short_series: ShortSeriesPolicy = "adapt"
     # The give-up floor: fewer achievable folds than this and the series is left unscored rather
     # than scored on evidence too thin to rank it. The default of 1 is today's behaviour exactly.
@@ -592,6 +635,8 @@ class OutputConfig(BaseModel):
     underage_cost: float | None = Field(default=None, gt=0.0)
     overage_cost: float | None = Field(default=None, gt=0.0)
     target_quantile: float | None = Field(default=None, gt=0.0, lt=1.0)
+    calibration_method: CalibrationMethod = "conformal"
+    aci_gamma: float = Field(default=0.05, gt=0.0, le=0.5)
 
     @property
     def effective_target_quantile(self) -> float | None:
@@ -653,6 +698,10 @@ class OutputConfig(BaseModel):
         if self.target_quantile is not None and self.underage_cost is not None:
             raise ValueError(
                 "cannot set both output.target_quantile and output.underage_cost/overage_cost"
+            )
+        if _is_non_finite(self.aci_gamma):
+            raise ValueError(
+                f"output.aci_gamma must be a finite float in (0, 0.5]; got {self.aci_gamma!r}"
             )
         return self
 

@@ -402,11 +402,20 @@ def run_group(
 
                 clean_panel, spec = build_hierarchy(clean_panel, cfg)
 
+            donor_pool = None
+            if cfg.features.cold_start_transfer and not clean_panel.empty:
+                from ..cold_start import build_cold_start_donor_pool
+
+                donor_pool = build_cold_start_donor_pool(clean_panel, cfg)
+                clean_panel.attrs["cold_start_donor_pool"] = donor_pool
+
             model_results: list[CellResult] = []
             if is_panel_model(mname, cfg, by_model.get(mname)):
                 model_results.extend(run_panel(clean_panel, mname, cfg, by_model.get(mname)))
             else:
                 for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
+                    if donor_pool is not None:
+                        sub.attrs["cold_start_donor_pool"] = donor_pool
                     model_results.append(run_cell(sub, mname, cfg, by_model.get(mname)))
             from ..simplex import close_simplex_cells, has_simplex_models
 
@@ -428,6 +437,13 @@ def run_group(
 
             clean_panel, spec = build_hierarchy(clean_panel, cfg)
 
+        donor_pool = None
+        if cfg.features.cold_start_transfer and not clean_panel.empty:
+            from ..cold_start import build_cold_start_donor_pool
+
+            donor_pool = build_cold_start_donor_pool(clean_panel, cfg)
+            clean_panel.attrs["cold_start_donor_pool"] = donor_pool
+
         panel_models = [m for m in executed if is_panel_model(m, cfg, by_model.get(m))]
         local_models = [m for m in executed if m not in panel_models]
         if panel_models and not clean_panel.empty:
@@ -435,6 +451,8 @@ def run_group(
                 results.extend(run_panel(clean_panel, model_name, cfg, by_model.get(model_name)))
         if local_models and not clean_panel.empty:
             for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
+                if donor_pool is not None:
+                    sub.attrs["cold_start_donor_pool"] = donor_pool
                 for model_name in local_models:
                     results.append(run_cell(sub, model_name, cfg, by_model.get(model_name)))
         if results and not clean_panel.empty:

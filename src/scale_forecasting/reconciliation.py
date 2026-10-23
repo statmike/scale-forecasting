@@ -1193,7 +1193,14 @@ def verify_coherence(
                 dcol = cand
                 break
     vcol = target_col if target_col is not None else value_col
-    if vcol not in df.columns:
+    if (
+        target_col is None
+        and value_col == "yhat"
+        and "path_id" in df.columns
+        and "yhat_sample" in df.columns
+    ):
+        vcol = "yhat_sample"
+    elif vcol not in df.columns:
         for cand in ("yhat", "yhat_sample", "y_allocated", "allocated_yhat", "y_sample", "y"):
             if cand in df.columns:
                 vcol = cand

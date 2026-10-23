@@ -36,6 +36,7 @@ __all__ = [
     "PROMO_ELASTICITY_COLUMNS",
     "compute_promo_elasticity",
     "compute_promo_elasticity_decomposition",
+    "detect_treatment_cols",
     "make_confounded_promo_dgp",
     "plot_promo_elasticity",
     "promo_elasticity_df",
@@ -124,6 +125,9 @@ def _detect_treatment_cols(
                     break
 
     return resolved_promo, resolved_price
+
+
+detect_treatment_cols = _detect_treatment_cols
 
 
 def _build_seasonal_nuisance_matrix(

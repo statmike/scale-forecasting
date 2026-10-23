@@ -78,7 +78,17 @@ POINT_FORECAST_ARMS: tuple[str, ...] = ("raw", "median", "mean")
 
 # Calibration provenance, most to least informative. Recorded per cell so a reader can tell a
 # genuinely held-out band from the in-sample fallback without inferring it from the config.
-CALIBRATION_SOURCES: tuple[str, ...] = ("oof-per-step", "oof-flat", "in-sample", "native")
+CALIBRATION_SOURCES: tuple[str, ...] = (
+    "oof-per-step",
+    "oof-flat",
+    "aci-per-step",
+    "aci-flat",
+    "aci-normalized-per-step",
+    "aci-normalized-flat",
+    "cold-start-pooled",
+    "in-sample",
+    "native",
+)
 
 # How a cell's arm got chosen — the companion to `point_forecast_source`, which says only *what* was
 # chosen. Under a fleetwide setting every cell reads "configured" and the column is dull, which is
@@ -154,10 +164,12 @@ CALIBRATED_COLUMNS: tuple[str, ...] = (
 # strictly better and genuinely available at our scale, but it needs a cross-series reduce stage
 # that does not exist in the worker. Left as follow-on work rather than faked here.
 _MIN_RESIDUALS_PER_STEP = 12
+MIN_RESIDUALS_PER_STEP = _MIN_RESIDUALS_PER_STEP
 
 # Minimum residuals overall before any OOF calibration is attempted. Below this the in-sample
 # fallback is not obviously worse and the OOF estimate is certainly unstable.
 _MIN_RESIDUALS_TOTAL = 8
+MIN_RESIDUALS_TOTAL = _MIN_RESIDUALS_TOTAL
 
 
 @dataclass(frozen=True)
@@ -229,9 +241,7 @@ def _summarize(residuals: np.ndarray, quantiles: Sequence[float]) -> StepCalibra
     )
 
 
-def _window_residuals(
-    by_step: dict[int, np.ndarray], step: int, steps: Sequence[int]
-) -> np.ndarray:
+def window_residuals(by_step: dict[int, np.ndarray], step: int, steps: Sequence[int]) -> np.ndarray:
     """Residuals for `step`, widening symmetrically into neighbours until there are enough.
 
     Returns an empty array if even the full horizon cannot reach the threshold — the caller then
@@ -245,6 +255,9 @@ def _window_residuals(
             return stacked
         radius += 1
     return np.empty(0)
+
+
+_window_residuals = window_residuals
 
 
 def calibrate_from_arrays(
@@ -298,6 +311,8 @@ def calibrate_from_oof(
     quantiles: Sequence[float],
     *,
     residual_column: str = "yhat_raw",
+    method: str = "conformal",
+    aci_gamma: float = 0.05,
 ) -> Calibration | None:
     """Learn residual quantiles from a cell's out-of-fold frame, by horizon step.
 
@@ -311,6 +326,18 @@ def calibrate_from_oof(
     needed = {"y_true", residual_column}
     if not needed.issubset(oof.columns):
         return None
+
+    if method in ("aci", "aci_normalized"):
+        from .aci import calibrate_aci_from_oof
+
+        cal, _state = calibrate_aci_from_oof(
+            oof,
+            method=method,  # type: ignore[arg-type]
+            gamma=aci_gamma,
+            quantiles=quantiles,
+            residual_column=residual_column,
+        )
+        return cal
 
     resid = _fast_float_array(oof["y_true"]) - _fast_float_array(oof[residual_column])
     steps_raw = _fast_float_array(oof["horizon_step"]) if "horizon_step" in oof.columns else None

@@ -78,10 +78,10 @@ DEFAULT_TEMPORAL_FACTORS: dict[str, tuple[int, ...]] = {
 }
 
 
-class _SafeArrayDict(dict[Any, Any]):
-    """Dictionary subclass comparing NumPy array values safely via `np.array_equal`."""
+class SafeArrayDict(dict[Any, Any]):
+    """Dictionary subclass comparing NumPy array and nested mapping values via `np.array_equal`."""
 
-    def __deepcopy__(self, memo: Any) -> _SafeArrayDict:
+    def __deepcopy__(self, memo: Any) -> SafeArrayDict:
         _ = memo
         return self
 
@@ -95,9 +95,15 @@ class _SafeArrayDict(dict[Any, Any]):
             if isinstance(v, np.ndarray) or isinstance(ov, np.ndarray):
                 if not np.array_equal(np.asarray(v), np.asarray(ov)):
                     return False
+            elif isinstance(v, Mapping) and isinstance(ov, Mapping):
+                if SafeArrayDict(v) != SafeArrayDict(ov):
+                    return False
             elif v != ov:
                 return False
         return True
+
+
+_SafeArrayDict = SafeArrayDict
 
 
 @dataclass(frozen=True)
