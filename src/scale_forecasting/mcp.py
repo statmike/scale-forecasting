@@ -61,6 +61,7 @@ from .registry.views import VIEW_NAMES
 __all__ = [
     "MCP_PROTOCOL_VERSION",
     "McpServer",
+    "compute_time_series_similarity",
     "main",
 ]
 
@@ -311,7 +312,7 @@ class McpServer:
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
-        """Return the 11 MCP tools exposed by this server."""
+        """Return the 12 MCP tools exposed by this server."""
         from .benchmarks import list_benchmarks
 
         return [
@@ -653,6 +654,19 @@ class McpServer:
                                 "interactive HTML report."
                             ),
                         },
+                        "include_similarity": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute pairwise time-series similarity, digital-twin "
+                                "pairs, and behavioral clusters across the playground panel."
+                            ),
+                        },
+                        "similarity_method": {
+                            "type": "string",
+                            "default": "hybrid",
+                            "description": "Similarity kernel lens when include_similarity=true.",
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -921,6 +935,19 @@ class McpServer:
                                 "Optional file path (.html) to export a self-contained "
                                 "interactive HTML report."
                             ),
+                        },
+                        "include_similarity": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute pairwise time-series similarity and behavioral "
+                                "clusters across the run's series."
+                            ),
+                        },
+                        "similarity_method": {
+                            "type": "string",
+                            "default": "hybrid",
+                            "description": "Similarity kernel lens when include_similarity=true.",
                         },
                     },
                     "required": ["run_id"],
@@ -1273,12 +1300,19 @@ class McpServer:
                         },
                         "evolve_target": {
                             "type": ["string", "null"],
-                            "enum": ["features", "ensemble", "model", "policy", None],
+                            "enum": [
+                                "features",
+                                "ensemble",
+                                "model",
+                                "policy",
+                                "similarity_kernel",
+                                None,
+                            ],
                             "default": None,
                             "description": (
                                 "Optional # EVOLVE-BLOCK target ('features', 'ensemble', 'model', "
-                                "'policy') to trigger Forecaster.evolve(...) with the 3-Gate "
-                                "Anti-Overfitting Ratchet."
+                                "'policy', 'similarity_kernel') to trigger Forecaster.evolve(...) "
+                                "with the 3-Gate Anti-Overfitting Ratchet."
                             ),
                         },
                         "evolve_backend": {
@@ -1315,6 +1349,104 @@ class McpServer:
                                 "post-run super-ensembling via Forecaster.evolve(from_run_ids=...)."
                             ),
                         },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "compute_time_series_similarity",
+                "description": (
+                    "Compute multi-lens time-series similarity (`hybrid`, `physics_attractor`, "
+                    "`spectral_phase`, `elastic_dtw`, `minirocket`, `structural_signature`, "
+                    "`foundation_latent`), Takens phase-space / dynamical invariants, Ward "
+                    "behavioral clusters, and digital-twin analog matches (`full_history`, "
+                    "`launch_prefix`, `recent_window`) across a panel."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": ["string", "null"],
+                            "default": "playground",
+                            "description": (
+                                "Data source: 'playground', a DGP benchmark name, or a local "
+                                "CSV/Parquet/JSON path."
+                            ),
+                        },
+                        "source_path_or_table": {
+                            "type": ["string", "null"],
+                            "default": None,
+                            "description": (
+                                "Optional alias for source path, benchmark name, or BigQuery table."
+                            ),
+                        },
+                        "preset": {
+                            "type": "string",
+                            "default": "retail_daily",
+                            "description": "Playground preset when source='playground'.",
+                        },
+                        "records": {
+                            "type": ["array", "null"],
+                            "items": {"type": "object"},
+                            "default": None,
+                            "description": (
+                                "Optional inline panel records (each with ts_id, ds, y)."
+                            ),
+                        },
+                        "method": {
+                            "type": "string",
+                            "enum": [
+                                "hybrid",
+                                "physics_attractor",
+                                "spectral_phase",
+                                "elastic_dtw",
+                                "minirocket",
+                                "structural_signature",
+                                "foundation_latent",
+                            ],
+                            "default": "hybrid",
+                            "description": "Similarity kernel lens.",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full_history", "launch_prefix", "recent_window"],
+                            "default": "full_history",
+                            "description": "Digital-twin matching mode.",
+                        },
+                        "query_ts_id": {
+                            "type": ["string", "null"],
+                            "default": None,
+                            "description": (
+                                "Optional query series ID for targeted k-NN digital-twin search."
+                            ),
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "default": 5,
+                            "description": "Number of top neighbor pairs per series.",
+                        },
+                        "n_clusters": {
+                            "type": ["integer", "string"],
+                            "default": "auto",
+                            "description": (
+                                "Target cluster count K >= 2 or 'auto' for silhouette-optimal K*."
+                            ),
+                        },
+                        "max_lag": {
+                            "type": "integer",
+                            "default": 0,
+                            "description": "Maximum lead-lag cross-correlation shift tau.",
+                        },
+                        "n_series": {
+                            "type": "integer",
+                            "default": 4,
+                            "description": "Series count when generating playground data.",
+                        },
+                        "ts_id_col": {"type": "string", "default": "ts_id"},
+                        "date_col": {"type": "string", "default": "ds"},
+                        "target_col": {"type": "string", "default": "y"},
+                        "freq": {"type": "string", "default": "D"},
+                        "project_id": {"type": ["string", "null"], "default": None},
                     },
                     "additionalProperties": False,
                 },
@@ -1639,6 +1771,15 @@ class McpServer:
                     else scen_opt_res_pg
                 )
                 out_pg["scenario_optimization"] = scen_opt_df_pg.head(15).to_dict(orient="records")
+            if bool(args.get("include_similarity", False)):
+                sim_m_pg = str(args.get("similarity_method", "hybrid"))
+                sim_df_pg = run.similarity_df(method=sim_m_pg)
+                sim_cl_pg = run.similarity_clusters_df(method=sim_m_pg)
+                out_pg["similarity"] = {
+                    "method": sim_m_pg,
+                    "pairs": sim_df_pg.head(15).to_dict(orient="records"),
+                    "clusters": sim_cl_pg.to_dict(orient="records"),
+                }
             rep_path = args.get("export_report_path")
             if rep_path:
                 written = run.export_report(
@@ -1855,6 +1996,7 @@ class McpServer:
             want_aci = bool(args.get("include_aci", False))
             want_traj = bool(args.get("include_trajectories", False))
             want_tail = bool(args.get("include_tail_risk", False))
+            want_sim = bool(args.get("include_similarity", False))
             opt_inv_rev = args.get("optimize_inventory_params")
             opt_scen_rev = args.get("optimize_scenario_params")
             rep_path_rev = args.get("export_report_path")
@@ -1871,6 +2013,7 @@ class McpServer:
                 or want_aci
                 or want_traj
                 or want_tail
+                or want_sim
                 or isinstance(opt_inv_rev, dict)
                 or isinstance(opt_scen_rev, dict)
                 or rep_path_rev
@@ -1893,6 +2036,7 @@ class McpServer:
                 from .registry.reads import read_oof, read_predictions
                 from .report import export_report
                 from .scenario_optimizer import optimize_scenario
+                from .similarity import cluster_by_similarity_df, compute_similarity_matrix
                 from .temporal_reconciliation import reconcile_temporal_forecasts
 
                 oof_rows = read_oof(run_id, limit=20000, settings=settings)
@@ -1932,12 +2076,34 @@ class McpServer:
                     or want_aci
                     or want_traj
                     or want_tail
+                    or want_sim
                     or isinstance(opt_inv_rev, dict)
                     or isinstance(opt_scen_rev, dict)
                     or rep_path_rev
                 ):
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                if want_sim:
+                    sim_m_rev = str(args.get("similarity_method", "hybrid"))
+                    sim_src = (
+                        oof_df.rename(columns={"val_date": "ds", "y_true": "y"})
+                        if not oof_df.empty
+                        else (
+                            pred_df.rename(columns={"forecast_date": "ds", "yhat": "y"})
+                            if pred_df is not None and not pred_df.empty
+                            else pd.DataFrame()
+                        )
+                    )
+                    if not sim_src.empty:
+                        sim_res_rev = compute_similarity_matrix(sim_src, method=sim_m_rev)
+                        sim_cl_rev = cluster_by_similarity_df(
+                            sim_src, method=sim_m_rev, similarity_result=sim_res_rev
+                        )
+                        out["similarity"] = {
+                            "method": sim_m_rev,
+                            "pairs": sim_res_rev.pairs_df.head(20).to_dict(orient="records"),
+                            "clusters": sim_cl_rev.to_dict(orient="records"),
+                        }
                 if want_cs and pred_df is not None and not pred_df.empty:
                     hist_cs = (
                         oof_df.rename(
@@ -2668,6 +2834,27 @@ class McpServer:
                 "rows": sched_df.to_dict(orient="records"),
             }
 
+        if name in ("compute_time_series_similarity", "sf_compute_time_series_similarity"):
+            src_arg_sim = args.get("source_path_or_table") or args.get("source")
+            return compute_time_series_similarity(
+                src_arg_sim,
+                preset=str(args.get("preset", "retail_daily")),
+                method=str(args.get("method", "hybrid")),
+                query_ts_id=args.get("query_ts_id"),
+                mode=str(args.get("mode", "full_history")),
+                n_clusters=args.get("n_clusters", "auto"),
+                top_k=int(args.get("top_k", 5)),
+                max_lag=int(args.get("max_lag", 0)),
+                ts_id_col=str(args.get("ts_id_col", "ts_id")),
+                date_col=str(args.get("date_col", "ds")),
+                target_col=str(args.get("target_col", "y")),
+                freq=str(args.get("freq", "D")),
+                project_id=args.get("project_id"),
+                records=args.get("records"),
+                n_series=int(args.get("n_series", 4)),
+                repo_root=self.repo_root,
+            )
+
         raise ValueError(f"Unknown tool: {name!r}")
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
@@ -2787,6 +2974,132 @@ def _write_frame(
         frame = encoded + b"\n"
     out_stream.write(frame)
     out_stream.flush()
+
+
+def compute_time_series_similarity(
+    source_path_or_table: str | None = None,
+    *,
+    preset: str = "retail_daily",
+    method: str = "hybrid",
+    query_ts_id: str | None = None,
+    mode: str = "full_history",
+    n_clusters: int | str = "auto",
+    top_k: int = 5,
+    max_lag: int = 0,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    freq: str = "D",
+    project_id: str | None = None,
+    records: list[dict[str, Any]] | None = None,
+    n_series: int = 4,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    """Compute time-series similarity, embeddings, behavioral clusters, and analog matches."""
+    import pandas as pd
+
+    from . import playground
+    from .benchmarks import BENCHMARK_NAMES, load_benchmark
+    from .similarity import (
+        cluster_by_similarity_df,
+        compute_similarity_matrix,
+        find_similar_series_df,
+    )
+
+    _ = (preset, freq, project_id)
+    if isinstance(records, list) and records:
+        panel_df = pd.DataFrame.from_records(records)
+    elif source_path_or_table and str(source_path_or_table).strip().lower() not in (
+        "playground",
+        "none",
+        "",
+    ):
+        src_str = str(source_path_or_table).strip()
+        if src_str in BENCHMARK_NAMES:
+            panel_df = load_benchmark(src_str).df.copy()
+        else:
+            cand_p = Path(src_str)
+            if not cand_p.is_file() and repo_root is not None:
+                cand_p = repo_root / src_str
+            if cand_p.is_file():
+                sfx = cand_p.suffix.lower()
+                if sfx == ".parquet":
+                    panel_df = pd.read_parquet(cand_p)
+                elif sfx == ".json":
+                    panel_df = pd.read_json(cand_p)
+                else:
+                    panel_df = pd.read_csv(cand_p)
+            else:
+                panel_df = playground.sample_data(n_series=max(2, int(n_series)))
+    else:
+        panel_df = playground.sample_data(n_series=max(2, int(n_series)))
+
+    sim_res = compute_similarity_matrix(
+        panel_df,
+        method=method,
+        top_k=max(1, int(top_k)),
+        max_lag=max(0, int(max_lag)),
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        target_col=target_col,
+    )
+    eff_n_clusters: Any = (
+        "auto"
+        if isinstance(n_clusters, str) and n_clusters.strip().lower() == "auto"
+        else int(n_clusters)
+    )
+    clusters_df = cluster_by_similarity_df(
+        panel_df,
+        n_clusters=eff_n_clusters,
+        method=method,
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        target_col=target_col,
+        similarity_result=sim_res,
+    )
+    if query_ts_id is not None or str(mode).strip().lower() != "full_history":
+        matches_df = find_similar_series_df(
+            panel_df,
+            query_ts_id=query_ts_id,
+            method=method,
+            top_k=max(1, int(top_k)),
+            mode=mode,
+            max_lag=max(0, int(max_lag)),
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+    else:
+        matches_df = sim_res.pairs_df
+
+    opt_k = (
+        int(clusters_df["similarity_cluster_id"].nunique())
+        if not clusters_df.empty and "similarity_cluster_id" in clusters_df.columns
+        else 1
+    )
+    sil_val = (
+        float(clusters_df["silhouette_score"].mean())
+        if not clusters_df.empty and "silhouette_score" in clusters_df.columns
+        else 0.0
+    )
+    return {
+        "status": "ok",
+        "method": sim_res.method,
+        "mode": str(mode),
+        "n_series": len(sim_res.matrix_df),
+        "optimal_n_clusters": opt_k,
+        "silhouette_score": round(sil_val, 6),
+        "mean_similarity": round(
+            float(sim_res.diagnostics.get("mean_pairwise_similarity", 1.0)), 6
+        ),
+        "top_pairs": sim_res.pairs_df.head(
+            max(1, int(top_k) * max(1, len(sim_res.matrix_df)))
+        ).to_dict(orient="records"),
+        "clusters": clusters_df.to_dict(orient="records"),
+        "embeddings": sim_res.embeddings_df.to_dict(orient="records"),
+        "analog_matches": matches_df.to_dict(orient="records"),
+        "diagnostics": dict(sim_res.diagnostics),
+    }
 
 
 def _configure_stderr_logging() -> None:

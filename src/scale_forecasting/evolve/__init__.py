@@ -13,9 +13,10 @@ Provides opt-in runtime evolutionary code synthesis built directly on top of
     ``model_name``) with an in-memory multi-island MAP-Elites population buffer
     (:class:`IslandPopulationBuffer`) for projects without Gemini Enterprise licensing.
   - ``backend="mock"`` (**Offline Test Backend**): Deterministic zero-network candidate replay.
-* **Four ``# EVOLVE-BLOCK`` Targets (:mod:`~scale_forecasting.evolve.targets`):** ``"features"``
+* **Five ``# EVOLVE-BLOCK`` Targets (:mod:`~scale_forecasting.evolve.targets`):** ``"features"``
   (:func:`synthesize_evolved_features`), ``"ensemble"`` (:func:`compute_evolved_weights`),
-  ``"model"`` (:class:`EvolvedForecaster`), and ``"policy"`` (:func:`evolve_policy_weights`).
+  ``"model"`` (:class:`EvolvedForecaster`), ``"policy"`` (:func:`evolve_policy_weights`), and
+  ``"similarity_kernel"`` (:func:`compute_evolved_similarity_kernel`).
 * **AST Security & Temporal Causality Sandbox (:mod:`~scale_forecasting.evolve.sandbox`):**
   Static AST whitelist (:func:`validate_candidate_ast`) plus the $+10^6$ future-target perturbation
   test (:func:`verify_no_future_leakage`).
@@ -69,6 +70,7 @@ from .targets import (
     EvolvedForecaster,
     TargetSpec,
     build_mutation_prompt,
+    compute_evolved_similarity_kernel,
     compute_evolved_weights,
     deterministic_mock_candidates,
     evolve_policy_weights,
@@ -104,6 +106,7 @@ __all__ = [
     "VertexGeminiEvolutionClient",
     "build_mutation_prompt",
     "compile_candidate_symbol",
+    "compute_evolved_similarity_kernel",
     "compute_evolved_weights",
     "create_evolution_client",
     "deterministic_mock_candidates",

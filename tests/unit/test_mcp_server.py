@@ -129,6 +129,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         "launch_or_repair_run",
         "build_auto_config",
         "run_auto_forecast",
+        "compute_time_series_similarity",
     ]
 
     # 1. probe_environment
@@ -577,3 +578,19 @@ def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
     assert not is_err_scen, scen_res
     assert scen_res["status"] == "ok"
     assert len(scen_res["rows"]) >= 1
+
+    # Track P: compute_time_series_similarity tool and similarity schema flags
+    assert "include_similarity" in pg_props
+    assert "include_similarity" in rev_props
+    auto_props = tools["run_auto_forecast"]["inputSchema"]["properties"]
+    assert "similarity_kernel" in auto_props["evolve_target"]["enum"]
+
+    is_err_sim, sim_res = _call_tool(
+        server,
+        "compute_time_series_similarity",
+        {"method": "hybrid", "mode": "full_history", "top_k": 2, "n_clusters": 2},
+    )
+    assert not is_err_sim, sim_res
+    assert sim_res["status"] == "ok"
+    assert len(sim_res["top_pairs"]) >= 1
+    assert len(sim_res["clusters"]) >= 1

@@ -465,7 +465,7 @@ def test_mcp_run_auto_forecast_supports_evolve_target_while_keeping_11_tools(
     """MCP `run_auto_forecast` dispatches to `Forecaster.evolve` when `evolve_target` is set."""
     server = McpServer(repo_root=REPO_ROOT)
     tools = server.list_tools()
-    assert len(tools) == 11
+    assert len(tools) == 12
     auto_tool = next(t for t in tools if t["name"] == "run_auto_forecast")
     props = auto_tool["inputSchema"]["properties"]
     assert "evolve_target" in props
@@ -1008,3 +1008,52 @@ def test_evolve_f12_policy_weights_and_seed_code_include_track_j_and_k_actions()
         "enable_temporal_reconciliation",
     ):
         assert action_key in cand_weights.action_weights
+
+
+def test_evolve_similarity_kernel_target_and_track_p_policy_actions(
+    sample_panel_df: pd.DataFrame,
+) -> None:
+    """Track P: verify similarity_kernel evolve target and Track P policy actions."""
+    from scale_forecasting.auto_policy import evolved_policy_thresholds
+    from scale_forecasting.evolve.targets import (
+        AutoPolicyWeights,
+        compute_evolved_similarity_kernel,
+        evolve_policy_weights,
+    )
+
+    assert "similarity_kernel" in EVOLVE_TARGETS
+    seed_spec = get_target_seed("similarity_kernel")
+    assert seed_spec.entrypoint == "compute_evolved_similarity_kernel"
+    mat = np.array([[0.0, 1.0, 2.0], [0.1, 1.1, 2.1], [3.0, -1.0, 0.0]], dtype=float)
+    sim = compute_evolved_similarity_kernel(mat)
+    assert sim.shape == (3, 3)
+    np.testing.assert_allclose(np.diag(sim), 1.0, atol=1e-6)
+    np.testing.assert_allclose(sim, sim.T, atol=1e-6)
+
+    th_actions = evolved_policy_thresholds()["action_weights"]
+    for action_key in (
+        "inject_similarity_global",
+        "inject_similarity_cold_start",
+        "enable_similarity_hierarchy",
+    ):
+        assert action_key in th_actions
+
+    updated = evolve_policy_weights(AutoPolicyWeights())
+    assert updated.enable_similarity_global is True
+    for action_key in (
+        "inject_similarity_global",
+        "inject_similarity_cold_start",
+        "enable_similarity_hierarchy",
+    ):
+        assert action_key in updated.action_weights
+
+    ev_res = Forecaster.evolve(
+        sample_panel_df,
+        horizon=7,
+        target="similarity_kernel",
+        backend="mock",
+        max_evaluations=2,
+    )
+    assert isinstance(ev_res, EvolveResult)
+    assert ev_res.target == "similarity_kernel"
+    assert "compute_evolved_similarity_kernel" in ev_res.champion_code

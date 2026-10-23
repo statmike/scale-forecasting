@@ -193,6 +193,12 @@ class PanelAutoProfile:
     simplex_total: float = 0.0
     cold_start_donor_similarity: float = 0.0
     residual_drift_ks_stat: float = 0.0
+    mean_pairwise_similarity: float = 0.0
+    optimal_similarity_clusters: int = 1
+    similarity_silhouette_score: float = 0.0
+    lead_lag_pairs_count: int = 0
+    has_similarity_clusters: bool = False
+    dominant_cluster_archetype: str = "steady_baseline"
 
     @classmethod
     def from_df(cls, data: Any, **kwargs: Any) -> PanelAutoProfile:
@@ -227,12 +233,15 @@ class PanelAutoProfile:
         rows = [
             {
                 "dimension": "scale_and_shape",
-                "signal": "n_series · history · scale_regime · cross_series_corr",
+                "signal": "n_series · history · scale_regime · cross_series_corr · similarity",
                 "measured_value": (
                     f"{self.n_series} series ({self.scale_regime}) | "
                     f"freq='{self.freq}' | median_T={self.median_n_obs} "
                     f"(min={self.min_n_obs}, max={self.max_n_obs}) | H={self.horizon} | "
-                    f"corr={self.cross_series_corr:.2f}"
+                    f"corr={self.cross_series_corr:.2f} | "
+                    f"sim={self.mean_pairwise_similarity:.2f} "
+                    f"(K={self.optimal_similarity_clusters}, "
+                    f"sil={self.similarity_silhouette_score:.2f})"
                 ),
                 "implication": str(scale_info["strategy"]),
             },
@@ -336,13 +345,18 @@ class PanelAutoProfile:
             },
             {
                 "dimension": "hierarchy_topology",
-                "signal": "hierarchy_id_cols · node_count · non_negative",
+                "signal": "hierarchy_id_cols · node_count · non_negative · similarity_clusters",
                 "measured_value": (
                     f"cols={list(self.hierarchy_id_cols)} | "
                     f"nodes={max(self.hierarchy_node_count, self.n_series)} | "
                     f"non_negative={self.non_negative}"
                     if self.hierarchy_id_cols
-                    else f"Flat panel (no hierarchy columns) | non_negative={self.non_negative}"
+                    else (
+                        f"Flat panel (no hierarchy columns) | "
+                        f"similarity_clusters={self.optimal_similarity_clusters} "
+                        f"(sil={self.similarity_silhouette_score:.2f}) | "
+                        f"non_negative={self.non_negative}"
+                    )
                 ),
                 "implication": (
                     "Hierarchical tree detected; applies scale-aware coherent reconciliation "
@@ -350,8 +364,13 @@ class PanelAutoProfile:
                     "aggregation residual."
                     if self.hierarchy_id_cols
                     else (
-                        "Independent series; enforces output.floor=0.0 when history "
-                        "is non-negative."
+                        "Flat panel with distinct behavioral similarity clusters; supports "
+                        "@similarity_global pooling and latent similarity_hierarchy reconciliation."
+                        if self.has_similarity_clusters
+                        else (
+                            "Independent series; enforces output.floor=0.0 when history "
+                            "is non-negative."
+                        )
                     )
                 ),
             },
@@ -390,6 +409,7 @@ class PanelAutoProfile:
 
 
 DataProfile = PanelAutoProfile
+DatasetProfile = PanelAutoProfile
 
 
 def select_hierarchy_reconciliation_methods(
@@ -610,6 +630,8 @@ def evolved_policy_thresholds() -> dict[str, Any]:
         "first_light_selection_rule": "best_single",
         "first_light_ensemble_strategies": ["inverse_error", "mean"],
         "tree_n_estimators_fast": 60,
+        "enable_similarity_global": True,
+        "similarity_silhouette_threshold": 0.30,
         "action_weights": {
             "prune_decoy_covariates": (0.86, 6.6),
             "fallback_to_plain_univariate": (0.65, 7.4),
@@ -618,6 +640,8 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "inject_transform_log1p": (0.92, 10.4),
             "inject_transform_simplex": (0.87, 8.0),
             "inject_direct_horizon_models": (0.84, 5.7),
+            "inject_similarity_global": (0.86, 6.4),
+            "inject_similarity_cold_start": (0.85, 5.2),
             "enable_level_shift": (0.92, 11.5),
             "enable_sliding_window_backtest": (0.67, 4.3),
             "enable_stl_resid_outlier_scrubbing": (0.96, 5.9),
@@ -625,6 +649,7 @@ def evolved_policy_thresholds() -> dict[str, Any]:
             "enable_cold_start_pooling": (0.94, 3.4),
             "enable_cold_start_transfer": (0.85, 5.2),
             "enable_cold_start_donor_transfer": (0.85, 5.2),
+            "enable_similarity_hierarchy": (0.83, 5.5),
             "enable_adaptive_conformal": (0.82, 4.1),
             "enable_aci_conformal_tracking": (0.82, 4.1),
             "refine_hierarchical_coherence": (0.86, 10.5),
@@ -2020,6 +2045,8 @@ def propose_autofocus_pass(
             features_cfg["regime_routing"] = True
             if donor_transfer_active:
                 features_cfg["cold_start_transfer"] = True
+                if profile.has_similarity_clusters or profile.optimal_similarity_clusters >= 2:
+                    features_cfg["cold_start_matching"] = "hybrid"
             strats_cs = list(ensemble_cfg.get("strategies", ["inverse_error"]))
             if "champion" not in strats_cs:
                 strats_cs.append("champion")
@@ -2048,6 +2075,85 @@ def propose_autofocus_pass(
                     "rationale": (
                         "Panel mixes mature donor series and short-history cold-start series; "
                         "enabling k-NN analog donor shrinkage transfer and SBC regime routing."
+                    ),
+                }
+            )
+
+    # 6b. Trajectory Similarity Clustering & Cross-Series Peer Context Escalation (Track P)
+    sim_sil_min = float(th.get("similarity_silhouette_threshold", 0.30))
+    if (
+        bool(th.get("enable_similarity_global", True))
+        and where != "bigquery"
+        and profile.n_series >= 2
+        and (
+            profile.has_similarity_clusters
+            or (
+                profile.optimal_similarity_clusters >= 2
+                and profile.similarity_silhouette_score >= sim_sil_min
+            )
+            or bool(diagnostics_summary.get("cold_start_donor_transfer_recommended", False))
+        )
+    ):
+        features_cfg["similarity_cluster_feature"] = True
+        features_cfg["similarity_n_clusters"] = int(max(profile.optimal_similarity_clusters, 2))
+        sim_added: list[str] = []
+        for sim_base in ("lightgbm", "regression_lags"):
+            if sim_base in avail:
+                sim_var = f"{sim_base}@similarity_global"
+                if sim_var not in current_models:
+                    current_models.append(sim_var)
+                    added_models.append(sim_var)
+                    sim_added.append(sim_var)
+                    if sim_base == "lightgbm" and tier in ("first_light", "wide_field"):
+                        model_params.setdefault(
+                            sim_var,
+                            {"n_estimators": int(th.get("tree_n_estimators_fast", 55))},
+                        )
+        mutations.append(
+            {
+                "action": "inject_similarity_global",
+                "domain": "covariates_and_horizon",
+                "parameter": "models + features.similarity_cluster_feature",
+                "old_value": "similarity_cluster_feature=False",
+                "new_value": (
+                    f"+{', '.join(sim_added) or 'similarity_global'}, "
+                    f"similarity_cluster_feature=True (K={features_cfg['similarity_n_clusters']})"
+                ),
+                "evidence": (
+                    f"optimal_similarity_clusters={profile.optimal_similarity_clusters}, "
+                    f"similarity_silhouette_score={profile.similarity_silhouette_score:.2f}, "
+                    f"mean_pairwise_similarity={profile.mean_pairwise_similarity:.2f}"
+                ),
+                "rationale": (
+                    "Panel exhibits distinct trajectory clusters; synthesizing "
+                    "similarity_cluster_id and injecting @similarity_global peer-context lag "
+                    "specialists."
+                ),
+            }
+        )
+        if (
+            not has_hierarchy
+            and profile.n_series >= 4
+            and profile.optimal_similarity_clusters >= 2
+            and profile.similarity_silhouette_score >= sim_sil_min
+        ):
+            hierarchy_cfg["similarity_hierarchy"] = True
+            hierarchy_cfg["similarity_n_clusters"] = int(profile.optimal_similarity_clusters)
+            hierarchy_cfg.setdefault("reconciliation_methods", ["wls_struct", "mint_shrink"])
+            mutations.append(
+                {
+                    "action": "enable_similarity_hierarchy",
+                    "domain": "regime_and_specialists",
+                    "parameter": "hierarchy.similarity_hierarchy",
+                    "old_value": "False",
+                    "new_value": f"True (K={profile.optimal_similarity_clusters})",
+                    "evidence": (
+                        f"optimal_similarity_clusters={profile.optimal_similarity_clusters}, "
+                        f"similarity_silhouette_score={profile.similarity_silhouette_score:.2f}"
+                    ),
+                    "rationale": (
+                        "Materializing synthetic __sim_cluster_id__ hierarchy for coherent "
+                        "cross-cluster WLS/MinT reconciliation."
                     ),
                 }
             )
@@ -2453,7 +2559,9 @@ def propose_autofocus_dag_branches(
                 b_strats.append("champion")
         elif dom == "covariates_and_horizon":
             for m in full_proposal["models"]:
-                if ("@direct" in m or "@monotone" in m) and m not in b_models:
+                if (
+                    "@direct" in m or "@monotone" in m or "@similarity_global" in m
+                ) and m not in b_models:
                     b_models.append(m)
                     b_added.append(m)
                     if m in full_params:
@@ -2466,6 +2574,9 @@ def propose_autofocus_dag_branches(
                 full_features["monotonic_constraints"], dict
             ):
                 b_features["monotonic_constraints"] = dict(full_features["monotonic_constraints"])
+            for sf_key in ("similarity_cluster_feature", "similarity_n_clusters"):
+                if sf_key in full_features:
+                    b_features[sf_key] = full_features[sf_key]
             for s_tag in ("horizon_specialist", "champion"):
                 if s_tag not in b_strats:
                     b_strats.append(s_tag)
@@ -2476,12 +2587,19 @@ def propose_autofocus_dag_branches(
                     and "@transform_" not in m
                     and "@direct" not in m
                     and "@monotone" not in m
+                    and "@similarity_global" not in m
                 ):
                     b_models.append(m)
                     b_added.append(m)
                     if m in full_params:
                         b_params[m] = dict(full_params[m])
-            for rf_key in ("regime_routing", "cold_start_transfer"):
+            for rf_key in (
+                "regime_routing",
+                "cold_start_transfer",
+                "cold_start_matching",
+                "similarity_cluster_feature",
+                "similarity_n_clusters",
+            ):
                 if rf_key in full_features:
                     b_features[rf_key] = full_features[rf_key]
             if full_hierarchy:
@@ -2494,6 +2612,8 @@ def propose_autofocus_dag_branches(
                     "temporal_aggregations",
                     "cross_temporal",
                     "spatial_temporal_weight",
+                    "similarity_hierarchy",
+                    "similarity_n_clusters",
                 ):
                     if hkey in full_hierarchy:
                         b_hierarchy[hkey] = full_hierarchy[hkey]
@@ -2585,6 +2705,9 @@ def propose_autofocus_synthesis_pass(
                 "outlier_policy",
                 "regime_routing",
                 "cold_start_transfer",
+                "cold_start_matching",
+                "similarity_cluster_feature",
+                "similarity_n_clusters",
             ):
                 if fk in b_feat and b_feat[fk] != pass1_config_dict.get("features", {}).get(fk):
                     synth_features[fk] = b_feat[fk]
@@ -2601,6 +2724,8 @@ def propose_autofocus_synthesis_pass(
                 "temporal_aggregations",
                 "cross_temporal",
                 "spatial_temporal_weight",
+                "similarity_hierarchy",
+                "similarity_n_clusters",
             ):
                 if hk in b_hier and b_hier[hk] != (pass1_config_dict.get("hierarchy") or {}).get(
                     hk

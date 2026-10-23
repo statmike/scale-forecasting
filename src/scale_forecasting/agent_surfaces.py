@@ -479,6 +479,14 @@ _VARIANT_SYNTAX_ROWS: tuple[tuple[str, str], ...] = (
             "CQR (`aci_normalized`) interval calibration override."
         ),
     ),
+    (
+        "`<model>@similarity_global` / `<model>@similarity_cold_start`",
+        (
+            "Enable similarity-clustered global pooling (`@similarity_global`, injecting "
+            "`__similarity_cluster_id__`) or similarity-driven cold-start donor transfer "
+            "(`@similarity_cold_start`, `cold_start_matching = 'similarity'`)."
+        ),
+    ),
 )
 
 _NORMALIZATION_RULES: tuple[str, ...] = (
@@ -527,6 +535,16 @@ _NORMALIZATION_RULES: tuple[str, ...] = (
         '`deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`. '
         'Family `automl` must use `runtime = "vertex_automl"`. `runtime = "gce"` is strictly '
         "single-VM (`workers = 1`)."
+    ),
+    (
+        "9. **Time-Series Similarity & Analog Clustering (`features`, `hierarchy`, `ensemble`):** "
+        "`features.cold_start_matching = 'similarity'` uses hybrid/DTW/MP/Wasserstein "
+        "launch-prefix donor matching (`similarity_method`). "
+        "`features.similarity_cluster_feature = true` or `<model>@similarity_global` injects "
+        "cluster labels into global models. `hierarchy.similarity_hierarchy = true` "
+        "auto-discovers latent cluster hierarchies on flat panels, and "
+        "`ensemble.similarity_smoothing = true` applies Laplacian graph smoothing across "
+        "per-series stacker weights."
     ),
 )
 
@@ -1462,6 +1480,11 @@ def render_skill_execution_paths_reference() -> str:
                 "`.optimize_inventory_df()` / `.optimize_scenario()` |"
             ),
             (
+                "| **Time-Series Similarity, Donor Matching & Cluster Hierarchies** | — | "
+                "`Forecaster(cfg).similarity_df()` / `.find_similar_series_df()` / "
+                "`.cluster_by_similarity_df()` / `compute_time_series_similarity` |"
+            ),
+            (
                 "| **Executive HTML + JSON report** | "
                 "`python -m scale_forecasting.report --model holtwinters --output-dir ./report` | "
                 "`Forecaster(cfg).export_report()` / `export_report(bench, './report')` |"
@@ -1492,7 +1515,7 @@ def render_skill_execution_paths_reference() -> str:
                 "`python -m scale_forecasting.evolve --target features --backend alphaevolve "
                 "--model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | "
                 "`Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / "
-                "`f.evolve(target='ensemble')` / "
+                "`f.evolve(target='ensemble')` / `f.evolve(target='similarity_kernel')` / "
                 "`Forecaster.evolve(from_run_ids=[...], target='ensemble')` |"
             ),
             "",
@@ -1641,9 +1664,11 @@ def render_llms_txt() -> str:
                 "(`promo_elasticity_df`), cold-start NPI donor transfer "
                 "(`cold_start_transfer_df`), online ACI conformal calibration (`aci_df`), joint "
                 "copula trajectories & tail risk (`sample_trajectories`, `tail_risk_df`), "
-                "portfolio inventory optimization (`optimize_inventory_df`), prescriptive price & "
-                "promo optimization (`optimize_scenario`), scenarios, and executive HTML/JSON "
-                "reports."
+                "time-series similarity, donor matching & cluster hierarchies (`similarity_df`, "
+                "`find_similar_series_df`, `cluster_by_similarity_df`, "
+                "`compute_time_series_similarity`), portfolio inventory optimization "
+                "(`optimize_inventory_df`), prescriptive price & promo optimization "
+                "(`optimize_scenario`), scenarios, and executive HTML/JSON reports."
             ),
             (
                 f"- [Auto-Forecaster & Bounded `autofocus`]({_SITE_BASE}/auto_forecaster/): "
@@ -1672,10 +1697,10 @@ def render_llms_txt() -> str:
                 f"- [AlphaEvolve Runtime Harness (Opt-In)]({_SITE_BASE}/alphaevolve_runner/): "
                 "Opt-in evolutionary code discovery (`Forecaster.evolve`, `python -m "
                 "scale_forecasting.evolve`) across `# EVOLVE-BLOCK` targets (`features`, "
-                "`ensemble`, `model`, `policy`) with AST security sandbox, temporal lookahead "
-                "probe, and 3-Gate Anti-Overfitting Ratchet (default `backend='alphaevolve'` on "
-                "Gemini Enterprise Discovery Engine + `backend='vertex_gemini'` backup on Vertex "
-                "AI Gemini)."
+                "`ensemble`, `model`, `policy`, `similarity_kernel`) with AST security sandbox, "
+                "temporal lookahead probe, and 3-Gate Anti-Overfitting Ratchet (default "
+                "`backend='alphaevolve'` on Gemini Enterprise Discovery Engine + "
+                "`backend='vertex_gemini'` backup on Vertex AI Gemini)."
             ),
             (
                 f"- [Models Reference (37 Models)]({_SITE_BASE}/models_reference/): All 37 "

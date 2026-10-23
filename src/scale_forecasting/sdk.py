@@ -429,7 +429,13 @@ class Forecaster:
 
         is_instance = not isinstance(cls_or_self, type)
         if is_instance:
-            if isinstance(data, str) and data in ("features", "ensemble", "model", "policy"):
+            if isinstance(data, str) and data in (
+                "features",
+                "ensemble",
+                "model",
+                "policy",
+                "similarity_kernel",
+            ):
                 target = data
                 data = cls_or_self
             elif data is None:
@@ -2689,6 +2695,9 @@ class Forecaster:
             if self._config.hierarchy.reconciliation_methods
             else "mint_shrink"
         )
+        has_hier = bool(
+            self._config.hierarchy.levels or self._config.hierarchy.similarity_hierarchy
+        )
         use_cross_sectional = (
             cross_sectional
             if cross_sectional is not None
@@ -2697,20 +2706,15 @@ class Forecaster:
                 or eff_method == "cross_temporal_mint"
                 or (
                     self._config.hierarchy.enabled
-                    and self._config.hierarchy.levels
+                    and has_hier
                     and hist_df is not None
                     and not hist_df.empty
                 )
             )
         )
-        if (
-            use_cross_sectional
-            and self._config.hierarchy.levels
-            and hist_df is not None
-            and not hist_df.empty
-        ):
+        if use_cross_sectional and has_hier and hist_df is not None and not hist_df.empty:
             needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
-            if needed.issubset(hist_df.columns):
+            if needed.issubset(hist_df.columns) or self._config.hierarchy.similarity_hierarchy:
                 panel_df, hier_spec = build_hierarchy(hist_df, self._config)
                 return reconcile_cross_temporal(
                     preds_df,
@@ -2780,12 +2784,12 @@ class Forecaster:
         eff_spec = spec if spec is not None else hier_spec
         if (
             eff_spec is None
-            and self._config.hierarchy.levels
+            and (self._config.hierarchy.levels or self._config.hierarchy.similarity_hierarchy)
             and hist_df is not None
             and not hist_df.empty
         ):
             needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
-            if needed.issubset(hist_df.columns):
+            if needed.issubset(hist_df.columns) or self._config.hierarchy.similarity_hierarchy:
                 hist_df, eff_spec = build_hierarchy(hist_df, self._config)
         eff_method = method or (
             self._config.hierarchy.reconciliation_methods[0]
@@ -2971,6 +2975,266 @@ class Forecaster:
 
     audit_scenario_monotonicity = audit_monotonicity_df
 
+    def _resolve_similarity_panel(
+        self,
+        data: pd.DataFrame | None = None,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Resolve a panel DataFrame for similarity analysis from explicit ``data``, in-memory
+        ``self._data``, ``self._auto_session.data_df``, BigQuery source/history, or synthetic data.
+        """
+        from . import playground
+
+        panel = data
+        if panel is None and self._data is not None:
+            panel = self._data
+        if (
+            panel is None
+            and self._auto_session is not None
+            and self._auto_session.data_df is not None
+        ):
+            panel = self._auto_session.data_df
+        if panel is None and run_id is not None:
+            with contextlib.suppress(Exception):
+                from .engines.bigquery_names import source_ref
+                from .engines.bigquery_sql import series_filter
+                from .registry.reads import resolve_settings
+
+                resolved = resolve_settings(self._settings)
+                source = source_ref(self._config, resolved.registry_dataset_ref)
+                idc, datec = self._config.data.ts_id_col, self._config.data.date_col
+                sfilter = series_filter(self._config, source, idc)
+                where_clause = f" WHERE {sfilter}" if sfilter else ""
+                sql = f"SELECT * FROM `{source}`{where_clause} ORDER BY {idc}, {datec}"
+                client = bigquery_client(resolved.project_id)
+                df = client.query(sql).to_dataframe()
+                if not df.empty:
+                    panel = df
+        if panel is None or panel.empty:
+            panel = playground.sample_data(
+                n_series=min(self._config.data.series_limit or 4, 6),
+                freq=self._config.data.freq,
+                with_exog=True,
+            )
+        return panel
+
+    def similarity_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        top_k: int | None = None,
+        max_lag: int | None = None,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute tidy pairwise trajectory similarity, lead-lag cross-correlation, and decomposed
+        distance metrics across the panel (`similarity.compute_similarity_matrix`).
+        """
+        from .similarity import compute_similarity_matrix
+
+        panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        eff_method = method or self._config.features.similarity_method
+        res = compute_similarity_matrix(
+            panel,
+            cfg=self._config,
+            method=eff_method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            top_k=int(top_k) if top_k is not None else 10,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+        return res.pairs_df
+
+    def similarity_matrix_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        max_lag: int | None = None,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute the symmetric $(N, N)$ trajectory similarity matrix DataFrame indexed and
+        columned by ``ts_id`` (`similarity.compute_similarity_matrix`).
+        """
+        from .similarity import compute_similarity_matrix
+
+        panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        eff_method = method or self._config.features.similarity_method
+        res = compute_similarity_matrix(
+            panel,
+            cfg=self._config,
+            method=eff_method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+        return res.matrix_df
+
+    def similarity_clusters_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        n_clusters: int | str = "auto",
+        method: str | None = None,
+        min_cluster_size: int = 2,
+        max_clusters: int = 8,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Partition series into behavioral similarity clusters with medoid exemplars and dynamical
+        archetype labels (`similarity.cluster_by_similarity_df`).
+        """
+        from .similarity import cluster_by_similarity_df
+
+        panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        eff_method = method or self._config.features.similarity_method
+        eff_k = (
+            self._config.features.similarity_n_clusters
+            if n_clusters == "auto" and self._config.features.similarity_n_clusters != "auto"
+            else n_clusters
+        )
+        return cluster_by_similarity_df(
+            panel,
+            cfg=self._config,
+            n_clusters=eff_k,  # type: ignore[arg-type]
+            method=eff_method,
+            min_cluster_size=min_cluster_size,
+            max_clusters=max_clusters,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def similarity_embeddings_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        n_components: int = 2,
+        include_foundation: bool = False,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Extract per-series physical & econometric invariants and 2D phase-space coordinates
+        (`similarity.embed_series_df`).
+        """
+        from .similarity import embed_series_df
+
+        panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        eff_method = (
+            "foundation_latent"
+            if include_foundation and method is None
+            else (method or self._config.features.similarity_method)
+        )
+        return embed_series_df(
+            panel,
+            cfg=self._config,
+            method=eff_method,
+            n_components=n_components,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def find_similar_series_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        mode: str = "full_history",
+        method: str | None = None,
+        prefix_len: int | None = None,
+        max_lag: int = 0,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Retrieve the Top-$K$ most similar peer series for ``query_ts_id`` across full history,
+        early launch prefix, or recent window (`similarity.find_similar_series_df`).
+        """
+        from .similarity import find_similar_series_df as _find_similar_series_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, str):
+            if eff_query is None:
+                eff_query = query_ts_id_or_data
+        elif query_ts_id_or_data is not None:
+            eff_data = query_ts_id_or_data
+
+        panel = self._resolve_similarity_panel(data=eff_data, run_id=run_id)
+        ts_col = self._config.data.ts_id_col
+        if eff_query is None:
+            eff_query = (
+                str(panel[ts_col].iloc[0])
+                if not panel.empty and ts_col in panel.columns
+                else "series_0"
+            )
+        eff_method = method or self._config.features.similarity_method
+        return _find_similar_series_df(
+            panel,
+            query_ts_id=eff_query,
+            cfg=self._config,
+            top_k=top_k,
+            mode=mode,
+            method=eff_method,
+            prefix_len=prefix_len,
+            max_lag=max_lag,
+            ts_id_col=ts_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def plot_similarity_map(
+        self,
+        sim_or_clusters_or_panel: Any = None,
+        *,
+        data: pd.DataFrame | None = None,
+        query_ts_id: str | None = None,
+        n_clusters: int | str = "auto",
+        method: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Render the 2-panel trajectory similarity heatmap & 2D MDS cluster map
+        (`similarity.plot_similarity_map`).
+        """
+        from .similarity import plot_similarity_map as _plot_similarity_map
+
+        target = (
+            sim_or_clusters_or_panel
+            if sim_or_clusters_or_panel is not None
+            else self._resolve_similarity_panel(data=data, run_id=run_id)
+        )
+        eff_method = method or self._config.features.similarity_method
+        return _plot_similarity_map(
+            target,
+            cfg=self._config,
+            query_ts_id=query_ts_id,
+            n_clusters=n_clusters,  # type: ignore[arg-type]
+            method=eff_method,
+            ax=ax,
+            title=title,
+            **kwargs,
+        )
+
     def promo_elasticity_df(
         self,
         data: pd.DataFrame | None = None,
@@ -2979,6 +3243,11 @@ class Forecaster:
         price_col: str | None = None,
         confounders: Sequence[str] | None = None,
         summary: bool = False,
+        use_similarity_priors: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str | None = None,
         run_id: str | None = None,
     ) -> pd.DataFrame:
         """Compute cross-fitted Double-ML promo & price elasticity decomposition
@@ -2988,6 +3257,8 @@ class Forecaster:
         from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
 
         panel = data
+        if panel is None and self._data is not None:
+            panel = self._data
         if (
             panel is None
             and self._auto_session is not None
@@ -3018,6 +3289,16 @@ class Forecaster:
                 freq=self._config.data.freq,
                 with_exog=True,
             )
+        eff_use_sim = (
+            bool(similarity_pooling)
+            and (similarity_weight is None or float(similarity_weight) > 0.0)
+            if similarity_pooling is not None
+            else (
+                bool(use_similarity_priors)
+                and (similarity_weight is None or float(similarity_weight) > 0.0)
+            )
+        )
+        eff_sim_method = similarity_method or self._config.features.similarity_method
         decomp = compute_promo_elasticity_decomposition(
             panel,
             ts_id_col=self._config.data.ts_id_col,
@@ -3028,6 +3309,9 @@ class Forecaster:
             confounders=confounders,
             freq=self._config.data.freq,
             holidays=self._config.features.holidays,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=similarity_matrix,
+            similarity_method=eff_sim_method,
         )
         return summarize_promo_elasticity(decomp) if summary else decomp
 
@@ -3064,6 +3348,9 @@ class Forecaster:
         min_obs: int | None = None,
         min_history_points: int = 14,
         method: str | None = None,
+        matching: str | None = None,
+        cold_start_matching: str | None = None,
+        similarity_method: str | None = None,
         top_k_donors: int = 3,
         model_type: str | None = None,
         limit: int = 20000,
@@ -3090,6 +3377,7 @@ class Forecaster:
                 freq=self._config.data.freq,
                 with_exog=True,
             )
+        eff_matching = cold_start_matching if cold_start_matching is not None else matching
         return _cold_start_transfer_df(
             panel,
             cfg=self._config,
@@ -3097,6 +3385,8 @@ class Forecaster:
             oof_df=eff_oof,
             min_obs=min_obs if min_obs is not None else min_history_points,
             method=method,  # type: ignore[arg-type]
+            matching=eff_matching,  # type: ignore[arg-type]
+            similarity_method=similarity_method,  # type: ignore[arg-type]
             static_covariates=self._config.features.static_covariates,
             hierarchy_cols=[c for lvl in self._config.hierarchy.levels for c in lvl],
             top_k_donors=top_k_donors,
@@ -3221,6 +3511,10 @@ class Forecaster:
         cross_series: bool = True,
         reconcile: bool = True,
         reconcile_hierarchy: bool = True,
+        similarity_shrinkage: bool = True,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str | None = None,
         floor: float | None = None,
         cap: float | None = None,
         seed: int = 42,
@@ -3245,13 +3539,14 @@ class Forecaster:
         hier_spec = None
         if (
             eff_reconcile
-            and self._config.hierarchy.levels
+            and (self._config.hierarchy.levels or self._config.hierarchy.similarity_hierarchy)
             and hist_df is not None
             and not hist_df.empty
         ):
             needed = {c for lvl in self._config.hierarchy.levels for c in lvl}
-            if needed.issubset(hist_df.columns):
+            if needed.issubset(hist_df.columns) or self._config.hierarchy.similarity_hierarchy:
                 _, hier_spec = build_hierarchy(hist_df, self._config)
+        eff_sim_method = similarity_method or self._config.features.similarity_method
         return _sample_trajectories(
             preds_df,
             oof_df=eff_oof,
@@ -3266,6 +3561,10 @@ class Forecaster:
             simplex_sum=self._config.features.simplex_sum,
             floor=floor if floor is not None else self._config.output.floor,
             cap=cap if cap is not None else self._config.output.cap,
+            similarity_shrinkage=similarity_shrinkage,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=similarity_matrix,
+            similarity_method=eff_sim_method,
             seed=seed,
         )
 
@@ -3287,6 +3586,11 @@ class Forecaster:
         stockout_cost: float | Mapping[str, float] | None = None,
         n_paths: int = 300,
         copula_type: str = "auto",
+        reconcile: bool = True,
+        similarity_shrinkage: bool = True,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str | None = None,
         seed: int = 42,
         model_type: str | None = None,
         limit: int = 20000,
@@ -3314,6 +3618,11 @@ class Forecaster:
                 run_id=run_id,
                 n_paths=n_paths,
                 copula_type=copula_type,
+                reconcile=reconcile,
+                similarity_shrinkage=similarity_shrinkage,
+                similarity_weight=similarity_weight,
+                similarity_matrix=similarity_matrix,
+                similarity_method=similarity_method,
                 seed=seed,
                 model_type=model_type,
                 limit=limit,
@@ -3393,6 +3702,11 @@ class Forecaster:
         backorders: float = 0.0,
         uncertainty_source: str = "analytical",
         copula_type: str = "auto",
+        similarity_shrinkage: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str | None = None,
         n_paths: int = 300,
         seed: int = 42,
         limit: int = 20000,
@@ -3404,7 +3718,7 @@ class Forecaster:
         from .inventory_optimizer import optimize_inventory_portfolio
 
         eff_model = model_name or model_type
-        preds_df, eff_oof, _ = self._resolve_track_k_frames(
+        preds_df, eff_oof, hist_df = self._resolve_track_k_frames(
             forecasts_df=forecasts_df,
             data=data,
             oof_df=oof_df,
@@ -3412,10 +3726,30 @@ class Forecaster:
             model_type=eff_model,
             limit=limit,
         )
+        ts_col = self._config.data.ts_id_col
+        if (
+            forecasts_df is None
+            and hist_df is not None
+            and not hist_df.empty
+            and ts_col in hist_df.columns
+            and "ts_id" in preds_df.columns
+        ):
+            leaf_ids = set(hist_df[ts_col].astype(str).unique())
+            if preds_df["ts_id"].astype(str).isin(leaf_ids).any():
+                preds_df = preds_df[preds_df["ts_id"].astype(str).isin(leaf_ids)].copy()
+                if eff_oof is not None and not eff_oof.empty and "ts_id" in eff_oof.columns:
+                    eff_oof = eff_oof[eff_oof["ts_id"].astype(str).isin(leaf_ids)].copy()
         eff_unc = "copula" if uncertainty_source == "copula" else "analytical"
+        eff_sim_shrink = (
+            bool(similarity_pooling)
+            if similarity_pooling is not None
+            else bool(similarity_shrinkage)
+        )
+        eff_sim_method = similarity_method or self._config.features.similarity_method
         return optimize_inventory_portfolio(
             preds_df,
             oof_df=eff_oof,
+            history_df=hist_df,
             inventory_df=inventory_df,
             trajectories_df=trajectories_df,
             copula_paths=copula_paths,
@@ -3441,6 +3775,10 @@ class Forecaster:
             backorders=backorders,
             uncertainty_source=eff_unc,  # type: ignore[arg-type]
             copula_type=copula_type,
+            similarity_shrinkage=eff_sim_shrink,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=similarity_matrix,
+            similarity_method=eff_sim_method,
             n_paths=n_paths,
             seed=seed,
         )
@@ -3489,6 +3827,12 @@ class Forecaster:
         promo_fixed_cost: float = 0.0,
         risk_aversion_lambda: float = 0.0,
         cvar_alpha: float = 0.95,
+        cannibalization_weight: float = 1.0,
+        cannibalization_strength: float | None = None,
+        use_similarity_priors: bool = True,
+        cross_sku_elasticity: bool | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str | None = None,
         reconcile: bool = True,
         include_inventory_impact: bool = True,
         lead_time: float = 7.0,
@@ -3520,6 +3864,17 @@ class Forecaster:
                 freq=self._config.data.freq,
                 with_exog=True,
             )
+        eff_cannib = (
+            float(cannibalization_strength)
+            if cannibalization_strength is not None
+            else float(cannibalization_weight)
+        )
+        eff_use_sim = (
+            bool(cross_sku_elasticity)
+            if cross_sku_elasticity is not None
+            else bool(use_similarity_priors)
+        )
+        eff_sim_method = similarity_method or self._config.features.similarity_method
         return _optimize_scenario(
             panel,
             config=self._config,
@@ -3544,6 +3899,10 @@ class Forecaster:
             inventory_cap=inventory_cap,
             risk_aversion_lambda=risk_aversion_lambda,
             cvar_alpha=cvar_alpha,
+            cannibalization_weight=eff_cannib,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=similarity_matrix,
+            similarity_method=eff_sim_method,
             reconcile=reconcile,
             include_inventory_impact=include_inventory_impact,
             lead_time=lead_time,
@@ -4048,6 +4407,8 @@ class Forecaster:
         cold_start_df: pd.DataFrame | None = None,
         inventory_opt_df: pd.DataFrame | None = None,
         scenario_opt_df: pd.DataFrame | None = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_clusters_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -4074,6 +4435,18 @@ class Forecaster:
             )
         )
         eff_oof = oof_df if oof_df is not None else self._oof_df
+        eff_sim = similarity_df
+        if eff_sim is None:
+            try:
+                eff_sim = self.similarity_df(run_id=rid)
+            except Exception:  # noqa: BLE001 - offline report fallback
+                eff_sim = pd.DataFrame()
+        eff_sim_clusters = similarity_clusters_df
+        if eff_sim_clusters is None:
+            try:
+                eff_sim_clusters = self.similarity_clusters_df(run_id=rid)
+            except Exception:  # noqa: BLE001 - offline report fallback
+                eff_sim_clusters = pd.DataFrame()
         payload_dict: dict[str, Any] = {
             "run_id": rid,
             "leaderboard_df": (
@@ -4094,6 +4467,8 @@ class Forecaster:
             "cold_start_df": cold_start_df,
             "inventory_opt_df": inventory_opt_df,
             "scenario_opt_df": scenario_opt_df,
+            "similarity_df": eff_sim,
+            "similarity_clusters_df": eff_sim_clusters,
         }
         if self._auto_session is not None:
             payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
@@ -4114,6 +4489,8 @@ class Forecaster:
             cold_start_df=cold_start_df,
             inventory_opt_df=inventory_opt_df,
             scenario_opt_df=scenario_opt_df,
+            similarity_df=eff_sim,
+            similarity_clusters_df=eff_sim_clusters,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )

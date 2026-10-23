@@ -168,6 +168,9 @@ def test_skill_md_and_extension_manifests() -> None:
         "temporal_reconcile_df",
         "allocate_target",
         "cold_start_transfer_df",
+        "similarity_df",
+        "find_similar_series_df",
+        "cluster_by_similarity_df",
         "aci_df",
         "sample_trajectories",
         "tail_risk_df",
@@ -181,6 +184,7 @@ def test_skill_md_and_extension_manifests() -> None:
         "THieF",
         "Goal-Seek",
         "cold-start NPI",
+        "time-series similarity",
         "copula",
         "VaR/CVaR",
     ):
