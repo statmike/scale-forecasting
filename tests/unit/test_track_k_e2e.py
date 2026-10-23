@@ -519,8 +519,8 @@ def test_t1_f9_auto_forecaster_profile_and_branches() -> None:
 
 
 def test_t1_f10_f11_version_docs_and_local_pipeline() -> None:
-    """Verify F10 & F11: Version 1.6.0 parity, API reference docs, and local group pipeline."""
-    assert sf.__version__ == "1.6.0"
+    """Verify F10 & F11: Version >= 1.6.0 parity, API reference docs, and local group pipeline."""
+    assert tuple(int(part) for part in sf.__version__.split(".")[:3]) >= (1, 6, 0)
     for api_doc in ("temporal_reconciliation.md", "simplex.md", "goal_seek.md"):
         doc_path = REPO_ROOT / "docs" / "api" / api_doc
         assert doc_path.is_file(), f"Missing API doc {doc_path}"

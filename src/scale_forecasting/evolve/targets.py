@@ -472,6 +472,8 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     updated_actions["inject_monotone_guardrails"] = (0.88, 7.0)
     updated_actions["inject_transform_simplex"] = (0.89, 8.4)
     updated_actions["enable_temporal_reconciliation"] = (0.81, 5.2)
+    updated_actions["enable_cold_start_transfer"] = (0.86, 6.8)
+    updated_actions["enable_adaptive_conformal"] = (0.83, 5.4)
     return base_weights.with_updates(
         intermittent_share_min=0.16,
         log1p_level_vol_corr_min=0.60,
@@ -774,6 +776,8 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     updated_actions["inject_monotone_guardrails"] = (0.88, 7.0)
     updated_actions["inject_transform_simplex"] = (0.89, 8.4)
     updated_actions["enable_temporal_reconciliation"] = (0.81, 5.2)
+    updated_actions["enable_cold_start_transfer"] = (0.86, 6.8)
+    updated_actions["enable_adaptive_conformal"] = (0.83, 5.4)
     return base_weights.with_updates(
         intermittent_share_min=0.16,
         log1p_level_vol_corr_min=0.60,
@@ -997,7 +1001,13 @@ def build_mutation_prompt(
         f"is_compositional_simplex={diag_dict.get('is_compositional_simplex', False)}, "
         f"simplex_total={diag_dict.get('simplex_total')}, "
         f"hierarchy_id_cols={diag_dict.get('hierarchy_id_cols', [])}, "
-        f"reconcile_temporal={diag_dict.get('reconcile_temporal', False)}"
+        f"reconcile_temporal={diag_dict.get('reconcile_temporal', False)}, "
+        f"has_cold_start={diag_dict.get('has_cold_start', False)}, "
+        f"cold_start_fraction={diag_dict.get('cold_start_fraction', 0.0)}, "
+        f"cold_start_donor_similarity={diag_dict.get('cold_start_donor_similarity', 0.0)}, "
+        f"calibration_method={diag_dict.get('calibration_method', 'conformal')}, "
+        f"residual_drift_ks_stat={diag_dict.get('residual_drift_ks_stat', 0.0)}, "
+        f"cross_series_residual_corr={diag_dict.get('cross_series_residual_corr', 0.0)}"
     )
     return spec.mutation_prompt_template.format(
         generation=generation,
@@ -1153,6 +1163,8 @@ updated_actions["enable_level_shift"] = (0.93, 12.0)
 updated_actions["inject_monotone_guardrails"] = (0.90, 7.4)
 updated_actions["inject_transform_simplex"] = (0.91, 8.8)
 updated_actions["enable_temporal_reconciliation"] = (0.83, 5.6)
+updated_actions["enable_cold_start_transfer"] = (0.88, 7.2)
+updated_actions["enable_adaptive_conformal"] = (0.85, 5.8)
 return base_weights.with_updates(
     intermittent_share_min=0.15,
     log1p_level_vol_corr_min=0.56,

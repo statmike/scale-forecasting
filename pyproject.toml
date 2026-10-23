@@ -1,6 +1,6 @@
 [project]
 name = "scale-forecasting"
-version = "1.6.0"
+version = "1.7.0"
 description = "Time-series forecasting on Google Cloud at any scale: one JSON configuration runs every model family on Dataproc Serverless, Ray, Vertex AI, GKE, Compute Engine, or BigQuery ML and writes forecasts and leaderboards back to BigQuery."
 dynamic = ["readme"]
 # Two different pins, on purpose. `requires-python` is what *the package* installs on: the pure

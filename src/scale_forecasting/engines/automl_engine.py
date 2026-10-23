@@ -2036,7 +2036,16 @@ def execute_automl_model_cells(
 
         oof = oof_by_uid[uid]
         arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
-        cal = calibrate_from_oof(oof, DEFAULT_QUANTILES) if oof is not None else None
+        cal = (
+            calibrate_from_oof(
+                oof,
+                DEFAULT_QUANTILES,
+                method=cfg.output.calibration_method,
+                aci_gamma=cfg.output.aci_gamma,
+            )
+            if oof is not None
+            else None
+        )
         calibrated, interval_calibration = apply_calibration(raw_pred, cal, arm)
         arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
 

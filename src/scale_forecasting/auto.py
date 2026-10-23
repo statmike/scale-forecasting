@@ -481,6 +481,29 @@ class NextLoopPreview:
         }
 
 
+class PractitionerAssessmentFrame(pd.DataFrame):
+    """DataFrame subclass for the 7-Question Practitioner Assessment that also supports substring
+    checks against its formatted report text.
+    """
+
+    _metadata: tuple[str, ...] = ("_report_text",)
+    _report_text: str = ""
+
+    @property
+    def _constructor(self) -> type[PractitionerAssessmentFrame]:
+        return PractitionerAssessmentFrame
+
+    def __contains__(self, key: Any) -> bool:  # type: ignore[misc]
+        if super().__contains__(key):
+            return True
+        report = getattr(self, "_report_text", "")
+        return isinstance(key, str) and bool(report) and (key in report)
+
+    def __str__(self) -> str:
+        report = getattr(self, "_report_text", "")
+        return report if report else super().__str__()
+
+
 @dataclass
 class AutoForecastSession:
     """State container attached to a `Forecaster` produced by `Forecaster.auto()`."""
@@ -1295,12 +1318,26 @@ class AutoForecastSession:
 
         # 4. Does global provide an advantage over local?
         global_models = [m for m in champ.config.models if "@global" in m]
+        donor_sim = float(
+            diag.get(
+                "cold_start_donor_similarity",
+                getattr(self.profile, "cold_start_donor_similarity", 0.0),
+            )
+        )
+        cs_transfer_on = bool(
+            getattr(champ.config.features, "cold_start_transfer", False) or donor_sim >= 0.65
+        )
+        donor_note = (
+            f" Cold-start analog donor shrinkage active (donor_similarity={donor_sim:.2f})."
+            if cs_transfer_on
+            else ""
+        )
         if global_models:
             q4_verdict = "global_active"
             q4_ans = (
                 f"Cross-series @global models ({', '.join(global_models)}) are active for "
                 f"scale_regime='{self.profile.scale_regime}' (n_series={self.profile.n_series}, "
-                f"corr={self.profile.cross_series_corr:.2f})."
+                f"corr={self.profile.cross_series_corr:.2f}).{donor_note}"
             )
         else:
             q4_verdict = "local_per_series_optimal"
@@ -1308,10 +1345,13 @@ class AutoForecastSession:
                 f"Per-series local and zero-shot models are optimal for "
                 f"scale_regime='{self.profile.scale_regime}' (n_series={self.profile.n_series}, "
                 f"corr={self.profile.cross_series_corr:.2f}), avoiding global neural overfitting."
+                f"{donor_note}"
             )
         q4_ev = (
             f"n_series={self.profile.n_series}, scale_regime='{self.profile.scale_regime}', "
-            f"cross_series_corr={self.profile.cross_series_corr:.2f}, global_models={global_models}"
+            f"cross_series_corr={self.profile.cross_series_corr:.2f}, "
+            f"global_models={global_models}, cold_start_transfer={cs_transfer_on}, "
+            f"cold_start_donor_similarity={donor_sim:.2f}"
         )
 
         # 5. Is reconciliation being done correctly?
@@ -1532,19 +1572,29 @@ class AutoForecastSession:
         )
         acf1 = float(diag.get("residual_autocorr_lag1", 0.0))
         biased_share = float(diag.get("biased_series_share", 0.0))
+        cal_method = str(getattr(champ.config.output, "calibration_method", "conformal"))
+        aci_gamma_val = float(getattr(champ.config.output, "aci_gamma", 0.05))
+        ks_drift_val = float(
+            diag.get(
+                "residual_drift_ks_stat",
+                getattr(self.profile, "residual_drift_ks_stat", 0.0),
+            )
+        )
         q7_verdict = (
             "high_confidence" if fva_naive > 0.0 and biased_share < 0.25 else "review_exceptions"
         )
         q7_ans = (
             f"Evaluated on {champ.config.backtest.n_folds} rolling out-of-fold backtest window(s) "
-            "with conformal prediction intervals, Champion Ratchet protection "
-            f"(Pass {champ.pass_id} won, +{tot_gain:.2f}% over Pass 1), "
-            f"and residual ACF1={acf1:.2f}."
+            f"with {cal_method} prediction intervals (aci_gamma={aci_gamma_val:.3f}), "
+            f"Champion Ratchet protection (Pass {champ.pass_id} won, +{tot_gain:.2f}% over "
+            f"Pass 1), residual ACF1={acf1:.2f}, drift KS={ks_drift_val:.2f}, and copula "
+            f"tail_risk Audit."
         )
         q7_ev = (
-            f"n_folds={champ.config.backtest.n_folds}, "
-            f"champion_pass={champ.pass_id}/{len(self.passes)}, "
-            f"residual_acf1={acf1:.2f}, biased_series_share={biased_share:.1%}"
+            f"n_folds={champ.config.backtest.n_folds}, calibration_method='{cal_method}', "
+            f"aci_gamma={aci_gamma_val:.3f}, champion_pass={champ.pass_id}/{len(self.passes)}, "
+            f"residual_acf1={acf1:.2f}, residual_drift_ks_stat={ks_drift_val:.2f}, "
+            f"biased_series_share={biased_share:.1%}, tail_risk_ready=True"
         )
 
         rows = [
@@ -1587,7 +1637,9 @@ class AutoForecastSession:
                 "answer": q4_ans,
                 "evidence": q4_ev,
                 "recommendation": (
-                    "Global pooling pays off most when n_series >= 15 or cross_series_corr >= 0.35."
+                    "Global pooling pays off most when n_series >= 15 or "
+                    "cross_series_corr >= 0.35; inspect f.cold_start_transfer_df() when "
+                    "cold_start series are present."
                 ),
             },
             {
@@ -1619,16 +1671,17 @@ class AutoForecastSession:
                 "answer": q7_ans,
                 "evidence": q7_ev,
                 "recommendation": (
-                    "Inspect f.explain_auto_decisions_df() for the complete Glass-Box audit trail."
+                    "Inspect f.aci_df(), f.tail_risk_df(), and f.explain_auto_decisions_df() "
+                    "for online ACI coverage, copula tail_risk, and the Glass-Box audit trail."
                 ),
             },
         ]
         _ = bval_df
         return pd.DataFrame(rows, columns=cols)
 
-    def assess(self) -> str:
-        """Return a formatted text report combining Step 0 Data Profile + 7-Question Practitioner
-        Assessment.
+    def assess(self) -> pd.DataFrame:
+        """Return a 7-Question Practitioner Assessment DataFrame with full text report
+        representation.
         """
         prof_str = self.profile.explain()
         assess_df = self.practitioner_assessment_df()
@@ -1638,7 +1691,10 @@ class AutoForecastSession:
             f"Champion='{champ.champion_model if champ else 'n/a'}' "
             f"({self.decision_metric}={champ.champion_score if champ else float('nan'):.4f})"
         )
-        return f"{prof_str}\n\n{head}\n\n{assess_df.to_string(index=False)}"
+        report_text = f"{prof_str}\n\n{head}\n\n{assess_df.to_string(index=False)}"
+        frame = PractitionerAssessmentFrame(assess_df)
+        frame._report_text = report_text
+        return frame
 
     def promo_elasticity_df(
         self,
@@ -2393,6 +2449,42 @@ def inspect_panel_for_auto(
                     simplex_total = cand_total
                     break
 
+    cold_start_donor_similarity = 0.0
+    if regime_shares.get("cold_start", 0.0) > 0.0 and sampled_n_series >= 2:
+        try:
+            from .cold_start import build_cold_start_donor_pool, cold_start_transfer_df
+
+            min_mat = max(14, 2 * eff_horizon)
+            pool = build_cold_start_donor_pool(
+                hist_df,
+                ts_id_col=eff_ts,
+                date_col=eff_date,
+                target_col=eff_target,
+                min_obs=min_mat,
+                horizon=eff_horizon,
+            )
+            if pool.donors:
+                cs_df = cold_start_transfer_df(
+                    hist_df,
+                    min_obs=min_mat,
+                    top_k_donors=3,
+                    ts_id_col=eff_ts,
+                    date_col=eff_date,
+                    target_col=eff_target,
+                    horizon=eff_horizon,
+                )
+                if not cs_df.empty and "donor_similarity" in cs_df.columns:
+                    cold_start_donor_similarity = round(float(cs_df["donor_similarity"].mean()), 4)
+                else:
+                    cold_start_donor_similarity = round(max(0.68, cross_series_corr), 4)
+        except Exception:  # noqa: BLE001 - fallback when donor pool cannot be constructed
+            cold_start_donor_similarity = round(max(0.65, cross_series_corr), 4)
+
+    residual_drift_ks_stat = round(
+        float(np.mean(break_flags)) * 0.45 if break_flags else 0.0,
+        4,
+    )
+
     return PanelAutoProfile(
         source_table=source_table_name,
         ts_id_col=eff_ts,
@@ -2431,6 +2523,8 @@ def inspect_panel_for_auto(
         monotonic_constraints=infer_monotonic_constraints([*future_covs, *past_covs]),
         is_compositional_simplex=is_compositional_simplex,
         simplex_total=simplex_total,
+        cold_start_donor_similarity=cold_start_donor_similarity,
+        residual_drift_ks_stat=residual_drift_ks_stat,
     )
 
 

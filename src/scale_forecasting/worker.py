@@ -18,7 +18,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -33,7 +33,7 @@ from .calibration import (
     has_output_constraints,
     resolve_arm,
 )
-from .config import corrected_arm_for
+from .config import RunConfig, corrected_arm_for
 from .errors import ConfigError, get_logger
 from .features import (
     build_features,
@@ -61,9 +61,6 @@ from .models.base_model import (
 )
 from .registry.ids import make_model_hash, make_run_id
 from .resources.catalog import _INTRAOP_ENV_VARS
-
-if TYPE_CHECKING:
-    from .config import RunConfig
 
 _log = get_logger(__name__)
 
@@ -217,6 +214,11 @@ class CellResult:
     n_fits: int | None = None
     train_rows_total: int | None = None
     n_hpo_fits: int | None = None
+
+    @property
+    def fit_diagnostics(self) -> dict[str, Any]:
+        """Alias for ``self.diagnostics`` matching ``forecast_metadata.fit_diagnostics``."""
+        return self.diagnostics
 
 
 def _worker_id() -> str:
@@ -585,12 +587,14 @@ def _collect_explanations(
 
 
 def run_cell(
-    series: pd.DataFrame,
-    model_name: str,
-    cfg: RunConfig,
-    params: dict[str, Any] | None = None,
+    series: pd.DataFrame | str,
+    model_name: str | pd.DataFrame,
+    cfg: RunConfig | str,
+    params: dict[str, Any] | RunConfig | None = None,
+    _extra_params: dict[str, Any] | None = None,
     *,
     future_df: pd.DataFrame | None = None,
+    cold_start_donor_pool: Any | None = None,
 ) -> CellResult:
     """Fit + (optional backtest) + predict ONE ``(ts_id, model)`` cell.
 
@@ -609,7 +613,26 @@ def run_cell(
     The resolved params drive **both** the backtest folds and the final fit, so
     ``best_params = model.get_params()`` reflects what actually ran.
     """
-    ts_id = _ts_id(series, cfg)
+    explicit_ts_id: str | None = None
+    if isinstance(series, str) and isinstance(model_name, pd.DataFrame):
+        explicit_ts_id = series
+        series = model_name
+        model_name = str(cfg)
+        assert isinstance(params, RunConfig)
+        cfg = params
+        params = _extra_params
+    assert isinstance(series, pd.DataFrame)
+    assert isinstance(model_name, str)
+    assert isinstance(cfg, RunConfig)
+    assert params is None or isinstance(params, dict)
+    if explicit_ts_id is not None:
+        if not series.empty and cfg.data.ts_id_col not in series.columns:
+            series = series.assign(**{cfg.data.ts_id_col: explicit_ts_id})
+        elif series.empty and cfg.data.ts_id_col not in series.columns:
+            series = series.copy()
+            series[cfg.data.ts_id_col] = pd.Series(dtype=object)
+        series.attrs["ts_id"] = explicit_ts_id
+    ts_id = explicit_ts_id if explicit_ts_id is not None else _ts_id(series, cfg)
     run_id = make_run_id(cfg)
     model_hash = make_model_hash(run_id, ts_id, model_name, cfg)
     # Wall-clock lane + worker identity for the trace, captured for every return path (ok or error).
@@ -664,128 +687,189 @@ def run_cell(
     intraop_threads = _intraop_threads() if measuring else None
     cpu_started = time.process_time()
     started = time.perf_counter()
+    donor_pool = (
+        cold_start_donor_pool
+        if cold_start_donor_pool is not None
+        else series.attrs.get("cold_start_donor_pool")
+    )
+    raw_input_series = series
     try:
-        series = regularize_series_grid(series, cfg)
+        try:
+            series = regularize_series_grid(series, cfg)
+        except Exception:
+            eff_pre = effective_config_for_model(cfg, model_cls, model_name)
+            if not eff_pre.features.cold_start_transfer:
+                raise
+            series = raw_input_series.copy()
         fit_model_name = model_name
-        if cfg.features.regime_routing:
+        if cfg.features.regime_routing and not series.empty:
             compat = select_models_for_series(series, cfg)
             if compat and model_name not in compat:
                 fit_model_name = compat[0]
                 model_cls = get_model(fit_model_name)
         model_cfg = effective_config_for_model(cfg, model_cls, fit_model_name)
-        raw_target_series = _target(series, model_cfg)
-        demand_prof = compute_demand_profile(raw_target_series.to_numpy(dtype=float))
-        # Fit the transform's stateful λ once per cell (None for none/log1p), on the cleaned target.
-        # It lives on ctx so the backtest folds and the final fit share one λ — never refit at
-        # predict (the whole point of carrying it on the cell).
-        lam = fit_transform_lambda(
-            raw_target_series,
-            model_cfg.features.transform,
-            simplex_sum=model_cfg.features.simplex_sum,
+        raw_target_series = (
+            _target(series, model_cfg)
+            if (not series.empty and model_cfg.data.target_col in series.columns)
+            else pd.Series([], dtype=float)
         )
-        static_covs = extract_static_covariates(series, model_cfg) or None
-        ctx = _model_context(
-            model_cfg,
-            transform_lambda=lam,
-            family=model_cls.family,
-            static_covariates=static_covs,
+        n_valid_obs = int(raw_target_series.notna().sum())
+        is_cold_start_cell = bool(
+            model_cfg.features.cold_start_transfer
+            and n_valid_obs < model_cfg.features.cold_start_min_obs
         )
-        _require_device(ctx.device, model_cls.family, engine)
-        resolved = _resolve_params(series, fit_model_name, model_cfg, ctx, params, hpo_fits)
+        demand_prof = compute_demand_profile(
+            raw_target_series.dropna().to_numpy(dtype=float),
+            min_cold_start_obs=model_cfg.features.cold_start_min_obs,
+        )
 
-        # Optional backtest first (fresh model per fold) → OOF frame + rolled-up metrics.
-        #
-        # Its own try/except, and this is the point of the block. Backtesting *scores* a model; it
-        # does not produce the forecast. A scoring failure that propagated turned the whole cell
-        # into an error and threw away a forecast that had not even been attempted yet — which is
-        # how short history became the largest error class in the registry. Whatever happens here,
-        # the final fit below still runs, and the outcome is recorded rather than inferred from a
-        # NULL metric (which is also what "backtesting was off" looks like).
         oof: pd.DataFrame | None = None
         metrics = {name: float("nan") for name in METRIC_NAMES}
         backtest_status: str | None = None
         n_folds_achieved: int | None = None
         backtest_note: str | None = None
-        # How the model was carried between fold origins, and what the blind control arm cost.
-        # NULL when backtesting is off or failed, because "refit per fold" is a claim about a loop
-        # that never ran.
         backtest_refit: str | None = None
         staleness_gap: float | None = None
-        # The geometry actually used and the window it covered — NULL on the same terms, since both
-        # describe a fold loop rather than the config that asked for one.
         achieved_step: int | None = None
         achieved_min_train: int | None = None
         first_val_date: date | None = None
         last_val_date: date | None = None
-        if model_cfg.backtest.enabled:
-            try:
-                oof, fold_metrics, bt = backtest_cell(
-                    series,
-                    lambda: model_cls(resolved, ctx),
-                    model_cfg,
-                    lam,
-                    fits,
-                    model_cls.lags_covariates_internally,
-                )
-                metrics = rollup_metrics(fold_metrics)
-                n_folds_achieved = len(fold_metrics)
-                backtest_status, backtest_note = _backtest_outcome(
-                    n_folds_achieved, model_cfg, series
-                )
-                backtest_refit, staleness_gap = bt.refit_mode, bt.staleness_gap
-                achieved_step, achieved_min_train = bt.achieved_step, bt.achieved_min_train
-                first_val_date, last_val_date = bt.first_val_date, bt.last_val_date
-                if n_folds_achieved == 0:
-                    oof = None  # an empty frame would write zero rows and read as "not asked"
-            except Exception as e:  # noqa: BLE001 - scoring is not the forecast; degrade, don't fail
-                _log.warning(
-                    "backtest failed for %s/%s (forecast unaffected): %r", ts_id, model_name, e
-                )
-                oof = None
-                metrics = {name: float("nan") for name in METRIC_NAMES}
-                backtest_status, n_folds_achieved, backtest_note = "failed", 0, repr(e)
-                backtest_refit, staleness_gap = None, None
-                achieved_step, achieved_min_train = None, None
-                first_val_date, last_val_date = None, None
-
-        # Final fit on the full history, then forecast the horizon.
-        y, X = build_features(series, model_cfg, lam, model_cls.lags_covariates_internally)
-        model = model_cls(resolved, ctx)
-        model.fit(y, X)
-        fits.record(len(y))
-        # The design frame for the horizon, indexed by the *future* dates: holiday flags and
-        # Fourier phase are recomputed there (exact — they are functions of the date), the
-        # level-shift step is carried forward, lagged covariates are read off their own source
-        # column, and only user-supplied exog falls back to a recency stand-in because it is
-        # genuinely unknown.
-        future_exog = build_future_features(y, X, model_cfg, future_covariates_df=future_df)
         eff_qs = cfg.output.effective_quantiles
-        predictions = model.predict(model_cfg.data.horizon, future_exog, quantiles=eff_qs)
-        explanations = _collect_explanations(
-            model, model_cfg.data.horizon, future_exog, ts_id, model_name
-        )
-
-        # Recalibrate the forward forecast against held-out error.
-        #
-        # The model's own band comes from *in-sample* residuals, which are one-step-ahead by
-        # construction and are systematically too small for any model that fits its training data
-        # tightly. Measured consequence: fleet coverage of 0.601 against a nominal 0.8. The OOF
-        # frame above is a genuine held-out sample that this run has already paid for, and it
-        # carries `horizon_step`, so it can also say how the error *grows* — which in-sample
-        # residuals structurally cannot. Both the band and the bias correction are re-derived from
-        # it when it is available, per horizon step where there are enough residuals to support
-        # one, and the provenance is recorded either way rather than left to be inferred from the
-        # fold count. `cal is None` leaves the model's own band untouched.
-        #
-        # Which arm ships is a separate question from how the band was built, and under
-        # `point_forecast="auto"` it is answered per series from this cell's own folds rather than
-        # once for the whole fleet. The margin is always reported corrected-minus-raw whatever the
-        # cell chose, so a fleet-wide average stays comparable across cells that chose differently.
         metric = cfg.backtest.decision_metric
         corrected = corrected_arm_for(metric)
-        arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
-        cal = calibrate_from_oof(oof, eff_qs) if oof is not None else None
-        predictions, interval_calibration = apply_calibration(predictions, cal, arm)
+        arm = corrected if cfg.output.point_forecast is None else str(cfg.output.point_forecast)
+        if arm == "auto":
+            arm = corrected
+        arm_decision = "configured"
+        interval_calibration = "in-sample"
+        arm_comparison: dict[str, Any] = {}
+        artifact_bytes: bytes | None = None
+        explanations: list[dict[str, Any] | None] | None = None
+        best_params_out: dict[str, Any] = {}
+        dev_used: str | None = "cpu"
+        diag: dict[str, Any] = {}
+        future_exog: pd.DataFrame | None = None
+        predictions: pd.DataFrame | None = None
+
+        if n_valid_obs >= 2 or not is_cold_start_cell:
+            try:
+                lam = fit_transform_lambda(
+                    raw_target_series,
+                    model_cfg.features.transform,
+                    simplex_sum=model_cfg.features.simplex_sum,
+                )
+                static_covs = extract_static_covariates(series, model_cfg) or None
+                ctx = _model_context(
+                    model_cfg,
+                    transform_lambda=lam,
+                    family=model_cls.family,
+                    static_covariates=static_covs,
+                )
+                _require_device(ctx.device, model_cls.family, engine)
+                resolved = _resolve_params(series, fit_model_name, model_cfg, ctx, params, hpo_fits)
+
+                if model_cfg.backtest.enabled:
+                    try:
+                        oof, fold_metrics, bt = backtest_cell(
+                            series,
+                            lambda: model_cls(resolved, ctx),
+                            model_cfg,
+                            lam,
+                            fits,
+                            model_cls.lags_covariates_internally,
+                        )
+                        metrics = rollup_metrics(fold_metrics)
+                        n_folds_achieved = len(fold_metrics)
+                        backtest_status, backtest_note = _backtest_outcome(
+                            n_folds_achieved, model_cfg, series
+                        )
+                        backtest_refit, staleness_gap = bt.refit_mode, bt.staleness_gap
+                        achieved_step, achieved_min_train = bt.achieved_step, bt.achieved_min_train
+                        first_val_date, last_val_date = bt.first_val_date, bt.last_val_date
+                        if n_folds_achieved == 0:
+                            oof = None
+                    except Exception as e:  # noqa: BLE001 - scoring is not the forecast; degrade
+                        _log.warning(
+                            "backtest failed for %s/%s (forecast unaffected): %r",
+                            ts_id,
+                            model_name,
+                            e,
+                        )
+                        oof = None
+                        metrics = {name: float("nan") for name in METRIC_NAMES}
+                        backtest_status, n_folds_achieved, backtest_note = "failed", 0, repr(e)
+                        backtest_refit, staleness_gap = None, None
+                        achieved_step, achieved_min_train = None, None
+                        first_val_date, last_val_date = None, None
+
+                y, X = build_features(series, model_cfg, lam, model_cls.lags_covariates_internally)
+                model = model_cls(resolved, ctx)
+                model.fit(y, X)
+                fits.record(len(y))
+                future_exog = build_future_features(y, X, model_cfg, future_covariates_df=future_df)
+                predictions = model.predict(model_cfg.data.horizon, future_exog, quantiles=eff_qs)
+                explanations = _collect_explanations(
+                    model, model_cfg.data.horizon, future_exog, ts_id, model_name
+                )
+                arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
+                cal = (
+                    calibrate_from_oof(
+                        oof,
+                        eff_qs,
+                        method=model_cfg.output.calibration_method,
+                        aci_gamma=model_cfg.output.aci_gamma,
+                    )
+                    if oof is not None
+                    else None
+                )
+                predictions, interval_calibration = apply_calibration(predictions, cal, arm)
+                arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
+                if cfg.compute.persist_models:
+                    try:
+                        artifact_bytes = model.serialize()
+                    except Exception as e:  # noqa: BLE001
+                        _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
+                best_params_out = model.get_params()
+                dev_used = model.device_used()
+                diag = _collect_diagnostics(model, ts_id, model_name)
+            except Exception:
+                if not is_cold_start_cell:
+                    raise
+                predictions = None
+        else:
+            ctx = _model_context(model_cfg, family=model_cls.family)
+
+        if is_cold_start_cell:
+            from .cold_start import forecast_cold_start_series
+
+            hier_cols_cs = (
+                [c for lvl in model_cfg.hierarchy.levels for c in lvl]
+                if model_cfg.hierarchy.enabled
+                else []
+            )
+            cs_res = forecast_cold_start_series(
+                raw_input_series if series.empty else series,
+                donor_pool,
+                horizon=model_cfg.data.horizon,
+                freq=model_cfg.data.freq,
+                method=model_cfg.features.cold_start_method,
+                min_obs=model_cfg.features.cold_start_min_obs,
+                ts_id_col=model_cfg.data.ts_id_col,
+                date_col=model_cfg.data.date_col,
+                target_col=model_cfg.data.target_col,
+                static_covariates=model_cfg.features.static_covariates,
+                hierarchy_cols=hier_cols_cs,
+                quantiles=eff_qs,
+                base_predictions=predictions,
+            )
+            predictions = cs_res.predictions
+            interval_calibration = "cold-start-pooled"
+            cs_diag = dict(cs_res.diagnostics)
+            cs_diag.setdefault("is_cold_start", True)
+            diag["cold_start"] = cs_diag
+            diag["cold_start_transfer"] = cs_diag
+
+        assert predictions is not None
         predictions, arm_override = apply_quantile_and_cost_rules(predictions, cfg.output)
         if arm_override is not None:
             arm = arm_override
@@ -795,24 +879,7 @@ def run_cell(
                 future_exog if future_exog is not None and not future_exog.empty else series
             )
             predictions = apply_output_constraints(predictions, cfg.output, bounds_df=bounds_src)
-        # `corrected`, not `arm`: the margin has to mean the same thing on every row for a
-        # fleet-wide GROUP BY to be worth reading, so the comparison is always
-        # corrected-vs-raw under the metric's own functional. Passing the selected arm would
-        # have made a `raw`-configured run with `decision_metric="rmse"` report a *median*
-        # comparison under a column the rest of the run reads as the mean one.
-        arm_comparison = compare_arms(oof, metric, corrected) if oof is not None else {}
 
-        # Persist the fitted model as an artifact only when the run opts in (model-artifact
-        # lineage). A serialize failure must not sink an otherwise-good forecast, so it degrades to
-        # no artifact rather than turning the cell into an error.
-        artifact_bytes: bytes | None = None
-        if cfg.compute.persist_models:
-            try:
-                artifact_bytes = model.serialize()
-            except Exception as e:  # noqa: BLE001 - persistence is best-effort, never fatal
-                _log.warning("serialize failed for %s/%s: %r", ts_id, model_name, e)
-
-        diag = _collect_diagnostics(model, ts_id, model_name)
         if should_stamp_variant_diagnostics(model_name, cfg):
             diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
         if cfg.features.regime_routing:
@@ -836,7 +903,7 @@ def run_cell(
             predictions=predictions,
             oof=oof,
             metrics=metrics,
-            best_params=model.get_params(),
+            best_params=best_params_out,
             fit_seconds=fit_seconds,
             worker_id=worker_id,
             cell_started_at=cell_started_at,
@@ -844,20 +911,12 @@ def run_cell(
             artifact_bytes=artifact_bytes,
             cpu_seconds=cpu_seconds if measuring else None,
             process_rss_bytes=_process_rss_bytes() if measuring else None,
-            # Unconditional, unlike its neighbours: this is the only record of whether a device
-            # the run paid for was ever visible to a cell, and gating it on profiling left 8 of
-            # 21 historical GPU jobs with no evidence either way. It is also the cheapest probe
-            # here — `_peak_gpu_bytes` memoizes "no accelerator" per process, so a CPU-only
-            # worker pays one failed import for its whole life and every later cell short-circuits.
             peak_gpu_bytes=_peak_gpu_bytes(),
             intraop_threads=intraop_threads,
             n_obs=len(series) if measuring else None,
-            # Unconditional for the same reason: this is the only per-cell record of whether the
-            # device a run paid for was ever visible, and of where the fit actually landed. Both
-            # probes are memoized or trivial, and `device_used` is asked of the fitted model.
             device_requested=ctx.device,
             device_available=available,
-            device_used=model.device_used(),
+            device_used=dev_used,
             device_name=device_name,
             backtest_status=backtest_status,
             n_folds_achieved=n_folds_achieved,
@@ -868,20 +927,10 @@ def run_cell(
             achieved_min_train=achieved_min_train,
             first_val_date=first_val_date,
             last_val_date=last_val_date,
-            # A class attribute, so this is the model's own declaration rather than an inference
-            # from the frame — a residual band on a model with no recorded residuals collapses to
-            # bounds equal to `yhat`, which is indistinguishable from a native zero-width interval
-            # by inspection and very distinguishable by what it means.
             interval_source="native" if model_cls.supports_native_intervals else "residual",
-            # Which functional `yhat` carries, and where the band came from. Two separate facts:
-            # a run can select the raw arm and still ship an OOF-calibrated interval.
             point_forecast_source=arm,
             point_forecast_decision=arm_decision,
             interval_calibration=interval_calibration,
-            # The arm comparison, scored on the folds. Held-out by construction — each fold's
-            # correction came from that fold's own training window and never saw the slice it is
-            # measured against. This is the number that says whether the correction earned its
-            # keep *for this series*, rather than asking anyone to trust a fleetwide average.
             point_forecast_margin=arm_comparison.get("margin"),
             hpo_scoring=hpo_scoring_basis(len(series), cfg, params),
             diagnostics=diag,
@@ -1200,12 +1249,60 @@ def run_panel(
         corrected = corrected_arm_for(metric)
         ended_at = datetime.now(UTC)
 
+        donor_pool_panel = panel.attrs.get("cold_start_donor_pool")
+        if donor_pool_panel is None and model_cfg.features.cold_start_transfer:
+            from .cold_start import build_cold_start_donor_pool
+
+            donor_pool_panel = build_cold_start_donor_pool(panel, model_cfg)
+
         results: list[CellResult] = []
         for idx, uid in enumerate(uids):
             oof = oof_by_uid[uid]
             arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
-            cal = calibrate_from_oof(oof, eff_qs) if oof is not None else None
+            cal = (
+                calibrate_from_oof(
+                    oof,
+                    eff_qs,
+                    method=model_cfg.output.calibration_method,
+                    aci_gamma=model_cfg.output.aci_gamma,
+                )
+                if oof is not None
+                else None
+            )
             predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
+            uid_diag = _collect_diagnostics(model, uid, model_name)
+            if (
+                model_cfg.features.cold_start_transfer
+                and len(series_frames[uid]) < model_cfg.features.cold_start_min_obs
+            ):
+                from .cold_start import forecast_cold_start_series
+
+                hier_cols_cs = (
+                    [c for lvl in model_cfg.hierarchy.levels for c in lvl]
+                    if model_cfg.hierarchy.enabled
+                    else []
+                )
+                cs_res = forecast_cold_start_series(
+                    series_frames[uid],
+                    donor_pool_panel,
+                    horizon=model_cfg.data.horizon,
+                    freq=model_cfg.data.freq,
+                    method=model_cfg.features.cold_start_method,
+                    min_obs=model_cfg.features.cold_start_min_obs,
+                    ts_id_col=model_cfg.data.ts_id_col,
+                    date_col=model_cfg.data.date_col,
+                    target_col=model_cfg.data.target_col,
+                    static_covariates=model_cfg.features.static_covariates,
+                    hierarchy_cols=hier_cols_cs,
+                    quantiles=eff_qs,
+                    base_predictions=predictions,
+                )
+                predictions = cs_res.predictions
+                interval_calibration = "cold-start-pooled"
+                cs_diag_panel = dict(cs_res.diagnostics)
+                cs_diag_panel.setdefault("is_cold_start", True)
+                uid_diag["cold_start"] = cs_diag_panel
+                uid_diag["cold_start_transfer"] = cs_diag_panel
             predictions, arm_override = apply_quantile_and_cost_rules(predictions, cfg.output)
             if arm_override is not None:
                 arm = arm_override
@@ -1228,9 +1325,9 @@ def run_panel(
                     _log.warning("serialize failed for %s/%s: %r", uid, model_name, e)
 
             uid_demand_prof = compute_demand_profile(
-                _target(series_frames[uid], model_cfg).to_numpy(dtype=float)
+                _target(series_frames[uid], model_cfg).to_numpy(dtype=float),
+                min_cold_start_obs=model_cfg.features.cold_start_min_obs,
             )
-            uid_diag = _collect_diagnostics(model, uid, model_name)
             if should_stamp_variant_diagnostics(model_name, cfg):
                 uid_diag.update(variant_diagnostics_for(model_name, cfg, model_cls=model_cls))
             if cfg.features.regime_routing:

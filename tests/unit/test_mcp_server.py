@@ -226,6 +226,26 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
     assert not is_err
     assert pg_no_bt["metrics"] == {}
 
+    is_err, pg_track_l = _call_tool(
+        server,
+        "run_playground",
+        {
+            "model": "theta",
+            "horizon": 7,
+            "n_series": 2,
+            "backtest": True,
+            "include_aci": True,
+            "include_tail_risk": True,
+            "optimize_inventory_params": {"max_budget": 1000.0},
+            "optimize_scenario_params": {"unit_cost": 4.0},
+        },
+    )
+    assert not is_err
+    assert len(pg_track_l["aci_coverage"]) >= 1
+    assert len(pg_track_l["tail_risk"]) >= 1
+    assert len(pg_track_l["inventory_optimization"]) >= 1
+    assert len(pg_track_l["scenario_optimization"]) >= 1
+
     is_err, pg_bad = _call_tool(server, "run_playground", {"model": "arima_plus"})
     assert is_err and "cannot run in the offline Python playground" in str(pg_bad)
 
@@ -522,3 +542,38 @@ def test_mcp_stdio_framing_and_cli_entrypoints() -> None:
     )
     assert probe_proc.returncode == 0
     assert json.loads(probe_proc.stdout)["models"]["total"] == 37
+
+
+def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
+    """R3.3 tripwire: verify MCP tool schemas match `COLD_START_METHODS` / `COPULA_TYPES` and
+    direct tool aliases (`optimize_inventory`, `optimize_scenario`) execute cleanly.
+    """
+    from scale_forecasting.config import COLD_START_METHODS
+    from scale_forecasting.copula import COPULA_TYPES
+
+    server = mcp.McpServer(allow_launch=False, repo_root=REPO_ROOT)
+    tools = {t["name"]: t for t in server.list_tools()}
+    pg_props = tools["run_playground"]["inputSchema"]["properties"]
+    rev_props = tools["review_run"]["inputSchema"]["properties"]
+
+    assert tuple(pg_props["cold_start_archetype"]["enum"]) == COLD_START_METHODS
+    assert tuple(pg_props["copula_type"]["enum"]) == COPULA_TYPES
+    assert tuple(rev_props["copula_type"]["enum"]) == COPULA_TYPES
+
+    is_err_inv, inv_res = _call_tool(
+        server,
+        "optimize_inventory",
+        {"model": "naive_mean", "horizon": 7, "max_budget": 1000.0, "unit_cost": 5.0},
+    )
+    assert not is_err_inv, inv_res
+    assert inv_res["status"] == "ok"
+    assert len(inv_res["rows"]) >= 1
+
+    is_err_scen, scen_res = _call_tool(
+        server,
+        "optimize_scenario",
+        {"model": "naive_mean", "horizon": 7, "unit_cost": 4.0, "objective": "gross_profit"},
+    )
+    assert not is_err_scen, scen_res
+    assert scen_res["status"] == "ok"
+    assert len(scen_res["rows"]) >= 1

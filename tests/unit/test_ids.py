@@ -221,3 +221,49 @@ def test_model_hash_is_hex_sha256() -> None:
     h = make_model_hash(make_run_id(cfg), "s1", "theta", cfg)
     assert len(h) == 64
     int(h, 16)  # raises if not hex
+
+
+def test_track_l_fields_elided_at_default_and_move_ids_when_set() -> None:
+    """Track L `cold_start_*` and `calibration_method` / `aci_gamma` elide at default."""
+    from scale_forecasting.registry.ids import make_model_spec_hash
+
+    base = _cfg()
+    canon = json.loads(_canonical_config(base))
+    assert "cold_start_transfer" not in canon["features"]
+    assert "cold_start_min_obs" not in canon["features"]
+    assert "cold_start_method" not in canon["features"]
+    assert "calibration_method" not in canon["output"]
+    assert "aci_gamma" not in canon["output"]
+
+    explicit_defaults = _cfg(
+        features={
+            "cold_start_transfer": False,
+            "cold_start_min_obs": 14,
+            "cold_start_method": "auto",
+        },
+        output={
+            "calibration_method": "conformal",
+            "aci_gamma": 0.05,
+        },
+    )
+    assert make_run_id(explicit_defaults) == make_run_id(base)
+    assert make_model_spec_hash("theta", explicit_defaults) == make_model_spec_hash("theta", base)
+
+    with_cs = _cfg(
+        features={
+            "cold_start_transfer": True,
+            "cold_start_min_obs": 10,
+            "cold_start_method": "bass_diffusion",
+        }
+    )
+    assert make_run_id(with_cs) != make_run_id(base)
+    assert make_model_spec_hash("theta", with_cs) != make_model_spec_hash("theta", base)
+
+    with_aci = _cfg(
+        output={
+            "calibration_method": "aci_normalized",
+            "aci_gamma": 0.10,
+        }
+    )
+    assert make_run_id(with_aci) != make_run_id(base)
+    assert make_model_spec_hash("theta", with_aci) != make_model_spec_hash("theta", base)

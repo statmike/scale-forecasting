@@ -53,7 +53,14 @@ flowchart TD
         K1 --> K2 --> K3
     end
 
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    subgraph S8["Stage 8: Cold-Start Transfer, Online ACI, Copula Risk, Portfolio Inventory & Prescriptive Optimization (Track L)"]
+        M1["Cold-Start & NPI Analog Transfer (cold_start.py)<br/>features.cold_start_transfer · analog_transfer · bass_diffusion · weibull_lifecycle"]
+        M2["Online Adaptive Conformal Inference & Copula Tail Risk (aci.py · copula.py)<br/>output.calibration_method = 'aci' | 'aci_normalized' · sample_trajectories · tail_risk_df (VaR / CVaR)"]
+        M3["Portfolio Inventory & Prescriptive Price/Promo Optimization (inventory_optimizer.py · scenario_optimizer.py)<br/>optimize_inventory_df (budget/volume/fill-rate) · optimize_scenario (Double-ML + CVaR)"]
+        M1 --> M2 --> M3
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
 ```
 
 ---
@@ -215,6 +222,34 @@ flowchart TD
 
 ---
 
+## 7. Cold-Start Transfer, Online ACI, Copula Risk & Prescriptive Optimization (Track L)
+
+Track L bridges probabilistic forecasting to **closed-loop prescriptive supply-chain & commercial decisioning**, handling ultra-short-history new product introductions (NPIs), non-exchangeable post-shock drift, cross-series tail dependencies, working-capital-constrained replenishment, and optimal price/promo calendar design:
+
+```mermaid
+flowchart TD
+    subgraph CS["1. Cold-Start & NPI Transfer (cold_start.py)"]
+        CS1["cold_start_transfer_df · match_cold_start_donors<br/>analog_transfer · bass_diffusion · weibull_lifecycle"]
+    end
+    subgraph Risk["2. Online ACI & Copula Tail Risk (aci.py · copula.py)"]
+        R1["aci_df (Gibbs & Candes 2021 + normalized)<br/>sample_trajectories (Gaussian / Student-t) · tail_risk_df (VaR / CVaR)"]
+    end
+    subgraph Presc["3. Portfolio Inventory & Scenario Optimization (inventory_optimizer.py · scenario_optimizer.py)"]
+        P1["optimize_inventory_df (budget · volume · fill-rate · MOQ)<br/>optimize_scenario (Double-ML elasticity + CVaR profit)"]
+    end
+    CS --> Risk --> Presc
+```
+
+| Capability | SDK / Workbench Entrypoint | Key Parameters & Outputs |
+| :--- | :--- | :--- |
+| **Cold-Start & NPI Analog Donor Transfer** | `features={"cold_start_transfer": True, "cold_start_min_obs": 14, "cold_start_method": "auto"}`<br/>`forecaster.cold_start_transfer_df(method="auto", top_k_donors=3)`<br/>`sf.cold_start_transfer_df(panel_df, min_obs=14)` | Matches ultra-short-history series ($n < \text{min\_obs}$) to mature donor peers using static metadata, hierarchy lineage, and normalized early-ramp shape (`analog_transfer`), or fits parametric `bass_diffusion` ($p, q, m$) and `weibull_lifecycle` curves with empirical-Bayes shrinkage. Automatically evaluated as Branch 2c (`cold_start_analog_transfer`) in `Forecaster.auto()` and surfaced in `f.assess()` Question 4. |
+| **Online Adaptive Conformal Inference (ACI)** | `output={"calibration_method": "aci_normalized", "aci_gamma": 0.05}`<br/>`forecaster.aci_df(gamma=0.05, normalized=True, horizon_delay=True)`<br/>`sf.compute_aci_df(oof_df, predictions_df=..., gamma=0.05)` | Updates the effective miscoverage rate $\alpha_{t+1} = \text{clip}(\alpha_t + \gamma(\alpha - \text{err}_{t-h+1}), [0.001, 0.999])$ online under distribution shift (`aci`) and scales intervals by an exponentially weighted volatility estimate $\hat{\sigma}_t$ (`aci_normalized`), guaranteeing finite-sample long-run coverage recovery after structural breaks. |
+| **Joint Cross-Series & Cross-Horizon Copula Trajectories & Tail Risk** | `forecaster.sample_trajectories(n_paths=500, copula_type="auto")`<br/>`forecaster.tail_risk_df(alphas=(0.90, 0.95, 0.99), window=7)`<br/>`sf.sample_trajectories(preds_df, oof_df=..., copula_type="student_t")` | Fits shrinkage-regularized Gaussian or heavy-tailed Student-$t$ copulas ($\nu=4$) over out-of-fold residual rank correlations across $(H \times N)$ series-horizon cells, enforces non-negative `floor`/`cap`, simplex closure, and hierarchical coherence per path, and computes portfolio `var_alpha`, `cvar_alpha`, `stockout_prob`, and `expected_shortfall_cost`. |
+| **Multi-SKU Portfolio-Constrained Inventory Optimizer** | `forecaster.optimize_inventory_df(max_budget=50000.0, max_volume=1200.0, target_portfolio_fill_rate=0.96, uncertainty_source="copula")`<br/>`sf.optimize_inventory_portfolio(preds_df, oof_df=..., max_budget=...)` | Solves joint multi-SKU replenishment (`recommended_order_qty`, `reorder_point`, `safety_stock`, `achieved_service_level`, `expected_total_cost`, `shadow_price_budget`) under shared working-capital (`max_budget`), warehouse capacity (`max_volume`), aggregate fill-rate (`target_portfolio_fill_rate`), and discrete `vendor_moq` / `order_multiple` constraints using either analytical or copula-trajectory distributions. Visualize with `forecaster.plot_inventory_frontier()`. |
+| **Prescriptive Price & Promo Calendar Optimizer** | `forecaster.optimize_scenario(objective="risk_adjusted_profit", price_bounds=(-0.10, 0.10), max_promo_days=3, min_cooldown_days=2, risk_aversion_lambda=0.3)`<br/>`sf.optimize_scenario(panel_df, config=..., objective="gross_profit")` | Optimizes the forward price and promotional calendar over the Double-ML causal response surface (`elasticity.py`)—incorporating own-price elasticity, promo lift, post-promo pull-forward dip, cross-SKU halo/cannibalization, hierarchical coherence, and inventory holding/stockout cost—subject to price bounds, promo frequency/cooldown rules, margin floors, and capacity caps. Visualize with `forecaster.plot_optimal_scenario()`. |
+
+---
+
 ## Complete Declarative Example (`RunConfig`)
 
 ```json
@@ -242,7 +277,10 @@ flowchart TD
     "monotonic_constraints": {"price_index": -1, "promo_flag": 1},
     "outlier_policy": "winsorize",
     "outlier_sigma": 3.5,
-    "regime_routing": true
+    "regime_routing": true,
+    "cold_start_transfer": true,
+    "cold_start_min_obs": 14,
+    "cold_start_method": "auto"
   },
   "backtest": {
     "enabled": true,
@@ -259,7 +297,9 @@ flowchart TD
     "integer_rounding": "cumulative_round",
     "quantiles": [0.1, 0.25, 0.5, 0.75, 0.9, 0.95],
     "underage_cost": 4.0,
-    "overage_cost": 1.0
+    "overage_cost": 1.0,
+    "calibration_method": "aci_normalized",
+    "aci_gamma": 0.05
   },
   "ensemble": {
     "enabled": true,
@@ -308,7 +348,13 @@ sim_df = bo.simulate_scenarios(
 print(sf.summarize_scenarios(sim_df)[["scenario", "model_type", "delta_pct", "gross_margin_delta", "delta_reorder_point", "delta_safety_stock"]])
 print(sf.audit_scenario_monotonicity(sim_df))
 
-# 4. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
+# 4. Online ACI intervals, joint Copula VaR/CVaR tail risk, portfolio inventory & prescriptive scenario optimization
+aci_df = bo.aci_df(gamma=0.05, normalized=True)
+risk_df = bo.tail_risk_df(n_paths=200, copula_type="auto")
+port_inv_df = bo.optimize_inventory_df(max_budget=25000.0, service_level=0.95, uncertainty_source="copula")
+scen_opt = bo.optimize_scenario(objective="gross_profit", price_bounds=(-0.10, 0.10), max_promo_days=3)
+
+# 5. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
 weekly_df = bo.rollup_time(freq="W")
 inv_df = bo.inventory_policy_df(lead_time=7.0, lead_time_std=1.0, service_level=0.95, on_hand=150.0, order_multiple=10.0)
 bo.export_report("workbench_report.html", write_json=True)
@@ -318,3 +364,4 @@ bo.export_report("workbench_report.html", write_json=True)
 # Generate an interactive HTML + JSON report directly from the CLI:
 python -m scale_forecasting.report --models naive_seasonal theta --horizon 14 --out report.html --json
 ```
+

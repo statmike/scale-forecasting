@@ -312,6 +312,8 @@ class McpServer:
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Return the 11 MCP tools exposed by this server."""
+        from .benchmarks import list_benchmarks
+
         return [
             {
                 "name": "probe_environment",
@@ -332,7 +334,7 @@ class McpServer:
                 "description": (
                     "Query the canonical catalogs of models (37), metrics (21), runtimes (7), "
                     "GPUs (4), dependency extras (13), BigQuery views (5), shipped configs (62), "
-                    "synthetic DGP benchmarks (18), or Auto-Forecaster exposure tiers & scale "
+                    "synthetic DGP benchmarks (20), or Auto-Forecaster exposure tiers & scale "
                     "regimes."
                 ),
                 "inputSchema": {
@@ -378,8 +380,8 @@ class McpServer:
                 "description": (
                     "Inspect the JSON Schema and validation rules for RunConfig or a specific "
                     "nested config block (DataConfig, FeaturesConfig, BacktestConfig, "
-                    "OutputConfig, HpoConfig, EnsembleConfig, HierarchyConfig, ComputeConfig, "
-                    "FamilyCompute, EnsembleCompute, ProfileConfig, CapacityConfig, "
+                    "OutputConfig, CalibrationConfig, HpoConfig, EnsembleConfig, HierarchyConfig, "
+                    "ComputeConfig, FamilyCompute, EnsembleCompute, ProfileConfig, CapacityConfig, "
                     "CapacityServicePolicy, RetryResources)."
                 ),
                 "inputSchema": {
@@ -389,7 +391,8 @@ class McpServer:
                             "type": "string",
                             "description": (
                                 "Optional section or Pydantic class name to inspect (e.g., "
-                                "'compute', 'backtest', 'FamilyCompute'). Omit for overview."
+                                "'compute', 'backtest', 'CalibrationConfig', 'FamilyCompute'). "
+                                "Omit for overview."
                             ),
                         }
                     },
@@ -446,6 +449,13 @@ class McpServer:
                                 "(e.g., 'holtwinters', 'theta', 'naive_seasonal')."
                             ),
                         },
+                        "models": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of model names for playground or bake-off runs."
+                            ),
+                        },
                         "horizon": {
                             "type": "integer",
                             "default": 14,
@@ -461,6 +471,11 @@ class McpServer:
                         "n_folds": {
                             "type": "integer",
                             "default": 3,
+                        },
+                        "include_fva": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "When true, include Forecast Value Added (FVA) summary.",
                         },
                         "scenarios": {
                             "type": "object",
@@ -542,10 +557,93 @@ class McpServer:
                         },
                         "temporal_reconciliation_method": {
                             "type": "string",
-                            "enum": ["ols", "wls_struct", "wls_var", "mint_shrink"],
+                            "enum": [
+                                "ols",
+                                "wls_struct",
+                                "wls_var",
+                                "mint_shrink",
+                                "mint_nonneg",
+                                "cross_temporal_mint",
+                            ],
                             "default": "wls_struct",
                             "description": (
                                 "Temporal reconciliation estimator when reconcile_temporal=True."
+                            ),
+                        },
+                        "include_cold_start": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute cold-start & NPI analog donor shrinkage or "
+                                "Bass/Gompertz diffusion forecast."
+                            ),
+                        },
+                        "cold_start_archetype": {
+                            "type": "string",
+                            "enum": [
+                                "auto",
+                                "analog_transfer",
+                                "bass_diffusion",
+                                "weibull_lifecycle",
+                            ],
+                            "default": "auto",
+                            "description": "Cold-start NPI launch archetype.",
+                        },
+                        "include_aci": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute online Adaptive Conformal Inference (ACI) "
+                                "intervals and rolling empirical coverage tracking."
+                            ),
+                        },
+                        "include_trajectories": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, simulate joint multi-horizon copula sample "
+                                "trajectories."
+                            ),
+                        },
+                        "include_tail_risk": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute portfolio Value-at-Risk (VaR) and Expected "
+                                "Shortfall (CVaR) from joint copula trajectories."
+                            ),
+                        },
+                        "copula_type": {
+                            "type": "string",
+                            "enum": [
+                                "auto",
+                                "gaussian",
+                                "student_t",
+                                "iman_conover",
+                                "empirical",
+                            ],
+                            "default": "gaussian",
+                            "description": "Copula family for joint trajectory sampling.",
+                        },
+                        "n_trajectories": {
+                            "type": "integer",
+                            "default": 50,
+                            "description": "Number of joint copula trajectories to draw.",
+                        },
+                        "optimize_inventory_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for portfolio-constrained inventory "
+                                "optimization (max_budget, max_volume, max_total_units, "
+                                "target_portfolio_fill_rate, vendor_moq, uncertainty_source)."
+                            ),
+                        },
+                        "optimize_scenario_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for prescriptive price & promo "
+                                "calendar optimization (objective, price_bounds, "
+                                "price_grid_steps, max_promo_periods, min_margin_pct)."
                             ),
                         },
                         "export_report_path": {
@@ -696,6 +794,14 @@ class McpServer:
                                 "When true, include Top-N operational exception triage queue."
                             ),
                         },
+                        "include_promo_elasticity": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include Double-ML promotional & price elasticity "
+                                "decomposition."
+                            ),
+                        },
                         "include_inventory_policy": {
                             "type": "boolean",
                             "default": False,
@@ -738,10 +844,75 @@ class McpServer:
                         },
                         "temporal_reconciliation_method": {
                             "type": "string",
-                            "enum": ["ols", "wls_struct", "wls_var", "mint_shrink"],
+                            "enum": [
+                                "ols",
+                                "wls_struct",
+                                "wls_var",
+                                "mint_shrink",
+                                "mint_nonneg",
+                                "cross_temporal_mint",
+                            ],
                             "default": "wls_struct",
                             "description": (
                                 "Temporal reconciliation estimator when reconcile_temporal=True."
+                            ),
+                        },
+                        "include_cold_start": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include cold-start NPI donor transfer / diffusion "
+                                "forecast."
+                            ),
+                        },
+                        "include_aci": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute online Adaptive Conformal Inference (ACI) "
+                                "intervals and rolling empirical coverage tracking."
+                            ),
+                        },
+                        "include_trajectories": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, include joint copula trajectory sample paths."
+                            ),
+                        },
+                        "include_tail_risk": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute portfolio Value-at-Risk (VaR) and Expected "
+                                "Shortfall (CVaR) from joint copula trajectories."
+                            ),
+                        },
+                        "copula_type": {
+                            "type": "string",
+                            "enum": [
+                                "auto",
+                                "gaussian",
+                                "student_t",
+                                "iman_conover",
+                                "empirical",
+                            ],
+                            "default": "gaussian",
+                            "description": "Copula family for joint trajectory sampling.",
+                        },
+                        "optimize_inventory_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for portfolio-constrained inventory "
+                                "optimization (max_budget, max_volume, max_total_units, "
+                                "target_portfolio_fill_rate, vendor_moq, uncertainty_source)."
+                            ),
+                        },
+                        "optimize_scenario_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for prescriptive price & promo "
+                                "calendar optimization."
                             ),
                         },
                         "export_report_path": {
@@ -807,13 +978,13 @@ class McpServer:
                     "Synthesize a glass-box RunConfig and ConfigBlueprint via the Auto-Forecaster "
                     "(`Forecaster.build_config`) across the 4 observational exposure tiers "
                     "('first_light', 'wide_field', 'deep_sky', 'deep_field') and 5 n_series "
-                    "scale regimes ('micro' to 'hyperscale'). Accepts any of the 18 synthetic "
-                    "DGP benchmark names ('dgp_01_smooth_seasonal' .. "
-                    "'dgp_18_promo_lag_pullforward'), 'playground' sample data, a local "
-                    "CSV/Parquet path, or a BigQuery table name. Returns the Step 0 7-dimension "
-                    "data profile (`profile_table`), validated RunConfig JSON, deterministic "
-                    "run_id, field-by-field rationale table, 4-anchor baseline ladder, and "
-                    "parametric wall-clock duration estimate."
+                    f"scale regimes ('micro' to 'hyperscale'). Accepts any of the "
+                    f"{len(list_benchmarks())} synthetic DGP benchmark names "
+                    "('dgp_01_smooth_seasonal' .. 'dgp_20_monthly_regime_drift_damped'), "
+                    "'playground' sample data, a local CSV/Parquet path, or a BigQuery table name. "
+                    "Returns the Step 0 7-dimension data profile (`profile_table`), validated "
+                    "RunConfig JSON, deterministic run_id, field-by-field rationale table, "
+                    "4-anchor baseline ladder, and parametric wall-clock duration estimate."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -824,7 +995,7 @@ class McpServer:
                             "description": (
                                 "Data source: 'playground', a synthetic benchmark name "
                                 "('dgp_01_smooth_seasonal' .. "
-                                "'dgp_18_promo_lag_pullforward'), a local CSV/Parquet file "
+                                "'dgp_20_monthly_regime_drift_damped'), a local CSV/Parquet file "
                                 "path, or a BigQuery table name."
                             ),
                         },
@@ -961,14 +1132,15 @@ class McpServer:
                 "name": "run_auto_forecast",
                 "description": (
                     "Run the Glass-Box Auto-Forecaster (`auto_forecast` / `Forecaster.auto`) "
-                    "on any of the 18 synthetic DGP benchmarks ('dgp_01_smooth_seasonal' .. "
-                    "'dgp_18_promo_lag_pullforward'), 'playground' sample panel, local "
-                    "CSV/Parquet file, or BigQuery table (with --allow-launch), with multi-branch "
-                    "autofocus refinement (`autofocus=True`, `autofocus_mode='dag'`). Returns "
-                    "the Step 0 data profile (`profile_table`), pass-by-pass `autofocus_ledger`, "
-                    "4-anchor `baseline_value` ladder (plus beaten complex challengers when a "
-                    "univariate model wins), per-level `hierarchy_value`, head-to-head "
-                    "`model_comparison`, and the 7-Question `practitioner_assessment`."
+                    f"on any of the {len(list_benchmarks())} synthetic DGP benchmarks "
+                    "('dgp_01_smooth_seasonal' .. 'dgp_20_monthly_regime_drift_damped'), "
+                    "'playground' sample panel, local CSV/Parquet file, or BigQuery table "
+                    "(with --allow-launch), with multi-branch autofocus refinement "
+                    "(`autofocus=True`, `autofocus_mode='dag'`). Returns the Step 0 data profile "
+                    "(`profile_table`), pass-by-pass `autofocus_ledger`, 4-anchor `baseline_value` "
+                    "ladder (plus beaten complex challengers when a univariate model wins), "
+                    "per-level `hierarchy_value`, head-to-head `model_comparison`, and the "
+                    "7-Question `practitioner_assessment`."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -979,7 +1151,7 @@ class McpServer:
                             "description": (
                                 "Offline data source: 'playground', a synthetic benchmark name "
                                 "('dgp_01_smooth_seasonal' .. "
-                                "'dgp_18_promo_lag_pullforward'), or a local CSV/Parquet "
+                                "'dgp_20_monthly_regime_drift_damped'), or a local CSV/Parquet "
                                 "file path."
                             ),
                         },
@@ -1303,7 +1475,13 @@ class McpServer:
         if name == "run_playground":
             from . import playground
 
-            model_name = str(args.get("model", "holtwinters"))
+            models_list = args.get("models")
+            default_model = (
+                str(models_list[0])
+                if isinstance(models_list, list) and models_list
+                else "holtwinters"
+            )
+            model_name = str(args.get("model", default_model))
             horizon = int(args.get("horizon", 14))
             n_series = int(args.get("n_series", 3))
             backtest = bool(args.get("backtest", True))
@@ -1326,7 +1504,10 @@ class McpServer:
             unit_cost_arg = args.get("unit_cost")
             inc_inv_impact = bool(args.get("include_inventory_impact", False))
             inc_promo_elast = bool(args.get("include_promo_elasticity", False))
-            with_exog = bool(scenarios_arg or price_col or inc_promo_elast)
+            opt_scen_params = args.get("optimize_scenario_params")
+            with_exog = bool(
+                scenarios_arg or price_col or inc_promo_elast or isinstance(opt_scen_params, dict)
+            )
             panel = playground.sample_data(n_series=n_series, with_exog=with_exog)
             run = playground.run_model(
                 model_name,
@@ -1360,6 +1541,11 @@ class McpServer:
                 "summary": summary_text,
                 "sample_predictions": sample_preds,
             }
+            if bool(args.get("include_fva", False)) and res.oof is not None and not res.oof.empty:
+                from .diagnostics import compute_fva
+
+                oof_fva = res.oof.assign(ts_id=res.ts_id, model_type=res.model_type)
+                out_pg["fva"] = compute_fva(oof_fva).to_dict(orient="records")
             if scenarios_arg and isinstance(scenarios_arg, dict):
                 from .scenarios import simulate_scenarios, summarize_scenarios
 
@@ -1407,9 +1593,63 @@ class McpServer:
                 out_pg["goal_seek_summary"] = summarize_goal_seek(gs_df_pg).to_dict(
                     orient="records"
                 )
+            cs_df_pg = None
+            if bool(args.get("include_cold_start", False)):
+                cs_arch_pg = str(args.get("cold_start_archetype") or "auto")
+                cs_df_pg = run.cold_start_transfer_df(
+                    donor_pool_df=panel if len(panel["ts_id"].unique()) > 1 else None,
+                    method=cs_arch_pg,
+                )
+                out_pg["cold_start_transfer"] = cs_df_pg.head(10).to_dict(orient="records")
+            aci_df_pg = None
+            if bool(args.get("include_aci", False)):
+                aci_df_pg = run.aci_df()
+                out_pg["aci_coverage"] = aci_df_pg.head(10).to_dict(orient="records")
+            copula_pg = str(args.get("copula_type", "gaussian"))
+            n_traj_pg = int(args.get("n_trajectories", 50))
+            traj_df_pg = None
+            if bool(args.get("include_trajectories", False)) or bool(
+                args.get("include_tail_risk", False)
+            ):
+                traj_df_pg = run.sample_trajectories(
+                    n_paths=n_traj_pg,
+                    copula_type=copula_pg,
+                )
+                if bool(args.get("include_trajectories", False)):
+                    out_pg["trajectories_sample"] = traj_df_pg.head(10).to_dict(orient="records")
+            tail_df_pg = None
+            if bool(args.get("include_tail_risk", False)):
+                tail_df_pg = run.tail_risk_df(
+                    trajectories_df=traj_df_pg,
+                    copula_type=copula_pg,
+                    n_paths=n_traj_pg,
+                )
+                out_pg["tail_risk"] = tail_df_pg.to_dict(orient="records")
+            opt_inv_params_pg = args.get("optimize_inventory_params")
+            inv_opt_df_pg = None
+            if isinstance(opt_inv_params_pg, dict):
+                inv_opt_df_pg = run.optimize_inventory_df(**opt_inv_params_pg)
+                out_pg["inventory_optimization"] = inv_opt_df_pg.to_dict(orient="records")
+            scen_opt_df_pg = None
+            if isinstance(opt_scen_params, dict):
+                scen_opt_res_pg = run.optimize_scenario(**opt_scen_params)
+                scen_opt_df_pg = (
+                    scen_opt_res_pg.schedule_df
+                    if hasattr(scen_opt_res_pg, "schedule_df")
+                    else scen_opt_res_pg
+                )
+                out_pg["scenario_optimization"] = scen_opt_df_pg.head(15).to_dict(orient="records")
             rep_path = args.get("export_report_path")
             if rep_path:
-                written = run.export_report(str(rep_path), goal_seek_df=gs_df_pg)
+                written = run.export_report(
+                    str(rep_path),
+                    goal_seek_df=gs_df_pg,
+                    aci_df=aci_df_pg,
+                    tail_risk_df=tail_df_pg,
+                    cold_start_df=cs_df_pg,
+                    inventory_opt_df=inv_opt_df_pg,
+                    scenario_opt_df=scen_opt_df_pg,
+                )
                 out_pg["report_path"] = str(written)
             return out_pg
 
@@ -1602,6 +1842,8 @@ class McpServer:
             want_decay = bool(args.get("include_horizon_decay", False))
             want_bias = bool(args.get("include_bias_report", False))
             want_exc = bool(args.get("include_exceptions", False))
+            want_promo = bool(args.get("include_promo_elasticity", False))
+            want_cs = bool(args.get("include_cold_start", False))
             inv_params_rev = args.get("inventory_params")
             want_inv = bool(args.get("include_inventory_policy", False)) or isinstance(
                 inv_params_rev, dict
@@ -1610,30 +1852,48 @@ class McpServer:
                 args.get("target_total") is not None
             )
             want_trec = bool(args.get("reconcile_temporal", False))
+            want_aci = bool(args.get("include_aci", False))
+            want_traj = bool(args.get("include_trajectories", False))
+            want_tail = bool(args.get("include_tail_risk", False))
+            opt_inv_rev = args.get("optimize_inventory_params")
+            opt_scen_rev = args.get("optimize_scenario_params")
             rep_path_rev = args.get("export_report_path")
             if (
                 want_fva
                 or want_decay
                 or want_bias
                 or want_exc
+                or want_promo
+                or want_cs
                 or want_inv
                 or want_gs
                 or want_trec
+                or want_aci
+                or want_traj
+                or want_tail
+                or isinstance(opt_inv_rev, dict)
+                or isinstance(opt_scen_rev, dict)
                 or rep_path_rev
             ):
                 import pandas as pd
 
+                from .aci import compute_aci_df
+                from .cold_start import cold_start_transfer_df
+                from .copula import compute_tail_risk, sample_trajectories
                 from .diagnostics import (
                     compute_bias_report,
                     compute_exceptions_queue,
                     compute_fva,
                     compute_horizon_decay,
                     compute_inventory_policy,
+                    compute_promo_elasticity,
                 )
                 from .goal_seek import allocate_target, summarize_goal_seek
+                from .inventory_optimizer import optimize_inventory_portfolio
                 from .registry.reads import read_oof, read_predictions
                 from .report import export_report
-                from .temporal_reconciliation import reconcile_forecasts_temporal
+                from .scenario_optimizer import optimize_scenario
+                from .temporal_reconciliation import reconcile_temporal_forecasts
 
                 oof_rows = read_oof(run_id, limit=20000, settings=settings)
                 oof_df = pd.DataFrame.from_records(oof_rows) if oof_rows else pd.DataFrame()
@@ -1650,10 +1910,51 @@ class McpServer:
                     out["exceptions"] = compute_exceptions_queue(
                         oof_df=oof_df, metric=metric
                     ).to_dict(orient="records")
+                if want_promo and not oof_df.empty:
+                    hist_promo = oof_df.rename(
+                        columns={
+                            c: "ds"
+                            for c in ("val_date", "forecast_date")
+                            if c in oof_df.columns and "ds" not in oof_df.columns
+                        }
+                    ).copy()
+                    if "y" not in hist_promo.columns and "y_true" in hist_promo.columns:
+                        hist_promo["y"] = hist_promo["y_true"]
+                    out["promo_elasticity"] = compute_promo_elasticity(hist_promo).to_dict(
+                        orient="records"
+                    )
                 pred_df: pd.DataFrame | None = None
-                if want_inv or want_gs or want_trec or rep_path_rev:
+                if (
+                    want_inv
+                    or want_gs
+                    or want_trec
+                    or want_cs
+                    or want_aci
+                    or want_traj
+                    or want_tail
+                    or isinstance(opt_inv_rev, dict)
+                    or isinstance(opt_scen_rev, dict)
+                    or rep_path_rev
+                ):
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                if want_cs and pred_df is not None and not pred_df.empty:
+                    hist_cs = (
+                        oof_df.rename(
+                            columns={
+                                "val_date": "ds",
+                                "y_true": "y",
+                            }
+                        )
+                        if not oof_df.empty
+                        else pred_df.rename(columns={"forecast_date": "ds", "yhat": "y"})
+                    )
+                    cs_rev = cold_start_transfer_df(
+                        hist_cs,
+                        oof_df=oof_df if not oof_df.empty else None,
+                    )
+                    assert isinstance(cs_rev, pd.DataFrame)
+                    out["cold_start_transfer"] = cs_rev.head(20).to_dict(orient="records")
                 if want_inv and pred_df is not None:
                     inv_kw_rev = dict(inv_params_rev) if isinstance(inv_params_rev, dict) else {}
                     out["inventory_policy"] = compute_inventory_policy(
@@ -1661,13 +1962,54 @@ class McpServer:
                         oof_df=oof_df if not oof_df.empty else None,
                         **inv_kw_rev,
                     ).to_dict(orient="records")
+                if isinstance(opt_inv_rev, dict) and pred_df is not None and not pred_df.empty:
+                    inv_opt_res = optimize_inventory_portfolio(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        **opt_inv_rev,
+                    )
+                    assert isinstance(inv_opt_res, pd.DataFrame)
+                    out["inventory_optimization"] = inv_opt_res.to_dict(orient="records")
+                if isinstance(opt_scen_rev, dict) and pred_df is not None and not pred_df.empty:
+                    scen_opt_rev = optimize_scenario(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        **opt_scen_rev,
+                    )
+                    scen_df_rev = (
+                        scen_opt_rev.schedule_df
+                        if hasattr(scen_opt_rev, "schedule_df")
+                        else scen_opt_rev
+                    )
+                    out["scenario_optimization"] = scen_df_rev.head(20).to_dict(orient="records")
+                if want_aci and pred_df is not None and not pred_df.empty:
+                    aci_res_rev = compute_aci_df(
+                        oof_df if not oof_df.empty else pred_df,
+                        predictions_df=pred_df,
+                    )
+                    assert isinstance(aci_res_rev, pd.DataFrame)
+                    out["aci_coverage"] = aci_res_rev.head(20).to_dict(orient="records")
+                if (want_traj or want_tail) and pred_df is not None and not pred_df.empty:
+                    cop_rev = str(args.get("copula_type", "gaussian"))
+                    traj_rev = sample_trajectories(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        copula_type=cop_rev,
+                        n_paths=100,
+                    )
+                    assert isinstance(traj_rev, pd.DataFrame)
+                    if want_traj:
+                        out["trajectories_sample"] = traj_rev.head(20).to_dict(orient="records")
+                    if want_tail:
+                        tail_rev = compute_tail_risk(traj_rev)
+                        assert isinstance(tail_rev, pd.DataFrame)
+                        out["tail_risk"] = tail_rev.to_dict(orient="records")
                 if want_trec and pred_df is not None and not pred_df.empty:
                     t_method_rev = str(args.get("temporal_reconciliation_method", "wls_struct"))
-                    trec_rev = reconcile_forecasts_temporal(
+                    trec_rev = reconcile_temporal_forecasts(
                         pred_df,
                         oof_df=oof_df if not oof_df.empty else None,
                         method=t_method_rev,
-                        stamp_method=False,
                     )
                     assert isinstance(trec_rev, pd.DataFrame)
                     out["temporal_reconciled_predictions"] = trec_rev.head(20).to_dict(
@@ -2176,7 +2518,7 @@ class McpServer:
             import pandas as pd
 
             from . import playground
-            from .temporal_reconciliation import reconcile_forecasts_temporal
+            from .temporal_reconciliation import reconcile_temporal_forecasts
 
             records_tr = args.get("records") or args.get("predictions")
             method_tr = str(args.get("method", "wls_struct"))
@@ -2188,13 +2530,12 @@ class McpServer:
                     if isinstance(args.get("oof"), list) and args["oof"]
                     else None
                 )
-                trec_out = reconcile_forecasts_temporal(
+                trec_out = reconcile_temporal_forecasts(
                     pred_tr,
                     oof_df=oof_tr,
                     freq=freq_tr,
                     method=method_tr,
-                    aggregations=args.get("aggregations"),
-                    stamp_method=bool(args.get("stamp_method", False)),
+                    temporal_aggregations=args.get("aggregations"),
                 )
             else:
                 pg_tr = playground.run_model(
@@ -2205,13 +2546,126 @@ class McpServer:
                 trec_out = pg_tr.temporal_reconcile_df(
                     method=method_tr,
                     aggregations=args.get("aggregations"),
-                    stamp_method=bool(args.get("stamp_method", False)),
                 )
             assert isinstance(trec_out, pd.DataFrame)
             return {
                 "status": "ok",
                 "method": method_tr,
                 "rows": trec_out.to_dict(orient="records"),
+            }
+
+        if name in ("optimize_inventory", "sf_optimize_inventory", "optimize_inventory_df"):
+            import pandas as pd
+
+            from . import playground
+            from .inventory_optimizer import optimize_inventory_portfolio
+
+            records_inv = args.get("records") or args.get("predictions")
+            inv_kwargs = {
+                k: v
+                for k, v in args.items()
+                if k
+                not in (
+                    "records",
+                    "predictions",
+                    "oof",
+                    "trajectories",
+                    "model",
+                    "horizon",
+                )
+            }
+            if isinstance(records_inv, list) and records_inv:
+                pred_inv = pd.DataFrame.from_records(records_inv)
+                oof_inv = (
+                    pd.DataFrame.from_records(args["oof"])
+                    if isinstance(args.get("oof"), list) and args["oof"]
+                    else None
+                )
+                traj_inv = (
+                    pd.DataFrame.from_records(args["trajectories"])
+                    if isinstance(args.get("trajectories"), list) and args["trajectories"]
+                    else None
+                )
+                inv_df_out = optimize_inventory_portfolio(
+                    pred_inv,
+                    oof_df=oof_inv,
+                    trajectories_df=traj_inv,
+                    **inv_kwargs,
+                )
+            else:
+                pg_inv = playground.run_model(
+                    str(args.get("model", "holtwinters")),
+                    horizon=int(args.get("horizon", 14)),
+                    backtest=True,
+                )
+                inv_df_out = pg_inv.optimize_inventory_df(**inv_kwargs)
+            assert isinstance(inv_df_out, pd.DataFrame)
+            return {
+                "status": "ok",
+                "rows": inv_df_out.to_dict(orient="records"),
+            }
+
+        if name in ("optimize_scenario", "sf_optimize_scenario"):
+            import pandas as pd
+
+            from . import playground
+            from .scenario_optimizer import optimize_scenario
+
+            records_scen = args.get("records") or args.get("predictions")
+            scen_kwargs = {
+                k: v
+                for k, v in args.items()
+                if k
+                not in (
+                    "records",
+                    "predictions",
+                    "history",
+                    "oof",
+                    "model",
+                    "horizon",
+                )
+            }
+            if isinstance(records_scen, list) and records_scen:
+                pred_scen = pd.DataFrame.from_records(records_scen)
+                hist_scen = (
+                    pd.DataFrame.from_records(args["history"])
+                    if isinstance(args.get("history"), list) and args["history"]
+                    else None
+                )
+                oof_scen = (
+                    pd.DataFrame.from_records(args["oof"])
+                    if isinstance(args.get("oof"), list) and args["oof"]
+                    else None
+                )
+                scen_res_out = optimize_scenario(
+                    pred_scen,
+                    history_df=hist_scen,
+                    oof_df=oof_scen,
+                    **scen_kwargs,
+                )
+            else:
+                pg_scen = playground.run_model(
+                    str(args.get("model", "holtwinters")),
+                    horizon=int(args.get("horizon", 14)),
+                    backtest=True,
+                )
+                scen_res_out = pg_scen.optimize_scenario(**scen_kwargs)
+            sched_df: pd.DataFrame = (
+                scen_res_out.schedule_df
+                if hasattr(scen_res_out, "schedule_df")
+                else pd.DataFrame(scen_res_out)
+            )
+            return {
+                "status": "ok",
+                "objective": getattr(
+                    scen_res_out, "objective", scen_kwargs.get("objective", "gross_profit")
+                ),
+                "optimal_total_gross_margin": getattr(
+                    scen_res_out, "optimal_total_gross_margin", None
+                ),
+                "optimal_total_revenue": getattr(scen_res_out, "optimal_total_revenue", None),
+                "optimal_total_units": getattr(scen_res_out, "optimal_total_units", None),
+                "rows": sched_df.to_dict(orient="records"),
             }
 
         raise ValueError(f"Unknown tool: {name!r}")

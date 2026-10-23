@@ -353,7 +353,11 @@ _CONFIG_MODELS: tuple[tuple[str, str, type[BaseModel]], ...] = (
     ),
     (
         "output (OutputConfig)",
-        "Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).",
+        (
+            "Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`), physical "
+            "bounds, Newsvendor underage/overage costs, and online Adaptive Conformal Inference "
+            "(`calibration_method`, `aci_gamma`)."
+        ),
         OutputConfig,
     ),
     (
@@ -374,7 +378,7 @@ _CONFIG_MODELS: tuple[tuple[str, str, type[BaseModel]], ...] = (
         (
             "Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, "
             "`mint_shrink`, ...), temporal hierarchy reconciliation (`THieF`), and cross-temporal "
-            "reconciliation."
+            "reconciliation (`cross_temporal`, `spatial_temporal_weight`)."
         ),
         HierarchyConfig,
     ),
@@ -421,6 +425,108 @@ _CONFIG_MODELS: tuple[tuple[str, str, type[BaseModel]], ...] = (
         "compute.capacity.retry (RetryResources)",
         "Resource ceiling (`max_executors`) for surgical `--retry` repairs.",
         RetryResources,
+    ),
+)
+
+_VARIANT_SYNTAX_ROWS: tuple[tuple[str, str], ...] = (
+    (
+        "`<model>@local` / `<model>@global` / `<model>@hybrid`",
+        "Explicitly select per-series local fitting, cross-series global pooling, or hybrid mode.",
+    ),
+    (
+        (
+            "`<model>@univariate` / `<model>@cov_none` / `<model>@cov_all` / "
+            "`<model>@cov_future_only` / `<model>@cov_past_only` / `<model>@cov_static_only` / "
+            "`<model>@cov_dynamic` / `<model>@cov_future_static` / `<model>@cov_past_static`"
+        ),
+        "Per-model covariate tier ablation override.",
+    ),
+    (
+        "`<model>@direct` / `<model>@recursive`",
+        "Select direct multi-horizon step-by-step regressors (`h=1..H`) vs. recursive rollouts.",
+    ),
+    (
+        "`<model>@monotone`",
+        (
+            "Enforce causal covariate sign constraints (`features.monotonic_constraints`) on "
+            "supported learners (`lightgbm`, `xgboost`, `catboost`, `regression_lags`)."
+        ),
+    ),
+    (
+        (
+            "`<model>@transform_log1p` / `<model>@transform_boxcox` / "
+            "`<model>@transform_clr` / `<model>@transform_ilr` / `<model>@transform_none`"
+        ),
+        (
+            "Per-model target transform override (including compositional simplex `transform_clr` "
+            "and `transform_ilr` isometric log-ratio transforms)."
+        ),
+    ),
+    (
+        (
+            "`<model>@cold_start` / `<model>@analog_transfer` / "
+            "`<model>@bass_diffusion` / `<model>@weibull_lifecycle`"
+        ),
+        (
+            "Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the "
+            "launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`)."
+        ),
+    ),
+    (
+        "`<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized`",
+        (
+            "Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized "
+            "CQR (`aci_normalized`) interval calibration override."
+        ),
+    ),
+)
+
+_NORMALIZATION_RULES: tuple[str, ...] = (
+    (
+        "1. **HPO requires Backtesting:** `hpo.enabled = true` requires `backtest.enabled = true` "
+        "(raises `ConfigError` otherwise)."
+    ),
+    (
+        "2. **Learned Ensembles require Backtesting:** If `ensemble.enabled = true` and "
+        "`backtest.enabled = false`, learned strategies (`nnls`, `ridge`, `xgb`) are automatically "
+        "dropped with a warning; always set `backtest.enabled = true` when using learned stackers."
+    ),
+    (
+        '3. **Point Forecast Arm (`output.point_forecast`):** Defaults to `"auto"` when '
+        '`backtest.enabled = true` and `"median"` when `backtest.enabled = false`. Setting '
+        '`"mean"` or `"auto"` when `backtest.enabled = false` raises `ConfigError`.'
+    ),
+    (
+        "4. **Online Adaptive Conformal Inference (`output.calibration_method`):** Supports "
+        '`"conformal"`, `"aci"`, and `"aci_normalized"` with step size `output.aci_gamma` '
+        "(`0 < aci_gamma <= 0.5`). Post-processing joint copula trajectories "
+        "(`Forecaster.sample_trajectories` / `Forecaster.tail_risk_df`) support `copula_type` in "
+        '`("auto", "gaussian", "student_t", "iman_conover", "empirical")`.'
+    ),
+    (
+        "5. **Short-Series Backtest Policies (`backtest.short_series`):** `min_folds` cannot "
+        'exceed `n_folds`. `short_series = "shrink_train"` requires `min_train_floor` to be set. '
+        '`control_arm = true` is forbidden when `scheme = "expanding_stale"`.'
+    ),
+    (
+        "6. **Covariate & Compositional Simplex Hygiene (`features`):** `future_covariates` and "
+        "`past_covariates` must be disjoint; `static_covariates` must be disjoint from dynamic "
+        "covariates; every key in `exog_lags` and `monotonic_constraints` must name a declared "
+        "covariate; `transform` in `('clr', 'ilr')` automatically sets `simplex_sum = 1.0` when "
+        "unset."
+    ),
+    (
+        "7. **Hierarchy & Cross-Temporal Hygiene (`hierarchy`):** When `hierarchy.enabled = true`, "
+        "both `levels` and `reconciliation_methods` must be non-empty. `hierarchy.cross_temporal = "
+        "true` or `'cross_temporal_mint'` in `reconciliation_methods` automatically enables "
+        "`reconcile_temporal = true` and validates `spatial_temporal_weight` (`'auto'` or float in "
+        "`[0, 1]`)."
+    ),
+    (
+        "8. **Per-Family Runtime & Hardware Constraints (`compute.families`):** Only "
+        '`deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`. '
+        'Family `automl` must use `runtime = "vertex_automl"`. `runtime = "gce"` is strictly '
+        "single-VM (`workers = 1`)."
     ),
 )
 
@@ -552,6 +658,25 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
             "optimization_goals": ["accuracy", "probabilistic", "service_level", "fast"],
             "benchmarks_count": len(list_benchmarks()),
             "practitioner_questions_count": 7,
+            "calibration_methods": ["conformal", "aci", "aci_normalized"],
+            "cold_start_archetypes": [
+                "auto",
+                "analog_transfer",
+                "bass_diffusion",
+                "weibull_lifecycle",
+            ],
+            "workbench_capabilities": [
+                "promo_elasticity",
+                "scenarios",
+                "goal_seek",
+                "temporal_reconciliation",
+                "simplex",
+                "cold_start",
+                "aci_cqr_calibration",
+                "trajectory_copula",
+                "inventory_optimizer",
+                "scenario_optimizer",
+            ],
         },
         "recommended_actions": recommendations,
     }
@@ -730,75 +855,23 @@ def render_skill_config_reference() -> str:
                 "(`NaN`, `Infinity`) are rejected. |"
             ),
             "",
+            "### Model Variant Suffixes (`models` list)",
+            "",
+            "| Variant Syntax | Behavior |",
+            "| :--- | :--- |",
+        ]
+    )
+    for var_syn, var_desc in _VARIANT_SYNTAX_ROWS:
+        lines.append(f"| {var_syn} | {var_desc} |")
+
+    lines.extend(
+        [
+            "",
             "---",
             "",
             "## 3. Cross-Field Validation Rules (`RunConfig._normalize`)",
             "",
-            (
-                "1. **HPO requires Backtesting:** `hpo.enabled = true` requires "
-                "`backtest.enabled = true` (raises `ConfigError` otherwise)."
-            ),
-            (
-                "2. **Learned Ensembles require Backtesting:** If `ensemble.enabled = true` and "
-                "`backtest.enabled = false`, learned strategies (`nnls`, `ridge`, `xgb`) are "
-                "automatically dropped with a warning; always set `backtest.enabled = true` when "
-                "using learned stackers."
-            ),
-            "3. **Point Forecast Arm (`output.point_forecast`):**",
-            (
-                '   - Defaults to `"auto"` when `backtest.enabled = true` and `"median"` when '
-                "`backtest.enabled = false`."
-            ),
-            (
-                '   - Setting `"mean"` or `"auto"` when `backtest.enabled = false` raises '
-                "`ConfigError`."
-            ),
-            "4. **Short-Series Backtest Policies (`backtest.short_series`):**",
-            "   - `min_folds` cannot exceed `n_folds`.",
-            (
-                '   - `short_series = "shrink_train"` requires `min_train_floor` to be set (and '
-                "`min_train_floor` is forbidden on other `short_series` policies)."
-            ),
-            '   - `control_arm = true` is forbidden when `scheme = "expanding_stale"`.',
-            "5. **Covariate Hygiene (`features`):**",
-            "   - `future_covariates` and `past_covariates` must be disjoint.",
-            (
-                "   - `static_covariates` must be disjoint from all dynamic covariates (`exog`, "
-                "`future_covariates`, `past_covariates`)."
-            ),
-            (
-                "   - Every key in `exog_lags` must name a declared dynamic covariate, and lags "
-                "must be positive integers."
-            ),
-            "6. **Hierarchy Hygiene (`hierarchy`):**",
-            (
-                "   - When `hierarchy.enabled = true`, both `levels` and "
-                "`reconciliation_methods` must be non-empty, and `middle_level` (if set) must "
-                "match one of the entries in `levels`."
-            ),
-            "7. **Per-Family Runtime & Hardware Constraints (`compute.families`):**",
-            (
-                "   - Only `deep_learning` and `automl` families may request "
-                '`hardware = "gpu"` or `gpu_type`.'
-            ),
-            (
-                '   - Family `automl` must use `runtime = "vertex_automl"`, and no other family '
-                "may use `vertex_automl` or `automl_mode`."
-            ),
-            (
-                '   - `spark_mode` / `spark_cluster_name` are only valid when `runtime = "spark"`; '
-                'Dataproc Serverless (`spark_mode = "serverless"`) supports `L4` GPUs only and '
-                "forbids `machine_type`."
-            ),
-            (
-                '   - `gke_mode` is only valid when `runtime = "gke"`; `ray_mode` is only valid '
-                'when `runtime = "ray"`.'
-            ),
-            '   - `runtime = "gce"` is strictly single-VM (`workers = 1`).',
-            (
-                "   - `min_workers` / `max_workers` are only valid on autoscaling runtimes "
-                '(`ray`, `spark`, `vertex_automl`, or `gke` with `gke_mode = "ray"`).'
-            ),
+            *_NORMALIZATION_RULES,
             "",
             "---",
             "",
@@ -1378,8 +1451,15 @@ def render_skill_execution_paths_reference() -> str:
             (
                 "| **Forecaster's Workbench, Goal-Seek & Temporal Reconciliation** | — | "
                 "`Forecaster(cfg).fva_df()` / `.horizon_decay_df()` / `.bias_report_df()` / "
-                "`.exceptions_df()` / `.inventory_policy_df()` / `.allocate_target()` / "
-                "`.temporal_reconcile_df()` |"
+                "`.exceptions_df()` / `.promo_elasticity_df()` / `.inventory_policy_df()` / "
+                "`.allocate_target()` / `.temporal_reconcile_df()` |"
+            ),
+            (
+                "| **Cold-Start NPI, Online ACI, Copula Tail-Risk & Prescriptive Optimization** | "
+                "— | "
+                "`Forecaster(cfg).cold_start_transfer_df()` / `.aci_df()` / "
+                "`.sample_trajectories()` / `.tail_risk_df()` / "
+                "`.optimize_inventory_df()` / `.optimize_scenario()` |"
             ),
             (
                 "| **Executive HTML + JSON report** | "
@@ -1485,7 +1565,8 @@ def render_llms_txt() -> str:
                 "families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 "
                 "evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, "
                 "`vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, "
-                "conformal/quantile calibration, FPP3 hierarchical reconciliation, and stacked "
+                "conformal/quantile calibration (`conformal`, `aci`, `aci_normalized`), FPP3 "
+                "spatial/temporal/cross-temporal hierarchical reconciliation, and stacked "
                 "ensembling into a 5-table, 5-view BigQuery registry."
             ),
             "",
@@ -1554,9 +1635,15 @@ def render_llms_txt() -> str:
             (
                 f"- [Forecaster's Workbench]({_SITE_BASE}/forecaster_workbench/): Physical "
                 "bounds, monotone quantiles, Newsvendor targets, SBC demand regimes, fold-safe "
-                "hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, THieF temporal "
-                "reconciliation, top-down Goal-Seek QP, compositional simplex transforms, "
-                "scenarios, lifecycle governance, and executive HTML/JSON reports."
+                "hygiene, FVA, horizon decay, Trigg bias, AR(1) time rollup, THieF temporal & "
+                "cross-temporal reconciliation, top-down Goal-Seek QP (`allocate_target`), "
+                "compositional simplex (`clr`/`ilr`), Double-ML promo elasticity "
+                "(`promo_elasticity_df`), cold-start NPI donor transfer "
+                "(`cold_start_transfer_df`), online ACI conformal calibration (`aci_df`), joint "
+                "copula trajectories & tail risk (`sample_trajectories`, `tail_risk_df`), "
+                "portfolio inventory optimization (`optimize_inventory_df`), prescriptive price & "
+                "promo optimization (`optimize_scenario`), scenarios, and executive HTML/JSON "
+                "reports."
             ),
             (
                 f"- [Auto-Forecaster & Bounded `autofocus`]({_SITE_BASE}/auto_forecaster/): "

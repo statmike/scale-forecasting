@@ -453,7 +453,7 @@ def enforce_simplex_closure(
     eps_floor = max(float(eps) * s_val, 1e-12 * s_val)
 
     group_cols: list[str] = []
-    for cand in ("scenario", "model_type", "fold_id", "cutoff_date", dcol):
+    for cand in ("path_id", "scenario", "model_type", "fold_id", "cutoff_date", dcol):
         if cand in df.columns and cand not in group_cols:
             group_cols.append(cand)
 
@@ -489,8 +489,8 @@ def enforce_simplex_closure(
             )
 
         sub[val_col] = yhat_closed
-        for aux_col in ("yhat_raw", "yhat_adjusted"):
-            if aux_col in sub.columns and sub[aux_col].notna().any():
+        for aux_col in ("yhat_sample", "yhat_raw", "yhat_adjusted"):
+            if aux_col != val_col and aux_col in sub.columns and sub[aux_col].notna().any():
                 aux_vals = sub[aux_col].to_numpy(dtype=float)
                 aux_pos = np.where(
                     np.isfinite(aux_vals), np.maximum(aux_vals, eps_floor), yhat_closed
@@ -931,7 +931,14 @@ def verify_simplex_coherence(
                 dcol = cand
                 break
     vcol = target_col if target_col is not None else value_col
-    if vcol not in df.columns:
+    if (
+        target_col is None
+        and value_col == "yhat"
+        and "path_id" in df.columns
+        and "yhat_sample" in df.columns
+    ):
+        vcol = "yhat_sample"
+    elif vcol not in df.columns:
         for cand in ("yhat", "yhat_sample", "y"):
             if cand in df.columns:
                 vcol = cand

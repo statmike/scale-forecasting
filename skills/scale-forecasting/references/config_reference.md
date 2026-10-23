@@ -74,6 +74,9 @@ Target transforms (including compositional `clr`/`ilr` simplex transforms), coun
 | `ablation_models` | `list[str]` | `[]` | — |
 | `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | — |
 | `holiday_window` | `HolidayWindowConfig \| None` | `null` | — |
+| `cold_start_transfer` | `bool` | `false` | — |
+| `cold_start_min_obs` | `int` | `14` | `>= 1` |
+| `cold_start_method` | `'auto' \| 'analog_transfer' \| 'bass_diffusion' \| 'weibull_lifecycle'` | `"auto"` | — |
 
 ### `backtest (BacktestConfig)`
 
@@ -97,7 +100,7 @@ Expanding, sliding, frozen, or stale cross-validation geometry and decision metr
 
 ### `output (OutputConfig)`
 
-Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).
+Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`), physical bounds, Newsvendor underage/overage costs, and online Adaptive Conformal Inference (`calibration_method`, `aci_gamma`).
 
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
@@ -111,6 +114,8 @@ Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`).
 | `underage_cost` | `float \| None` | `null` | `> 0.0` |
 | `overage_cost` | `float \| None` | `null` | `> 0.0` |
 | `target_quantile` | `float \| None` | `null` | `> 0.0`, `< 1.0` |
+| `calibration_method` | `'conformal' \| 'aci' \| 'aci_normalized'` | `"conformal"` | — |
+| `aci_gamma` | `float` | `0.05` | `> 0.0`, `<= 0.5` |
 
 ### `hpo (HpoConfig)`
 
@@ -139,7 +144,7 @@ Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xg
 
 ### `hierarchy (HierarchyConfig)`
 
-Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, `mint_shrink`, ...), temporal hierarchy reconciliation (`THieF`), and cross-temporal reconciliation.
+Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, `mint_shrink`, ...), temporal hierarchy reconciliation (`THieF`), and cross-temporal reconciliation (`cross_temporal`, `spatial_temporal_weight`).
 
 | Field | Type / Allowed Values | Default | Constraints |
 | :--- | :--- | :--- | :--- |
@@ -297,32 +302,30 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `compute.profile.source` | One of `none`, `auto`, `baseline` or an existing `<slug>-<12hex>` `run_id`. |
 | `model_params` | Dict mapping `<model_name>` to `<param_dict>` of JSON-safe scalars or flat lists (`bool`, `int`, `float`, `str`, `None`). Non-finite floats (`NaN`, `Infinity`) are rejected. |
 
+### Model Variant Suffixes (`models` list)
+
+| Variant Syntax | Behavior |
+| :--- | :--- |
+| `<model>@local` / `<model>@global` / `<model>@hybrid` | Explicitly select per-series local fitting, cross-series global pooling, or hybrid mode. |
+| `<model>@univariate` / `<model>@cov_none` / `<model>@cov_all` / `<model>@cov_future_only` / `<model>@cov_past_only` / `<model>@cov_static_only` / `<model>@cov_dynamic` / `<model>@cov_future_static` / `<model>@cov_past_static` | Per-model covariate tier ablation override. |
+| `<model>@direct` / `<model>@recursive` | Select direct multi-horizon step-by-step regressors (`h=1..H`) vs. recursive rollouts. |
+| `<model>@monotone` | Enforce causal covariate sign constraints (`features.monotonic_constraints`) on supported learners (`lightgbm`, `xgboost`, `catboost`, `regression_lags`). |
+| `<model>@transform_log1p` / `<model>@transform_boxcox` / `<model>@transform_clr` / `<model>@transform_ilr` / `<model>@transform_none` | Per-model target transform override (including compositional simplex `transform_clr` and `transform_ilr` isometric log-ratio transforms). |
+| `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`). |
+| `<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized` | Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized CQR (`aci_normalized`) interval calibration override. |
+
 ---
 
 ## 3. Cross-Field Validation Rules (`RunConfig._normalize`)
 
 1. **HPO requires Backtesting:** `hpo.enabled = true` requires `backtest.enabled = true` (raises `ConfigError` otherwise).
 2. **Learned Ensembles require Backtesting:** If `ensemble.enabled = true` and `backtest.enabled = false`, learned strategies (`nnls`, `ridge`, `xgb`) are automatically dropped with a warning; always set `backtest.enabled = true` when using learned stackers.
-3. **Point Forecast Arm (`output.point_forecast`):**
-   - Defaults to `"auto"` when `backtest.enabled = true` and `"median"` when `backtest.enabled = false`.
-   - Setting `"mean"` or `"auto"` when `backtest.enabled = false` raises `ConfigError`.
-4. **Short-Series Backtest Policies (`backtest.short_series`):**
-   - `min_folds` cannot exceed `n_folds`.
-   - `short_series = "shrink_train"` requires `min_train_floor` to be set (and `min_train_floor` is forbidden on other `short_series` policies).
-   - `control_arm = true` is forbidden when `scheme = "expanding_stale"`.
-5. **Covariate Hygiene (`features`):**
-   - `future_covariates` and `past_covariates` must be disjoint.
-   - `static_covariates` must be disjoint from all dynamic covariates (`exog`, `future_covariates`, `past_covariates`).
-   - Every key in `exog_lags` must name a declared dynamic covariate, and lags must be positive integers.
-6. **Hierarchy Hygiene (`hierarchy`):**
-   - When `hierarchy.enabled = true`, both `levels` and `reconciliation_methods` must be non-empty, and `middle_level` (if set) must match one of the entries in `levels`.
-7. **Per-Family Runtime & Hardware Constraints (`compute.families`):**
-   - Only `deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`.
-   - Family `automl` must use `runtime = "vertex_automl"`, and no other family may use `vertex_automl` or `automl_mode`.
-   - `spark_mode` / `spark_cluster_name` are only valid when `runtime = "spark"`; Dataproc Serverless (`spark_mode = "serverless"`) supports `L4` GPUs only and forbids `machine_type`.
-   - `gke_mode` is only valid when `runtime = "gke"`; `ray_mode` is only valid when `runtime = "ray"`.
-   - `runtime = "gce"` is strictly single-VM (`workers = 1`).
-   - `min_workers` / `max_workers` are only valid on autoscaling runtimes (`ray`, `spark`, `vertex_automl`, or `gke` with `gke_mode = "ray"`).
+3. **Point Forecast Arm (`output.point_forecast`):** Defaults to `"auto"` when `backtest.enabled = true` and `"median"` when `backtest.enabled = false`. Setting `"mean"` or `"auto"` when `backtest.enabled = false` raises `ConfigError`.
+4. **Online Adaptive Conformal Inference (`output.calibration_method`):** Supports `"conformal"`, `"aci"`, and `"aci_normalized"` with step size `output.aci_gamma` (`0 < aci_gamma <= 0.5`). Post-processing joint copula trajectories (`Forecaster.sample_trajectories` / `Forecaster.tail_risk_df`) support `copula_type` in `("auto", "gaussian", "student_t", "iman_conover", "empirical")`.
+5. **Short-Series Backtest Policies (`backtest.short_series`):** `min_folds` cannot exceed `n_folds`. `short_series = "shrink_train"` requires `min_train_floor` to be set. `control_arm = true` is forbidden when `scheme = "expanding_stale"`.
+6. **Covariate & Compositional Simplex Hygiene (`features`):** `future_covariates` and `past_covariates` must be disjoint; `static_covariates` must be disjoint from dynamic covariates; every key in `exog_lags` and `monotonic_constraints` must name a declared covariate; `transform` in `('clr', 'ilr')` automatically sets `simplex_sum = 1.0` when unset.
+7. **Hierarchy & Cross-Temporal Hygiene (`hierarchy`):** When `hierarchy.enabled = true`, both `levels` and `reconciliation_methods` must be non-empty. `hierarchy.cross_temporal = true` or `'cross_temporal_mint'` in `reconciliation_methods` automatically enables `reconcile_temporal = true` and validates `spatial_temporal_weight` (`'auto'` or float in `[0, 1]`).
+8. **Per-Family Runtime & Hardware Constraints (`compute.families`):** Only `deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`. Family `automl` must use `runtime = "vertex_automl"`. `runtime = "gce"` is strictly single-VM (`workers = 1`).
 
 ---
 

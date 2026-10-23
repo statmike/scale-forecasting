@@ -74,6 +74,11 @@ VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
         "trading_days",
         "monotonic_constraints",
         "holiday_window",
+        "cold_start_transfer",
+        "cold_start_min_obs",
+        "cold_start_method",
+        "calibration_method",
+        "aci_gamma",
     }
 )
 VARIANT_META_KEYS: frozenset[str] = VARIANT_FEATURE_META_KEYS | {"training_mode"}
@@ -577,6 +582,22 @@ def resolve_model_variant(
                     if "transform" not in variant_explicit:
                         raw_params["transform"] = tr_norm
                     rem_tag = rem_tag.replace(multi_tr, "")
+            for cs_m in ("analog_transfer", "bass_diffusion", "weibull_lifecycle"):
+                if cs_m in rem_tag:
+                    if "cold_start_transfer" not in variant_explicit:
+                        raw_params["cold_start_transfer"] = True
+                    if "cold_start_method" not in variant_explicit:
+                        raw_params["cold_start_method"] = cs_m
+                    rem_tag = rem_tag.replace(cs_m, "")
+            if "cold_start" in rem_tag:
+                if "cold_start_transfer" not in variant_explicit:
+                    raw_params["cold_start_transfer"] = True
+                rem_tag = rem_tag.replace("cold_start", "")
+            for aci_tok in ("aci_normalized", "aci_norm"):
+                if aci_tok in rem_tag:
+                    if "calibration_method" not in variant_explicit:
+                        raw_params["calibration_method"] = "aci_normalized"
+                    rem_tag = rem_tag.replace(aci_tok, "")
 
             supported_for_tag = model_cls.supported_training_modes()
             for tok in (t for t in rem_tag.split("_") if t):
@@ -606,6 +627,8 @@ def resolve_model_variant(
                     raw_params["strategy"] = tok
                 elif tok in ("sba", "tsb", "classic") and "variant" not in variant_explicit:
                     raw_params["variant"] = tok
+                elif tok == "aci" and "calibration_method" not in variant_explicit:
+                    raw_params["calibration_method"] = "aci"
 
     # If the run includes a `@monotone` sibling for this base model, an untagged base model
     # serves as the unconstrained baseline unless `monotonic_constraints` was explicitly passed
@@ -769,6 +792,21 @@ def resolve_model_variant(
                 new_mono_constraints = validate_monotonic_constraints_map(raw_mc)
         if "holiday_window" in raw_params:
             new_holiday_window = coerce_holiday_window_config(raw_params["holiday_window"])
+        new_cs_transfer = (
+            bool(raw_params["cold_start_transfer"])
+            if "cold_start_transfer" in raw_params and raw_params["cold_start_transfer"] is not None
+            else f.cold_start_transfer
+        )
+        new_cs_min_obs = (
+            int(raw_params["cold_start_min_obs"])
+            if "cold_start_min_obs" in raw_params and raw_params["cold_start_min_obs"] is not None
+            else f.cold_start_min_obs
+        )
+        new_cs_method = (
+            str(raw_params["cold_start_method"])
+            if "cold_start_method" in raw_params and raw_params["cold_start_method"] is not None
+            else f.cold_start_method
+        )
 
         kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
         new_lags = {k: list(v) for k, v in new_lags.items() if k in kept_dynamic}
@@ -788,6 +826,9 @@ def resolve_model_variant(
                 "trading_days": new_trading_days,
                 "monotonic_constraints": new_mono_constraints,
                 "holiday_window": new_holiday_window,
+                "cold_start_transfer": new_cs_transfer,
+                "cold_start_min_obs": new_cs_min_obs,
+                "cold_start_method": new_cs_method,
             }
         )
         cand_cfg = cfg if cand_features == f else cfg.model_copy(update={"features": cand_features})
@@ -796,6 +837,26 @@ def resolve_model_variant(
             model_cls,
             allow_unsupported=allow_unsupported,
         )
+        output_updates: dict[str, Any] = {}
+        if "calibration_method" in raw_params and raw_params["calibration_method"] is not None:
+            cm_val = str(raw_params["calibration_method"])
+            if cm_val not in ("conformal", "aci", "aci_normalized"):
+                raise ConfigError(
+                    f"model_params.{model_name}.calibration_method={cm_val!r} is invalid; "
+                    "must be 'conformal', 'aci', or 'aci_normalized'"
+                )
+            output_updates["calibration_method"] = cm_val
+        if "aci_gamma" in raw_params and raw_params["aci_gamma"] is not None:
+            gamma_val = float(raw_params["aci_gamma"])
+            if not np.isfinite(gamma_val) or gamma_val <= 0.0:
+                raise ConfigError(
+                    f"model_params.{model_name}.aci_gamma={raw_params['aci_gamma']!r} must be > 0"
+                )
+            output_updates["aci_gamma"] = gamma_val
+        if output_updates:
+            eff_cfg = eff_cfg.model_copy(
+                update={"output": eff_cfg.output.model_copy(update=output_updates)}
+            )
 
     eff_f = eff_cfg.features
     cov_prof = compute_cov_profile(eff_f, model_cls=model_cls)

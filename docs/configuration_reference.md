@@ -114,8 +114,11 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
 | `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | Directional economic sign constraints on exogenous covariates (`-1` non-increasing for price/rate columns, `+1` non-decreasing for promo/discount/marketing columns, `0` unconstrained), enforced across `lightgbm`, `xgboost`, `catboost`, and `regression_lags` (`ridge_lags`). Can also be activated per-model via the `@monotone` variant tag (e.g. `"lightgbm@monotone"`, `"regression_lags@monotone"`). |
 | `holiday_window` | `HolidayWindowConfig \| dict \| bool \| null` | `null` | Multi-day moving-holiday lead/lag window (`{"enabled": true, "pre_holiday_days": 7, "post_holiday_days": 3, "kernel": "linear"}`) generating deterministic pre-holiday ramp-up (`pre_holiday_window`, `days_to_next_holiday`) and post-holiday slump (`post_holiday_window`, `days_since_prev_holiday`, `holiday_offset_days`) covariates when `holidays` or `custom_holidays` are active. |
 | `custom_holidays` | `list[dict[str, str]]` | `[]` | Custom event dates (`[{"name": "Cyber Monday", "date": "2026-11-30"}]`) combined with `holidays` for `is_holiday` and `holiday_window` features. |
+| `cold_start_transfer` | `bool` | `false` | When `true`, series with fewer than `cold_start_min_obs` observations synthesize forward trajectories via analog donor transfer or parametric diffusion (`cold_start.py`). |
+| `cold_start_min_obs` | `int` (`≥ 1`) | `14` | Observation-count threshold below which a series is routed through cold-start / NPI transfer when `cold_start_transfer` is `true`. |
+| `cold_start_method` | `"auto"` \| `"analog_transfer"` \| `"bass_diffusion"` \| `"weibull_lifecycle"` | `"auto"` | Cold-start transfer strategy: `"auto"` selects donor shape transfer when mature peer series exist and falls back to Bass/Weibull lifecycle curves otherwise. |
 
-**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py)):
+**What each option produces** ([`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py)):
 
 - **`transform`** — reshapes the target before fitting and inverts it on output:
   - `none` — identity (no constraint on `y`).
@@ -173,6 +176,7 @@ can put its statistical family on Spark, its deep-learning family on Vertex `Cus
   re-baselinings, store openings/closings, or a unit-of-measure change — the shipped example data
   contains them by construction (`data_gen.generator` plants one per series with archetype-specific
   probability).
+- **`cold_start_transfer`, `cold_start_min_obs` & `cold_start_method`** — transfers seasonal shape and launch trajectories from mature donor peers to ultra-short-history series ($n < \text{cold\_start\_min\_obs}$, default `14`) via [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py). `"analog_transfer"` scores mature donors by static-attribute match, hierarchy lineage overlap, and normalized early-ramp shape correlation; `"bass_diffusion"` and `"weibull_lifecycle"` fit empirical-Bayes regularized launch curves when no peer donors exist; `"auto"` chooses `"analog_transfer"` when mature donors are present and falls back to lifecycle diffusion otherwise.
 
 ### Why there is no target-lag knob
 
@@ -532,6 +536,8 @@ Controls point-forecast calibration, physical domain guardrails (`floor`, `cap`,
 | `target_quantile` | `float` \| `null` | `null` | Explicit service-level percentile $\tau \in (0, 1)$ to emit as the primary `yhat` point forecast. |
 | `underage_cost` | `float` \| `null` | `null` | Unit stockout / lost-margin cost $c_u > 0$; paired with `overage_cost` to set `yhat` to the Newsvendor critical fractile $\tau^* = c_u / (c_u + c_o)$. |
 | `overage_cost` | `float` \| `null` | `null` | Unit holding / spoilage / markdown cost $c_o > 0$; paired with `underage_cost`. |
+| `calibration_method` | `"conformal"` \| `"aci"` \| `"aci_normalized"` | `"conformal"` | Prediction-interval calibration engine: static out-of-fold split conformal (`"conformal"`), online Adaptive Conformal Inference (`"aci"`, Gibbs & Candès 2021), or volatility-normalized online ACI (`"aci_normalized"`, [`aci.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/aci.py)). |
+| `aci_gamma` | `float` (`0 < γ ≤ 0.5`) | `0.05` | Online learning rate $\gamma$ for `"aci"` / `"aci_normalized"` updating the effective miscoverage rate $\alpha_{t+1} = \operatorname{clip}(\alpha_t + \gamma(\alpha - \operatorname{err}_{t-h+1}), [0.001, 0.999])$. |
 
 Every model emits one number per future date, so something decides what that number is:
 
@@ -546,6 +552,8 @@ Every model emits one number per future date, so something decides what that num
   are one setting for the whole fleet; this one is the admission that a fleet is not uniform. Also
   **requires `backtest.enabled`**, for the same reason and more sharply: there is nothing to decide
   from otherwise. See *Letting each series choose* below.
+
+When `calibration_method` is `"aci"` or `"aci_normalized"`, prediction intervals (`yhat_lower`, `yhat_upper`) and multi-percentile `quantiles` are widened or tightened online along the chronological out-of-fold residual trajectory using learning rate `aci_gamma` (`0.05` default), restoring target coverage after regime shifts without assuming residual exchangeability.
 
 `yhat_raw` and `yhat_adjusted` are both written to `forecast_predictions` and `backtest_oof`
 whatever you set here, so the choice is never destructive — you can re-score a finished run on the
