@@ -284,6 +284,15 @@ UNPROVEN: dict[str, str] = {
         )
         for m in sorted(VALID_ABLATION_MODES)
     },
+    "features.cold_start_matching=attribute": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.cold_start_matching=hybrid": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.cold_start_matching=similarity": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
     "features.cold_start_method=analog_transfer": (
         "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
     ),
@@ -343,6 +352,27 @@ UNPROVEN: dict[str, str] = {
         "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
         "test_sbc_demand_profile_and_regime_routing"
     ),
+    "features.similarity_cluster_feature=true": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=elastic_dtw": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=foundation_latent": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=minirocket": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=physics_attractor": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=spectral_phase": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "features.similarity_method=structural_signature": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
     "features.trading_days=true": (
         "tests/unit/test_phase_g2_hygiene_and_quantiles.py::"
         "test_trading_days_censored_demand_and_outlier_hygiene"
@@ -369,6 +399,27 @@ UNPROVEN: dict[str, str] = {
     "hierarchy.reconciliation_methods=mint_nonneg": (
         "tests/unit/test_phase_g1_workbench.py::"
         "test_reconciliation_mint_nonneg_guarantees_nonnegative_coherent_forecasts"
+    ),
+    "hierarchy.similarity_hierarchy=true": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=elastic_dtw": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=foundation_latent": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=minirocket": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=physics_attractor": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=spectral_phase": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
+    ),
+    "hierarchy.similarity_method=structural_signature": (
+        "tests/unit/test_similarity.py::test_similarity_config_options_and_hierarchy_resolution"
     ),
     # --- models --------------------------------------------------------------------------------
     "models=chronos2": (

@@ -193,6 +193,31 @@ COLD_START_METHODS: tuple[str, ...] = (
     "bass_diffusion",
     "weibull_lifecycle",
 )
+ColdStartMatching = Literal["auto", "attribute", "similarity", "hybrid"]
+COLD_START_MATCHING_MODES: tuple[str, ...] = (
+    "auto",
+    "attribute",
+    "similarity",
+    "hybrid",
+)
+SimilarityMethod = Literal[
+    "hybrid",
+    "physics_attractor",
+    "spectral_phase",
+    "elastic_dtw",
+    "minirocket",
+    "structural_signature",
+    "foundation_latent",
+]
+SIMILARITY_METHODS: tuple[str, ...] = (
+    "hybrid",
+    "physics_attractor",
+    "spectral_phase",
+    "elastic_dtw",
+    "minirocket",
+    "structural_signature",
+    "foundation_latent",
+)
 CalibrationMethod = Literal["conformal", "aci", "aci_normalized"]
 CALIBRATION_METHODS: tuple[str, ...] = ("conformal", "aci", "aci_normalized")
 VALID_VARIANT_TAGS: frozenset[str] = frozenset(
@@ -209,6 +234,7 @@ VALID_VARIANT_TAGS: frozenset[str] = frozenset(
         "local",
         "global",
         "hybrid",
+        "similarity_global",
         "transform_log1p",
         "transform_boxcox",
         "transform_clr",
@@ -218,6 +244,7 @@ VALID_VARIANT_TAGS: frozenset[str] = frozenset(
         "recursive",
         "monotone",
         "cold_start",
+        "similarity_cold_start",
         "analog_transfer",
         "bass_diffusion",
         "weibull_lifecycle",
@@ -239,6 +266,7 @@ AblationMode = Literal[
     "local",
     "global",
     "hybrid",
+    "similarity_global",
     "local_univariate",
     "local_cov_none",
     "local_cov_future_only",
@@ -369,6 +397,19 @@ class FeaturesConfig(BaseModel):
     cold_start_transfer: bool = False
     cold_start_min_obs: int = Field(default=14, ge=1)
     cold_start_method: ColdStartMethod = "auto"
+    cold_start_matching: ColdStartMatching = "auto"
+    similarity_cluster_feature: bool = False
+    similarity_method: SimilarityMethod = "hybrid"
+    similarity_n_clusters: int | Literal["auto"] = "auto"
+
+    @field_validator("similarity_n_clusters", mode="before")
+    @classmethod
+    def _validate_similarity_n_clusters(cls, v: Any) -> int | Literal["auto"]:
+        if v == "auto":
+            return "auto"
+        if isinstance(v, bool) or not isinstance(v, int) or v < 2:
+            raise ValueError("features.similarity_n_clusters must be 'auto' or an integer >= 2.")
+        return int(v)
 
     @field_validator("monotonic_constraints", mode="before")
     @classmethod
@@ -752,6 +793,17 @@ class EnsembleConfig(BaseModel):
     top_k: int | None = Field(default=None, gt=0)
     parsimony_margin: float = Field(default=0.0, ge=0.0)
     variant_policy: VariantPolicy = "all"
+    similarity_smoothing: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("similarity_smoothing", mode="before")
+    @classmethod
+    def _validate_similarity_smoothing(cls, v: Any) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("ensemble.similarity_smoothing must be a float in [0.0, 1.0].")
+        val = float(v)
+        if not math.isfinite(val) or val < 0.0 or val > 1.0:
+            raise ValueError(f"ensemble.similarity_smoothing must be in [0.0, 1.0], got {v!r}.")
+        return val
 
     @model_validator(mode="before")
     @classmethod
@@ -834,6 +886,27 @@ class HierarchyConfig(BaseModel):
     temporal_aggregations: list[int] | None = None
     cross_temporal: bool = False
     spatial_temporal_weight: float | Literal["auto"] = "auto"
+    similarity_hierarchy: bool = False
+    similarity_n_clusters: int | Literal["auto"] = "auto"
+    similarity_method: SimilarityMethod = "hybrid"
+
+    @property
+    def effective_levels(self) -> list[list[str]]:
+        """Effective cross-sectional aggregation levels, appending ``["similarity_cluster_id"]``
+        when ``similarity_hierarchy=True``."""
+        out = [list(lvl) for lvl in self.levels]
+        if self.similarity_hierarchy and ["similarity_cluster_id"] not in out:
+            out.append(["similarity_cluster_id"])
+        return out
+
+    @field_validator("similarity_n_clusters", mode="before")
+    @classmethod
+    def _validate_similarity_n_clusters(cls, v: Any) -> int | Literal["auto"]:
+        if v == "auto":
+            return "auto"
+        if isinstance(v, bool) or not isinstance(v, int) or v < 2:
+            raise ValueError("hierarchy.similarity_n_clusters must be 'auto' or an integer >= 2.")
+        return int(v)
 
     @field_validator("spatial_temporal_weight", mode="before")
     @classmethod
@@ -861,10 +934,17 @@ class HierarchyConfig(BaseModel):
                 raise ValueError(f"hierarchy.levels[{idx}] is empty; each level must name columns")
             if len(set(level)) != len(level):
                 raise ValueError(f"hierarchy.levels[{idx}] repeats a column: {level}")
-        if self.middle_level is not None and self.levels and self.middle_level not in self.levels:
+        if self.similarity_hierarchy:
+            object.__setattr__(self, "enabled", True)
+        has_spatial_levels = bool(self.levels) or self.similarity_hierarchy
+        if (
+            self.middle_level is not None
+            and has_spatial_levels
+            and self.middle_level not in self.effective_levels
+        ):
             raise ValueError(
                 f"hierarchy.middle_level {self.middle_level} must be one of hierarchy.levels "
-                f"{self.levels}"
+                f"{self.effective_levels}"
             )
         if self.temporal_aggregations is not None:
             if not self.temporal_aggregations:
@@ -881,16 +961,16 @@ class HierarchyConfig(BaseModel):
                     "hierarchy.temporal_aggregations must contain positive integer factors > 1; "
                     f"got {self.temporal_aggregations}"
                 )
-        if self.cross_temporal and not self.levels:
+        if self.cross_temporal and not has_spatial_levels:
             raise ValueError(
                 "hierarchy.cross_temporal=true requires at least one aggregation level in "
                 "hierarchy.levels."
             )
         if self.cross_temporal or (
-            "cross_temporal_mint" in self.reconciliation_methods and bool(self.levels)
+            "cross_temporal_mint" in self.reconciliation_methods and has_spatial_levels
         ):
             object.__setattr__(self, "reconcile_temporal", True)
-            if self.levels:
+            if has_spatial_levels:
                 object.__setattr__(self, "enabled", True)
                 object.__setattr__(self, "cross_temporal", True)
             if "cross_temporal_mint" not in self.reconciliation_methods:
@@ -900,12 +980,12 @@ class HierarchyConfig(BaseModel):
                     [*self.reconciliation_methods, "cross_temporal_mint"],
                 )
         if self.enabled:
-            if not self.levels and not self.reconcile_temporal and not self.cross_temporal:
+            if not has_spatial_levels and not self.reconcile_temporal and not self.cross_temporal:
                 raise ValueError(
                     "hierarchy.enabled=true requires at least one aggregation level in "
                     "hierarchy.levels (e.g. [['region'], ['region', 'category']])"
                 )
-            if self.cross_temporal and not self.levels:
+            if self.cross_temporal and not has_spatial_levels:
                 raise ValueError(
                     "hierarchy.cross_temporal=true requires at least one aggregation level in "
                     "hierarchy.levels"

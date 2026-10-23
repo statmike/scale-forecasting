@@ -278,7 +278,7 @@ def check_model_params(cfg: RunConfig) -> None:
                     "BigQuery AI.FORECAST to 'TimesFM 3.0' (maximum horizon 1024), but this run "
                     f"requires max_horizon={cfg.max_horizon}."
                 )
-        if mode in ("global", "hybrid"):
+        if mode in ("global", "hybrid", "similarity_global"):
             if cfg.hpo.enabled and cfg.hpo.granularity == "per_series":
                 raise ConfigError(
                     f"model_params.{name} sets training_mode={mode!r}, which fits a single shared "

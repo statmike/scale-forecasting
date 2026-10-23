@@ -44,7 +44,7 @@ from .models.base_model import DEFAULT_QUANTILES
 from .seasonality import seasonal_period
 
 if TYPE_CHECKING:
-    from .config import ColdStartMethod, RunConfig
+    from .config import ColdStartMatching, ColdStartMethod, RunConfig, SimilarityMethod
 
 ColdStartArchetype = Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle", "none"]
 
@@ -116,6 +116,9 @@ class ColdStartForecastResult:
     oof_wape_lift_pct: float
     predictions: pd.DataFrame
     diagnostics: dict[str, Any]
+    matching_mode_used: str = "attribute"
+    donor_similarity_score: float = 0.0
+    top_donor_ts_ids: tuple[str, ...] = ()
 
 
 def _extract_seasonal_indices(y: np.ndarray, period: int) -> np.ndarray:
@@ -449,6 +452,46 @@ def _match_donors_hierarchical(
     return candidates, "__global__", "__global__"
 
 
+def _compute_donor_launch_similarity(
+    y_obs: np.ndarray,
+    donors: Sequence[DonorProfile],
+    *,
+    similarity_method: str = "hybrid",
+) -> dict[str, float]:
+    """Score mature ``donors`` against the cold-start series' observed launch prefix ``y_obs``
+    and initial velocity/acceleration via :func:`find_similar_series_df`."""
+    n_obs = int(y_obs.size)
+    if not donors:
+        return {}
+    if n_obs < 2:
+        return {d.ts_id: 0.5 for d in donors}
+
+    from .similarity import find_similar_series_df
+
+    pref_len = max(2, n_obs)
+    panel_rows: list[dict[str, Any]] = []
+    for t_idx, val in enumerate(y_obs[:pref_len]):
+        panel_rows.append({"ts_id": "__cs_query__", "ds": t_idx, "y": float(val)})
+    for d in donors:
+        d_slice = d.raw_launch_trajectory[: max(pref_len, min(d.raw_launch_trajectory.size, 14))]
+        for t_idx, val in enumerate(d_slice):
+            panel_rows.append({"ts_id": d.ts_id, "ds": t_idx, "y": float(val)})
+
+    sim_df = find_similar_series_df(
+        pd.DataFrame(panel_rows),
+        query_ts_id="__cs_query__",
+        top_k=len(donors),
+        mode="launch_prefix",
+        method=similarity_method,
+        prefix_len=n_obs,
+    )
+    score_map: dict[str, float] = {d.ts_id: 0.5 for d in donors}
+    for row in sim_df.to_dict(orient="records"):
+        nbr = str(row["neighbor_ts_id"])
+        score_map[nbr] = float(np.clip(float(row["similarity_score"]), 0.0, 1.0))
+    return score_map
+
+
 def _project_archetype_from_donors(
     method: Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle"],
     y_obs: np.ndarray,
@@ -459,6 +502,7 @@ def _project_archetype_from_donors(
     top_k_donors: int = 3,
     kappa: float = _DEFAULT_KAPPA,
     prior_scale_override: float | None = None,
+    donor_similarity_map: dict[str, float] | None = None,
 ) -> tuple[
     np.ndarray,
     tuple[str, ...],
@@ -510,7 +554,10 @@ def _project_archetype_from_donors(
     donor_prefix_scales: list[float] = []
     for d in matched_donors:
         traj = d.raw_launch_trajectory
-        if n_obs >= 2 and traj.size >= n_obs:
+        if donor_similarity_map is not None and d.ts_id in donor_similarity_map and n_obs >= 2:
+            sim_01 = float(np.clip(donor_similarity_map[d.ts_id], 0.0, 1.0))
+            score = math.exp(3.0 * sim_01)
+        elif n_obs >= 2 and traj.size >= n_obs:
             d_pref = traj[:n_obs]
             y_norm = y_obs - float(np.mean(y_obs))
             d_norm = d_pref - float(np.mean(d_pref))
@@ -1039,12 +1086,15 @@ build_cold_start_donor_catalog = build_cold_start_donor_pool
 
 def forecast_cold_start_series(
     series_df: pd.DataFrame,
-    donor_pool: ColdStartDonorPool | None = None,
+    donor_pool: ColdStartDonorPool | pd.DataFrame | None = None,
     *,
     ts_id: str | None = None,
     horizon: int = 14,
     freq: str = "D",
     method: ColdStartMethod = "auto",
+    matching: ColdStartMatching = "auto",
+    cold_start_matching: ColdStartMatching | None = None,
+    similarity_method: SimilarityMethod = "hybrid",
     min_obs: int = 14,
     top_k_donors: int = 3,
     ts_id_col: str = "ts_id",
@@ -1058,11 +1108,26 @@ def forecast_cold_start_series(
 ) -> ColdStartForecastResult:
     """Produce a cold-start NPI forecast and calibrated interval fan for one series."""
     h = max(1, int(horizon))
+    if isinstance(donor_pool, pd.DataFrame):
+        donor_pool = build_cold_start_donor_pool(
+            donor_pool,
+            freq=freq,
+            horizon=h,
+            min_obs=int(min_obs),
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+            static_covariates=static_covariates,
+            hierarchy_cols=hierarchy_cols,
+        )
     eff_freq = donor_pool.freq if donor_pool is not None else freq
     m_per = (
         donor_pool.seasonal_period if donor_pool is not None else max(1, seasonal_period(eff_freq))
     )
     eff_min_obs = int(min_obs)
+    eff_matching: ColdStartMatching = (
+        cold_start_matching if cold_start_matching is not None else matching
+    )
     q_levels = tuple(sorted({round(float(q), 6) for q in quantiles} | {0.1, 0.5, 0.9}))
 
     tid = str(ts_id) if ts_id is not None else "series_0"
@@ -1113,27 +1178,86 @@ def forecast_cold_start_series(
             except (TypeError, ValueError):
                 pass
 
+    donor_sim_map: dict[str, float] | None = None
+    matching_mode_used = "attribute"
     if donor_pool is not None and donor_pool.donors:
+        all_candidates = [d for d in donor_pool.donors if d.ts_id != tid]
         fallback_levels = (
             donor_pool.attribute_Hierarchy
             if donor_pool.attribute_Hierarchy
             else _build_fallback_levels(static_covariates, hierarchy_cols, set(target_attrs.keys()))
         )
-        matched_donors, donor_group, matched_level = _match_donors_hierarchical(
+        attr_donors, attr_group, attr_level = _match_donors_hierarchical(
             target_attrs,
             donor_pool.donors,
             fallback_levels,
             exclude_ts_id=tid,
         )
+        if eff_matching == "similarity":
+            matched_donors = all_candidates
+            donor_group = f"similarity:{similarity_method}"
+            matched_level = "similarity_launch_prefix"
+            matching_mode_used = "similarity"
+            if n_obs >= 2 and matched_donors:
+                donor_sim_map = _compute_donor_launch_similarity(
+                    y_obs, matched_donors, similarity_method=similarity_method
+                )
+        elif eff_matching == "hybrid":
+            matched_donors = attr_donors if attr_donors else all_candidates
+            donor_group = (
+                attr_group if attr_group != "__global__" else f"hybrid:{similarity_method}"
+            )
+            matched_level = (
+                f"{attr_level}+similarity"
+                if attr_level != "__global__"
+                else "similarity_launch_prefix"
+            )
+            matching_mode_used = "hybrid"
+            if n_obs >= 2 and matched_donors:
+                donor_sim_map = _compute_donor_launch_similarity(
+                    y_obs, matched_donors, similarity_method=similarity_method
+                )
+        elif eff_matching == "attribute":
+            matched_donors = attr_donors
+            donor_group = attr_group
+            matched_level = attr_level
+            matching_mode_used = "attribute"
+        else:
+            # eff_matching == "auto":
+            # Use "similarity" when no attribute metadata matched (zero-metadata panel) and
+            # n_obs >= 2; use "hybrid" when attribute metadata matched and n_obs >= 3; else
+            # "attribute".
+            if attr_level == "__global__" and n_obs >= 2 and all_candidates:
+                matched_donors = all_candidates
+                donor_group = f"similarity:{similarity_method}"
+                matched_level = "similarity_launch_prefix"
+                matching_mode_used = "similarity"
+                donor_sim_map = _compute_donor_launch_similarity(
+                    y_obs, matched_donors, similarity_method=similarity_method
+                )
+            elif attr_level != "__global__" and n_obs >= 3 and attr_donors:
+                matched_donors = attr_donors
+                donor_group = attr_group
+                matched_level = attr_level
+                matching_mode_used = "hybrid"
+                donor_sim_map = _compute_donor_launch_similarity(
+                    y_obs, matched_donors, similarity_method=similarity_method
+                )
+            else:
+                matched_donors = attr_donors
+                donor_group = attr_group
+                matched_level = attr_level
+                matching_mode_used = "attribute"
+
         eff_kappa = (
             float(kappa)
             if kappa is not None
             else donor_pool.group_kappa.get(
-                donor_group, donor_pool.group_kappa.get("__global__", _DEFAULT_KAPPA)
+                attr_group, donor_pool.group_kappa.get("__global__", _DEFAULT_KAPPA)
             )
         )
         oof_lift = donor_pool.group_oof_lift_pct.get(
-            donor_group, donor_pool.group_oof_lift_pct.get("__global__", 0.0)
+            attr_group, donor_pool.group_oof_lift_pct.get("__global__", 0.0)
         )
     else:
         matched_donors = []
@@ -1141,6 +1265,9 @@ def forecast_cold_start_series(
         matched_level = "__global__"
         eff_kappa = float(kappa) if kappa is not None else _DEFAULT_KAPPA
         oof_lift = 0.0
+        matching_mode_used = (
+            eff_matching if eff_matching in ("attribute", "similarity", "hybrid") else "attribute"
+        )
 
     # Resolve archetype method
     if method == "auto":
@@ -1168,8 +1295,21 @@ def forecast_cold_start_series(
             top_k_donors=top_k_donors,
             kappa=eff_kappa,
             prior_scale_override=prior_scale_col_val,
+            donor_similarity_map=donor_sim_map,
         )
     )
+
+    if donor_ids and donor_sim_map:
+        best_sim_score = float(
+            np.sum(
+                np.asarray(sim_weights, dtype=float)
+                * np.array([donor_sim_map.get(did, 0.5) for did in donor_ids], dtype=float)
+            )
+        )
+    elif sim_weights:
+        best_sim_score = float(np.max(sim_weights))
+    else:
+        best_sim_score = 0.0
 
     # Blend with base_predictions if provided and n_obs > 0
     if (
@@ -1273,6 +1413,9 @@ def forecast_cold_start_series(
         "n_obs": n_obs,
         "donor_group": donor_group,
         "matched_level": matched_level,
+        "matching_mode_used": matching_mode_used,
+        "donor_similarity_score": round(best_sim_score, 6),
+        "top_donor_ts_ids": list(donor_ids),
         "selected_archetype": resolved_arch,
         "method_used": arch_used,
         "donor_ts_ids": list(donor_ids),
@@ -1307,6 +1450,9 @@ def forecast_cold_start_series(
         oof_wape_lift_pct=round(float(oof_lift), 4),
         predictions=pred_df,
         diagnostics=diag,
+        matching_mode_used=matching_mode_used,
+        donor_similarity_score=round(best_sim_score, 6),
+        top_donor_ts_ids=donor_ids,
     )
 
 
@@ -1319,6 +1465,9 @@ def cold_start_transfer_df(
     oof_df: pd.DataFrame | None = None,
     min_obs: int | None = None,
     method: ColdStartMethod | None = None,
+    matching: ColdStartMatching | None = None,
+    cold_start_matching: ColdStartMatching | None = None,
+    similarity_method: SimilarityMethod | None = None,
     static_covariates: Sequence[str] = (),
     hierarchy_cols: Sequence[str] = (),
     top_k_donors: int = 3,
@@ -1346,6 +1495,17 @@ def cold_start_transfer_df(
         if method is not None
         else (cfg.features.cold_start_method if cfg is not None else "auto")
     )
+    req_matching = cold_start_matching if cold_start_matching is not None else matching
+    eff_matching: ColdStartMatching = (
+        req_matching
+        if req_matching is not None
+        else (cfg.features.cold_start_matching if cfg is not None else "auto")
+    )
+    eff_sim_method: SimilarityMethod = (
+        similarity_method
+        if similarity_method is not None
+        else (cfg.features.similarity_method if cfg is not None else "hybrid")
+    )
 
     preds_src = forecasts_df if forecasts_df is not None else predictions_df
     donor_pool = build_cold_start_donor_pool(
@@ -1369,9 +1529,12 @@ def cold_start_transfer_df(
         "cold_start_flag",
         "donor_group",
         "matched_level",
+        "matching_mode_used",
         "selected_archetype",
         "method_used",
         "donor_ts_ids",
+        "top_donor_ts_ids",
+        "donor_similarity_score",
         "similarity_scores",
         "empirical_bayes_weight",
         "prior_scale",
@@ -1408,6 +1571,8 @@ def cold_start_transfer_df(
             horizon=eff_horizon,
             freq=eff_freq,
             method=eff_method,
+            matching=eff_matching,
+            similarity_method=eff_sim_method,
             min_obs=eff_min_obs,
             top_k_donors=top_k_donors,
             ts_id_col=eff_ts_col,
@@ -1431,9 +1596,12 @@ def cold_start_transfer_df(
                 "cold_start_flag": cs_res.cold_start_flag,
                 "donor_group": cs_res.donor_group,
                 "matched_level": cs_res.matched_level,
+                "matching_mode_used": cs_res.matching_mode_used,
                 "selected_archetype": cs_res.selected_archetype,
                 "method_used": cs_res.method_used,
                 "donor_ts_ids": ",".join(cs_res.donor_ts_ids),
+                "top_donor_ts_ids": ",".join(cs_res.top_donor_ts_ids),
+                "donor_similarity_score": cs_res.donor_similarity_score,
                 "similarity_scores": ",".join(f"{w:.3f}" for w in cs_res.similarity_weights),
                 "empirical_bayes_weight": cs_res.empirical_bayes_weight,
                 "prior_scale": cs_res.prior_scale,

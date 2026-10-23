@@ -853,6 +853,8 @@ def run_cell(
                 horizon=model_cfg.data.horizon,
                 freq=model_cfg.data.freq,
                 method=model_cfg.features.cold_start_method,
+                matching=model_cfg.features.cold_start_matching,
+                similarity_method=model_cfg.features.similarity_method,
                 min_obs=model_cfg.features.cold_start_min_obs,
                 ts_id_col=model_cfg.data.ts_id_col,
                 date_col=model_cfg.data.date_col,
@@ -945,7 +947,8 @@ def run_cell(
 
 
 def is_panel_model(model_name: str, cfg: RunConfig, params: dict[str, Any] | None = None) -> bool:
-    """Whether ``model_name`` is configured for panel training (`global` or `hybrid`)."""
+    """Whether ``model_name`` is configured for panel training (`global`, `hybrid`, or
+    `similarity_global`)."""
     base_name = base_model_name(model_name)
     authored: dict[str, Any] = {}
     if base_name in cfg.model_params:
@@ -955,9 +958,13 @@ def is_panel_model(model_name: str, cfg: RunConfig, params: dict[str, Any] | Non
     if params is not None:
         authored.update(params)
     if "training_mode" in authored:
-        return str(authored["training_mode"]) in ("global", "hybrid")
+        return str(authored["training_mode"]) in ("global", "hybrid", "similarity_global")
     if "@" in model_name:
-        return resolve_model_variant(cfg, model_name).training_mode in ("global", "hybrid")
+        return resolve_model_variant(cfg, model_name).training_mode in (
+            "global",
+            "hybrid",
+            "similarity_global",
+        )
     return False
 
 
@@ -969,7 +976,8 @@ def run_panel(
     *,
     future_df: pd.DataFrame | None = None,
 ) -> list[CellResult]:
-    """Fit + (optional panel backtest) + predict ONE global/hybrid model across a panel.
+    """Fit + (optional panel backtest) + predict ONE global/hybrid/similarity_global model across
+    a panel.
 
     Returns one `CellResult` per distinct ``ts_id`` in ``panel``, preserving the exact per-series
     schema and lineage contract (`forecasts`, `backtest_oof`, `forecast_metadata`) as `run_cell`.
@@ -988,8 +996,9 @@ def run_panel(
     available, device_name = visible_device()
     series_frames: dict[str, pd.DataFrame] = {}
     for raw_uid, sub in panel.groupby(id_col, sort=True):
-        reg_sub = regularize_series_grid(sub, cfg)
-        series_frames[str(raw_uid)] = reg_sub.sort_values(date_col).reset_index(drop=True)
+        reg_sub = regularize_series_grid(sub, cfg).sort_values(date_col).reset_index(drop=True)
+        reg_sub.attrs = {}
+        series_frames[str(raw_uid)] = reg_sub
     future_frames: dict[str, pd.DataFrame] = {}
     if future_df is not None and not future_df.empty and id_col in future_df.columns:
         for raw_uid, f_sub in future_df.groupby(id_col, sort=False):
@@ -1047,6 +1056,59 @@ def run_panel(
         clean_override = clean_model_params(params) if params is not None else {}
         resolved = {**authored, **clean_override} if params is not None else authored
 
+        is_similarity_global = variant_spec.training_mode == "similarity_global"
+        if is_similarity_global:
+            resolved["training_mode"] = "global"
+
+        cluster_info_by_uid: dict[str, dict[str, Any]] = {}
+        clusters_uids: dict[str, list[str]] = {"__all__": list(uids)}
+        if is_similarity_global or model_cfg.features.similarity_cluster_feature:
+            from .similarity import cluster_by_similarity_df
+
+            reg_panel = pd.concat([series_frames[u] for u in uids], ignore_index=True)
+            clusters_df = cluster_by_similarity_df(
+                reg_panel,
+                cfg=model_cfg,
+                n_clusters=model_cfg.features.similarity_n_clusters,
+                method=model_cfg.features.similarity_method,
+                min_cluster_size=2,
+                ts_id_col=id_col,
+                date_col=date_col,
+                target_col=target_col,
+            )
+            if is_similarity_global:
+                clusters_uids = {}
+            for _, crow in clusters_df.iterrows():
+                u = str(crow["ts_id"])
+                cid = str(crow["similarity_cluster_id"])
+                c_int = int(crow.get("cluster_int_id", 0))
+                sim_med = float(crow.get("similarity_to_medoid", 1.0))
+                cluster_info_by_uid[u] = {
+                    "similarity_cluster_id": cid,
+                    "cluster_id": cid,
+                    "cluster_int_id": c_int,
+                    "cluster_medoid_ts_id": str(crow.get("cluster_medoid_ts_id", u)),
+                    "similarity_to_medoid": sim_med,
+                    "cluster_silhouette": float(crow.get("cluster_silhouette", 0.0)),
+                    "cluster_size": int(crow.get("cluster_size", 1)),
+                    "cluster_archetype": str(crow.get("cluster_archetype", "smooth_regular")),
+                    "method": model_cfg.features.similarity_method,
+                }
+                if is_similarity_global and u in series_frames:
+                    clusters_uids.setdefault(cid, []).append(u)
+                if model_cfg.features.similarity_cluster_feature and u in series_frames:
+                    sub_u = series_frames[u].copy()
+                    sub_u["similarity_cluster_id"] = c_int
+                    sub_u["similarity_to_medoid"] = sim_med
+                    series_frames[u] = sub_u
+            if is_similarity_global:
+                for u in uids:
+                    if u not in cluster_info_by_uid:
+                        clusters_uids.setdefault("cluster_0", []).append(u)
+                n_clust_total = len(clusters_uids)
+                for u_info in cluster_info_by_uid.values():
+                    u_info["n_clusters"] = n_clust_total
+
         lams: dict[str, float | None] = {
             uid: fit_transform_lambda(
                 _target(series_frames[uid], model_cfg),
@@ -1089,6 +1151,31 @@ def run_panel(
                     active_uids = [u for u in uids if fold_idx < len(folds_by_uid[u])]
                     if not active_uids:
                         continue
+                    fold_cluster_int: dict[str, int] = {}
+                    fold_sim_med: dict[str, float] = {}
+                    if model_cfg.features.similarity_cluster_feature:
+                        from .similarity import cluster_by_similarity_df
+
+                        fold_train_frames = [
+                            series_frames[u].iloc[: folds_by_uid[u][fold_idx].train_end]
+                            for u in active_uids
+                        ]
+                        fold_panel = pd.concat(fold_train_frames, ignore_index=True)
+                        fold_clusters = cluster_by_similarity_df(
+                            fold_panel,
+                            cfg=model_cfg,
+                            n_clusters=model_cfg.features.similarity_n_clusters,
+                            method=model_cfg.features.similarity_method,
+                            min_cluster_size=2,
+                            ts_id_col=id_col,
+                            date_col=date_col,
+                            target_col=target_col,
+                        )
+                        for _, frow in fold_clusters.iterrows():
+                            fu = str(frow["ts_id"])
+                            fold_cluster_int[fu] = int(frow.get("cluster_int_id", 0))
+                            fold_sim_med[fu] = float(frow.get("similarity_to_medoid", 1.0))
+
                     fold_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
                     fold_futr_map: dict[str, pd.DataFrame | None] = {}
                     fold_lams: dict[str, float | None] = {}
@@ -1096,6 +1183,10 @@ def run_panel(
                         fold = folds_by_uid[uid][fold_idx]
                         sub = series_frames[uid]
                         train_slice = sub.iloc[: fold.train_end]
+                        if model_cfg.features.similarity_cluster_feature:
+                            train_slice = train_slice.copy()
+                            train_slice["similarity_cluster_id"] = fold_cluster_int.get(uid, 0)
+                            train_slice["similarity_to_medoid"] = fold_sim_med.get(uid, 1.0)
                         val_future = sub.iloc[fold.train_end : fold.val_end]
                         if model_cfg.features.past_covariates:
                             val_future = val_future.drop(
@@ -1119,16 +1210,29 @@ def run_panel(
                         fold_lams[uid] = lams[uid]
                         train_rows_total += len(y_tr)
 
-                    fold_model = model_cls(resolved, ctx)
-                    fold_model.fit_panel(
-                        fold_series_map, static_map=static_map if static_map else None
-                    )
-                    n_fits += 1
-                    preds_map = fold_model.predict_panel(
-                        gap + bt_h,
-                        fold_futr_map,
-                        transform_lambdas=fold_lams,
-                    )
+                    preds_map: dict[str, pd.DataFrame] = {}
+                    for _cid, c_uids in sorted(clusters_uids.items()):
+                        c_active = [u for u in c_uids if u in fold_series_map]
+                        if not c_active:
+                            continue
+                        fold_model = model_cls(resolved, ctx)
+                        c_static = (
+                            {u: static_map[u] for u in c_active if u in static_map}
+                            if static_map
+                            else None
+                        )
+                        fold_model.fit_panel(
+                            {u: fold_series_map[u] for u in c_active},
+                            static_map=c_static if c_static else None,
+                        )
+                        n_fits += 1
+                        c_preds = fold_model.predict_panel(
+                            gap + bt_h,
+                            {u: fold_futr_map[u] for u in c_active},
+                            transform_lambdas={u: fold_lams[u] for u in c_active},
+                        )
+                        preds_map.update(c_preds)
+
                     for uid in active_uids:
                         fold = folds_by_uid[uid][fold_idx]
                         sub = series_frames[uid]
@@ -1208,7 +1312,7 @@ def run_panel(
                     n_folds_by_uid[uid] = 0
                     bt_note_by_uid[uid] = repr(e)
 
-        # Final fit across the full panel.
+        # Final fit across the full panel (or per similarity cluster).
         full_series_map: dict[str, tuple[pd.Series, pd.DataFrame | None]] = {}
         full_futr_map: dict[str, pd.DataFrame | None] = {}
         for uid in uids:
@@ -1225,17 +1329,37 @@ def run_panel(
             )
             train_rows_total += len(y_full)
 
-        model = model_cls(resolved, ctx)
-        model.fit_panel(full_series_map, static_map=static_map if static_map else None)
-        n_fits += 1
         eff_qs = cfg.output.effective_quantiles
-        raw_preds_map = model.predict_panel(
-            model_cfg.data.horizon,
-            full_futr_map,
-            quantiles=eff_qs,
-            transform_lambdas=lams,
-        )
+        raw_preds_map: dict[str, pd.DataFrame] = {}
+        models_by_uid: dict[str, BaseModel] = {}
+        first_model: BaseModel | None = None
+        for _cid, c_uids in sorted(clusters_uids.items()):
+            c_active = [u for u in c_uids if u in full_series_map]
+            if not c_active:
+                continue
+            c_model = model_cls(resolved, ctx)
+            c_static = (
+                {u: static_map[u] for u in c_active if u in static_map} if static_map else None
+            )
+            c_model.fit_panel(
+                {u: full_series_map[u] for u in c_active},
+                static_map=c_static if c_static else None,
+            )
+            n_fits += 1
+            c_preds = c_model.predict_panel(
+                model_cfg.data.horizon,
+                {u: full_futr_map[u] for u in c_active},
+                quantiles=eff_qs,
+                transform_lambdas={u: lams[u] for u in c_active},
+            )
+            raw_preds_map.update(c_preds)
+            for u in c_active:
+                models_by_uid[u] = c_model
+            if first_model is None:
+                first_model = c_model
 
+        assert first_model is not None
+        model = first_model
         total_fit_seconds = time.perf_counter() - started
         total_cpu_seconds = time.process_time() - cpu_started
         per_series_fit_s = total_fit_seconds / max(1, len(uids))
@@ -1257,6 +1381,7 @@ def run_panel(
 
         results: list[CellResult] = []
         for idx, uid in enumerate(uids):
+            uid_model = models_by_uid.get(uid, model)
             oof = oof_by_uid[uid]
             arm, arm_decision = resolve_arm(cfg.output.point_forecast, oof, metric, corrected)
             cal = (
@@ -1270,7 +1395,12 @@ def run_panel(
                 else None
             )
             predictions, interval_calibration = apply_calibration(raw_preds_map[uid], cal, arm)
-            uid_diag = _collect_diagnostics(model, uid, model_name)
+            uid_diag = _collect_diagnostics(uid_model, uid, model_name)
+            if uid in cluster_info_by_uid:
+                c_info = dict(cluster_info_by_uid[uid])
+                uid_diag["similarity_clusters"] = c_info
+                uid_diag["similarity_cluster_id"] = c_info["similarity_cluster_id"]
+                uid_diag["similarity_to_medoid"] = c_info["similarity_to_medoid"]
             if (
                 model_cfg.features.cold_start_transfer
                 and len(series_frames[uid]) < model_cfg.features.cold_start_min_obs
@@ -1288,6 +1418,8 @@ def run_panel(
                     horizon=model_cfg.data.horizon,
                     freq=model_cfg.data.freq,
                     method=model_cfg.features.cold_start_method,
+                    matching=model_cfg.features.cold_start_matching,
+                    similarity_method=model_cfg.features.similarity_method,
                     min_obs=model_cfg.features.cold_start_min_obs,
                     ts_id_col=model_cfg.data.ts_id_col,
                     date_col=model_cfg.data.date_col,
@@ -1320,7 +1452,7 @@ def run_panel(
             artifact_bytes: bytes | None = None
             if cfg.compute.persist_models and idx == 0:
                 try:
-                    artifact_bytes = model.serialize()
+                    artifact_bytes = uid_model.serialize()
                 except Exception as e:  # noqa: BLE001
                     _log.warning("serialize failed for %s/%s: %r", uid, model_name, e)
 
@@ -1345,7 +1477,7 @@ def run_panel(
                     predictions=predictions,
                     oof=oof,
                     metrics=metrics_by_uid[uid],
-                    best_params=best_params,
+                    best_params=uid_model.get_params() if is_similarity_global else best_params,
                     fit_seconds=per_series_fit_s,
                     worker_id=worker_id,
                     cell_started_at=cell_started_at,

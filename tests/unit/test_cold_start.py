@@ -238,3 +238,56 @@ def test_cold_start_config_and_worker_pipeline() -> None:
     assert len(cell.predictions) == 7
     assert cell.fit_diagnostics.get("cold_start_transfer") is not None
     assert cell.fit_diagnostics["cold_start_transfer"]["is_cold_start"] is True
+
+
+def test_cold_start_similarity_and_hybrid_matching() -> None:
+    """Verify cold_start_matching='similarity'|'hybrid' and @similarity_cold_start transfer."""
+    panel = _make_npi_panel()
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "test_similarity_cold_start",
+            "data": {"source_table": "p.d.t", "horizon": 7, "freq": "D"},
+            "models": ["naive_mean@similarity_cold_start"],
+            "features": {
+                "cold_start_min_obs": 14,
+                "cold_start_method": "analog_transfer",
+                "cold_start_matching": "similarity",
+                "similarity_method": "hybrid",
+            },
+        }
+    )
+    variant = resolve_model_variant(cfg, "naive_mean@similarity_cold_start")
+    assert variant.effective_cfg.features.cold_start_transfer is True
+    assert variant.effective_cfg.features.cold_start_matching == "similarity"
+
+    s5 = panel[panel["ts_id"] == "npi_5obs"][["ts_id", "ds", "y"]].reset_index(drop=True)
+    cell = run_cell(
+        "npi_5obs",
+        s5,
+        "naive_mean@similarity_cold_start",
+        cfg,
+        cold_start_donor_pool=panel[["ts_id", "ds", "y"]],
+    )
+    assert cell.status == "ok"
+    assert len(cell.predictions) == 7
+    cs_diag = cell.fit_diagnostics["cold_start_transfer"]
+    assert cs_diag["is_cold_start"] is True
+    assert cs_diag["matching_mode_used"] == "similarity"
+    assert float(cs_diag["donor_similarity_score"]) > 0.0
+    assert len(cs_diag["top_donor_ts_ids"]) >= 1
+
+    hybrid_report = cold_start_transfer_df(
+        panel,
+        horizon=7,
+        freq="D",
+        min_obs=14,
+        matching="hybrid",
+        similarity_method="hybrid",
+        static_covariates=["category", "brand_tier"],
+    )
+    assert "matching_mode_used" in hybrid_report.columns
+    assert "donor_similarity_score" in hybrid_report.columns
+    assert "top_donor_ts_ids" in hybrid_report.columns
+    npi_row = hybrid_report[hybrid_report["ts_id"] == "npi_5obs"].iloc[0]
+    assert str(npi_row["matching_mode_used"]) == "hybrid"
+    assert float(npi_row["donor_similarity_score"]) > 0.0

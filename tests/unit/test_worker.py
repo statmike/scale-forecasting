@@ -1024,3 +1024,40 @@ def replace_diagnostics(res: CellResult, diagnostics: dict[str, Any]) -> CellRes
     import dataclasses
 
     return dataclasses.replace(res, diagnostics=diagnostics)
+
+
+def test_run_panel_similarity_global_clusters_and_stamps_diagnostics() -> None:
+    """`run_panel` fits one independent global model per cluster under @similarity_global."""
+    from scale_forecasting.worker import is_panel_model, run_panel
+
+    rng = np.random.default_rng(7)
+    dates = pd.date_range("2025-01-01", periods=42, freq="D")
+    t = np.arange(42, dtype=float)
+    frames = []
+    for i in range(2):
+        y_s = 100.0 + 30.0 * np.sin(2.0 * np.pi * t / 7.0) + rng.normal(0.0, 1.0, size=42)
+        frames.append(pd.DataFrame({"ts_id": f"sin_{i}", "ds": dates, "y": y_s}))
+    for i in range(2):
+        y_t = 20.0 + 3.0 * t + rng.normal(0.0, 1.0, size=42)
+        frames.append(pd.DataFrame({"ts_id": f"lin_{i}", "ds": dates, "y": y_t}))
+    panel = pd.concat(frames, ignore_index=True)
+
+    cfg = _cfg(
+        models=["tide@similarity_global"],
+        model_params={"tide": {"max_steps": 4, "input_size": 7}},
+        features={"similarity_n_clusters": 2, "similarity_method": "hybrid"},
+        backtest={"enabled": False},
+    )
+    assert is_panel_model("tide@similarity_global", cfg) is True
+    results = run_panel(panel, "tide@similarity_global", cfg)
+    assert len(results) == 4
+    assert all(r.status == "ok" for r in results)
+    by_uid = {r.ts_id: r for r in results}
+    assert (
+        by_uid["sin_0"].fit_diagnostics["similarity_cluster_id"]
+        == by_uid["sin_1"].fit_diagnostics["similarity_cluster_id"]
+    )
+    assert (
+        by_uid["lin_0"].fit_diagnostics["similarity_cluster_id"]
+        == by_uid["lin_1"].fit_diagnostics["similarity_cluster_id"]
+    )

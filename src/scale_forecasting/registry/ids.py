@@ -162,6 +162,9 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("hierarchy", "temporal_aggregations"): None,
     ("hierarchy", "cross_temporal"): False,
     ("hierarchy", "spatial_temporal_weight"): "auto",
+    ("hierarchy", "similarity_hierarchy"): False,
+    ("hierarchy", "similarity_n_clusters"): "auto",
+    ("hierarchy", "similarity_method"): "hybrid",
     ("hierarchy",): {
         "enabled": False,
         "levels": [],
@@ -189,6 +192,7 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("ensemble", "top_k"): None,
     ("ensemble", "parsimony_margin"): 0.0,
     ("ensemble", "variant_policy"): "all",
+    ("ensemble", "similarity_smoothing"): 0.0,
     ("data", "grid_policy"): "strict",
     ("data", "trim_leading_zeros"): False,
     ("data", "snapshot_millis"): None,
@@ -205,6 +209,10 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "cold_start_transfer"): False,
     ("features", "cold_start_min_obs"): 14,
     ("features", "cold_start_method"): "auto",
+    ("features", "cold_start_matching"): "auto",
+    ("features", "similarity_cluster_feature"): False,
+    ("features", "similarity_method"): "hybrid",
+    ("features", "similarity_n_clusters"): "auto",
     ("output", "calibration_method"): "conformal",
     ("output", "aci_gamma"): 0.05,
 }
@@ -358,6 +366,17 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         features_payload["cold_start_transfer"] = True
         features_payload["cold_start_min_obs"] = eff_f.cold_start_min_obs
         features_payload["cold_start_method"] = eff_f.cold_start_method
+        if eff_f.cold_start_matching != "auto":
+            features_payload["cold_start_matching"] = eff_f.cold_start_matching
+    if eff_f.similarity_cluster_feature:
+        features_payload["similarity_cluster_feature"] = True
+        features_payload["similarity_method"] = eff_f.similarity_method
+        features_payload["similarity_n_clusters"] = eff_f.similarity_n_clusters
+    elif spec.training_mode == "similarity_global":
+        if eff_f.similarity_method != "hybrid":
+            features_payload["similarity_method"] = eff_f.similarity_method
+        if eff_f.similarity_n_clusters != "auto":
+            features_payload["similarity_n_clusters"] = eff_f.similarity_n_clusters
 
     output_payload = spec.effective_cfg.output.model_dump(mode="json")
     if output_payload.get("calibration_method") == "conformal":
@@ -411,6 +430,8 @@ def make_ensemble_id(ensemble: EnsembleConfig) -> str:
         raw_payload["parsimony_margin"] = ensemble.parsimony_margin
     if ensemble.variant_policy != "all":
         raw_payload["variant_policy"] = ensemble.variant_policy
+    if ensemble.similarity_smoothing != 0.0:
+        raw_payload["similarity_smoothing"] = ensemble.similarity_smoothing
     payload = json.dumps(
         raw_payload,
         sort_keys=True,
