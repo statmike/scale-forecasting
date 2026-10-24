@@ -16,6 +16,7 @@ Public surface: ``available_models``, ``model_catalog``, ``metric_catalog``, ``s
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -362,6 +363,8 @@ class PlaygroundRun:
             **kwargs,
         )
 
+    cluster_by_similarity_df = similarity_clusters_df
+
     def similarity_embeddings_df(
         self,
         data: pd.DataFrame | None = None,
@@ -384,6 +387,8 @@ class PlaygroundRun:
             **kwargs,
         )
 
+    embed_series_df = similarity_embeddings_df
+
     def find_similar_series_df(
         self,
         query_ts_id_or_data: str | pd.DataFrame | None = None,
@@ -395,6 +400,10 @@ class PlaygroundRun:
         method: str = "hybrid",
         prefix_len: int | None = None,
         max_lag: int = 0,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Retrieve Top-$K$ similar peer series (`similarity.find_similar_series_df`)."""
@@ -416,6 +425,10 @@ class PlaygroundRun:
             method=method,
             prefix_len=prefix_len,
             max_lag=max_lag,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
             **kwargs,
         )
 
@@ -450,6 +463,82 @@ class PlaygroundRun:
             title=title,
             **kwargs,
         )
+
+    def recommend_substitutes_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        inventory_df: pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | Sequence[str] | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        require_in_stock: bool = True,
+        on_hand_col: str = "on_hand",
+        safety_stock_col: str = "safety_stock",
+        method: str = "hybrid",
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Recommend stockout-aware substitutes (`similarity.recommend_substitutes_df`)."""
+        from .similarity import recommend_substitutes_df as _recommend_substitutes_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        return _recommend_substitutes_df(
+            panel,
+            inventory_df=inventory_df,
+            query_ts_id=eff_query,
+            top_k=top_k,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            on_hand_col=on_hand_col,
+            safety_stock_col=safety_stock_col,
+            method=method,
+            **kwargs,
+        )
+
+    def emerging_trends_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        window: int = 14,
+        top_k_related: int = 3,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        max_lag: int = 7,
+        method: str = "hybrid",
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Detect emerging trends and bellwethers (`similarity.detect_emerging_trends_df`)."""
+        from .similarity import detect_emerging_trends_df as _detect_emerging_trends_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        return _detect_emerging_trends_df(
+            panel,
+            window=window,
+            top_k_related=top_k_related,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max_lag,
+            method=method,
+            **kwargs,
+        )
+
+    detect_emerging_trends_df = emerging_trends_df
 
     def inventory_policy_df(
         self,
@@ -884,9 +973,13 @@ class PlaygroundRun:
         matching: str | None = None,
         cold_start_matching: str | None = None,
         similarity_method: str | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
         top_k_donors: int = 3,
         donor_pool_df: pd.DataFrame | None = None,
         return_result: bool = False,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
         from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
@@ -914,8 +1007,12 @@ class PlaygroundRun:
             method=method,
             matching=eff_matching,  # type: ignore[arg-type]
             similarity_method=similarity_method,  # type: ignore[arg-type]
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=list(hierarchy_cols) if hierarchy_cols is not None else (),
             top_k_donors=top_k_donors,
             horizon=len(self.result.predictions) or 14,
+            **kwargs,
         )
 
     def plot_cold_start_transfer(
@@ -1407,6 +1504,8 @@ class PlaygroundRun:
         scenario_opt_df: pd.DataFrame | None = None,
         similarity_df: pd.DataFrame | None = None,
         similarity_clusters_df: pd.DataFrame | None = None,
+        substitutes_df: pd.DataFrame | None = None,
+        emerging_trends_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -1425,6 +1524,8 @@ class PlaygroundRun:
             scenario_opt_df=scenario_opt_df,
             similarity_df=similarity_df,
             similarity_clusters_df=similarity_clusters_df,
+            substitutes_df=substitutes_df,
+            emerging_trends_df=emerging_trends_df,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )
@@ -1538,6 +1639,8 @@ class BakeOff:
             **kwargs,
         )
 
+    cluster_by_similarity_df = similarity_clusters_df
+
     def similarity_embeddings_df(
         self,
         data: pd.DataFrame | None = None,
@@ -1568,6 +1671,8 @@ class BakeOff:
             **kwargs,
         )
 
+    embed_series_df = similarity_embeddings_df
+
     def find_similar_series_df(
         self,
         query_ts_id_or_data: str | pd.DataFrame | None = None,
@@ -1579,6 +1684,10 @@ class BakeOff:
         method: str | None = None,
         prefix_len: int | None = None,
         max_lag: int = 0,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Rank top-K most similar peer series to ``query_ts_id``."""
@@ -1612,6 +1721,10 @@ class BakeOff:
             method=eff_method,
             prefix_len=prefix_len,
             max_lag=max_lag,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
             ts_id_col=ts_col,
             date_col=self.config.data.date_col,
             target_col=self.config.data.target_col,
@@ -1646,6 +1759,94 @@ class BakeOff:
             title=title,
             **kwargs,
         )
+
+    def recommend_substitutes_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        inventory_df: pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | Sequence[str] | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        require_in_stock: bool = True,
+        on_hand_col: str = "on_hand",
+        safety_stock_col: str = "safety_stock",
+        method: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Recommend stockout-aware substitutes (`similarity.recommend_substitutes_df`)."""
+        from .similarity import recommend_substitutes_df as _recommend_substitutes_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        eff_method = method or self.config.features.similarity_method
+        return _recommend_substitutes_df(
+            panel,
+            inventory_df=inventory_df,
+            query_ts_id=eff_query,
+            top_k=top_k,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            on_hand_col=on_hand_col,
+            safety_stock_col=safety_stock_col,
+            method=eff_method,
+            cfg=self.config,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    def emerging_trends_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        window: int = 14,
+        top_k_related: int = 3,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        max_lag: int = 7,
+        method: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Detect emerging trends and bellwethers (`similarity.detect_emerging_trends_df`)."""
+        from .similarity import detect_emerging_trends_df as _detect_emerging_trends_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        return _detect_emerging_trends_df(
+            panel,
+            window=window,
+            top_k_related=top_k_related,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max_lag,
+            method=eff_method,
+            cfg=self.config,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    detect_emerging_trends_df = emerging_trends_df
 
     def fva_df(
         self,
@@ -2138,11 +2339,16 @@ class BakeOff:
         min_history_points: int = 14,
         method: Any = None,
         matching: str | None = None,
+        cold_start_matching: str | None = None,
         similarity_method: str | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
         top_k_donors: int = 3,
         donor_pool_df: pd.DataFrame | None = None,
         model_type: str | None = None,
         return_result: bool = False,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
         from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
@@ -2157,6 +2363,12 @@ class BakeOff:
             if donor_pool_df is not None
             else (self.panel_df if self.panel_df is not None else self.series)
         )
+        eff_matching = cold_start_matching if cold_start_matching is not None else matching
+        eff_hier_cols = (
+            list(hierarchy_cols)
+            if hierarchy_cols is not None
+            else [c for lvl in self.config.hierarchy.levels for c in lvl]
+        )
         return _cold_start_transfer_df(
             panel,
             cfg=self.config,
@@ -2164,16 +2376,19 @@ class BakeOff:
             oof_df=self.oof,
             min_obs=min_obs if min_obs is not None else min_history_points,
             method=method,
-            matching=matching,  # type: ignore[arg-type]
+            matching=eff_matching,  # type: ignore[arg-type]
             similarity_method=similarity_method,  # type: ignore[arg-type]
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
             static_covariates=self.config.features.static_covariates,
-            hierarchy_cols=[c for lvl in self.config.hierarchy.levels for c in lvl],
+            hierarchy_cols=eff_hier_cols,
             top_k_donors=top_k_donors,
             ts_id_col=self.config.data.ts_id_col,
             date_col=self.config.data.date_col,
             target_col=self.config.data.target_col,
             horizon=self.config.data.horizon,
             freq=self.config.data.freq,
+            **kwargs,
         )
 
     def plot_cold_start_transfer(
@@ -2677,6 +2892,8 @@ class BakeOff:
         scenario_opt_df: pd.DataFrame | None = None,
         similarity_df: pd.DataFrame | None = None,
         similarity_clusters_df: pd.DataFrame | None = None,
+        substitutes_df: pd.DataFrame | None = None,
+        emerging_trends_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -2695,6 +2912,8 @@ class BakeOff:
             scenario_opt_df=scenario_opt_df,
             similarity_df=similarity_df,
             similarity_clusters_df=similarity_clusters_df,
+            substitutes_df=substitutes_df,
+            emerging_trends_df=emerging_trends_df,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )

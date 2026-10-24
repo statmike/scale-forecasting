@@ -537,14 +537,19 @@ _NORMALIZATION_RULES: tuple[str, ...] = (
         "single-VM (`workers = 1`)."
     ),
     (
-        "9. **Time-Series Similarity & Analog Clustering (`features`, `hierarchy`, `ensemble`):** "
-        "`features.cold_start_matching = 'similarity'` uses hybrid/DTW/MP/Wasserstein "
-        "launch-prefix donor matching (`similarity_method`). "
+        "9. **Time-Series Similarity, Multi-Modal Matching & Merchandising "
+        "(`features`, `hierarchy`, `ensemble`):** "
+        "`features.cold_start_matching = 'similarity'` uses 7-lens (`hybrid`, "
+        "`physics_attractor`, `spectral_phase`, `elastic_dtw`, `minirocket`, "
+        "`structural_signature`, `foundation_latent`) and multi-modal (`text_cols`, "
+        "`attribute_cols`, `hierarchy_cols`) Day-0 to Day-14 donor matching "
+        "(`similarity_method`). "
         "`features.similarity_cluster_feature = true` or `<model>@similarity_global` injects "
         "cluster labels into global models. `hierarchy.similarity_hierarchy = true` "
-        "auto-discovers latent cluster hierarchies on flat panels, and "
+        "auto-discovers latent cluster hierarchies on flat panels, "
         "`ensemble.similarity_smoothing = true` applies Laplacian graph smoothing across "
-        "per-series stacker weights."
+        "per-series stacker weights, and `recommend_substitutes_df` / `detect_emerging_trends_df` "
+        "provide inventory-aware SKU substitution and emerging trend breakout intelligence."
     ),
 )
 
@@ -1480,9 +1485,10 @@ def render_skill_execution_paths_reference() -> str:
                 "`.optimize_inventory_df()` / `.optimize_scenario()` |"
             ),
             (
-                "| **Time-Series Similarity, Donor Matching & Cluster Hierarchies** | — | "
+                "| **Time-Series Similarity, Donor Matching, Substitutes & Emerging Trends** | — | "
                 "`Forecaster(cfg).similarity_df()` / `.find_similar_series_df()` / "
-                "`.cluster_by_similarity_df()` / `compute_time_series_similarity` |"
+                "`.cluster_by_similarity_df()` / `.recommend_substitutes_df()` / "
+                "`.emerging_trends_df()` / `compute_time_series_similarity` |"
             ),
             (
                 "| **Executive HTML + JSON report** | "
@@ -1664,8 +1670,9 @@ def render_llms_txt() -> str:
                 "(`promo_elasticity_df`), cold-start NPI donor transfer "
                 "(`cold_start_transfer_df`), online ACI conformal calibration (`aci_df`), joint "
                 "copula trajectories & tail risk (`sample_trajectories`, `tail_risk_df`), "
-                "time-series similarity, donor matching & cluster hierarchies (`similarity_df`, "
-                "`find_similar_series_df`, `cluster_by_similarity_df`, "
+                "multi-modal time-series similarity, donor matching, SKU substitutes & emerging "
+                "trends (`similarity_df`, `find_similar_series_df`, `cluster_by_similarity_df`, "
+                "`recommend_substitutes_df`, `detect_emerging_trends_df`, "
                 "`compute_time_series_similarity`), portfolio inventory optimization "
                 "(`optimize_inventory_df`), prescriptive price & promo optimization "
                 "(`optimize_scenario`), scenarios, and executive HTML/JSON reports."

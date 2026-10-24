@@ -171,6 +171,8 @@ def test_skill_md_and_extension_manifests() -> None:
         "similarity_df",
         "find_similar_series_df",
         "cluster_by_similarity_df",
+        "recommend_substitutes_df",
+        "emerging_trends_df",
         "aci_df",
         "sample_trajectories",
         "tail_risk_df",

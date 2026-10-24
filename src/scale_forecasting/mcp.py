@@ -33,6 +33,7 @@ import datetime
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -667,6 +668,50 @@ class McpServer:
                             "default": "hybrid",
                             "description": "Similarity kernel lens when include_similarity=true.",
                         },
+                        "include_substitutes": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute inventory-aware SKU substitute / "
+                                "cannibalization recommendations (recommend_substitutes_df)."
+                            ),
+                        },
+                        "include_emerging_trends": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute breakout velocity, acceleration, and "
+                                "bellwether merchandising actions (detect_emerging_trends_df)."
+                            ),
+                        },
+                        "text_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional text columns for multi-modal similarity.",
+                        },
+                        "attribute_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional attribute columns for multi-modal similarity.",
+                        },
+                        "hierarchy_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional hierarchy columns for multi-modal similarity.",
+                        },
+                        "within_hierarchy_level": {
+                            "type": "string",
+                            "description": (
+                                "Optional hierarchy column restricting substitute search."
+                            ),
+                        },
+                        "inventory_records": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional inventory records for recommend_substitutes_df."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -948,6 +993,50 @@ class McpServer:
                             "type": "string",
                             "default": "hybrid",
                             "description": "Similarity kernel lens when include_similarity=true.",
+                        },
+                        "include_substitutes": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute inventory-aware SKU substitute recommendations "
+                                "(recommend_substitutes_df)."
+                            ),
+                        },
+                        "include_emerging_trends": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute breakout velocity, acceleration, and "
+                                "bellwether merchandising actions (detect_emerging_trends_df)."
+                            ),
+                        },
+                        "text_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional text columns for multi-modal similarity.",
+                        },
+                        "attribute_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional attribute columns for multi-modal similarity.",
+                        },
+                        "hierarchy_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional hierarchy columns for multi-modal similarity.",
+                        },
+                        "within_hierarchy_level": {
+                            "type": "string",
+                            "description": (
+                                "Optional hierarchy column restricting substitute search."
+                            ),
+                        },
+                        "inventory_records": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional inventory records for recommend_substitutes_df."
+                            ),
                         },
                     },
                     "required": ["run_id"],
@@ -1356,11 +1445,12 @@ class McpServer:
             {
                 "name": "compute_time_series_similarity",
                 "description": (
-                    "Compute multi-lens time-series similarity (`hybrid`, `physics_attractor`, "
-                    "`spectral_phase`, `elastic_dtw`, `minirocket`, `structural_signature`, "
-                    "`foundation_latent`), Takens phase-space / dynamical invariants, Ward "
-                    "behavioral clusters, and digital-twin analog matches (`full_history`, "
-                    "`launch_prefix`, `recent_window`) across a panel."
+                    "Compute multi-lens and multi-modal time-series similarity (`hybrid`, "
+                    "`physics_attractor`, `spectral_phase`, `elastic_dtw`, `minirocket`, "
+                    "`structural_signature`, `foundation_latent`), Takens phase-space / dynamical "
+                    "invariants, Ward behavioral clusters, digital-twin analog matches "
+                    "(`full_history`, `launch_prefix`, `recent_window`), stockout-aware assortment "
+                    "substitutes (`substitutes`), and emerging trend breakouts (`emerging_trends`)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1409,21 +1499,32 @@ class McpServer:
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["full_history", "launch_prefix", "recent_window"],
+                            "enum": [
+                                "full_history",
+                                "launch_prefix",
+                                "recent_window",
+                                "substitutes",
+                                "emerging_trends",
+                            ],
                             "default": "full_history",
-                            "description": "Digital-twin matching mode.",
+                            "description": (
+                                "Digital-twin matching or retail sensing mode "
+                                "('full_history', 'launch_prefix', 'recent_window', "
+                                "'substitutes', 'emerging_trends')."
+                            ),
                         },
                         "query_ts_id": {
                             "type": ["string", "null"],
                             "default": None,
                             "description": (
-                                "Optional query series ID for targeted k-NN digital-twin search."
+                                "Optional query series ID for targeted k-NN digital-twin or "
+                                "substitute search."
                             ),
                         },
                         "top_k": {
                             "type": "integer",
                             "default": 5,
-                            "description": "Number of top neighbor pairs per series.",
+                            "description": "Number of top neighbor or substitute pairs per series.",
                         },
                         "n_clusters": {
                             "type": ["integer", "string"],
@@ -1436,6 +1537,80 @@ class McpServer:
                             "type": "integer",
                             "default": 0,
                             "description": "Maximum lead-lag cross-correlation shift tau.",
+                        },
+                        "window": {
+                            "type": "integer",
+                            "default": 14,
+                            "description": (
+                                "Recent observation window for emerging trend velocity and "
+                                "acceleration sensing."
+                            ),
+                        },
+                        "include_substitutes": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, compute stockout-aware assortment substitutes "
+                                "(`recommend_substitutes_df`)."
+                            ),
+                        },
+                        "include_emerging_trends": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, detect emerging trend breakouts and bellwether "
+                                "lead-lag propagation (`detect_emerging_trends_df`)."
+                            ),
+                        },
+                        "text_cols": {
+                            "type": ["array", "string", "null"],
+                            "default": None,
+                            "description": (
+                                "Optional text columns for N-gram TF-IDF + SVD semantic similarity."
+                            ),
+                        },
+                        "attribute_cols": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string"},
+                            "default": None,
+                            "description": (
+                                "Optional categorical/numeric attribute columns for Gower "
+                                "similarity."
+                            ),
+                        },
+                        "hierarchy_cols": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string"},
+                            "default": None,
+                            "description": (
+                                "Optional ordered hierarchy columns for Wu-Palmer LCA tree "
+                                "proximity."
+                            ),
+                        },
+                        "within_hierarchy_level": {
+                            "type": ["string", "array", "null"],
+                            "default": None,
+                            "description": (
+                                "Optional hierarchy column(s) restricting matches to the same "
+                                "taxonomy node."
+                            ),
+                        },
+                        "inventory_records": {
+                            "type": ["array", "null"],
+                            "items": {"type": "object"},
+                            "default": None,
+                            "description": (
+                                "Optional inline inventory records (ts_id, on_hand, safety_stock) "
+                                "for assortment substitution."
+                            ),
+                        },
+                        "require_in_stock": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "When true, exclude out-of-stock candidates in substitute "
+                                "recommendations."
+                            ),
                         },
                         "n_series": {
                             "type": "integer",
@@ -1771,15 +1946,55 @@ class McpServer:
                     else scen_opt_res_pg
                 )
                 out_pg["scenario_optimization"] = scen_opt_df_pg.head(15).to_dict(orient="records")
-            if bool(args.get("include_similarity", False)):
-                sim_m_pg = str(args.get("similarity_method", "hybrid"))
-                sim_df_pg = run.similarity_df(method=sim_m_pg)
-                sim_cl_pg = run.similarity_clusters_df(method=sim_m_pg)
+            subs_df_pg = None
+            trends_df_pg = None
+            want_sim_pg = bool(args.get("include_similarity", False))
+            want_subs_pg = bool(args.get("include_substitutes", False))
+            want_trends_pg = bool(args.get("include_emerging_trends", False))
+            sim_m_pg = str(args.get("similarity_method", "hybrid"))
+            inv_recs_pg = args.get("inventory_records")
+            inv_df_pg = None
+            if isinstance(inv_recs_pg, list) and inv_recs_pg:
+                import pandas as pd
+
+                inv_df_pg = pd.DataFrame.from_records(inv_recs_pg)
+            if want_sim_pg:
+                sim_df_pg = run.similarity_df(
+                    method=sim_m_pg,
+                    text_cols=args.get("text_cols"),
+                    attribute_cols=args.get("attribute_cols"),
+                    hierarchy_cols=args.get("hierarchy_cols"),
+                    within_hierarchy_level=args.get("within_hierarchy_level"),
+                )
+                sim_cl_pg = run.similarity_clusters_df(
+                    method=sim_m_pg,
+                    text_cols=args.get("text_cols"),
+                    attribute_cols=args.get("attribute_cols"),
+                    hierarchy_cols=args.get("hierarchy_cols"),
+                )
                 out_pg["similarity"] = {
                     "method": sim_m_pg,
                     "pairs": sim_df_pg.head(15).to_dict(orient="records"),
                     "clusters": sim_cl_pg.to_dict(orient="records"),
                 }
+            if want_subs_pg:
+                subs_df_pg = run.recommend_substitutes_df(
+                    inventory_df=inv_df_pg,
+                    method=sim_m_pg,
+                    text_cols=args.get("text_cols"),
+                    attribute_cols=args.get("attribute_cols"),
+                    hierarchy_cols=args.get("hierarchy_cols"),
+                    within_hierarchy_level=args.get("within_hierarchy_level"),
+                )
+                out_pg["substitutes"] = subs_df_pg.head(15).to_dict(orient="records")
+            if want_trends_pg:
+                trends_df_pg = run.emerging_trends_df(
+                    method=sim_m_pg,
+                    text_cols=args.get("text_cols"),
+                    attribute_cols=args.get("attribute_cols"),
+                    hierarchy_cols=args.get("hierarchy_cols"),
+                )
+                out_pg["emerging_trends"] = trends_df_pg.to_dict(orient="records")
             rep_path = args.get("export_report_path")
             if rep_path:
                 written = run.export_report(
@@ -1997,6 +2212,8 @@ class McpServer:
             want_traj = bool(args.get("include_trajectories", False))
             want_tail = bool(args.get("include_tail_risk", False))
             want_sim = bool(args.get("include_similarity", False))
+            want_subs = bool(args.get("include_substitutes", False))
+            want_trends = bool(args.get("include_emerging_trends", False))
             opt_inv_rev = args.get("optimize_inventory_params")
             opt_scen_rev = args.get("optimize_scenario_params")
             rep_path_rev = args.get("export_report_path")
@@ -2014,6 +2231,8 @@ class McpServer:
                 or want_traj
                 or want_tail
                 or want_sim
+                or want_subs
+                or want_trends
                 or isinstance(opt_inv_rev, dict)
                 or isinstance(opt_scen_rev, dict)
                 or rep_path_rev
@@ -2036,7 +2255,12 @@ class McpServer:
                 from .registry.reads import read_oof, read_predictions
                 from .report import export_report
                 from .scenario_optimizer import optimize_scenario
-                from .similarity import cluster_by_similarity_df, compute_similarity_matrix
+                from .similarity import (
+                    cluster_by_similarity_df,
+                    compute_similarity_matrix,
+                    detect_emerging_trends_df,
+                    recommend_substitutes_df,
+                )
                 from .temporal_reconciliation import reconcile_temporal_forecasts
 
                 oof_rows = read_oof(run_id, limit=20000, settings=settings)
@@ -2077,13 +2301,15 @@ class McpServer:
                     or want_traj
                     or want_tail
                     or want_sim
+                    or want_subs
+                    or want_trends
                     or isinstance(opt_inv_rev, dict)
                     or isinstance(opt_scen_rev, dict)
                     or rep_path_rev
                 ):
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
-                if want_sim:
+                if want_sim or want_subs or want_trends:
                     sim_m_rev = str(args.get("similarity_method", "hybrid"))
                     sim_src = (
                         oof_df.rename(columns={"val_date": "ds", "y_true": "y"})
@@ -2095,15 +2321,63 @@ class McpServer:
                         )
                     )
                     if not sim_src.empty:
-                        sim_res_rev = compute_similarity_matrix(sim_src, method=sim_m_rev)
-                        sim_cl_rev = cluster_by_similarity_df(
-                            sim_src, method=sim_m_rev, similarity_result=sim_res_rev
+                        rev_text_cols = (
+                            [str(x) for x in args["text_cols"]]
+                            if isinstance(args.get("text_cols"), list)
+                            else None
                         )
-                        out["similarity"] = {
-                            "method": sim_m_rev,
-                            "pairs": sim_res_rev.pairs_df.head(20).to_dict(orient="records"),
-                            "clusters": sim_cl_rev.to_dict(orient="records"),
-                        }
+                        rev_attr_cols = (
+                            [str(x) for x in args["attribute_cols"]]
+                            if isinstance(args.get("attribute_cols"), list)
+                            else None
+                        )
+                        rev_hier_cols = (
+                            [str(x) for x in args["hierarchy_cols"]]
+                            if isinstance(args.get("hierarchy_cols"), list)
+                            else None
+                        )
+                        sim_res_rev = None
+                        if want_sim:
+                            sim_res_rev = compute_similarity_matrix(
+                                sim_src,
+                                method=sim_m_rev,
+                                text_cols=rev_text_cols,
+                                attribute_cols=rev_attr_cols,
+                                hierarchy_cols=rev_hier_cols,
+                            )
+                            sim_cl_rev = cluster_by_similarity_df(
+                                sim_src, method=sim_m_rev, similarity_result=sim_res_rev
+                            )
+                            out["similarity"] = {
+                                "method": sim_m_rev,
+                                "pairs": sim_res_rev.pairs_df.head(20).to_dict(orient="records"),
+                                "clusters": sim_cl_rev.to_dict(orient="records"),
+                            }
+                        if want_subs:
+                            inv_recs_rev = args.get("inventory_records")
+                            inv_df_rev = (
+                                pd.DataFrame.from_records(inv_recs_rev)
+                                if isinstance(inv_recs_rev, list) and inv_recs_rev
+                                else None
+                            )
+                            out["substitutes"] = recommend_substitutes_df(
+                                sim_src,
+                                inventory_df=inv_df_rev,
+                                method=sim_m_rev,
+                                text_cols=rev_text_cols,
+                                attribute_cols=rev_attr_cols,
+                                hierarchy_cols=rev_hier_cols,
+                                within_hierarchy_level=str(args["within_hierarchy_level"])
+                                if args.get("within_hierarchy_level")
+                                else None,
+                                similarity_result=sim_res_rev,
+                            ).to_dict(orient="records")
+                        if want_trends:
+                            out["emerging_trends"] = detect_emerging_trends_df(
+                                sim_src,
+                                method=sim_m_rev,
+                                similarity_result=sim_res_rev,
+                            ).to_dict(orient="records")
                 if want_cs and pred_df is not None and not pred_df.empty:
                     hist_cs = (
                         oof_df.rename(
@@ -2845,6 +3119,15 @@ class McpServer:
                 n_clusters=args.get("n_clusters", "auto"),
                 top_k=int(args.get("top_k", 5)),
                 max_lag=int(args.get("max_lag", 0)),
+                window=int(args.get("window", 14)),
+                include_substitutes=bool(args.get("include_substitutes", False)),
+                include_emerging_trends=bool(args.get("include_emerging_trends", False)),
+                text_cols=args.get("text_cols"),
+                attribute_cols=args.get("attribute_cols"),
+                hierarchy_cols=args.get("hierarchy_cols"),
+                within_hierarchy_level=args.get("within_hierarchy_level"),
+                inventory_records=args.get("inventory_records"),
+                require_in_stock=bool(args.get("require_in_stock", True)),
                 ts_id_col=str(args.get("ts_id_col", "ts_id")),
                 date_col=str(args.get("date_col", "ds")),
                 target_col=str(args.get("target_col", "y")),
@@ -2986,6 +3269,15 @@ def compute_time_series_similarity(
     n_clusters: int | str = "auto",
     top_k: int = 5,
     max_lag: int = 0,
+    window: int = 14,
+    include_substitutes: bool = False,
+    include_emerging_trends: bool = False,
+    text_cols: Sequence[str] | str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    inventory_records: list[dict[str, Any]] | None = None,
+    require_in_stock: bool = True,
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
     target_col: str = "y",
@@ -2995,7 +3287,8 @@ def compute_time_series_similarity(
     n_series: int = 4,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Compute time-series similarity, embeddings, behavioral clusters, and analog matches."""
+    """Compute time-series similarity, embeddings, behavioral clusters, analog matches,
+    stockout-aware substitutes, and emerging trend breakouts."""
     import pandas as pd
 
     from . import playground
@@ -3003,7 +3296,9 @@ def compute_time_series_similarity(
     from .similarity import (
         cluster_by_similarity_df,
         compute_similarity_matrix,
+        detect_emerging_trends_df,
         find_similar_series_df,
+        recommend_substitutes_df,
     )
 
     _ = (preset, freq, project_id)
@@ -3039,6 +3334,10 @@ def compute_time_series_similarity(
         method=method,
         top_k=max(1, int(top_k)),
         max_lag=max(0, int(max_lag)),
+        text_cols=text_cols,
+        attribute_cols=attribute_cols,
+        hierarchy_cols=hierarchy_cols,
+        within_hierarchy_level=within_hierarchy_level,
         ts_id_col=ts_id_col,
         date_col=date_col,
         target_col=target_col,
@@ -3052,19 +3351,70 @@ def compute_time_series_similarity(
         panel_df,
         n_clusters=eff_n_clusters,
         method=method,
+        text_cols=text_cols,
+        attribute_cols=attribute_cols,
+        hierarchy_cols=hierarchy_cols,
         ts_id_col=ts_id_col,
         date_col=date_col,
         target_col=target_col,
         similarity_result=sim_res,
     )
-    if query_ts_id is not None or str(mode).strip().lower() != "full_history":
+    canon_mode = str(mode).strip().lower()
+    inv_df = (
+        pd.DataFrame.from_records(inventory_records)
+        if isinstance(inventory_records, list) and inventory_records
+        else None
+    )
+    subs_df: pd.DataFrame | None = None
+    trends_df: pd.DataFrame | None = None
+
+    if canon_mode == "substitutes" or include_substitutes:
+        subs_df = recommend_substitutes_df(
+            panel_df,
+            inventory_df=inv_df,
+            query_ts_id=query_ts_id,
+            top_k=max(1, int(top_k)),
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            method=method,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+    if canon_mode == "emerging_trends" or include_emerging_trends:
+        trends_df = detect_emerging_trends_df(
+            panel_df,
+            window=max(3, int(window)),
+            top_k_related=max(1, int(top_k)),
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max(1, int(max_lag)) if int(max_lag) > 0 else 7,
+            method=method,
+            ts_id_col=ts_id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+
+    if canon_mode == "substitutes" and subs_df is not None:
+        matches_df = subs_df
+    elif canon_mode == "emerging_trends" and trends_df is not None:
+        matches_df = trends_df
+    elif query_ts_id is not None or canon_mode != "full_history":
         matches_df = find_similar_series_df(
             panel_df,
             query_ts_id=query_ts_id,
             method=method,
             top_k=max(1, int(top_k)),
-            mode=mode,
+            mode=canon_mode,
             max_lag=max(0, int(max_lag)),
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
             ts_id_col=ts_id_col,
             date_col=date_col,
             target_col=target_col,
@@ -3082,7 +3432,7 @@ def compute_time_series_similarity(
         if not clusters_df.empty and "silhouette_score" in clusters_df.columns
         else 0.0
     )
-    return {
+    out_dict: dict[str, Any] = {
         "status": "ok",
         "method": sim_res.method,
         "mode": str(mode),
@@ -3100,6 +3450,11 @@ def compute_time_series_similarity(
         "analog_matches": matches_df.to_dict(orient="records"),
         "diagnostics": dict(sim_res.diagnostics),
     }
+    if subs_df is not None:
+        out_dict["substitutes"] = subs_df.to_dict(orient="records")
+    if trends_df is not None:
+        out_dict["emerging_trends"] = trends_df.to_dict(orient="records")
+    return out_dict
 
 
 def _configure_stderr_logging() -> None:

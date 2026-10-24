@@ -3025,6 +3025,10 @@ class Forecaster:
         method: str | None = None,
         top_k: int | None = None,
         max_lag: int | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
         run_id: str | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
@@ -3041,6 +3045,10 @@ class Forecaster:
             method=eff_method,
             max_lag=int(max_lag) if max_lag is not None else 0,
             top_k=int(top_k) if top_k is not None else 10,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
             ts_id_col=self._config.data.ts_id_col,
             date_col=self._config.data.date_col,
             target_col=self._config.data.target_col,
@@ -3115,6 +3123,8 @@ class Forecaster:
             **kwargs,
         )
 
+    cluster_by_similarity_df = similarity_clusters_df
+
     def similarity_embeddings_df(
         self,
         data: pd.DataFrame | None = None,
@@ -3148,6 +3158,8 @@ class Forecaster:
             **kwargs,
         )
 
+    embed_series_df = similarity_embeddings_df
+
     def find_similar_series_df(
         self,
         query_ts_id_or_data: str | pd.DataFrame | None = None,
@@ -3159,6 +3171,10 @@ class Forecaster:
         method: str | None = None,
         prefix_len: int | None = None,
         max_lag: int = 0,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
         run_id: str | None = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
@@ -3193,6 +3209,10 @@ class Forecaster:
             method=eff_method,
             prefix_len=prefix_len,
             max_lag=max_lag,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
             ts_id_col=ts_col,
             date_col=self._config.data.date_col,
             target_col=self._config.data.target_col,
@@ -3234,6 +3254,98 @@ class Forecaster:
             title=title,
             **kwargs,
         )
+
+    def recommend_substitutes_df(
+        self,
+        data: pd.DataFrame | str | None = None,
+        inventory_df: pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | Sequence[str] | None = None,
+        top_k: int = 5,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        require_in_stock: bool = True,
+        on_hand_col: str = "on_hand",
+        safety_stock_col: str = "safety_stock",
+        method: str | None = None,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Recommend stockout-aware assortment substitutes for one or all series
+        (`similarity.recommend_substitutes_df`).
+        """
+        from .similarity import recommend_substitutes_df as _recommend_substitutes_df
+
+        eff_data: pd.DataFrame | None = None
+        eff_query = query_ts_id
+        if isinstance(data, str):
+            eff_query = data
+        elif data is not None:
+            eff_data = data
+        panel = self._resolve_similarity_panel(data=eff_data, run_id=run_id)
+        eff_method = method or self._config.features.similarity_method
+        return _recommend_substitutes_df(
+            panel,
+            inventory_df=inventory_df,
+            query_ts_id=eff_query,
+            top_k=top_k,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            on_hand_col=on_hand_col,
+            safety_stock_col=safety_stock_col,
+            method=eff_method,
+            cfg=self._config,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def emerging_trends_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        window: int = 14,
+        top_k_related: int = 3,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        max_lag: int = 7,
+        method: str | None = None,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Detect emerging trends, regime acceleration, and lead-lag propagation across the panel
+        (`similarity.detect_emerging_trends_df`).
+        """
+        from .similarity import detect_emerging_trends_df as _detect_emerging_trends_df
+
+        panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        eff_method = method or self._config.features.similarity_method
+        return _detect_emerging_trends_df(
+            panel,
+            window=window,
+            top_k_related=top_k_related,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max_lag,
+            method=eff_method,
+            cfg=self._config,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    detect_emerging_trends_df = emerging_trends_df
 
     def promo_elasticity_df(
         self,
@@ -3351,9 +3463,13 @@ class Forecaster:
         matching: str | None = None,
         cold_start_matching: str | None = None,
         similarity_method: str | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
         top_k_donors: int = 3,
         model_type: str | None = None,
         limit: int = 20000,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """Synthesize cold-start / NPI trajectories via analog donor matching & seasonal shape
         transfer (`cold_start.cold_start_transfer_df`).
@@ -3378,6 +3494,11 @@ class Forecaster:
                 with_exog=True,
             )
         eff_matching = cold_start_matching if cold_start_matching is not None else matching
+        eff_hier_cols = (
+            list(hierarchy_cols)
+            if hierarchy_cols is not None
+            else [c for lvl in self._config.hierarchy.levels for c in lvl]
+        )
         return _cold_start_transfer_df(
             panel,
             cfg=self._config,
@@ -3387,14 +3508,17 @@ class Forecaster:
             method=method,  # type: ignore[arg-type]
             matching=eff_matching,  # type: ignore[arg-type]
             similarity_method=similarity_method,  # type: ignore[arg-type]
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
             static_covariates=self._config.features.static_covariates,
-            hierarchy_cols=[c for lvl in self._config.hierarchy.levels for c in lvl],
+            hierarchy_cols=eff_hier_cols,
             top_k_donors=top_k_donors,
             ts_id_col=self._config.data.ts_id_col,
             date_col=self._config.data.date_col,
             target_col=self._config.data.target_col,
             horizon=self._config.data.horizon,
             freq=self._config.data.freq,
+            **kwargs,
         )
 
     def plot_cold_start_transfer(
@@ -4409,6 +4533,8 @@ class Forecaster:
         scenario_opt_df: pd.DataFrame | None = None,
         similarity_df: pd.DataFrame | None = None,
         similarity_clusters_df: pd.DataFrame | None = None,
+        substitutes_df: pd.DataFrame | None = None,
+        emerging_trends_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -4447,6 +4573,13 @@ class Forecaster:
                 eff_sim_clusters = self.similarity_clusters_df(run_id=rid)
             except Exception:  # noqa: BLE001 - offline report fallback
                 eff_sim_clusters = pd.DataFrame()
+        eff_subs = substitutes_df
+        eff_trends = emerging_trends_df
+        if eff_trends is None:
+            try:
+                eff_trends = self.emerging_trends_df(run_id=rid)
+            except Exception:  # noqa: BLE001 - offline report fallback
+                eff_trends = pd.DataFrame()
         payload_dict: dict[str, Any] = {
             "run_id": rid,
             "leaderboard_df": (
@@ -4469,6 +4602,8 @@ class Forecaster:
             "scenario_opt_df": scenario_opt_df,
             "similarity_df": eff_sim,
             "similarity_clusters_df": eff_sim_clusters,
+            "substitutes_df": eff_subs,
+            "emerging_trends_df": eff_trends,
         }
         if self._auto_session is not None:
             payload_dict["autofocus_ledger_df"] = self.autofocus_ledger_df()
@@ -4491,6 +4626,8 @@ class Forecaster:
             scenario_opt_df=scenario_opt_df,
             similarity_df=eff_sim,
             similarity_clusters_df=eff_sim_clusters,
+            substitutes_df=eff_subs,
+            emerging_trends_df=eff_trends,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )

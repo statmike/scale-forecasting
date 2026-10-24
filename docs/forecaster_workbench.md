@@ -60,10 +60,10 @@ flowchart TD
         M1 --> M2 --> M3
     end
 
-    subgraph S9["Stage 9: Multi-Lens Time-Series Similarity, Digital-Twin Search & Similarity-Woven Decisioning (Track P)"]
-        P_SIM1["7-Lens PSD Similarity & Physics/Spectral Attractors (similarity.py)<br/>hybrid · physics_attractor · spectral_phase · elastic_dtw · minirocket · structural_signature · foundation_latent"]
-        P_SIM2["Cluster-Aware Global Pooling, NPI Kinematic Matching & Latent Hierarchies<br/>@similarity_global · @similarity_cold_start (cold_start_matching) · hierarchy.similarity_hierarchy"]
-        P_SIM3["Similarity-Regularized Copulas, Inventory Pooling, Cannibalization Priors & OOF Smoothing<br/>similarity_shrinkage · similarity_pooling · use_similarity_priors · ensemble.similarity_smoothing"]
+    subgraph S9["Stage 9: Multi-Lens & Multi-Modal Similarity, Merchandising Intelligence & Similarity-Woven Decisioning (Track P)"]
+        P_SIM1["7-Lens + Multi-Modal PSD Similarity (similarity.py)<br/>hybrid · physics_attractor · spectral_phase · elastic_dtw · minirocket · structural_signature · foundation_latent · text_cols / attribute_cols / hierarchy_cols"]
+        P_SIM2["Cluster-Aware Global Pooling, Day-0 to Day-14 NPI Handoff & Latent Hierarchies<br/>@similarity_global · @similarity_cold_start (cold_start_handoff) · hierarchy.similarity_hierarchy"]
+        P_SIM3["SKU Substitutes, Emerging Trends, Copulas, Inventory Pooling & OOF Smoothing<br/>recommend_substitutes_df · detect_emerging_trends_df · similarity_shrinkage · similarity_pooling · ensemble.similarity_smoothing"]
         P_SIM1 --> P_SIM2 --> P_SIM3
     end
 
@@ -257,21 +257,21 @@ flowchart TD
 
 ---
 
-## 8. Multi-Lens Time-Series Similarity, Digital-Twin Search & Similarity-Woven Decisioning (Track P)
+## 8. Multi-Lens & Multi-Modal Time-Series Similarity, Merchandising Intelligence & Similarity-Woven Decisioning (Track P)
 
-Track P ([`similarity.py`](./api/similarity.md)) elevates time-series similarity from an isolated diagnostic into a **first-class structural primitive** woven across cold-start transfer, global model pooling, hierarchy discovery, copula tail-risk shrinkage, portfolio inventory pooling, promo cannibalization priors, ensemble OOF selection, and AlphaEvolve kernel synthesis:
+Track P ([`similarity.py`](./api/similarity.md)) elevates time-series similarity from an isolated diagnostic into a **first-class structural primitive** woven across cold-start transfer, global model pooling, hierarchy discovery, SKU substitution & emerging trend detection, copula tail-risk shrinkage, portfolio inventory pooling, promo cannibalization priors, ensemble OOF selection, and AlphaEvolve kernel synthesis:
 
 ```mermaid
 flowchart TD
-    subgraph LENS["1. Seven Orthogonal Similarity Lenses (similarity.py)"]
+    subgraph LENS["1. Seven Temporal Lenses + Multi-Modal Metadata (similarity.py)"]
         L1["Physics & Spectral Lenses<br/>physics_attractor (Takens · Rosenstein Lyapunov · Hurst · Permutation Entropy)<br/>spectral_phase (FFT Coherence · Hilbert Kuramoto Phase · Lead-Lag tau*)"]
-        L2["Elastic, Convolutional, Structural & Foundation Lenses<br/>elastic_dtw (Sakoe-Chiba DTW + Derivative DTW) · minirocket (84-dim PPV)<br/>structural_signature (16-dim STL/ACF/SBC) · foundation_latent (Chronos/TimesFM)"]
+        L2["Elastic, Convolutional, Structural, Foundation & Multi-Modal Lenses<br/>elastic_dtw · minirocket (84-dim PPV) · structural_signature · foundation_latent<br/>+ text_cols (TF-IDF) · attribute_cols (Gower) · hierarchy_cols (LCA)"]
         L3["Adaptive Hybrid PSD Kernel (method='hybrid')<br/>Eigenvalue-Clipped Symmetric PSD Matrix S in [0, 1]^{N x N} (S_{i,i} = 1)"]
         L1 --> L2 --> L3
     end
-    subgraph WEAVE["2. Six Similarity-Woven System Integrations"]
-        W1["Cold-Start Launch-Prefix Kinematic Matching & Cluster-Aware Global Pooling<br/>@similarity_cold_start (cold_start_matching='similarity' | 'hybrid') · @similarity_global (similarity_cluster_feature)"]
-        W2["Latent Similarity Hierarchy Discovery & OOF Champion Smoothing<br/>hierarchy.similarity_hierarchy = true (similarity_cluster_id) · ensemble.similarity_smoothing"]
+    subgraph WEAVE["2. Similarity-Woven System & Merchandising Integrations"]
+        W1["Day-0 to Day-14 Cold-Start Handoff & Cluster-Aware Global Pooling<br/>@similarity_cold_start (cold_start_handoff='auto') · @similarity_global (similarity_cluster_feature)"]
+        W2["SKU Substitute Recommendations, Emerging Trends & Latent Hierarchies<br/>recommend_substitutes_df · detect_emerging_trends_df · hierarchy.similarity_hierarchy · ensemble.similarity_smoothing"]
         W3["Similarity-Regularized Copulas, Inventory Pooling & Cannibalization Priors<br/>sample_trajectories(similarity_shrinkage=True) · optimize_inventory_df(similarity_pooling=True) · promo_elasticity_df(use_similarity_priors=True)"]
         W1 --> W2 --> W3
     end
@@ -280,9 +280,11 @@ flowchart TD
 
 | Similarity Lens / Integration | SDK / Config Entrypoint | Mathematical & Operational Behavior |
 | :--- | :--- | :--- |
-| **7 Similarity Lenses & Digital-Twin Search** | `forecaster.similarity_df(method="hybrid")`<br/>`forecaster.similarity_clusters_df(n_clusters=None)`<br/>`forecaster.find_similar_series_df(query_ts_id, top_k=5)`<br/>`forecaster.plot_similarity_map()` | Computes symmetric positive semi-definite (PSD) similarity matrices ($S_{i,i}=1, S_{i,j} \in [0, 1]$) across `"hybrid"`, `"physics_attractor"`, `"spectral_phase"`, `"elastic_dtw"`, `"minirocket"`, `"structural_signature"`, and `"foundation_latent"`, plus directed lead-lag shift discovery ($\tau_{i \to j}^*$) and spectral clustering with eigengap/silhouette auto-$K$. |
+| **7 Similarity Lenses, Multi-Modal Fusion & Digital-Twin Search** | `forecaster.similarity_df(method="hybrid", text_cols=..., attribute_cols=..., hierarchy_cols=...)`<br/>`forecaster.cluster_by_similarity_df(n_clusters=None)`<br/>`forecaster.find_similar_series_df(query_ts_id, top_k=5)`<br/>`forecaster.plot_similarity_map()` | Computes symmetric positive semi-definite (PSD) similarity matrices ($S_{i,i}=1, S_{i,j} \in [0, 1]$) across `"hybrid"`, `"physics_attractor"`, `"spectral_phase"`, `"elastic_dtw"`, `"minirocket"`, `"structural_signature"`, and `"foundation_latent"`, fused with character/word $n$-gram TF-IDF (`semantic_sim`), Gower attributes, and LCA tree similarity (`hierarchy_sim`), plus directed lead-lag shift discovery ($\tau_{i \to j}^*$) and spectral clustering. |
+| **SKU Substitute & Cannibalization Recommender** | `forecaster.recommend_substitutes_df(inventory_df=..., text_cols=..., hierarchy_cols=..., within_hierarchy_level=...)`<br/>`sf.recommend_substitutes_df(panel_df, inventory_df=...)` | Ranks in-stock digital-twin substitutes for each query SKU (`substitution_score`, `similarity_score`, `semantic_sim`, `hierarchy_sim`, `available_units`, `stock_status` in `{"in_stock_surplus", "adequate_stock", "low_stock_risk", "out_of_stock"}`, `substitution_rationale`), optionally restricted to the same category/department (`within_hierarchy_level`). |
+| **Emerging Trend & Breakout Detector** | `forecaster.emerging_trends_df(window=14)`<br/>`sf.detect_emerging_trends_df(panel_df, window=14)` |Combines kinematic velocity ($\dot{y}_t$), acceleration ($\ddot{y}_t$), recent-vs-baseline breakout $z$-scores, Hurst persistence ($H > 0.55$), and Kuramoto lead-lag bellwether shifts ($\tau_{i \to j}^* > 0$) to classify `trend_regime` (`{"accelerating_breakout", "steady_growth", "maturing_plateau", "declining", "stable"}`) and prescribe `recommended_merchandising_action` (`{"promote_trend_leader", "co_promote_lagging_twin", "replenish_breakout_risk", "clearance_candidate", "hold_baseline"}`). |
 | **Cluster-Aware Global Pooling (`@similarity_global`)** | `models=["lightgbm@similarity_global", "regression_lags@similarity_global"]`<br/>`features={"similarity_cluster_feature": True}` | Partitions heterogeneous panels into homogeneous dynamical clusters before fitting global tabular or deep-learning models (both locally and via distributed `spark_io.add_bucket` panel isolation), eliminating cross-regime negative transfer. |
-| **Launch-Prefix Cold-Start Transfer (`@similarity_cold_start`)** | `models=["theta@similarity_cold_start"]`<br/>`features={"cold_start_transfer": True, "cold_start_matching": "hybrid"}`<br/>`sf.match_cold_start_launch_prefix_df(panel_df)` | Matches ultra-short launch prefixes ($n \ge 3$ observations) against historical donor prefixes of equal length using Sakoe–Chiba DTW, first/second-difference kinematics (velocity & acceleration), and Wasserstein-1 distance—working even when `static_covariates=[]`. |
+| **Day-0 to Day-14 Cold-Start Transfer (`@similarity_cold_start`)** | `models=["theta@similarity_cold_start"]`<br/>`features={"cold_start_transfer": True, "cold_start_matching": "hybrid", "cold_start_handoff": "auto"}`<br/>`sf.match_cold_start_launch_prefix_df(panel_df)` | Smoothly transitions from Day-0 pre-launch metadata/semantic/hierarchy donor matching (`0` history observations) through Day-1 to Day-14 launch-prefix kinematic/DTW matching via ramp weight $\alpha(n) = \text{clip}(n / n_{\text{min}}, 0, 1)$. |
 | **Latent Similarity Hierarchy (`similarity_hierarchy`)** | `hierarchy={"enabled": True, "similarity_hierarchy": True, "reconciliation_methods": ["mint_shrink"]}` | Auto-discovers a 2-level hierarchy (`__total__ -> similarity_cluster_id -> ts_id`) on flat panels without metadata columns and reconciles via `mint_shrink`, `mint_nonneg`, `cross_temporal_mint`, and `allocate_target()`. |
 | **Copula Shrinkage, Inventory Pooling, Cannibalization & OOF Smoothing** | `sample_trajectories(similarity_shrinkage=True)`<br/>`optimize_inventory_df(similarity_pooling=True)`<br/>`promo_elasticity_df(use_similarity_priors=True)`<br/>`ensemble={"similarity_smoothing": 0.25}` | Regularizes high-dimensional copula correlations toward $S_{i,j}$ when $K_{\text{folds}} < N_{\text{series}}$, pools sparse OOF residuals across digital twins for safety-stock sizing, weights cross-SKU cannibalization candidates by $S_{i,j}$ (`similarity_prior_weight`), and smooths noisy per-series OOF losses across top-$K$ neighbors before `"champion"` / `"inverse_error"` selection. |
 

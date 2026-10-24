@@ -366,6 +366,9 @@ _LAZY: dict[str, tuple[str, str]] = {
     "cluster_by_similarity_df": (".similarity", "cluster_by_similarity_df"),
     "find_similar_series_df": (".similarity", "find_similar_series_df"),
     "plot_similarity_map": (".similarity", "plot_similarity_map"),
+    "recommend_substitutes_df": (".similarity", "recommend_substitutes_df"),
+    "detect_emerging_trends_df": (".similarity", "detect_emerging_trends_df"),
+    "emerging_trends_df": (".similarity", "emerging_trends_df"),
     "extract_foundation_embeddings": (".similarity", "extract_foundation_embeddings"),
     "shrink_correlation_toward_similarity": (
         ".copula",
@@ -638,10 +641,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         SimilarityMethod,
         cluster_by_similarity_df,
         compute_similarity_matrix,
+        detect_emerging_trends_df,
         embed_series_df,
+        emerging_trends_df,
         extract_foundation_embeddings,
         find_similar_series_df,
         plot_similarity_map,
+        recommend_substitutes_df,
     )
     from .simplex import (  # noqa: F401
         DEFAULT_ZERO_DELTA,
