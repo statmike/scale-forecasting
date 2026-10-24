@@ -457,39 +457,121 @@ def _compute_donor_launch_similarity(
     donors: Sequence[DonorProfile],
     *,
     similarity_method: str = "hybrid",
+    target_attrs: Mapping[str, Any] | None = None,
+    text_cols: Sequence[str] | str | None = None,
+    attribute_cols: Sequence[str] | str | None = None,
+    hierarchy_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    min_obs: int = 14,
 ) -> dict[str, float]:
-    """Score mature ``donors`` against the cold-start series' observed launch prefix ``y_obs``
-    and initial velocity/acceleration via :func:`find_similar_series_df`."""
+    """Score mature ``donors`` against the cold-start series' multi-modal metadata and/or observed
+    launch prefix ``y_obs`` with continuous Day-0 ($n_i = 0$) to Day-14 handoff."""
     n_obs = int(y_obs.size)
     if not donors:
         return {}
-    if n_obs < 2:
+
+    text_list = (
+        [text_cols] if isinstance(text_cols, str) else [str(c) for c in (text_cols or ()) if str(c)]
+    )
+    attr_list = (
+        [attribute_cols]
+        if isinstance(attribute_cols, str)
+        else [str(c) for c in (attribute_cols or ()) if str(c)]
+    )
+    hier_list = (
+        [hierarchy_cols]
+        if isinstance(hierarchy_cols, str)
+        else [str(c) for c in (hierarchy_cols or ()) if str(c)]
+    )
+    has_meta = bool(target_attrs) and bool(text_list or attr_list or hier_list or embedding_col)
+
+    if n_obs < 2 and not has_meta:
         return {d.ts_id: 0.5 for d in donors}
 
-    from .similarity import find_similar_series_df
+    from .similarity import compute_similarity_matrix, find_similar_series_df
 
-    pref_len = max(2, n_obs)
-    panel_rows: list[dict[str, Any]] = []
-    for t_idx, val in enumerate(y_obs[:pref_len]):
-        panel_rows.append({"ts_id": "__cs_query__", "ds": t_idx, "y": float(val)})
-    for d in donors:
-        d_slice = d.raw_launch_trajectory[: max(pref_len, min(d.raw_launch_trajectory.size, 14))]
-        for t_idx, val in enumerate(d_slice):
-            panel_rows.append({"ts_id": d.ts_id, "ds": t_idx, "y": float(val)})
+    meta_scores: dict[str, float] = {d.ts_id: 0.5 for d in donors}
+    if has_meta and target_attrs is not None:
+        meta_rows: list[dict[str, Any]] = [
+            {"ts_id": "__cs_query__", "ds": 0, "y": 1.0, **dict(target_attrs)}
+        ]
+        for d in donors:
+            meta_rows.append({"ts_id": d.ts_id, "ds": 0, "y": 1.0, **dict(d.static_features)})
+        sem_active = bool(text_list or attr_list or embedding_col)
+        hier_active = bool(hier_list)
+        w_s = 0.6 if (sem_active and hier_active) else (1.0 if sem_active else 0.0)
+        w_h = 0.4 if (sem_active and hier_active) else (1.0 if hier_active else 0.0)
+        sim_res = compute_similarity_matrix(
+            pd.DataFrame(meta_rows),
+            method=similarity_method,
+            text_cols=text_list or None,
+            embedding_col=embedding_col,
+            attribute_cols=attr_list or None,
+            hierarchy_cols=hier_list or None,
+            semantic_weight=w_s,
+            hierarchy_weight=w_h,
+        )
+        if "__cs_query__" in sim_res.matrix_df.index:
+            q_row = sim_res.matrix_df.loc["__cs_query__"].to_dict()
+            for tid_d, raw_sim in q_row.items():
+                if str(tid_d) != "__cs_query__":
+                    meta_scores[str(tid_d)] = float(np.clip(float(raw_sim), 0.0, 1.0))
 
-    sim_df = find_similar_series_df(
-        pd.DataFrame(panel_rows),
-        query_ts_id="__cs_query__",
-        top_k=len(donors),
-        mode="launch_prefix",
-        method=similarity_method,
-        prefix_len=n_obs,
-    )
-    score_map: dict[str, float] = {d.ts_id: 0.5 for d in donors}
-    for row in sim_df.to_dict(orient="records"):
-        nbr = str(row["neighbor_ts_id"])
-        score_map[nbr] = float(np.clip(float(row["similarity_score"]), 0.0, 1.0))
-    return score_map
+    if n_obs == 0:
+        return meta_scores
+
+    traj_scores: dict[str, float] = {d.ts_id: 0.5 for d in donors}
+    if n_obs >= 2:
+        pref_len = max(2, n_obs)
+        panel_rows: list[dict[str, Any]] = []
+        for t_idx, val in enumerate(y_obs[:pref_len]):
+            panel_rows.append({"ts_id": "__cs_query__", "ds": t_idx, "y": float(val)})
+        for d in donors:
+            d_slice = d.raw_launch_trajectory[
+                : max(pref_len, min(d.raw_launch_trajectory.size, 14))
+            ]
+            for t_idx, val in enumerate(d_slice):
+                panel_rows.append({"ts_id": d.ts_id, "ds": t_idx, "y": float(val)})
+
+        sim_df = find_similar_series_df(
+            pd.DataFrame(panel_rows),
+            query_ts_id="__cs_query__",
+            top_k=len(donors),
+            mode="launch_prefix",
+            method=similarity_method,
+            prefix_len=n_obs,
+        )
+        for row in sim_df.to_dict(orient="records"):
+            nbr = str(row["neighbor_ts_id"])
+            traj_scores[nbr] = float(np.clip(float(row["similarity_score"]), 0.0, 1.0))
+    else:
+        # n_obs == 1: initial level proximity against donor Day-1 observation
+        y0 = max(0.0, float(y_obs[0]))
+        for d in donors:
+            d0 = (
+                max(0.0, float(d.raw_launch_trajectory[0]))
+                if d.raw_launch_trajectory.size > 0
+                else max(0.0, float(d.mean_level))
+            )
+            traj_scores[d.ts_id] = float(
+                np.clip(math.exp(-abs(math.log((y0 + 1.0) / (d0 + 1.0)))), 0.0, 1.0)
+            )
+
+    if not has_meta:
+        return traj_scores
+
+    alpha_traj = float(np.clip(float(n_obs) / float(max(int(min_obs), 1)), 0.0, 1.0))
+    return {
+        d.ts_id: float(
+            np.clip(
+                (1.0 - alpha_traj) * meta_scores.get(d.ts_id, 0.5)
+                + alpha_traj * traj_scores.get(d.ts_id, 0.5),
+                0.0,
+                1.0,
+            )
+        )
+        for d in donors
+    }
 
 
 def _project_archetype_from_donors(
@@ -554,7 +636,7 @@ def _project_archetype_from_donors(
     donor_prefix_scales: list[float] = []
     for d in matched_donors:
         traj = d.raw_launch_trajectory
-        if donor_similarity_map is not None and d.ts_id in donor_similarity_map and n_obs >= 2:
+        if donor_similarity_map is not None and d.ts_id in donor_similarity_map:
             sim_01 = float(np.clip(donor_similarity_map[d.ts_id], 0.0, 1.0))
             score = math.exp(3.0 * sim_01)
         elif n_obs >= 2 and traj.size >= n_obs:
@@ -870,10 +952,14 @@ def build_cold_start_donor_pool(
     horizon: int | None = None,
     static_covariates: Sequence[str] = (),
     hierarchy_cols: Sequence[str] = (),
+    text_cols: Sequence[str] | str | None = (),
+    attribute_cols: Sequence[str] | str | None = (),
+    embedding_col: str | None = None,
     oof_df: pd.DataFrame | None = None,
     quantiles: Sequence[float] = DEFAULT_QUANTILES,
 ) -> ColdStartDonorPool:
     """Build a `ColdStartDonorPool` from all mature series (`n_obs >= min_obs`) in ``panel_df``."""
+    _ = (text_cols, attribute_cols, embedding_col)
     eff_ts_col = cfg.data.ts_id_col if cfg is not None else ts_id_col
     eff_date_col = cfg.data.date_col if cfg is not None else date_col
     eff_target_col = cfg.data.target_col if cfg is not None else target_col
@@ -974,11 +1060,14 @@ def build_cold_start_donor_pool(
         norm_traj = launch_slice / mean_lvl
 
         static_feats: dict[str, Any] = {}
-        for col in (*stat_cols, *hier_cols):
+        meta_cand_cols = [
+            c for c in sub.columns if c not in {eff_ts_col, eff_date_col, eff_target_col}
+        ]
+        for col in dict.fromkeys([*stat_cols, *hier_cols, *meta_cand_cols]):
             if col in sub.columns:
                 non_na = sub[col].dropna()
                 if not non_na.empty:
-                    static_feats[col] = non_na.iloc[0]
+                    static_feats[str(col)] = non_na.iloc[0]
 
         # Extract scale-normalized residuals (from OOF if available, else deseasonalized diff)
         if tid in oof_resid_by_id:
@@ -1102,6 +1191,9 @@ def forecast_cold_start_series(
     target_col: str = "y",
     static_covariates: Sequence[str] = (),
     hierarchy_cols: Sequence[str] = (),
+    text_cols: Sequence[str] | str | None = (),
+    attribute_cols: Sequence[str] | str | None = (),
+    embedding_col: str | None = None,
     quantiles: Sequence[float] = DEFAULT_QUANTILES,
     base_predictions: pd.DataFrame | None = None,
     kappa: float | None = None,
@@ -1119,6 +1211,9 @@ def forecast_cold_start_series(
             target_col=target_col,
             static_covariates=static_covariates,
             hierarchy_cols=hierarchy_cols,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            embedding_col=embedding_col,
         )
     eff_freq = donor_pool.freq if donor_pool is not None else freq
     m_per = (
@@ -1157,7 +1252,7 @@ def forecast_cold_start_series(
     n_nz = int(np.count_nonzero(y_obs > _EPS))
     is_cs = bool(n_obs < eff_min_obs)
 
-    # Extract static/hierarchy attributes from series_df
+    # Extract static/hierarchy/text/attribute metadata from series_df
     target_attrs: dict[str, Any] = {}
     if not sub.empty:
         cand_cols = set(sub.columns) - {ts_id_col, date_col, target_col}
@@ -1166,6 +1261,17 @@ def forecast_cold_start_series(
                 vals = sub[col].dropna()
                 if not vals.empty:
                     target_attrs[str(col)] = vals.iloc[0]
+
+    has_multimodal_args = bool(text_cols or attribute_cols or embedding_col)
+    eff_attr_cols: list[str] = []
+    for c_src in (attribute_cols, static_covariates):
+        if isinstance(c_src, str):
+            if c_src and c_src not in eff_attr_cols:
+                eff_attr_cols.append(c_src)
+        elif c_src is not None:
+            for c_item in c_src:
+                if str(c_item) and str(c_item) not in eff_attr_cols:
+                    eff_attr_cols.append(str(c_item))
 
     prior_scale_col_val: float | None = None
     for scale_col in ("launch_scale", "prior_scale", "expected_scale"):
@@ -1198,12 +1304,24 @@ def forecast_cold_start_series(
             donor_group = f"similarity:{similarity_method}"
             matched_level = "similarity_launch_prefix"
             matching_mode_used = "similarity"
-            if n_obs >= 2 and matched_donors:
+            if (n_obs >= 2 or has_multimodal_args) and matched_donors:
                 donor_sim_map = _compute_donor_launch_similarity(
-                    y_obs, matched_donors, similarity_method=similarity_method
+                    y_obs,
+                    matched_donors,
+                    similarity_method=similarity_method,
+                    target_attrs=target_attrs,
+                    text_cols=text_cols,
+                    attribute_cols=eff_attr_cols if has_multimodal_args else None,
+                    hierarchy_cols=hierarchy_cols if has_multimodal_args else None,
+                    embedding_col=embedding_col,
+                    min_obs=eff_min_obs,
                 )
         elif eff_matching == "hybrid":
-            matched_donors = attr_donors if attr_donors else all_candidates
+            matched_donors = (
+                all_candidates
+                if has_multimodal_args
+                else (attr_donors if attr_donors else all_candidates)
+            )
             donor_group = (
                 attr_group if attr_group != "__global__" else f"hybrid:{similarity_method}"
             )
@@ -1213,9 +1331,17 @@ def forecast_cold_start_series(
                 else "similarity_launch_prefix"
             )
             matching_mode_used = "hybrid"
-            if n_obs >= 2 and matched_donors:
+            if (n_obs >= 2 or has_multimodal_args or bool(hierarchy_cols)) and matched_donors:
                 donor_sim_map = _compute_donor_launch_similarity(
-                    y_obs, matched_donors, similarity_method=similarity_method
+                    y_obs,
+                    matched_donors,
+                    similarity_method=similarity_method,
+                    target_attrs=target_attrs,
+                    text_cols=text_cols,
+                    attribute_cols=eff_attr_cols or None,
+                    hierarchy_cols=hierarchy_cols or None,
+                    embedding_col=embedding_col,
+                    min_obs=eff_min_obs,
                 )
         elif eff_matching == "attribute":
             matched_donors = attr_donors
@@ -1224,10 +1350,29 @@ def forecast_cold_start_series(
             matching_mode_used = "attribute"
         else:
             # eff_matching == "auto":
-            # Use "similarity" when no attribute metadata matched (zero-metadata panel) and
-            # n_obs >= 2; use "hybrid" when attribute metadata matched and n_obs >= 3; else
-            # "attribute".
-            if attr_level == "__global__" and n_obs >= 2 and all_candidates:
+            if has_multimodal_args and all_candidates:
+                matched_donors = all_candidates
+                donor_group = (
+                    attr_group if attr_group != "__global__" else f"hybrid:{similarity_method}"
+                )
+                matched_level = (
+                    f"{attr_level}+similarity"
+                    if attr_level != "__global__"
+                    else "similarity_launch_prefix"
+                )
+                matching_mode_used = "hybrid"
+                donor_sim_map = _compute_donor_launch_similarity(
+                    y_obs,
+                    matched_donors,
+                    similarity_method=similarity_method,
+                    target_attrs=target_attrs,
+                    text_cols=text_cols,
+                    attribute_cols=eff_attr_cols or None,
+                    hierarchy_cols=hierarchy_cols or None,
+                    embedding_col=embedding_col,
+                    min_obs=eff_min_obs,
+                )
+            elif attr_level == "__global__" and n_obs >= 2 and all_candidates:
                 matched_donors = all_candidates
                 donor_group = f"similarity:{similarity_method}"
                 matched_level = "similarity_launch_prefix"
@@ -1470,6 +1615,9 @@ def cold_start_transfer_df(
     similarity_method: SimilarityMethod | None = None,
     static_covariates: Sequence[str] = (),
     hierarchy_cols: Sequence[str] = (),
+    text_cols: Sequence[str] | str | None = (),
+    attribute_cols: Sequence[str] | str | None = (),
+    embedding_col: str | None = None,
     top_k_donors: int = 3,
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
@@ -1518,6 +1666,9 @@ def cold_start_transfer_df(
         min_obs=eff_min_obs,
         static_covariates=static_covariates,
         hierarchy_cols=hierarchy_cols,
+        text_cols=text_cols,
+        attribute_cols=attribute_cols,
+        embedding_col=embedding_col,
         oof_df=oof_df,
     )
 
@@ -1580,6 +1731,9 @@ def cold_start_transfer_df(
             target_col=eff_target_col,
             static_covariates=static_covariates,
             hierarchy_cols=hierarchy_cols,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            embedding_col=embedding_col,
             base_predictions=preds_by_id.get(tid),
         )
         yhat_mean_val = float(cs_res.predictions["yhat"].mean())

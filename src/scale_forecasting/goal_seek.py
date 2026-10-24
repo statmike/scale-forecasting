@@ -123,6 +123,35 @@ def _build_flat_hierarchy_spec(
     )
 
 
+def _canonicalize_sim_cluster_node_id(
+    nid: str,
+    *,
+    bottom_ids: set[str] | None = None,
+) -> str:
+    """Canonicalize shorthand similarity-cluster aliases (e.g. ``'__sim_cluster_0__'``,
+    ``'sim_cluster_0'``, ``'cluster_0'``) to ``'similarity_cluster_id=cluster_0'``."""
+    s = str(nid).strip()
+    if s.startswith("__sim_cluster_") and s.endswith("__"):
+        cid = s[len("__sim_cluster_") : -2]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if s.startswith("sim_cluster_"):
+        cid = s[len("sim_cluster_") :]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if s.startswith("__cluster_") and s.endswith("__"):
+        cid = s[len("__cluster_") : -2]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if (
+        s.startswith("cluster_")
+        and s[len("cluster_") :].isdigit()
+        and (bottom_ids is None or s not in bottom_ids)
+    ):
+        return f"similarity_cluster_id={s}"
+    return s
+
+
 def _infer_hierarchy_spec_from_frame(
     df: pd.DataFrame,
     *,
@@ -177,20 +206,25 @@ def _infer_hierarchy_spec_from_frame(
             bottom_ids = [TOTAL_NODE_ID]
             has_total = False
 
+    bottom_set = set(bottom_ids)
     # Inspect target_node and raw_target for any requested intermediate nodes (e.g.,
-    # "similarity_cluster_id=cluster_0" or "region=North") even when df only has flat leaf rows.
+    # "similarity_cluster_id=cluster_0", "__sim_cluster_0__", or "region=North") even when df only
+    # has flat leaf rows.
     extra_inter_candidates: list[str] = []
-    if target_node and target_node != TOTAL_NODE_ID and "=" in target_node:
-        extra_inter_candidates.append(str(target_node))
+    if target_node:
+        cand_tn = _canonicalize_sim_cluster_node_id(str(target_node), bottom_ids=bottom_set)
+        if cand_tn != TOTAL_NODE_ID and "=" in cand_tn:
+            extra_inter_candidates.append(cand_tn)
     if isinstance(raw_target, Mapping):
         for k in raw_target:
-            ks = str(k)
+            ks = _canonicalize_sim_cluster_node_id(str(k), bottom_ids=bottom_set)
             if ks != TOTAL_NODE_ID and "=" in ks:
                 extra_inter_candidates.append(ks)
     elif isinstance(raw_target, pd.DataFrame) and ts_id_col in raw_target.columns:
         for k in raw_target[ts_id_col].dropna().astype(str).unique().tolist():
-            if k != TOTAL_NODE_ID and "=" in k:
-                extra_inter_candidates.append(k)
+            ks = _canonicalize_sim_cluster_node_id(k, bottom_ids=bottom_set)
+            if ks != TOTAL_NODE_ID and "=" in ks:
+                extra_inter_candidates.append(ks)
 
     ref_df = history_df.copy() if (history_df is not None and not history_df.empty) else df.copy()
     needs_sim_cluster = (
@@ -1124,7 +1158,7 @@ def allocate_target(
     eq_rhs: list[float] = []
 
     def _node_s_row(nid_raw: str) -> np.ndarray:
-        nid = str(nid_raw)
+        nid = _canonicalize_sim_cluster_node_id(str(nid_raw), bottom_ids=set(b_to_idx))
         if nid in node_to_idx:
             return resolved_spec.summing_matrix[node_to_idx[nid]].copy()
         # Allow shorthand like "North" matching "region=North".
@@ -1136,7 +1170,7 @@ def allocate_target(
             r[b_to_idx[nid]] = 1.0
             return r
         raise ConfigError(
-            f"Unknown hierarchy node '{nid}'; available nodes: {list(resolved_spec.node_ids)}"
+            f"Unknown hierarchy node '{nid_raw}'; available nodes: {list(resolved_spec.node_ids)}"
         )
 
     # Process locked_nodes and locks.
@@ -1248,7 +1282,7 @@ def allocate_target(
         # Determine whether keys are hierarchy node IDs or dates/steps.
         sample_keys = list(raw_target.keys())
         is_node_mapping = all(
-            str(k) in node_to_idx
+            _canonicalize_sim_cluster_node_id(str(k), bottom_ids=set(b_to_idx)) in node_to_idx
             or str(k) in b_to_idx
             or any(cand.endswith(f"={k}") for cand in node_to_idx)
             for k in sample_keys
@@ -1414,7 +1448,15 @@ def allocate_target(
     for r in df.to_dict(orient="records"):
         orig_by_key[(str(r[ts_id_col]), r[dcol])] = {str(k): v for k, v in r.items()}
 
-    target_node_idx = node_to_idx.get(eff_target_node, 0)
+    canon_tn = _canonicalize_sim_cluster_node_id(eff_target_node, bottom_ids=set(b_to_idx))
+    if canon_tn in node_to_idx:
+        target_node_idx = node_to_idx[canon_tn]
+    else:
+        target_node_idx = 0
+        for cand_nid, r_idx in node_to_idx.items():
+            if cand_nid.endswith(f"={canon_tn}") or cand_nid == canon_tn:
+                target_node_idx = r_idx
+                break
     records: list[dict[str, Any]] = []
     for nid in output_node_ids:
         n_idx = node_to_idx[nid]

@@ -477,3 +477,24 @@ def test_allocate_target_with_similarity_hierarchy_and_cluster_node_target() -> 
     )
     assert abs(c0_sum - 240.0) < 1e-6
     assert alloc_c0.max_coherence_discrepancy < 1e-6
+
+    # 3. Target shorthand alias `node_id="__sim_cluster_0__"` directly on flat input
+    alloc_alias = allocate_target(
+        preds_df,
+        target=240.0,
+        node_id="__sim_cluster_0__",
+        history_df=hist_df,
+        oof_df=oof_df,
+        similarity_hierarchy=True,
+        similarity_n_clusters=2,
+        return_result=True,
+    )
+    assert isinstance(alloc_alias, GoalSeekResult)
+    alias_sum = float(
+        alloc_alias.dataframe.loc[
+            alloc_alias.dataframe["ts_id"] == "similarity_cluster_id=cluster_0", "y_allocated"
+        ].sum()
+    )
+    assert abs(alias_sum - 240.0) < 1e-6
+    assert abs(float(alloc_alias.allocated_total) - 240.0) < 1e-6
+    assert alloc_alias.max_coherence_discrepancy < 1e-6

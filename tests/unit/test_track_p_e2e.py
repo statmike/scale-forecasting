@@ -1,14 +1,18 @@
-"""4-Tier End-to-End (E2E) Verification Suite for Track P (`v1.8.0`).
+"""4-Tier End-to-End (E2E) Verification Suite for Track P (`v1.8.0` Phase 1 & Phase 2).
 
-Covers all Track P features (F1–F15 in `PROJECT.md § Feature Inventory`) across 4 testing tiers:
+Covers all Track P features (F1–F20 in `PROJECT.md § Feature Inventory`) across 4 testing tiers:
 - Tier 1 — Category-Partition Feature Coverage (12 suites covering F1–F15, all 7 similarity lenses,
   and all 6 system integrations)
 - Tier 2 — Boundary Value & Pathological Corner-Case Hardening (N=1, N=2, flat/zero, intermittent,
   short launch prefixes, missing values, invalid config rejection, and 100% digest invariance)
 - Tier 3 — Cross-Feature & Cross-Track Multi-Subsystem Combinations (5 integration suites chaining
   Track J + Track K + Track L + Track P)
-- Tier 4 — Real-World Enterprise Application Scenarios (Multi-regime retail negative-transfer
-  elimination and flat-panel Forecast-to-Decision executive spine)
+- Tier 4 — Real-World Enterprise Application Scenarios (Scenarios #1–#8: Multi-regime retail
+  negative-transfer elimination, flat-panel Forecast-to-Decision spine, Day-0 -> Day-5 -> Mature
+  cold-start progression, multi-modal retail similarity, distributed sharding with
+  @similarity_global, latent similarity hierarchy 3-mode MiNT & Goal-Seek, stockout-aware
+  substitute recommendation & cannibalization optimization, and emerging trend breakout &
+  lead-lag co-promotion sensing)
 """
 
 from __future__ import annotations
@@ -2188,6 +2192,1155 @@ def test_t4_scenario_2_flat_panel_latent_hierarchy_copula_inventory_and_executiv
     rep_path = f.export_report(tmp_path / "flat_panel_executive_report.html")
     assert rep_path.exists()
     plt.close("all")
+
+
+def _make_phase2_multimodal_retail_panel() -> pd.DataFrame:
+    """Create a 7-series retail assortment panel with rich text, attribute, embedding, and
+    3-level hierarchy metadata (`department -> category -> subcategory`), including:
+    - True retail substitutes (`oat_milk_vanilla_64oz` and `oat_milk_orig_64oz` in
+      `Dairy_Alt > Plant_Milk > Oat_Milk`)
+    - Same-subcategory out-of-stock twin (`oat_milk_choco_64oz` in `Oat_Milk`)
+    - Sister-subcategory item (`almond_milk_64oz` in `Dairy_Alt > Plant_Milk > Almond_Milk`)
+    - Same-department item (`greek_yogurt_32oz` in `Dairy_Alt > Cultured > Yogurt`)
+    - Coincidental seasonal twins in disjoint departments (`ice_cream_gelato_16oz` in
+      `Frozen > Desserts > Gelato` and `sunscreen_lotion_spf50` in
+      `Personal_Care > Sun_Care > Lotion`) sharing the exact same summer sine wave as
+      `oat_milk_vanilla_64oz`!
+    """
+    n_days = 42
+    dates = pd.date_range("2025-06-01", periods=n_days, freq="D")
+    t = np.arange(n_days, dtype=float)
+    summer_wave = (
+        120.0 + 35.0 * np.sin(2.0 * np.pi * t / 14.0) + 10.0 * np.cos(2.0 * np.pi * t / 7.0)
+    )
+    yogurt_wave = 80.0 + 12.0 * np.cos(2.0 * np.pi * t / 7.0) + 0.4 * t
+
+    specs = [
+        (
+            "oat_milk_vanilla_64oz",
+            summer_wave,
+            "Organic Oat Milk Vanilla Sweetened 64oz Plant Based Beverage Carton",
+            "Dairy_Alt",
+            "Plant_Milk",
+            "Oat_Milk",
+            "OatHarvest",
+            64.0,
+            4.99,
+            "[0.92, 0.88, 0.05, 0.02]",
+        ),
+        (
+            "oat_milk_orig_64oz",
+            summer_wave * 0.99 + 1.0,
+            "Organic Oat Milk Original Sweetened 64oz Plant Based Beverage Carton",
+            "Dairy_Alt",
+            "Plant_Milk",
+            "Oat_Milk",
+            "OatHarvest",
+            64.0,
+            4.99,
+            "[0.92, 0.87, 0.05, 0.02]",
+        ),
+        (
+            "oat_milk_choco_64oz",
+            summer_wave * 0.92 + 4.0,
+            "Cocoa Dark Chocolate Oat Milk 64oz Plant Carton",
+            "Dairy_Alt",
+            "Plant_Milk",
+            "Oat_Milk",
+            "OatHarvest",
+            64.0,
+            5.49,
+            "[0.82, 0.78, 0.12, 0.04]",
+        ),
+        (
+            "almond_milk_64oz",
+            summer_wave * 0.85 + 8.0,
+            "Creamy Almond Milk Vanilla 64oz Nut Beverage Carton",
+            "Dairy_Alt",
+            "Plant_Milk",
+            "Almond_Milk",
+            "NutMeadow",
+            64.0,
+            4.49,
+            "[0.75, 0.72, 0.12, 0.05]",
+        ),
+        (
+            "greek_yogurt_32oz",
+            yogurt_wave,
+            "Plain Nonfat Greek Strained Yogurt 32oz Tub",
+            "Dairy_Alt",
+            "Cultured",
+            "Yogurt",
+            "OatHarvest",
+            32.0,
+            5.99,
+            "[0.45, 0.50, 0.30, 0.10]",
+        ),
+        (
+            "ice_cream_gelato_16oz",
+            summer_wave * 1.01,
+            "Artisan Vanilla Bean Frozen Gelato Ice Cream 16oz Pint",
+            "Frozen",
+            "Desserts",
+            "Gelato",
+            "GlacierCream",
+            16.0,
+            6.49,
+            "[0.15, 0.20, 0.85, 0.10]",
+        ),
+        (
+            "sunscreen_lotion_spf50",
+            summer_wave * 1.00,
+            "Broad Spectrum UV Sunscreen SPF 50 Waterproof Sunblock Lotion 8oz",
+            "Personal_Care",
+            "Sun_Care",
+            "Lotion",
+            "SolGuard",
+            8.0,
+            11.99,
+            "[0.02, 0.03, 0.10, 0.96]",
+        ),
+    ]
+    frames: list[pd.DataFrame] = []
+    for tid, y_arr, desc, dept, cat, subcat, brand, size_oz, price, emb in specs:
+        frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": tid,
+                    "ds": dates,
+                    "y": y_arr.astype(float),
+                    "product_title": desc,
+                    "department": dept,
+                    "category": cat,
+                    "subcategory": subcat,
+                    "brand": brand,
+                    "pack_size_oz": float(size_oz),
+                    "price": float(price),
+                    "text_embedding": emb,
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_t4_scenario_3_day0_to_day5_to_mature_cold_start_progression() -> None:
+    """Tier 4 Scenario 3 (F17): Day-0 -> Day-5 -> Mature Cold-Start NPI Progression.
+
+    Exercises:
+    1. Day-0 (`n_i = 0` pre-launch SKU matched via `semantic_sim + hierarchy_sim` using
+       `text_cols`, `attribute_cols`, `hierarchy_cols`),
+    2. Day-5 (`n_i = 5` `launch_prefix` blended with `semantic_sim + hierarchy_sim` under
+       `cold_start_matching="hybrid"`),
+    3. Mature (`n_i = 28 >= cold_start_min_obs=14`) cold-start progression via both
+       `cold_start_transfer_df` and `Forecaster.cold_start_transfer_df`.
+    Verifies Empirical-Bayes weight `w_i = n_i / (n_i + kappa)` increases monotonically from
+    `0.0` at Day-0 to `> 0` at Day-5 to `>= 0.5` at Mature, and verifies valid Day-0/Day-5
+    prediction intervals (`yhat_lower < yhat < yhat_upper`) and populated
+    `donor_similarity_score` / `top_donor_ts_ids`.
+    """
+    from scale_forecasting.cold_start import (
+        build_cold_start_donor_pool,
+        cold_start_transfer_df,
+        forecast_cold_start_series,
+    )
+
+    dates = pd.date_range("2025-01-01", periods=28, freq="D")
+    t = np.arange(28, dtype=float)
+    oat_curve = 185.0 + 30.0 * np.sin(2.0 * np.pi * t / 7.0) + 1.5 * t
+    soda_curve = 28.0 + 4.0 * np.cos(2.0 * np.pi * t / 7.0)
+
+    panel = pd.concat(
+        [
+            # Mature donor 1 (n_obs = 28)
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_oat_orig_64oz",
+                    "ds": dates,
+                    "y": oat_curve,
+                    "product_title": "Organic Oat Milk Original 64oz Plant Beverage Carton",
+                    "department": "Dairy_Alt",
+                    "category": "Plant_Milk",
+                    "subcategory": "Oat_Milk",
+                    "brand": "OatHarvest",
+                    "pack_size_oz": 64.0,
+                }
+            ),
+            # Mature donor 2 (n_obs = 28)
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_oat_choco_64oz",
+                    "ds": dates,
+                    "y": oat_curve * 0.94,
+                    "product_title": "Organic Oat Milk Chocolate 64oz Plant Beverage Carton",
+                    "department": "Dairy_Alt",
+                    "category": "Plant_Milk",
+                    "subcategory": "Oat_Milk",
+                    "brand": "OatHarvest",
+                    "pack_size_oz": 64.0,
+                }
+            ),
+            # Unrelated mature donor in a different department/scale (n_obs = 28)
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_cola_can_12oz",
+                    "ds": dates,
+                    "y": soda_curve,
+                    "product_title": "Sparkling Cola Carbonated Soda 12oz Aluminum Can",
+                    "department": "Beverages",
+                    "category": "Carbonated",
+                    "subcategory": "Cola",
+                    "brand": "FizzPop",
+                    "pack_size_oz": 12.0,
+                }
+            ),
+            # Day-0 pre-launch SKU (n_obs = 0: target y is NaN)
+            pd.DataFrame(
+                {
+                    "ts_id": "npi_day0_oat_vanilla",
+                    "ds": [dates[-1]],
+                    "y": [float("nan")],
+                    "product_title": "Organic Oat Milk Vanilla 64oz Plant Beverage Carton",
+                    "department": "Dairy_Alt",
+                    "category": "Plant_Milk",
+                    "subcategory": "Oat_Milk",
+                    "brand": "OatHarvest",
+                    "pack_size_oz": 64.0,
+                }
+            ),
+            # Day-5 early-launch SKU (n_obs = 5)
+            pd.DataFrame(
+                {
+                    "ts_id": "npi_day5_oat_barista",
+                    "ds": dates[:5],
+                    "y": oat_curve[:5] * 1.04,
+                    "product_title": "Organic Oat Milk Barista Edition 64oz Plant Beverage Carton",
+                    "department": "Dairy_Alt",
+                    "category": "Plant_Milk",
+                    "subcategory": "Oat_Milk",
+                    "brand": "OatHarvest",
+                    "pack_size_oz": 64.0,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    # 1. Direct cold_start_transfer_df verification
+    cs_df = cold_start_transfer_df(
+        panel,
+        horizon=7,
+        freq="D",
+        min_obs=14,
+        cold_start_matching="hybrid",
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    by_id = cs_df.set_index("ts_id")
+
+    # Verify via Forecaster.cold_start_transfer_df as well
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-3-cold-start-progression",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 7},
+            "models": ["theta@similarity_cold_start"],
+            "features": {
+                "cold_start_transfer": True,
+                "cold_start_min_obs": 14,
+                "cold_start_matching": "hybrid",
+            },
+        }
+    )
+    f = sf.Forecaster(cfg, data=panel)
+    cs_sdk_df = f.cold_start_transfer_df(
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    by_id_sdk = cs_sdk_df.set_index("ts_id")
+
+    for table in (by_id, by_id_sdk):
+        r_day0 = table.loc["npi_day0_oat_vanilla"]
+        r_day5 = table.loc["npi_day5_oat_barista"]
+        r_mat = table.loc["donor_oat_orig_64oz"]
+
+        w_day0 = float(r_day0["empirical_bayes_weight"])
+        w_day5 = float(r_day5["empirical_bayes_weight"])
+        w_mat = float(r_mat["empirical_bayes_weight"])
+
+        # Monotonic Empirical-Bayes progression: 0.0 (Day-0) < w_5 (Day-5) < w_28 (>= 0.5 at Mature)
+        assert int(r_day0["n_obs"]) == 0
+        assert bool(r_day0["is_cold_start"]) is True
+        assert str(r_day0["lifecycle_stage"]) == "pre_launch"
+        assert w_day0 == pytest.approx(0.0, abs=1e-9)
+
+        assert int(r_day5["n_obs"]) == 5
+        assert bool(r_day5["is_cold_start"]) is True
+        assert str(r_day5["lifecycle_stage"]) == "early_launch"
+        assert 0.0 < w_day5 < w_mat
+
+        assert int(r_mat["n_obs"]) == 28
+        assert bool(r_mat["is_cold_start"]) is False
+        assert str(r_mat["lifecycle_stage"]) == "mature"
+        assert w_mat >= 0.50
+
+        # Populated donor_similarity_score and top_donor_ts_ids matching Oat Milk donors
+        assert float(r_day0["donor_similarity_score"]) > 0.65
+        assert float(r_day5["donor_similarity_score"]) > 0.65
+        assert "donor_oat_" in str(r_day0["top_donor_ts_ids"])
+        assert "donor_oat_" in str(r_day5["top_donor_ts_ids"])
+        assert float(r_day0["yhat_mean"]) > 120.0
+        assert float(r_day5["yhat_mean"]) > 120.0
+
+    # 2. Verify valid Day-0 and Day-5 prediction intervals (yhat_lower < yhat < yhat_upper)
+    pool = build_cold_start_donor_pool(
+        panel,
+        cfg,
+        min_obs=14,
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    for sku_id in ("npi_day0_oat_vanilla", "npi_day5_oat_barista"):
+        sub_df = panel[panel["ts_id"] == sku_id].copy()
+        fc_res = forecast_cold_start_series(
+            sub_df,
+            pool,
+            horizon=7,
+            freq="D",
+            min_obs=14,
+            matching="hybrid",
+            text_cols=["product_title"],
+            attribute_cols=["brand", "pack_size_oz"],
+            hierarchy_cols=["department", "category", "subcategory"],
+        )
+        preds = fc_res.predictions
+        assert len(preds) == 7
+        assert bool((preds["yhat_lower"] < preds["yhat"]).all())
+        assert bool((preds["yhat"] < preds["yhat_upper"]).all())
+        assert fc_res.donor_similarity_score > 0.65
+        assert any(d.startswith("donor_oat_") for d in fc_res.top_donor_ts_ids)
+
+
+def test_t4_scenario_4_multimodal_retail_similarity_text_attributes_hierarchy() -> None:
+    """Tier 4 Scenario 4 (F16): Multi-Modal Retail Similarity (`text_cols`, `embedding_col`,
+    `attribute_cols`, `hierarchy_cols`, `within_hierarchy_level`, `semantic_weight`, and
+    `hierarchy_weight`).
+
+    Verifies on a synthetic retail panel that coincidental seasonal twins (*Ice Cream* vs.
+    *Sunscreen/Lawn Care*) are separated when semantic + Wu-Palmer LCA hierarchy similarity
+    are active, while true retail substitutes (*Oat Milk Vanilla 64oz* vs.
+    *Oat Milk Original 64oz*) are ranked `#1`, and `within_hierarchy_level="department"`
+    strictly excludes cross-department items.
+    """
+    from scale_forecasting.similarity import (
+        cluster_by_similarity_df,
+        compute_similarity_matrix,
+        embed_series_df,
+        find_similar_series_df,
+    )
+
+    panel = _make_phase2_multimodal_retail_panel()
+
+    # 1. Pure behavioral trajectory similarity treats coincidental seasonal twins as near-identical
+    behav_res = compute_similarity_matrix(panel, method="hybrid")
+    assert float(behav_res.matrix_df.loc["oat_milk_vanilla_64oz", "sunscreen_lotion_spf50"]) > 0.90
+    assert float(behav_res.matrix_df.loc["ice_cream_gelato_16oz", "sunscreen_lotion_spf50"]) > 0.90
+
+    # 2. Multi-modal similarity with text_cols, embedding_col, attribute_cols, hierarchy_cols,
+    #    and explicit semantic_weight / hierarchy_weight separates coincidental twins
+    mm_res = compute_similarity_matrix(
+        panel,
+        method="hybrid",
+        text_cols=["product_title"],
+        embedding_col="text_embedding",
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        semantic_weight=0.35,
+        hierarchy_weight=0.30,
+    )
+    assert {"semantic_sim", "hierarchy_sim"}.issubset(mm_res.pairs_df.columns)
+
+    q_pairs = mm_res.pairs_df[mm_res.pairs_df["ts_id"] == "oat_milk_vanilla_64oz"].set_index(
+        "neighbor_ts_id"
+    )
+    # Wu-Palmer LCA hierarchy proximity:
+    # Same subcategory (depth 3/3) -> 1.0; same category (depth 2/3) -> 2/3;
+    # same department (depth 1/3) -> 1/3; disjoint department -> 0.0
+    assert float(q_pairs.loc["oat_milk_orig_64oz", "hierarchy_sim"]) == pytest.approx(1.0)
+    assert float(q_pairs.loc["almond_milk_64oz", "hierarchy_sim"]) == pytest.approx(2.0 / 3.0)
+    assert float(q_pairs.loc["greek_yogurt_32oz", "hierarchy_sim"]) == pytest.approx(1.0 / 3.0)
+    assert float(q_pairs.loc["sunscreen_lotion_spf50", "hierarchy_sim"]) == pytest.approx(0.0)
+    assert float(q_pairs.loc["ice_cream_gelato_16oz", "hierarchy_sim"]) == pytest.approx(0.0)
+
+    # True substitute Oat Milk Original is ranked #1 and separated from Sunscreen / Ice Cream
+    top_neighbor = str(
+        mm_res.pairs_df[mm_res.pairs_df["ts_id"] == "oat_milk_vanilla_64oz"]
+        .sort_values("rank")
+        .iloc[0]["neighbor_ts_id"]
+    )
+    assert top_neighbor == "oat_milk_orig_64oz"
+    assert (
+        float(mm_res.matrix_df.loc["oat_milk_vanilla_64oz", "oat_milk_orig_64oz"])
+        > float(mm_res.matrix_df.loc["oat_milk_vanilla_64oz", "sunscreen_lotion_spf50"]) + 0.35
+    )
+    assert float(mm_res.matrix_df.loc["ice_cream_gelato_16oz", "sunscreen_lotion_spf50"]) < 0.50
+
+    # 3. find_similar_series_df with within_hierarchy_level="department" strictly excludes
+    #    cross-department items (Frozen, Personal_Care)
+    nbrs_dept = find_similar_series_df(
+        panel,
+        query_ts_id="oat_milk_vanilla_64oz",
+        top_k=6,
+        mode="full_history",
+        text_cols=["product_title"],
+        embedding_col="text_embedding",
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="department",
+        semantic_weight="auto",
+        hierarchy_weight="auto",
+    )
+    assert {"semantic_sim", "hierarchy_sim"}.issubset(nbrs_dept.columns)
+    assert str(nbrs_dept.iloc[0]["neighbor_ts_id"]) == "oat_milk_orig_64oz"
+    returned_neighbors = set(nbrs_dept["neighbor_ts_id"].astype(str))
+    assert "sunscreen_lotion_spf50" not in returned_neighbors
+    assert "ice_cream_gelato_16oz" not in returned_neighbors
+    assert returned_neighbors.issubset(
+        {"oat_milk_orig_64oz", "oat_milk_choco_64oz", "almond_milk_64oz", "greek_yogurt_32oz"}
+    )
+
+    # 4. cluster_by_similarity_df and embed_series_df with multi-modal inputs
+    clusters_df = cluster_by_similarity_df(
+        panel,
+        n_clusters=3,
+        min_cluster_size=1,
+        text_cols=["product_title"],
+        embedding_col="text_embedding",
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        semantic_weight=0.35,
+        hierarchy_weight=0.30,
+    )
+    c_map = clusters_df.set_index("ts_id")["similarity_cluster_id"].to_dict()
+    assert c_map["oat_milk_vanilla_64oz"] == c_map["oat_milk_orig_64oz"]
+    assert c_map["oat_milk_vanilla_64oz"] != c_map["sunscreen_lotion_spf50"]
+
+    emb_df = embed_series_df(
+        panel,
+        text_cols=["product_title"],
+        embedding_col="text_embedding",
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        semantic_weight=0.30,
+        hierarchy_weight=0.25,
+    )
+    assert len(emb_df) == 7
+    assert {"embed_x", "embed_y", "hurst_exp", "lyapunov_exp"}.issubset(emb_df.columns)
+
+
+def test_t4_scenario_5_distributed_sharding_with_similarity_global() -> None:
+    """Tier 4 Scenario 5 (F5 / F20): Distributed Multi-Worker Sharding with `@similarity_global`.
+
+    Tests distributed multi-worker sharding (`vertex_engine` worker series selection / panel
+    model routing + `spark_io.add_bucket` + `ray_io` chunking) with `<model>@similarity_global`,
+    verifying that all clusters and series are preserved without cross-shard fragmentation.
+    """
+    import unittest.mock
+
+    from scale_forecasting.engines import spark_io
+    from scale_forecasting.engines.vertex_engine import (
+        WorkerTopology,
+        build_worker_series_range,
+        effective_worker_count,
+        execute_panel,
+        models_sharded_across_workers,
+        partition_models_for_worker,
+        shard_series_for_worker,
+    )
+
+    panel = _make_multi_regime_retail_panel(
+        n_days=42, n_short_days=5, include_cold_start=False, seed=4005
+    )
+    all_ids = sorted(panel["ts_id"].astype(str).unique())
+    assert len(all_ids) == 6
+
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-5-distributed-sharding",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 7},
+            "models": [
+                "tide@similarity_global",
+                "theta@similarity_cold_start",
+                "naive_mean",
+            ],
+            "model_params": {
+                "tide": {
+                    "max_steps": 15,
+                    "input_size": 14,
+                    "learning_rate": 0.01,
+                    "random_seed": 42,
+                }
+            },
+            "features": {
+                "similarity_method": "hybrid",
+                "similarity_n_clusters": 2,
+                "cold_start_transfer": True,
+                "cold_start_matching": "similarity",
+            },
+            "backtest": {"enabled": False},
+        }
+    )
+
+    # 1. Vertex Engine multi-worker topology & model/series routing
+    assert models_sharded_across_workers(cfg, ["tide@similarity_global"]) is True
+    assert effective_worker_count(cfg, cfg.models, requested_workers=2, n_series=6) == 2
+
+    topo_single = WorkerTopology(rank=0, world_size=1, source="single")
+    topo_w0 = WorkerTopology(rank=0, world_size=2, source="cli")
+    topo_w1 = WorkerTopology(rank=1, world_size=2, source="cli")
+
+    # Verify build_worker_series_range and shard_series_for_worker partition local series cleanly
+    restr_0, set_0, total_0 = build_worker_series_range(all_ids, None, "ts_id", topo_w0)
+    restr_1, set_1, total_1 = build_worker_series_range(all_ids, None, "ts_id", topo_w1)
+    assert total_0 == 6 and total_1 == 6
+    assert restr_0 is not None and restr_1 is not None
+    assert set_0.isdisjoint(set_1)
+    assert sorted(set_0 | set_1) == all_ids
+    shard_0 = shard_series_for_worker(panel, topo_w0)
+    shard_1 = shard_series_for_worker(panel, topo_w1)
+    assert isinstance(shard_0, pd.DataFrame) and isinstance(shard_1, pd.DataFrame)
+    assert sorted(set(shard_0["ts_id"]) | set(shard_1["ts_id"])) == all_ids
+
+    # Execute single-worker reference vs 2-worker distributed execution via execute_panel
+    cells_single, status_single = execute_panel(panel, cfg, topology=topo_single)
+    cells_w0, status_w0 = execute_panel(panel, cfg, topology=topo_w0)
+    cells_w1, status_w1 = execute_panel(panel, cfg, topology=topo_w1)
+
+    assert partition_models_for_worker(cfg, cfg.models, topo_w0) == [
+        "tide@similarity_global",
+        "theta@similarity_cold_start",
+        "naive_mean",
+    ]
+    assert partition_models_for_worker(cfg, cfg.models, topo_w1) == [
+        "theta@similarity_cold_start",
+        "naive_mean",
+    ]
+
+    cells_dist = [*cells_w0, *cells_w1]
+    status_dist = pd.concat([status_w0, status_w1], ignore_index=True)
+    assert len(cells_single) == 18  # 6 series x 3 models
+    assert len(cells_dist) == 18
+    assert set(status_single["status"]) == {"ok"}
+    assert set(status_dist["status"]) == {"ok"}
+
+    # Verify @similarity_global was NOT fragmented across shards: all 6 series were pooled together
+    sim_cells_single = {
+        c.ts_id: c for c in cells_single if c.model_type == "tide@similarity_global"
+    }
+    sim_cells_dist = {c.ts_id: c for c in cells_dist if c.model_type == "tide@similarity_global"}
+    assert sorted(sim_cells_dist.keys()) == all_ids
+    for tid in all_ids:
+        diag_s = sim_cells_single[tid].diagnostics["similarity_clusters"]
+        diag_d = sim_cells_dist[tid].diagnostics["similarity_clusters"]
+        assert int(diag_d["n_clusters"]) == 2
+        assert diag_d["cluster_id"] == diag_s["cluster_id"]
+        np.testing.assert_allclose(
+            sim_cells_dist[tid].predictions["yhat"].to_numpy(dtype=float),
+            sim_cells_single[tid].predictions["yhat"].to_numpy(dtype=float),
+            atol=1e-6,
+        )
+
+    # 2. Ray IO chunk_cells preserves full 6-series panel in 1 chunk for @similarity_global
+    chunks = chunk_cells(panel, cfg, cfg.models, n_chunks=4)
+    sim_global_chunks = [c for c in chunks if (c[_MODEL_COL] == "tide@similarity_global").all()]
+    assert len(sim_global_chunks) == 1
+    assert sorted(sim_global_chunks[0]["ts_id"].unique()) == all_ids
+
+    # 3. Spark IO add_bucket & run_group isolate @similarity_global onto a single model-level bucket
+    class _FakeSparkCol:
+        def __init__(self, expr: str) -> None:
+            self.expr = expr
+
+        def __str__(self) -> str:
+            return self.expr
+
+        def isin(self, values: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"{self.expr}.isin({list(values)!r})")
+
+        def otherwise(self, other: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"{self.expr}.otherwise({other})")
+
+        def __eq__(self, other: object) -> _FakeSparkCol:  # type: ignore[override]
+            return _FakeSparkCol(f"({self.expr} == {other})")
+
+        def __add__(self, other: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"({self.expr} + {other})")
+
+    class _FakeSparkF:
+        @staticmethod
+        def col(name: str) -> _FakeSparkCol:
+            return _FakeSparkCol(f"col({name})")
+
+        @staticmethod
+        def lit(val: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"lit({val!r})")
+
+        @staticmethod
+        def hash(*cols: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"hash({', '.join(str(c) for c in cols)})")
+
+        @staticmethod
+        def pmod(a: Any, b: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"pmod({a}, {b})")
+
+        @staticmethod
+        def when(cond: Any, val: Any) -> _FakeSparkCol:
+            return _FakeSparkCol(f"when({cond}, {val})")
+
+    class _RecordingSparkDF:
+        def __init__(self) -> None:
+            self.added_col: str | None = None
+            self.bucket_expr: Any = None
+
+        def withColumn(self, col_name: str, expr: Any) -> _RecordingSparkDF:
+            self.added_col = col_name
+            self.bucket_expr = expr
+            return self
+
+    alloc = spark_io.allocate_buckets(
+        cfg.models,
+        12,
+        {
+            "tide@similarity_global": 4.0,
+            "theta@similarity_cold_start": 1.0,
+            "naive_mean": 1.0,
+        },
+    )
+    fake_sdf = _RecordingSparkDF()
+    with unittest.mock.patch("pyspark.sql.functions", _FakeSparkF):
+        out_sdf = spark_io.add_bucket(fake_sdf, cfg, n_buckets=12, allocation=alloc)  # type: ignore[arg-type]
+    assert out_sdf is fake_sdf
+    assert fake_sdf.added_col == spark_io._BUCKET_COL
+    assert fake_sdf.bucket_expr is not None
+    expr_str = str(fake_sdf.bucket_expr)
+    # tide@similarity_global is mapped to constant bucket lit(0) (not hashed by ts_id)
+    assert "when((col(_sf_model) == lit('tide@similarity_global')), lit(0))" in expr_str
+
+    # Also verify spark_io.run_group executes the single-bucket @similarity_global group cleanly
+    spark_group_pdf = panel.assign(**{spark_io._MODEL_COL: "tide@similarity_global"})
+    spark_cells, spark_status = spark_io.run_group(spark_group_pdf, cfg)
+    assert len(spark_cells) == 6
+    assert set(spark_status["status"]) == {"ok"}
+    assert sorted(c.ts_id for c in spark_cells) == all_ids
+
+
+def test_t4_scenario_6_latent_similarity_hierarchy_3mode_mint_and_goal_seek() -> None:
+    """Tier 4 Scenario 6 (F6 / F17): Latent Similarity Hierarchy + 3-Mode MiNT + Top-Down
+    Goal-Seek on `"__sim_cluster_0__"`.
+
+    Tests `HierarchyConfig(similarity_hierarchy=True, cross_temporal=True,
+    reconciliation_methods=["mint_shrink", "cross_temporal_mint"])` + 3-mode reconciliation +
+    Top-Down Goal-Seek `allocate_target(..., node_id="__sim_cluster_0__")` (and
+    `Forecaster.allocate_target(node_id="__sim_cluster_0__")`), verifying `< 1e-6`
+    reconciliation coherence and exact `allocated_total == target_total` on `"__sim_cluster_0__"`.
+    """
+    from scale_forecasting.temporal_reconciliation import reconcile_temporal_forecasts
+
+    panel = _make_multi_regime_retail_panel(
+        n_days=42, n_short_days=5, include_cold_start=False, seed=4006
+    )
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-6-latent-hier-3mode-gs",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 14},
+            "models": ["naive_mean"],
+            "hierarchy": {
+                "similarity_hierarchy": True,
+                "similarity_n_clusters": 2,
+                "cross_temporal": True,
+                "temporal_aggregations": [7, 14],
+                "reconciliation_methods": ["mint_shrink", "cross_temporal_mint"],
+            },
+        }
+    )
+    assert cfg.hierarchy.enabled is True
+    assert cfg.hierarchy.reconcile_temporal is True
+    assert cfg.hierarchy.effective_levels == [["similarity_cluster_id"]]
+
+    hier_panel, spec = build_hierarchy(panel, cfg)
+    assert "__total__" in spec.node_ids
+    assert "similarity_cluster_id=cluster_0" in spec.node_ids
+    assert "similarity_cluster_id=cluster_1" in spec.node_ids
+
+    f_dates = pd.date_range("2025-02-12", periods=14, freq="D")
+    pred_rows = [
+        {
+            "ts_id": nid,
+            "model_type": "naive_mean",
+            "ds": dt,
+            "forecast_date": dt,
+            "horizon_step": h_idx,
+            "yhat": float(80.0 + 4.0 * (h_idx % 7)),
+            "yhat_lower": float(65.0 + 4.0 * (h_idx % 7)),
+            "yhat_upper": float(95.0 + 4.0 * (h_idx % 7)),
+        }
+        for nid in spec.bottom_ids
+        for h_idx, dt in enumerate(f_dates, start=1)
+    ]
+    preds_df = pd.DataFrame(pred_rows)
+
+    # 1. Mode 1 (Spatial-only MiNT shrinkage)
+    rec_spatial = reconcile_forecasts(preds_df, spec, "mint_shrink", cfg=cfg, history_df=hier_panel)
+    assert verify_coherence(rec_spatial, spec) < 1e-6
+
+    # 2. Mode 2 (Temporal-only THieF MiNT shrinkage)
+    rec_temporal = reconcile_temporal_forecasts(
+        preds_df, history_df=hier_panel, cfg=cfg, method="mint_shrink"
+    )
+    assert verify_temporal_coherence(rec_temporal, cfg=cfg) < 1e-6
+
+    # 3. Mode 3 (Simultaneous Cross-Temporal MiNT)
+    rec_ct = reconcile_forecasts(
+        preds_df, spec, "cross_temporal_mint", cfg=cfg, history_df=hier_panel
+    )
+    assert verify_coherence(rec_ct, spec) < 1e-6
+    assert verify_temporal_coherence(rec_ct, cfg=cfg) < 1e-6
+
+    # 4. Top-Down Goal-Seek on shorthand `node_id="__sim_cluster_0__"` via `allocate_target`
+    target_val = 4200.0
+    gs_res = allocate_target(
+        rec_ct,
+        target_total=target_val,
+        node_id="__sim_cluster_0__",
+        history_df=hier_panel,
+        cfg=cfg,
+        return_result=True,
+    )
+    assert isinstance(gs_res, GoalSeekResult)
+    assert gs_res.max_coherence_discrepancy < 1e-6
+    assert gs_res.max_target_discrepancy < 1e-6
+    assert float(gs_res.allocated_total) == pytest.approx(target_val, abs=1e-4)
+    c0_rows = gs_res.dataframe[gs_res.dataframe["ts_id"] == "similarity_cluster_id=cluster_0"]
+    assert float(c0_rows["allocated_yhat"].sum()) == pytest.approx(target_val, abs=1e-4)
+
+    # 5. Also verify via `Forecaster.allocate_target(node_id="__sim_cluster_0__")`
+    f = sf.Forecaster(cfg, data=panel)
+    gs_sdk_res = f.allocate_target(
+        target_val,
+        forecasts_df=rec_ct,
+        node_id="__sim_cluster_0__",
+        return_result=True,
+    )
+    assert isinstance(gs_sdk_res, GoalSeekResult)
+    assert gs_sdk_res.max_coherence_discrepancy < 1e-6
+    assert float(gs_sdk_res.allocated_total) == pytest.approx(target_val, abs=1e-4)
+
+
+def test_t4_scenario_7_low_stock_substitute_recommendation_and_cannibalization_optimization() -> (
+    None
+):
+    """Tier 4 Scenario 7 (F18a / F8): Low-Stock Assortment Substitute Recommendation +
+    Similarity-Weighted Cross-SKU Cannibalization in Prescriptive Scenario Optimization.
+
+    Tests `recommend_substitutes_df` (and `Forecaster.recommend_substitutes_df` /
+    `PlaygroundRun.recommend_substitutes_df`) with `inventory_df`, `require_in_stock=True`,
+    `within_hierarchy_level`, and all required columns (`query_ts_id`, `substitute_ts_id`,
+    `rank`, `substitution_score`, `similarity_score`, `semantic_sim`, `hierarchy_sim`,
+    `available_units`, `stock_status`, `substitution_rationale`), combined with
+    similarity-weighted cross-SKU cannibalization in
+    `optimize_scenario(..., use_similarity_priors=True)`.
+    """
+    from scale_forecasting.scenario_optimizer import optimize_scenario
+    from scale_forecasting.similarity import recommend_substitutes_df
+
+    panel = _make_phase2_multimodal_retail_panel()
+    inv_df = pd.DataFrame(
+        [
+            {"ts_id": "oat_milk_vanilla_64oz", "on_hand": 0.0, "safety_stock": 20.0},
+            {"ts_id": "oat_milk_orig_64oz", "on_hand": 140.0, "safety_stock": 25.0},
+            {"ts_id": "oat_milk_choco_64oz", "on_hand": 0.0, "safety_stock": 20.0},
+            {"ts_id": "almond_milk_64oz", "on_hand": 65.0, "safety_stock": 20.0},
+            {"ts_id": "greek_yogurt_32oz", "on_hand": 18.0, "safety_stock": 25.0},
+            {"ts_id": "ice_cream_gelato_16oz", "on_hand": 90.0, "safety_stock": 20.0},
+            {"ts_id": "sunscreen_lotion_spf50", "on_hand": 180.0, "safety_stock": 30.0},
+        ]
+    )
+
+    required_cols = {
+        "query_ts_id",
+        "substitute_ts_id",
+        "rank",
+        "substitution_score",
+        "similarity_score",
+        "semantic_sim",
+        "hierarchy_sim",
+        "available_units",
+        "stock_status",
+        "substitution_rationale",
+    }
+
+    # 1. Direct recommend_substitutes_df with inventory_df, require_in_stock=True, and
+    #    within_hierarchy_level="department"
+    subs_df = recommend_substitutes_df(
+        panel,
+        inv_df,
+        query_ts_id="oat_milk_vanilla_64oz",
+        top_k=5,
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="department",
+        require_in_stock=True,
+    )
+    assert required_cols.issubset(subs_df.columns)
+    assert not subs_df.empty
+    # Out-of-stock oat_milk_choco_64oz and cross-department items are excluded
+    sub_ids = set(subs_df["substitute_ts_id"].astype(str))
+    assert "oat_milk_choco_64oz" not in sub_ids
+    assert "sunscreen_lotion_spf50" not in sub_ids
+    assert "ice_cream_gelato_16oz" not in sub_ids
+    # In-stock Oat Milk Original ranks #1 with surplus stock
+    assert str(subs_df.iloc[0]["substitute_ts_id"]) == "oat_milk_orig_64oz"
+    assert int(subs_df.iloc[0]["rank"]) == 1
+    assert str(subs_df.iloc[0]["stock_status"]) == "in_stock_surplus"
+    assert float(subs_df.iloc[0]["available_units"]) == pytest.approx(115.0)
+    assert float(subs_df.iloc[0]["substitution_score"]) > 0.70
+    assert bool(subs_df.iloc[0]["substitution_rationale"])
+
+    # 2. Verify Forecaster.recommend_substitutes_df and PlaygroundRun.recommend_substitutes_df
+    cfg_sub = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-7-subs-and-cannib",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 7},
+            "models": ["naive_mean"],
+        }
+    )
+    f_sub = sf.Forecaster(cfg_sub, data=panel)
+    subs_sdk = f_sub.recommend_substitutes_df(
+        inventory_df=inv_df,
+        query_ts_id="oat_milk_vanilla_64oz",
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="department",
+        require_in_stock=True,
+    )
+    assert required_cols.issubset(subs_sdk.columns)
+    assert str(subs_sdk.iloc[0]["substitute_ts_id"]) == "oat_milk_orig_64oz"
+
+    pg_run = run_model("naive_mean", data=panel, horizon=7, backtest=False)
+    subs_pg = pg_run.recommend_substitutes_df(
+        inventory_df=inv_df,
+        query_ts_id="oat_milk_vanilla_64oz",
+        text_cols=["product_title"],
+        attribute_cols=["brand", "pack_size_oz", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="department",
+        require_in_stock=True,
+    )
+    assert required_cols.issubset(subs_pg.columns)
+    assert str(subs_pg.iloc[0]["substitute_ts_id"]) == "oat_milk_orig_64oz"
+
+    # 3. Combine with similarity-weighted cross-SKU cannibalization in optimize_scenario
+    hist_cannib, fut_cannib = _make_promo_cannibalization_twin_panel(
+        n_days=49, horizon=7, seed=4007
+    )
+    cfg_opt = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-7-cannib-opt",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 7},
+            "models": ["regression_lags@monotone"],
+            "features": {
+                "future_covariates": ["price", "promo"],
+                "monotonic_constraints": {"price": -1, "promo": 1},
+            },
+            "backtest": {"enabled": False},
+        }
+    )
+    scen_res = optimize_scenario(
+        hist_cannib,
+        config=cfg_opt,
+        future_covariates_df=fut_cannib,
+        objective="gross_profit",
+        price_col="price",
+        promo_col="promo",
+        unit_cost=4.0,
+        max_promo_days=2,
+        min_cooldown_days=2,
+        use_similarity_priors=True,
+        reconcile=False,
+    )
+    assert scen_res.optimal_objective_value >= scen_res.baseline_objective_value - 1e-6
+    assert "cannibalization_effect" in scen_res.schedule_df.columns
+    assert "total_cannibalization_effect" in scen_res.summary_df.columns
+    assert not scen_res.inventory_delta_df.empty
+
+
+def test_t4_scenario_8_emerging_trend_breakout_and_lead_lag_copromotion_sensing(
+    tmp_path: Path,
+) -> None:
+    """Tier 4 Scenario 8 (F18b / F19): Emerging Trend Breakout & Bellwether Lead-Lag
+    Co-Promotion Sensing across `detect_emerging_trends_df`, `Forecaster`, `PlaygroundRun`,
+    `export_report()`, and MCP `compute_time_series_similarity`.
+
+    Tests `detect_emerging_trends_df` (and `Forecaster.emerging_trends_df` /
+    `PlaygroundRun.emerging_trends_df`), `Forecaster.export_report()`, and MCP
+    `compute_time_series_similarity` (`mode="substitutes"`, `mode="emerging_trends"`,
+    `include_substitutes=True`, `include_emerging_trends=True`), verifying all required columns,
+    accelerating breakout leader detection, bellwether lead-lag shift recovery, and
+    `"co_promote_lagging_twin"` merchandising action.
+    """
+    from scale_forecasting.mcp import compute_time_series_similarity
+    from scale_forecasting.similarity import detect_emerging_trends_df
+
+    n_obs = 48
+    dates = pd.date_range("2025-01-01", periods=n_obs, freq="D")
+    t = np.arange(n_obs, dtype=float)
+    rng = np.random.default_rng(4008)
+
+    # Bellwether breakout leader: flat baseline until day 24, then steep quadratic acceleration
+    ramp_lead = np.maximum(0.0, t - 24.0)
+    y_leader = 35.0 + 1.9 * ramp_lead + 0.19 * (ramp_lead**2) + 2.0 * np.sin(2.0 * np.pi * t / 7.0)
+    # Lagging digital twin: follows leader_breakout with a 4-day lag
+    ramp_follow = np.maximum(0.0, (t - 4.0) - 24.0)
+    y_follower = (
+        35.0
+        + 1.9 * ramp_follow
+        + 0.19 * (ramp_follow**2)
+        + 2.0 * np.sin(2.0 * np.pi * (t - 4.0) / 7.0)
+    )
+    # Stable series
+    y_stable = 60.0 + 3.0 * np.sin(2.0 * np.pi * t / 7.0) + rng.normal(0.0, 0.4, size=n_obs)
+    # Declining clearance candidate
+    y_declining = np.maximum(5.0, 130.0 - 2.2 * t + rng.normal(0.0, 0.4, size=n_obs))
+
+    panel = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "ts_id": "sku_bellwether_leader",
+                    "ds": dates,
+                    "y": y_leader,
+                    "product_title": "Cold Brew Espresso Concentrate Vanilla 32oz Bottle",
+                    "department": "Beverages",
+                    "category": "Coffee",
+                    "brand": "RoastCraft",
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "ts_id": "sku_lagging_follower",
+                    "ds": dates,
+                    "y": y_follower,
+                    "product_title": "Cold Brew Espresso Concentrate Caramel 32oz Bottle",
+                    "department": "Beverages",
+                    "category": "Coffee",
+                    "brand": "RoastCraft",
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "ts_id": "sku_steady_staple",
+                    "ds": dates,
+                    "y": y_stable,
+                    "product_title": "Classic Medium Roast Ground Coffee 16oz Bag",
+                    "department": "Beverages",
+                    "category": "Coffee",
+                    "brand": "RoastCraft",
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "ts_id": "sku_declining_seasonal",
+                    "ds": dates,
+                    "y": y_declining,
+                    "product_title": "Holiday Peppermint Mocha Creamer 16oz Bottle",
+                    "department": "Beverages",
+                    "category": "Creamer",
+                    "brand": "FrostBrew",
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    required_cols = {
+        "ts_id",
+        "trend_score",
+        "trend_regime",
+        "recent_velocity",
+        "recent_acceleration",
+        "breakout_zscore",
+        "hurst_exp",
+        "similarity_cluster_id",
+        "leading_bellwether_ts_id",
+        "lag_behind_leader",
+        "co_promote_candidates",
+        "recommended_merchandising_action",
+    }
+
+    # 1. Direct detect_emerging_trends_df verification
+    trends_df = detect_emerging_trends_df(
+        panel,
+        window=14,
+        baseline_window=24,
+        top_k_related=3,
+        max_lag=7,
+        text_cols=["product_title"],
+        attribute_cols=["brand"],
+        hierarchy_cols=["department", "category"],
+    )
+    assert required_cols.issubset(trends_df.columns)
+    assert len(trends_df) == 4
+
+    by_id = trends_df.set_index("ts_id")
+    assert str(by_id.loc["sku_bellwether_leader", "trend_regime"]) == "accelerating_breakout"
+    assert float(by_id.loc["sku_bellwether_leader", "breakout_zscore"]) > 2.0
+    assert float(by_id.loc["sku_bellwether_leader", "recent_velocity"]) > 0.0
+    assert float(by_id.loc["sku_bellwether_leader", "recent_acceleration"]) > 0.0
+    assert "sku_lagging_follower" in str(
+        by_id.loc["sku_bellwether_leader", "co_promote_candidates"]
+    )
+
+    # Follower lags behind sku_bellwether_leader and receives "co_promote_lagging_twin"
+    assert (
+        str(by_id.loc["sku_lagging_follower", "leading_bellwether_ts_id"])
+        == "sku_bellwether_leader"
+    )
+    assert int(by_id.loc["sku_lagging_follower", "lag_behind_leader"]) > 0
+    assert (
+        str(by_id.loc["sku_lagging_follower", "recommended_merchandising_action"])
+        == "co_promote_lagging_twin"
+    )
+    assert str(by_id.loc["sku_declining_seasonal", "trend_regime"]) == "declining"
+    assert (
+        str(by_id.loc["sku_declining_seasonal", "recommended_merchandising_action"])
+        == "clearance_candidate"
+    )
+
+    # 2. Verify Forecaster.emerging_trends_df, PlaygroundRun.emerging_trends_df & export_report
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "t4-scen-8-emerging-trends",
+            "data": {"source_table": "p.d.t", "freq": "D", "horizon": 7},
+            "models": ["naive_mean"],
+        }
+    )
+    f = sf.Forecaster(cfg, data=panel)
+    f_trends = f.emerging_trends_df(
+        window=14,
+        max_lag=7,
+        text_cols=["product_title"],
+        attribute_cols=["brand"],
+        hierarchy_cols=["department", "category"],
+    )
+    assert required_cols.issubset(f_trends.columns)
+
+    pg_run = run_model("naive_mean", data=panel, horizon=7, backtest=False)
+    pg_trends = pg_run.emerging_trends_df(
+        window=14,
+        max_lag=7,
+        text_cols=["product_title"],
+        hierarchy_cols=["department", "category"],
+    )
+    assert required_cols.issubset(pg_trends.columns)
+
+    subs_df = f.recommend_substitutes_df(
+        query_ts_id="sku_bellwether_leader",
+        text_cols=["product_title"],
+        hierarchy_cols=["department", "category"],
+    )
+    rep_file = f.export_report(
+        tmp_path / "scen8_trends_report.html",
+        substitutes_df=subs_df,
+        emerging_trends_df=f_trends,
+    )
+    html_str = rep_file.read_text(encoding="utf-8")
+    assert "Emerging Trends &amp; Breakout Detection" in html_str
+    assert "SKU Substitute &amp; Cannibalization Recommendations" in html_str
+    assert "co_promote_lagging_twin" in html_str
+
+    pg_rep_file = pg_run.export_report(
+        tmp_path / "scen8_pg_trends_report.html",
+        substitutes_df=subs_df,
+        emerging_trends_df=pg_trends,
+    )
+    pg_html_str = pg_rep_file.read_text(encoding="utf-8")
+    assert "SKU Substitute &amp; Cannibalization Recommendations" in pg_html_str
+    assert "co_promote_lagging_twin" in pg_html_str
+
+    # 3. Verify MCP compute_time_series_similarity across mode="substitutes",
+    #    mode="emerging_trends", include_substitutes=True, and include_emerging_trends=True
+    records = panel.assign(ds=panel["ds"].dt.strftime("%Y-%m-%d")).to_dict(orient="records")
+    inv_records = [
+        {"ts_id": "sku_bellwether_leader", "on_hand": 0.0, "safety_stock": 15.0},
+        {"ts_id": "sku_lagging_follower", "on_hand": 120.0, "safety_stock": 20.0},
+        {"ts_id": "sku_steady_staple", "on_hand": 80.0, "safety_stock": 15.0},
+        {"ts_id": "sku_declining_seasonal", "on_hand": 40.0, "safety_stock": 10.0},
+    ]
+
+    mcp_subs = compute_time_series_similarity(
+        records=records,
+        mode="substitutes",
+        query_ts_id="sku_bellwether_leader",
+        text_cols=["product_title"],
+        attribute_cols=["brand"],
+        hierarchy_cols=["department", "category"],
+        within_hierarchy_level="category",
+        inventory_records=inv_records,
+        require_in_stock=True,
+    )
+    assert mcp_subs["status"] == "ok"
+    assert "substitutes" in mcp_subs and len(mcp_subs["substitutes"]) >= 1
+    assert mcp_subs["substitutes"][0]["substitute_ts_id"] == "sku_lagging_follower"
+
+    mcp_trends = compute_time_series_similarity(
+        records=records,
+        mode="emerging_trends",
+        window=14,
+        max_lag=7,
+        text_cols=["product_title"],
+        attribute_cols=["brand"],
+        hierarchy_cols=["department", "category"],
+        include_substitutes=True,
+        include_emerging_trends=True,
+        inventory_records=inv_records,
+    )
+    assert mcp_trends["status"] == "ok"
+    assert "substitutes" in mcp_trends and len(mcp_trends["substitutes"]) >= 1
+    assert "emerging_trends" in mcp_trends and len(mcp_trends["emerging_trends"]) == 4
+    trend_map = {row["ts_id"]: row for row in mcp_trends["emerging_trends"]}
+    assert trend_map["sku_bellwether_leader"]["trend_regime"] == "accelerating_breakout"
+    assert (
+        trend_map["sku_lagging_follower"]["recommended_merchandising_action"]
+        == "co_promote_lagging_twin"
+    )
+
+    # Also verify via JSON-RPC McpServer tool call
+    srv = McpServer()
+    rpc_resp = srv.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 808,
+            "method": "tools/call",
+            "params": {
+                "name": "compute_time_series_similarity",
+                "arguments": {
+                    "records": records,
+                    "mode": "emerging_trends",
+                    "window": 14,
+                    "max_lag": 7,
+                    "include_substitutes": True,
+                    "include_emerging_trends": True,
+                    "text_cols": ["product_title"],
+                    "hierarchy_cols": ["department", "category"],
+                },
+            },
+        }
+    )
+    assert rpc_resp is not None and "result" in rpc_resp
+    assert rpc_resp["result"]["isError"] is False
 
 
 def test_adv_all_lenses_extreme_scale_nan_inf_and_lead_lag_antisymmetry() -> None:

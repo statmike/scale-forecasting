@@ -38,6 +38,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -329,6 +330,464 @@ def _distances_to_rbf_similarity(dist_mat: np.ndarray) -> np.ndarray:
     sim = np.exp(-d / (scale * 1.25))
     np.fill_diagonal(sim, 1.0)
     return _project_to_psd_similarity(sim)
+
+
+# ---------------------------------------------------------------------------
+# Multi-Modal Semantic Text, Product Attribute & Hierarchy LCA Proximity
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TEXT_CANDIDATE_COLS: tuple[str, ...] = (
+    "item_description",
+    "product_title",
+    "description",
+    "title",
+    "product_name",
+    "item_name",
+    "tags",
+)
+_DEFAULT_ATTR_CANDIDATE_COLS: tuple[str, ...] = (
+    "brand",
+    "pack_size",
+    "size",
+    "price_tier",
+    "perishable",
+    "flavor",
+    "color",
+    "material",
+    "segment",
+)
+_DEFAULT_HIER_CANDIDATE_COLS: tuple[str, ...] = (
+    "department",
+    "category",
+    "subcategory",
+    "class",
+    "subclass",
+    "aisle",
+)
+_WORD_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+
+
+def _normalize_col_list(
+    cols: Sequence[str] | str | None,
+    available_cols: Sequence[str],
+) -> list[str]:
+    """Normalize a column name or sequence into a deduplicated list in ``available_cols``."""
+    if cols is None:
+        return []
+    raw_list = [cols] if isinstance(cols, str) else [str(c) for c in cols]
+    avail_set = set(available_cols)
+    out: list[str] = []
+    for c in raw_list:
+        if c in avail_set and c not in out:
+            out.append(c)
+    return out
+
+
+def _extract_series_metadata(
+    panel_df: pd.DataFrame | Mapping[str, Any] | None,
+    series_ids: Sequence[str],
+    *,
+    cfg: RunConfig | None = None,
+    ts_id_col: str = "ts_id",
+) -> pd.DataFrame:
+    """Extract a single metadata row per ``ts_id`` indexed in ``series_ids`` order."""
+    if (
+        panel_df is None
+        or not isinstance(panel_df, pd.DataFrame)
+        or panel_df.empty
+        or len(series_ids) == 0
+    ):
+        return pd.DataFrame(index=pd.Index(list(series_ids), name="ts_id"))
+
+    eff_ts_col = ts_id_col
+    if cfg is not None and ts_id_col == "ts_id" and cfg.data.ts_id_col in panel_df.columns:
+        eff_ts_col = cfg.data.ts_id_col
+    if eff_ts_col not in panel_df.columns:
+        return pd.DataFrame(index=pd.Index(list(series_ids), name="ts_id"))
+
+    meta_cols = [c for c in panel_df.columns if c != eff_ts_col]
+    if not meta_cols:
+        return pd.DataFrame(index=pd.Index(list(series_ids), name="ts_id"))
+
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    for raw_id, grp in panel_df.groupby(eff_ts_col, sort=False):
+        sid = str(raw_id)
+        row_dict: dict[str, Any] = {}
+        for col in meta_cols:
+            non_na = grp[col].dropna()
+            row_dict[col] = non_na.iloc[0] if not non_na.empty else None
+        rows_by_id[sid] = row_dict
+
+    ordered_rows = [rows_by_id.get(sid, dict.fromkeys(meta_cols)) for sid in series_ids]
+    return pd.DataFrame(ordered_rows, index=pd.Index(list(series_ids), name="ts_id"))
+
+
+def _count_valid_panel_obs(
+    panel_df: pd.DataFrame | Mapping[str, Any] | None,
+    series_ids: Sequence[str],
+    *,
+    cfg: RunConfig | None = None,
+    ts_id_col: str = "ts_id",
+    target_col: str = "y",
+) -> dict[str, int]:
+    """Count the number of finite target observations per series in the raw panel."""
+    counts = {str(sid): 2 for sid in series_ids}
+    if panel_df is None:
+        return counts
+    if isinstance(panel_df, Mapping) and not isinstance(panel_df, pd.DataFrame):
+        for k, v in panel_df.items():
+            arr = np.asarray(v, dtype=np.float64).reshape(-1)
+            counts[str(k)] = int(np.count_nonzero(np.isfinite(arr)))
+        return counts
+    if panel_df.empty:
+        return counts
+
+    eff_ts_col = ts_id_col
+    eff_target_col = target_col
+    if cfg is not None:
+        if ts_id_col == "ts_id" and cfg.data.ts_id_col in panel_df.columns:
+            eff_ts_col = cfg.data.ts_id_col
+        if target_col == "y" and cfg.data.target_col in panel_df.columns:
+            eff_target_col = cfg.data.target_col
+    if eff_target_col not in panel_df.columns:
+        for fallback in ("y", "yhat", "value", "target"):
+            if fallback in panel_df.columns:
+                eff_target_col = fallback
+                break
+        else:
+            return counts
+    if eff_ts_col not in panel_df.columns:
+        vals = pd.to_numeric(panel_df[eff_target_col], errors="coerce").to_numpy(dtype=np.float64)
+        for sid in series_ids:
+            counts[str(sid)] = int(np.count_nonzero(np.isfinite(vals)))
+        return counts
+
+    for raw_id, grp in panel_df.groupby(eff_ts_col, sort=False):
+        sid = str(raw_id)
+        if sid in counts:
+            vals = pd.to_numeric(grp[eff_target_col], errors="coerce").to_numpy(dtype=np.float64)
+            counts[sid] = int(np.count_nonzero(np.isfinite(vals)))
+    return counts
+
+
+def _compute_text_ngram_lsa_similarity(texts: Sequence[str]) -> np.ndarray:
+    """Compute word 1-2 gram + character 3-4 gram sublinear TF-IDF + truncated SVD LSA cosine
+    similarity in :math:`[0, 1]`."""
+    n = len(texts)
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    if n == 1:
+        return np.ones((1, 1), dtype=np.float64)
+
+    doc_tokens: list[dict[str, float]] = []
+    vocab_index: dict[str, int] = {}
+
+    for raw_text in texts:
+        words = _WORD_TOKEN_PATTERN.findall(str(raw_text or "").lower())
+        counts: dict[str, float] = {}
+        for w in words:
+            tok_w1 = f"w1:{w}"
+            counts[tok_w1] = counts.get(tok_w1, 0.0) + 1.0
+            padded = f"#{w}#"
+            plen = len(padded)
+            for k in range(max(0, plen - 2)):
+                c3 = f"c3:{padded[k : k + 3]}"
+                counts[c3] = counts.get(c3, 0.0) + 0.35
+            for k in range(max(0, plen - 3)):
+                c4 = f"c4:{padded[k : k + 4]}"
+                counts[c4] = counts.get(c4, 0.0) + 0.50
+        for idx in range(len(words) - 1):
+            tok_w2 = f"w2:{words[idx]}_{words[idx + 1]}"
+            counts[tok_w2] = counts.get(tok_w2, 0.0) + 1.25
+        for tok in counts:
+            if tok not in vocab_index:
+                vocab_index[tok] = len(vocab_index)
+        doc_tokens.append(counts)
+
+    v_size = len(vocab_index)
+    if v_size == 0:
+        return np.eye(n, dtype=np.float64)
+
+    tf_mat = np.zeros((n, v_size), dtype=np.float64)
+    for i, counts in enumerate(doc_tokens):
+        for tok, cnt in counts.items():
+            if cnt > 0.0:
+                tf_mat[i, vocab_index[tok]] = 1.0 + math.log(1.0 + cnt)
+
+    df_vec = np.count_nonzero(tf_mat > 0.0, axis=0).astype(np.float64)
+    idf_vec = np.log((1.0 + float(n)) / (1.0 + df_vec)) + 1.0
+    tfidf = tf_mat * idf_vec[None, :]
+    row_norms = np.linalg.norm(tfidf, axis=1, keepdims=True)
+    tfidf_norm = np.where(row_norms > 1e-12, tfidf / np.maximum(row_norms, 1e-12), 0.0)
+
+    sim_tfidf = np.clip(tfidf_norm @ tfidf_norm.T, 0.0, 1.0)
+    np.fill_diagonal(sim_tfidf, 1.0)
+
+    if min(n, v_size) >= 3:
+        try:
+            u_mat, s_vals, _ = np.linalg.svd(tfidf_norm, full_matrices=False)
+            k_dim = min(16, max(2, n - 1), s_vals.size)
+            lsa_proj = u_mat[:, :k_dim] * s_vals[:k_dim]
+            lsa_norms = np.linalg.norm(lsa_proj, axis=1, keepdims=True)
+            lsa_unit = np.where(lsa_norms > 1e-12, lsa_proj / np.maximum(lsa_norms, 1e-12), 0.0)
+            sim_lsa = np.clip(lsa_unit @ lsa_unit.T, 0.0, 1.0)
+            # Gate LSA by lexical/subword overlap so completely disjoint texts stay near 0.0
+            gate = np.clip(sim_tfidf / 0.12, 0.0, 1.0)
+            sim_text = 0.70 * sim_tfidf + 0.30 * (sim_lsa * gate)
+        except np.linalg.LinAlgError:
+            sim_text = sim_tfidf
+    else:
+        sim_text = sim_tfidf
+
+    sim_text = np.clip(0.5 * (sim_text + sim_text.T), 0.0, 1.0)
+    np.fill_diagonal(sim_text, 1.0)
+    return sim_text
+
+
+def _compute_embedding_col_similarity(
+    meta_df: pd.DataFrame,
+    embedding_col: str | None,
+) -> tuple[np.ndarray, bool]:
+    """Parse a precomputed/LLM vector column and return its cosine similarity matrix."""
+    n = len(meta_df)
+    if embedding_col is None or embedding_col not in meta_df.columns or n == 0:
+        return np.eye(n, dtype=np.float64), False
+
+    parsed_vecs: list[np.ndarray | None] = []
+    max_dim = 0
+    for val in meta_df[embedding_col].tolist():
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            parsed_vecs.append(None)
+            continue
+        try:
+            if isinstance(val, str):
+                s_val = val.strip()
+                arr_raw = (
+                    json.loads(s_val)
+                    if s_val.startswith("[")
+                    else [float(x) for x in s_val.replace(",", " ").split() if x.strip()]
+                )
+                vec = np.asarray(arr_raw, dtype=np.float64).reshape(-1)
+            else:
+                vec = np.asarray(val, dtype=np.float64).reshape(-1)
+            if vec.size > 0 and np.all(np.isfinite(vec)):
+                parsed_vecs.append(vec)
+                max_dim = max(max_dim, int(vec.size))
+            else:
+                parsed_vecs.append(None)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            parsed_vecs.append(None)
+
+    if max_dim == 0 or all(v is None for v in parsed_vecs):
+        return np.eye(n, dtype=np.float64), False
+
+    emb_mat = np.zeros((n, max_dim), dtype=np.float64)
+    for idx, parsed_v in enumerate(parsed_vecs):
+        if parsed_v is not None:
+            emb_mat[idx, : parsed_v.size] = parsed_v
+    norms = np.linalg.norm(emb_mat, axis=1, keepdims=True)
+    unit_emb = np.where(norms > 1e-12, emb_mat / np.maximum(norms, 1e-12), 0.0)
+    sim_emb = np.clip(unit_emb @ unit_emb.T, 0.0, 1.0)
+    np.fill_diagonal(sim_emb, 1.0)
+    return sim_emb, True
+
+
+def _compute_attribute_gower_similarity(
+    meta_df: pd.DataFrame,
+    attr_cols: Sequence[str],
+) -> tuple[np.ndarray, bool]:
+    """Compute mixed numeric range-normalized + categorical/multi-token Jaccard Gower similarity."""
+    n = len(meta_df)
+    eff_cols = [c for c in attr_cols if c in meta_df.columns]
+    if not eff_cols or n == 0:
+        return np.eye(n, dtype=np.float64), False
+
+    col_sims: list[np.ndarray] = []
+    for col in eff_cols:
+        series_col = meta_df[col]
+        non_na = series_col.dropna()
+        if non_na.empty:
+            continue
+
+        is_bool = pd.api.types.is_bool_dtype(series_col) or all(
+            isinstance(x, (bool, np.bool_)) for x in non_na.tolist()
+        )
+        num_conv = pd.to_numeric(series_col, errors="coerce")
+        is_numeric = (not is_bool) and int(num_conv.notna().sum()) == len(non_na)
+
+        c_mat = np.zeros((n, n), dtype=np.float64)
+        if is_numeric:
+            vals = num_conv.to_numpy(dtype=np.float64)
+            finite = np.isfinite(vals)
+            v_min = float(np.nanmin(vals)) if np.any(finite) else 0.0
+            v_max = float(np.nanmax(vals)) if np.any(finite) else 0.0
+            v_range = v_max - v_min
+            for i in range(n):
+                c_mat[i, i] = 1.0
+                for j in range(i + 1, n):
+                    if not (finite[i] and finite[j]):
+                        s_ij = 0.0
+                    elif v_range > 1e-12:
+                        s_ij = float(np.clip(1.0 - abs(vals[i] - vals[j]) / v_range, 0.0, 1.0))
+                    else:
+                        s_ij = 1.0
+                    c_mat[i, j] = c_mat[j, i] = s_ij
+        else:
+            raw_list = series_col.tolist()
+            for i in range(n):
+                c_mat[i, i] = 1.0
+                vi = raw_list[i]
+                for j in range(i + 1, n):
+                    vj = raw_list[j]
+                    if vi is None or vj is None or pd.isna(vi) or pd.isna(vj):
+                        s_ij = 0.0
+                    else:
+                        si = str(vi).strip().lower()
+                        sj = str(vj).strip().lower()
+                        if si == sj:
+                            s_ij = 1.0
+                        else:
+                            ti = set(_WORD_TOKEN_PATTERN.findall(si))
+                            tj = set(_WORD_TOKEN_PATTERN.findall(sj))
+                            if len(ti) > 1 or len(tj) > 1:
+                                union_len = len(ti | tj)
+                                s_ij = (
+                                    float(len(ti & tj)) / float(union_len) if union_len > 0 else 0.0
+                                )
+                            else:
+                                s_ij = 0.0
+                    c_mat[i, j] = c_mat[j, i] = s_ij
+        col_sims.append(c_mat)
+
+    if not col_sims:
+        return np.eye(n, dtype=np.float64), False
+
+    avg_sim = np.mean(np.stack(col_sims, axis=0), axis=0)
+    avg_sim = np.clip(0.5 * (avg_sim + avg_sim.T), 0.0, 1.0)
+    np.fill_diagonal(avg_sim, 1.0)
+    return avg_sim, True
+
+
+def _compute_semantic_similarity_matrix(
+    series_ids: Sequence[str],
+    meta_df: pd.DataFrame,
+    *,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | str | None = None,
+) -> tuple[np.ndarray, bool]:
+    """Compute fused semantic similarity :math:`\\mathbf{S}_{\\text{sem}} \\in [0, 1]^{N \\times N}`
+    across ``text_cols``, ``embedding_col``, and ``attribute_cols``."""
+    n = len(series_ids)
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64), False
+    if meta_df.empty:
+        return np.eye(n, dtype=np.float64), False
+
+    eff_text_cols = _normalize_col_list(text_cols, list(meta_df.columns))
+    eff_attr_cols = _normalize_col_list(attribute_cols, list(meta_df.columns))
+
+    weighted_mats: list[tuple[float, np.ndarray]] = []
+    if eff_text_cols:
+        texts: list[str] = []
+        for sid in series_ids:
+            parts: list[str] = []
+            for col in eff_text_cols:
+                val = meta_df.loc[sid, col] if sid in meta_df.index else None
+                if val is not None and not pd.isna(val) and str(val).strip():
+                    parts.append(str(val).strip())
+            texts.append(" ".join(parts))
+        if any(bool(t) for t in texts):
+            s_text = _compute_text_ngram_lsa_similarity(texts)
+            weighted_mats.append((0.65, s_text))
+
+    s_emb, has_emb = _compute_embedding_col_similarity(meta_df, embedding_col)
+    if has_emb:
+        weighted_mats.append((0.50, s_emb))
+
+    if eff_attr_cols:
+        s_attr, has_attr = _compute_attribute_gower_similarity(meta_df, eff_attr_cols)
+        if has_attr:
+            weighted_mats.append((0.35, s_attr))
+
+    if not weighted_mats:
+        return np.eye(n, dtype=np.float64), False
+
+    w_total = sum(w for w, _ in weighted_mats)
+    fused_sem = np.zeros((n, n), dtype=np.float64)
+    for w, mat in weighted_mats:
+        fused_sem = fused_sem + w * mat
+    fused_sem = fused_sem / max(w_total, 1e-9)
+    return _project_to_psd_similarity(fused_sem), True
+
+
+def _compute_hierarchy_lca_matrix(
+    series_ids: Sequence[str],
+    meta_df: pd.DataFrame,
+    *,
+    hierarchy_cols: Sequence[str] | str | None = None,
+    cfg: RunConfig | None = None,
+) -> tuple[np.ndarray, bool]:
+    """Compute Wu-Palmer Lowest Common Ancestor (``LCA``) tree proximity
+    :math:`S_{\\text{hier}}(i, j) = 2 \\cdot \\text{depth}(\\text{LCA}) /`
+    :math:`(\\text{depth}(i) + \\text{depth}(j))`."""
+    n = len(series_ids)
+    if n == 0:
+        return np.zeros((0, 0), dtype=np.float64), False
+    if meta_df.empty:
+        return np.eye(n, dtype=np.float64), False
+
+    raw_hier: list[str] = []
+    if hierarchy_cols is not None:
+        raw_hier = (
+            [hierarchy_cols]
+            if isinstance(hierarchy_cols, str)
+            else [str(c) for c in hierarchy_cols]
+        )
+    elif cfg is not None and cfg.hierarchy.levels:
+        for lvl in cfg.hierarchy.levels:
+            for c in lvl:
+                if c not in raw_hier:
+                    raw_hier.append(str(c))
+
+    eff_hier_cols = _normalize_col_list(raw_hier, list(meta_df.columns))
+    if not eff_hier_cols:
+        return np.eye(n, dtype=np.float64), False
+
+    paths: list[list[str]] = []
+    for sid in series_ids:
+        path_i: list[str] = []
+        for col in eff_hier_cols:
+            val = meta_df.loc[sid, col] if sid in meta_df.index else None
+            if val is not None and not pd.isna(val) and str(val).strip():
+                path_i.append(str(val).strip().lower())
+            else:
+                break
+        paths.append(path_i)
+
+    if all(len(p) == 0 for p in paths):
+        return np.eye(n, dtype=np.float64), False
+
+    hier_mat = np.eye(n, dtype=np.float64)
+    for i in range(n):
+        pi = paths[i]
+        di = len(pi)
+        for j in range(i + 1, n):
+            pj = paths[j]
+            dj = len(pj)
+            if di == 0 or dj == 0:
+                s_ij = 0.0
+            else:
+                lca_depth = 0
+                for va, vb in zip(pi, pj, strict=False):
+                    if va == vb:
+                        lca_depth += 1
+                    else:
+                        break
+                s_ij = (2.0 * float(lca_depth)) / float(di + dj)
+            hier_mat[i, j] = hier_mat[j, i] = s_ij
+
+    return _project_to_psd_similarity(hier_mat), True
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1733,13 @@ def embed_series_df(
     cfg: RunConfig | None = None,
     method: str = "hybrid",
     n_components: int = 2,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    semantic_weight: float | Literal["auto"] = "auto",
+    hierarchy_weight: float | Literal["auto"] = "auto",
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
     target_col: str = "y",
@@ -1296,6 +1762,13 @@ def embed_series_df(
         cfg=cfg,
         method=canon_method,
         n_components=n_components,
+        text_cols=text_cols,
+        embedding_col=embedding_col,
+        attribute_cols=attribute_cols,
+        hierarchy_cols=hierarchy_cols,
+        within_hierarchy_level=within_hierarchy_level,
+        semantic_weight=semantic_weight,
+        hierarchy_weight=hierarchy_weight,
         ts_id_col=ts_id_col,
         date_col=date_col,
         target_col=target_col,
@@ -1320,6 +1793,13 @@ def compute_similarity_matrix(
     spring_stiffness: float = 0.05,
     window_frac: float = 0.15,
     n_components: int = 2,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    semantic_weight: float | Literal["auto"] = "auto",
+    hierarchy_weight: float | Literal["auto"] = "auto",
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
     target_col: str = "y",
@@ -1330,6 +1810,10 @@ def compute_similarity_matrix(
     """Compute the symmetric PSD similarity matrix, ranked digital-twin pairs, and per-series
     physical/econometric embeddings across a time-series panel."""
     canon_method = _resolve_similarity_method(method)
+    metadata_source_df = kwargs.pop("_metadata_df", None)
+    meta_ts_id_col = str(kwargs.pop("_metadata_ts_id_col", ts_id_col))
+    meta_target_col = str(kwargs.pop("_metadata_target_col", target_col))
+
     series_ids, series_map = _extract_panel_series(
         panel_df, cfg=cfg, ts_id_col=ts_id_col, date_col=date_col, target_col=target_col
     )
@@ -1370,6 +1854,8 @@ def compute_similarity_matrix(
         "spectral_sim",
         "shape_sim",
         "structural_sim",
+        "semantic_sim",
+        "hierarchy_sim",
         "optimal_lag",
         "lag_correlation",
         "method",
@@ -1382,6 +1868,36 @@ def compute_similarity_matrix(
             method=canon_method,
             diagnostics={"n_series": 0, "method": canon_method},
         )
+
+    eff_meta_panel = metadata_source_df if metadata_source_df is not None else panel_df
+    meta_df = _extract_series_metadata(
+        eff_meta_panel, series_ids, cfg=cfg, ts_id_col=meta_ts_id_col
+    )
+    valid_obs_counts = _count_valid_panel_obs(
+        eff_meta_panel,
+        series_ids,
+        cfg=cfg,
+        ts_id_col=meta_ts_id_col,
+        target_col=meta_target_col,
+    )
+
+    sem_mat, has_sem = _compute_semantic_similarity_matrix(
+        series_ids,
+        meta_df,
+        text_cols=text_cols,
+        embedding_col=embedding_col,
+        attribute_cols=attribute_cols,
+    )
+    hier_mat, has_hier = _compute_hierarchy_lca_matrix(
+        series_ids,
+        meta_df,
+        hierarchy_cols=hierarchy_cols,
+        cfg=cfg,
+    )
+    if not has_sem and n > 1:
+        sem_mat = np.eye(n, dtype=np.float64)
+    if not has_hier and n > 1:
+        hier_mat = np.eye(n, dtype=np.float64)
 
     # Always compute the core component lenses so per-lens attributions and invariants are populated
     phys_mat, phys_inv = _compute_physics_attractor_matrix(series_ids, series_map)
@@ -1471,6 +1987,54 @@ def compute_similarity_matrix(
         ) / w_sum
         final_mat = _project_to_psd_similarity(fused)
 
+    if has_sem or has_hier:
+        if not has_sem:
+            w_sem = 0.0
+        elif semantic_weight == "auto":
+            w_sem = 0.30 if has_hier else 0.40
+        else:
+            w_sem = max(0.0, float(semantic_weight))
+
+        if not has_hier:
+            w_hier = 0.0
+        elif hierarchy_weight == "auto":
+            w_hier = 0.25 if has_sem else 0.35
+        else:
+            w_hier = max(0.0, float(hierarchy_weight))
+
+        w_meta = w_sem + w_hier
+        if w_meta > 0.0 and n > 1:
+            if w_meta >= 0.85:
+                w_behav = max(0.15, 1.0 - min(0.85, w_meta))
+                scale_m = (1.0 - w_behav) / w_meta
+                eff_w_sem = w_sem * scale_m
+                eff_w_hier = w_hier * scale_m
+            else:
+                w_behav = 1.0 - w_meta
+                eff_w_sem = w_sem
+                eff_w_hier = w_hier
+
+            meta_combined = (w_sem * sem_mat + w_hier * hier_mat) / max(w_meta, 1e-9)
+            behav_adjusted = final_mat.copy()
+            if has_sem and has_hier:
+                # Damp coincidental seasonal correlation when both semantic & hierarchy are disjoint
+                low_meta_gate = np.clip(meta_combined / 0.12, 0.35, 1.0)
+                np.fill_diagonal(low_meta_gate, 1.0)
+                behav_adjusted = behav_adjusted * low_meta_gate
+
+            retail_fused = w_behav * behav_adjusted + eff_w_sem * sem_mat + eff_w_hier * hier_mat
+            # For pre-launch / < 2 observation SKUs, drive similarity purely from metadata
+            for i_idx, sid in enumerate(series_ids):
+                if valid_obs_counts.get(sid, 2) < 2:
+                    for j_idx in range(n):
+                        if i_idx != j_idx:
+                            m_val = float(meta_combined[i_idx, j_idx])
+                            retail_fused[i_idx, j_idx] = m_val
+                            retail_fused[j_idx, i_idx] = m_val
+            final_mat = _project_to_psd_similarity(retail_fused)
+
+    within_cols = _normalize_col_list(within_hierarchy_level, list(meta_df.columns))
+
     coords = _spectral_2d_coords(final_mat, n_components=max(2, n_components))
 
     embed_rows: list[dict[str, Any]] = []
@@ -1519,6 +2083,15 @@ def compute_similarity_matrix(
         for j in range(n):
             if i == j:
                 continue
+            if within_cols:
+                sid_b_cand = series_ids[j]
+                same_scope = all(
+                    str(meta_df.loc[sid_a, c]).strip().lower()
+                    == str(meta_df.loc[sid_b_cand, c]).strip().lower()
+                    for c in within_cols
+                )
+                if not same_scope:
+                    continue
             candidates.append((float(final_mat[i, j]), j))
         candidates.sort(key=lambda item: (-item[0], series_ids[item[1]]))
         for rank_idx, (score, j) in enumerate(candidates[:eff_k], start=1):
@@ -1538,6 +2111,8 @@ def compute_similarity_matrix(
                     "spectral_sim": round(float(spec_mat[i, j]), 6),
                     "shape_sim": round(float(shape_mat[i, j]), 6),
                     "structural_sim": round(float(st_mat[i, j]), 6),
+                    "semantic_sim": round(float(sem_mat[i, j]), 6),
+                    "hierarchy_sim": round(float(hier_mat[i, j]), 6),
                     "optimal_lag": int(lag_mat[i, j]),
                     "lag_correlation": round(float(corr_mat[i, j]), 6),
                     "method": canon_method,
@@ -1554,6 +2129,8 @@ def compute_similarity_matrix(
         "min_eigenvalue": min_eig,
         "is_psd": bool(min_eig >= -1e-7),
         "embedding_backend_used": backend_used,
+        "has_semantic_similarity": has_sem,
+        "has_hierarchy_similarity": has_hier,
     }
     return SimilarityMatrixResult(
         matrix_df=matrix_df,
@@ -1672,6 +2249,13 @@ def cluster_by_similarity_df(
     method: str = "hybrid",
     min_cluster_size: int = 2,
     max_clusters: int = 8,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    semantic_weight: float | Literal["auto"] = "auto",
+    hierarchy_weight: float | Literal["auto"] = "auto",
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
     target_col: str = "y",
@@ -1703,6 +2287,13 @@ def cluster_by_similarity_df(
             panel_df,
             cfg=cfg,
             method=method,
+            text_cols=text_cols,
+            embedding_col=embedding_col,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            semantic_weight=semantic_weight,
+            hierarchy_weight=hierarchy_weight,
             ts_id_col=ts_id_col,
             date_col=date_col,
             target_col=target_col,
@@ -1867,6 +2458,13 @@ def find_similar_series_df(
     prefix_len: int | None = None,
     window: int | None = None,
     max_lag: int = 0,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    semantic_weight: float | Literal["auto"] = "auto",
+    hierarchy_weight: float | Literal["auto"] = "auto",
     cfg: RunConfig | None = None,
     ts_id_col: str = "ts_id",
     date_col: str = "ds",
@@ -1891,6 +2489,8 @@ def find_similar_series_df(
         "spectral_sim",
         "shape_sim",
         "structural_sim",
+        "semantic_sim",
+        "hierarchy_sim",
         "optimal_lag",
         "lag_correlation",
         "scale_ratio",
@@ -1910,6 +2510,12 @@ def find_similar_series_df(
         raise ValueError(
             f"query_ts_id {query_ts_id!r} not found in panel series {series_ids[:10]}."
         )
+
+    meta_df = _extract_series_metadata(panel_df, series_ids, cfg=cfg, ts_id_col=ts_id_col)
+    valid_obs_counts = _count_valid_panel_obs(
+        panel_df, series_ids, cfg=cfg, ts_id_col=ts_id_col, target_col=target_col
+    )
+    within_cols = _normalize_col_list(within_hierarchy_level, list(meta_df.columns))
 
     # Slice series according to matching mode before computing similarity
     sliced_rows: list[dict[str, Any]] = []
@@ -1951,12 +2557,23 @@ def find_similar_series_df(
     sliced_df = pd.DataFrame(sliced_rows)
     sim_res = compute_similarity_matrix(
         sliced_df,
+        cfg=cfg,
         method=canon_method,
         top_k=len(series_ids),
         max_lag=max_lag,
+        text_cols=text_cols,
+        embedding_col=embedding_col,
+        attribute_cols=attribute_cols,
+        hierarchy_cols=hierarchy_cols,
+        within_hierarchy_level=within_hierarchy_level,
+        semantic_weight=semantic_weight,
+        hierarchy_weight=hierarchy_weight,
         ts_id_col="ts_id",
         date_col="ds",
         target_col="y",
+        _metadata_df=panel_df,
+        _metadata_ts_id_col=ts_id_col,
+        _metadata_target_col=target_col,
         **kwargs,
     )
 
@@ -1973,19 +2590,28 @@ def find_similar_series_df(
     result_rows: list[dict[str, Any]] = []
     for q_id in queries:
         ya = sliced_map[q_id]
+        q_obs = valid_obs_counts.get(q_id, int(ya.size))
         scored_neighbors: list[tuple[float, str, dict[str, Any]]] = []
         for n_id in series_ids:
             if n_id == q_id:
                 continue
             if cand_set is not None and n_id not in cand_set:
                 continue
+            if within_cols:
+                same_scope = all(
+                    str(meta_df.loc[q_id, c]).strip().lower()
+                    == str(meta_df.loc[n_id, c]).strip().lower()
+                    for c in within_cols
+                )
+                if not same_scope:
+                    continue
             p_info = pairs_lookup.get((q_id, n_id))
             if p_info is None:
                 continue
             yb = sliced_map[n_id]
             scale_r, lvl_off, vel_sim, acc_sim = _kinematic_velocity_acceleration_sim(ya, yb)
             base_sim = float(p_info["similarity_score"])
-            if canon_mode == "launch_prefix" and min(ya.size, yb.size) >= 2:
+            if canon_mode == "launch_prefix" and min(ya.size, yb.size) >= 2 and q_obs >= 2:
                 # Blend prefix shape similarity with initial kinematic velocity & acceleration
                 z_a, _, _, flat_a = _zscore(ya)
                 z_b, _, _, flat_b = _zscore(yb[: ya.size])
@@ -2032,6 +2658,8 @@ def find_similar_series_df(
                     "spectral_sim": info["spectral_sim"],
                     "shape_sim": info["shape_sim"],
                     "structural_sim": info["structural_sim"],
+                    "semantic_sim": info["semantic_sim"],
+                    "hierarchy_sim": info["hierarchy_sim"],
                     "optimal_lag": info["optimal_lag"],
                     "lag_correlation": info["lag_correlation"],
                     "scale_ratio": info["scale_ratio"],
@@ -2151,3 +2779,663 @@ def plot_similarity_map(
         plt.colorbar(im, ax=ax_heat, fraction=0.046, pad=0.04)
 
     return ax_scatter
+
+
+# ---------------------------------------------------------------------------
+# Public Function 6: recommend_substitutes_df (Retail Assortment Substitution)
+# ---------------------------------------------------------------------------
+
+
+def _extract_inventory_snapshot(
+    panel_df: pd.DataFrame,
+    inventory_df: pd.DataFrame | None,
+    series_ids: Sequence[str],
+    series_map: Mapping[str, np.ndarray],
+    *,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    on_hand_col: str = "on_hand",
+    safety_stock_col: str = "safety_stock",
+) -> tuple[dict[str, float], dict[str, str], bool]:
+    """Return ``(available_units_map, stock_status_map, has_inventory_data)``."""
+    src_df: pd.DataFrame | None = None
+    if (
+        inventory_df is not None
+        and isinstance(inventory_df, pd.DataFrame)
+        and not inventory_df.empty
+    ):
+        src_df = inventory_df
+    elif isinstance(panel_df, pd.DataFrame) and not panel_df.empty:
+        cand_inv_cols = {
+            on_hand_col,
+            safety_stock_col,
+            "on_hand",
+            "on_hand_units",
+            "inventory_units",
+            "current_inventory",
+            "inventory",
+            "available_units",
+            "stock",
+        }
+        if any(c in panel_df.columns for c in cand_inv_cols):
+            src_df = panel_df
+
+    avail_map: dict[str, float] = {}
+    status_map: dict[str, str] = {}
+    if src_df is None or ts_id_col not in src_df.columns:
+        for sid in series_ids:
+            arr = series_map.get(sid, np.ones(1, dtype=np.float64))
+            est_avail = round(max(10.0, float(np.mean(np.maximum(arr, 0.0))) * 7.0), 2)
+            avail_map[sid] = est_avail
+            status_map[sid] = "adequate_stock"
+        return avail_map, status_map, False
+
+    eff_oh_col: str | None = None
+    for c in (
+        on_hand_col,
+        "on_hand",
+        "on_hand_units",
+        "inventory_units",
+        "current_inventory",
+        "inventory",
+        "stock",
+    ):
+        if c in src_df.columns:
+            eff_oh_col = c
+            break
+    eff_ss_col: str | None = None
+    for c in (safety_stock_col, "safety_stock", "safety_stock_units", "min_stock"):
+        if c in src_df.columns:
+            eff_ss_col = c
+            break
+    has_direct_avail = "available_units" in src_df.columns
+
+    work = src_df.sort_values(date_col) if date_col in src_df.columns else src_df
+    latest_by_id: dict[str, pd.Series] = {}
+    for raw_id, grp in work.groupby(ts_id_col, sort=False):
+        latest_by_id[str(raw_id)] = grp.iloc[-1]
+
+    for sid in series_ids:
+        if sid not in latest_by_id:
+            avail_map[sid] = 0.0
+            status_map[sid] = "out_of_stock"
+            continue
+        row = latest_by_id[sid]
+        ss_val = (
+            float(pd.to_numeric(row[eff_ss_col], errors="coerce"))
+            if (eff_ss_col is not None and pd.notna(row[eff_ss_col]))
+            else 0.0
+        )
+        if not math.isfinite(ss_val):
+            ss_val = 0.0
+
+        if eff_oh_col is not None and pd.notna(row[eff_oh_col]):
+            oh_val = float(pd.to_numeric(row[eff_oh_col], errors="coerce"))
+            if not math.isfinite(oh_val):
+                oh_val = 0.0
+            avail_val = oh_val - ss_val
+        elif has_direct_avail and pd.notna(row["available_units"]):
+            avail_val = float(pd.to_numeric(row["available_units"], errors="coerce"))
+            if not math.isfinite(avail_val):
+                avail_val = 0.0
+            oh_val = max(0.0, avail_val + ss_val)
+        else:
+            oh_val = 0.0
+            avail_val = 0.0
+
+        if oh_val <= 0.0 or (avail_val <= 0.0 and ss_val <= 0.0):
+            st = "out_of_stock"
+        elif avail_val <= 0.0:
+            st = "low_stock_risk"
+        elif avail_val >= max(0.5 * max(ss_val, 0.0), 10.0):
+            st = "in_stock_surplus"
+        else:
+            st = "adequate_stock"
+        avail_map[sid] = round(float(avail_val), 4)
+        status_map[sid] = st
+
+    return avail_map, status_map, True
+
+
+def recommend_substitutes_df(
+    panel_df: pd.DataFrame,
+    inventory_df: pd.DataFrame | None = None,
+    *,
+    query_ts_id: str | Sequence[str] | None = None,
+    top_k: int = 5,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    within_hierarchy_level: str | Sequence[str] | None = None,
+    require_in_stock: bool = True,
+    exclude_out_of_stock: bool | None = None,
+    on_hand_col: str = "on_hand",
+    inventory_col: str | None = None,
+    safety_stock_col: str = "safety_stock",
+    method: str = "hybrid",
+    semantic_weight: float | Literal["auto"] = "auto",
+    hierarchy_weight: float | Literal["auto"] = "auto",
+    cfg: RunConfig | None = None,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Recommend top-:math:`K` in-stock retail assortment substitutes combining semantic/attribute
+    similarity, Wu-Palmer hierarchy LCA proximity, behavioral trajectory similarity, and inventory
+    availability surplus."""
+    eff_require_in_stock = (
+        bool(exclude_out_of_stock) if exclude_out_of_stock is not None else bool(require_in_stock)
+    )
+    eff_on_hand_col = str(inventory_col) if inventory_col is not None else on_hand_col
+    out_cols = [
+        "query_ts_id",
+        "substitute_ts_id",
+        "rank",
+        "substitution_score",
+        "similarity_score",
+        "semantic_sim",
+        "hierarchy_sim",
+        "available_units",
+        "stock_status",
+        "substitution_rationale",
+    ]
+    series_ids, series_map = _extract_panel_series(
+        panel_df, cfg=cfg, ts_id_col=ts_id_col, date_col=date_col, target_col=target_col
+    )
+    if len(series_ids) <= 1:
+        return pd.DataFrame(columns=out_cols)
+
+    meta_df = _extract_series_metadata(panel_df, series_ids, cfg=cfg, ts_id_col=ts_id_col)
+    avail_cols = list(meta_df.columns)
+
+    eff_text_cols = (
+        _normalize_col_list(text_cols, avail_cols)
+        if text_cols is not None
+        else [c for c in _DEFAULT_TEXT_CANDIDATE_COLS if c in avail_cols]
+    )
+    eff_attr_cols = (
+        _normalize_col_list(attribute_cols, avail_cols)
+        if attribute_cols is not None
+        else [c for c in _DEFAULT_ATTR_CANDIDATE_COLS if c in avail_cols]
+    )
+    if hierarchy_cols is not None:
+        eff_hier_cols = _normalize_col_list(hierarchy_cols, avail_cols)
+    elif cfg is not None and cfg.hierarchy.levels:
+        eff_hier_cols = _normalize_col_list(
+            [c for lvl in cfg.hierarchy.levels for c in lvl], avail_cols
+        )
+    else:
+        eff_hier_cols = [c for c in _DEFAULT_HIER_CANDIDATE_COLS if c in avail_cols]
+
+    within_cols = _normalize_col_list(within_hierarchy_level, avail_cols)
+
+    sim_res = compute_similarity_matrix(
+        panel_df,
+        cfg=cfg,
+        method=method,
+        top_k=len(series_ids),
+        text_cols=eff_text_cols or None,
+        embedding_col=embedding_col,
+        attribute_cols=eff_attr_cols or None,
+        hierarchy_cols=eff_hier_cols or None,
+        within_hierarchy_level=within_hierarchy_level,
+        semantic_weight=semantic_weight,
+        hierarchy_weight=hierarchy_weight,
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        target_col=target_col,
+        **kwargs,
+    )
+    has_sem = bool(sim_res.diagnostics.get("has_semantic_similarity", False))
+    has_hier = bool(sim_res.diagnostics.get("has_hierarchy_similarity", False))
+
+    avail_map, status_map, has_inv = _extract_inventory_snapshot(
+        panel_df,
+        inventory_df,
+        series_ids,
+        series_map,
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        on_hand_col=eff_on_hand_col,
+        safety_stock_col=safety_stock_col,
+    )
+
+    if query_ts_id is None:
+        queries = list(series_ids)
+    elif isinstance(query_ts_id, str):
+        if str(query_ts_id) not in series_map:
+            raise ValueError(
+                f"query_ts_id {query_ts_id!r} not found in panel series {series_ids[:10]}."
+            )
+        queries = [str(query_ts_id)]
+    else:
+        queries = [str(q) for q in query_ts_id if str(q) in series_map]
+
+    pairs_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in sim_res.pairs_df.to_dict(orient="records"):
+        pairs_lookup[(str(row["ts_id"]), str(row["neighbor_ts_id"]))] = {
+            str(k): v for k, v in row.items()
+        }
+
+    pos_avails = [max(0.0, v) for v in avail_map.values() if v > 0.0]
+    max_pos_avail = max(pos_avails) if pos_avails else 1.0
+    eff_k = max(1, int(top_k))
+
+    rows: list[dict[str, Any]] = []
+    for q_id in queries:
+        candidates: list[tuple[float, str, dict[str, Any]]] = []
+        for cand_id in series_ids:
+            if cand_id == q_id:
+                continue
+            if within_cols:
+                same_scope = all(
+                    str(meta_df.loc[q_id, c]).strip().lower()
+                    == str(meta_df.loc[cand_id, c]).strip().lower()
+                    for c in within_cols
+                )
+                if not same_scope:
+                    continue
+
+            c_status = status_map.get(cand_id, "adequate_stock")
+            c_avail = float(avail_map.get(cand_id, 0.0))
+            if has_inv and eff_require_in_stock and (c_status == "out_of_stock" or c_avail <= 0.0):
+                continue
+
+            p_info = pairs_lookup.get((q_id, cand_id))
+            if p_info is None:
+                continue
+
+            sim_score = float(p_info["similarity_score"])
+            sem_sim = float(p_info["semantic_sim"])
+            hier_sim = float(p_info["hierarchy_sim"])
+            behav_sim = (
+                0.30 * float(p_info["physics_sim"])
+                + 0.25 * float(p_info["spectral_sim"])
+                + 0.25 * float(p_info["shape_sim"])
+                + 0.20 * float(p_info["structural_sim"])
+            )
+
+            if has_inv:
+                if c_avail <= 0.0 or c_status == "out_of_stock":
+                    inv_bonus = 0.0
+                else:
+                    norm_av = float(np.clip(c_avail / max(max_pos_avail, 1.0), 0.0, 1.0))
+                    inv_bonus = (
+                        0.50 + 0.50 * norm_av
+                        if c_status == "in_stock_surplus"
+                        else 0.35 + 0.45 * norm_av
+                    )
+            else:
+                inv_bonus = sim_score
+
+            if has_inv and (c_avail <= 0.0 or c_status == "out_of_stock"):
+                sub_score = 0.0
+            elif has_sem and has_hier:
+                sub_score = 0.40 * sem_sim + 0.25 * hier_sim + 0.20 * behav_sim + 0.15 * inv_bonus
+                if sem_sim < 0.12 and hier_sim < 0.15:
+                    sub_score *= 0.35
+            elif has_sem:
+                sub_score = 0.55 * sem_sim + 0.30 * behav_sim + 0.15 * inv_bonus
+                if sem_sim < 0.10:
+                    sub_score *= 0.50
+            elif has_hier:
+                sub_score = 0.45 * hier_sim + 0.40 * behav_sim + 0.15 * inv_bonus
+                if hier_sim < 0.10:
+                    sub_score *= 0.50
+            else:
+                sub_score = 0.85 * sim_score + 0.15 * inv_bonus
+
+            sub_score = float(np.clip(sub_score, 0.0, 1.0))
+            rationale_parts: list[str] = []
+            if has_sem:
+                rationale_parts.append(f"semantic_sim={sem_sim:.2f}")
+            if has_hier:
+                rationale_parts.append(f"hierarchy_sim={hier_sim:.2f}")
+            rationale_parts.append(f"trajectory_sim={behav_sim:.2f}")
+            rationale_parts.append(f"stock={c_status} (available_units={c_avail:.1f})")
+            rationale = f"Substitute {cand_id} for {q_id}: " + ", ".join(rationale_parts)
+
+            candidates.append(
+                (
+                    sub_score,
+                    cand_id,
+                    {
+                        "query_ts_id": q_id,
+                        "substitute_ts_id": cand_id,
+                        "substitution_score": round(sub_score, 6),
+                        "similarity_score": round(sim_score, 6),
+                        "semantic_sim": round(sem_sim, 6),
+                        "hierarchy_sim": round(hier_sim, 6),
+                        "available_units": round(c_avail, 4),
+                        "stock_status": c_status,
+                        "substitution_rationale": rationale,
+                    },
+                )
+            )
+
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        for rank_idx, (_, _, info) in enumerate(candidates[:eff_k], start=1):
+            row_out = dict(info)
+            row_out["rank"] = rank_idx
+            rows.append(row_out)
+
+    return pd.DataFrame(rows, columns=out_cols)
+
+
+# ---------------------------------------------------------------------------
+# Public Function 7: detect_emerging_trends_df (Emerging Trend Breakout Sensing)
+# ---------------------------------------------------------------------------
+
+
+def detect_emerging_trends_df(
+    panel_df: pd.DataFrame,
+    *,
+    window: int = 14,
+    recent_window: int | None = None,
+    baseline_window: int | None = None,
+    top_k_related: int = 3,
+    text_cols: Sequence[str] | str | None = None,
+    embedding_col: str | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | None = None,
+    max_lag: int = 7,
+    method: str = "hybrid",
+    cfg: RunConfig | None = None,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Detect emerging trend breakouts, kinematic velocity/acceleration (:math:`\\dot{y},
+    \\ddot{y}`), directed Kuramoto/cross-correlation lead-lag bellwether leaders
+    (:math:`\\tau_{i \\to j}^*`), and lagging co-promotion candidates."""
+    eff_window = int(recent_window) if recent_window is not None else int(window)
+    out_cols = [
+        "ts_id",
+        "trend_score",
+        "trend_regime",
+        "recent_velocity",
+        "recent_acceleration",
+        "breakout_zscore",
+        "hurst_exp",
+        "similarity_cluster_id",
+        "leading_bellwether_ts_id",
+        "lag_behind_leader",
+        "co_promote_candidates",
+        "recommended_merchandising_action",
+    ]
+    series_ids, series_map = _extract_panel_series(
+        panel_df, cfg=cfg, ts_id_col=ts_id_col, date_col=date_col, target_col=target_col
+    )
+    if not series_ids:
+        return pd.DataFrame(columns=out_cols)
+
+    meta_df = _extract_series_metadata(panel_df, series_ids, cfg=cfg, ts_id_col=ts_id_col)
+    avail_cols = list(meta_df.columns)
+    eff_text_cols = (
+        _normalize_col_list(text_cols, avail_cols)
+        if text_cols is not None
+        else [c for c in _DEFAULT_TEXT_CANDIDATE_COLS if c in avail_cols]
+    )
+    eff_attr_cols = (
+        _normalize_col_list(attribute_cols, avail_cols)
+        if attribute_cols is not None
+        else [c for c in _DEFAULT_ATTR_CANDIDATE_COLS if c in avail_cols]
+    )
+    if hierarchy_cols is not None:
+        eff_hier_cols = _normalize_col_list(hierarchy_cols, avail_cols)
+    elif cfg is not None and cfg.hierarchy.levels:
+        eff_hier_cols = _normalize_col_list(
+            [c for lvl in cfg.hierarchy.levels for c in lvl], avail_cols
+        )
+    else:
+        eff_hier_cols = [c for c in _DEFAULT_HIER_CANDIDATE_COLS if c in avail_cols]
+
+    eff_max_lag = max(1, int(max_lag))
+    sim_res = compute_similarity_matrix(
+        panel_df,
+        cfg=cfg,
+        method=method,
+        top_k=len(series_ids),
+        max_lag=eff_max_lag,
+        text_cols=eff_text_cols or None,
+        embedding_col=embedding_col,
+        attribute_cols=eff_attr_cols or None,
+        hierarchy_cols=eff_hier_cols or None,
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        target_col=target_col,
+        **kwargs,
+    )
+    clusters_df = cluster_by_similarity_df(
+        panel_df,
+        cfg=cfg,
+        method=method,
+        similarity_result=sim_res,
+    )
+    cluster_by_id = dict(
+        zip(
+            clusters_df["ts_id"].astype(str),
+            clusters_df["similarity_cluster_id"].astype(str),
+            strict=False,
+        )
+    )
+    hurst_by_id = dict(
+        zip(
+            sim_res.embeddings_df["ts_id"].astype(str),
+            sim_res.embeddings_df["hurst_exp"].astype(float),
+            strict=False,
+        )
+    )
+
+    kinematics_by_id: dict[str, dict[str, Any]] = {}
+    for sid in series_ids:
+        y = series_map[sid]
+        t_len = int(y.size)
+        w = min(max(3, eff_window), t_len)
+        y_rec = y[-w:]
+        y_prior = y[:-w] if t_len > w + 2 else y[: max(2, t_len // 2)]
+        if baseline_window is not None and y_prior.size > max(2, int(baseline_window)):
+            y_prior = y_prior[-int(baseline_window) :]
+
+        mu_prior = float(np.mean(y_prior)) if y_prior.size > 0 else float(np.mean(y))
+        sd_prior = float(np.std(y_prior)) if y_prior.size > 1 else 0.0
+        scale_base = max(abs(mu_prior), float(np.mean(np.abs(y))), 1e-6)
+        denom_sd = max(sd_prior, 0.05 * abs(mu_prior), 1e-6)
+
+        y_rec_norm = y_rec / scale_base
+        t_grid = np.arange(w, dtype=np.float64)
+        t_centered = t_grid - float(np.mean(t_grid))
+        t_ss = float(np.dot(t_centered, t_centered))
+        vel = (
+            float(np.dot(t_centered, y_rec_norm - np.mean(y_rec_norm)) / t_ss)
+            if t_ss > 1e-12
+            else 0.0
+        )
+
+        if w >= 4:
+            half = w // 2
+            y1 = y_rec_norm[: max(2, half)]
+            y2 = y_rec_norm[half:]
+            t1 = np.arange(y1.size, dtype=np.float64)
+            t1 -= float(np.mean(t1))
+            v1 = float(np.dot(t1, y1 - np.mean(y1)) / max(float(np.dot(t1, t1)), 1e-12))
+            t2 = np.arange(y2.size, dtype=np.float64)
+            t2 -= float(np.mean(t2))
+            v2 = float(np.dot(t2, y2 - np.mean(y2)) / max(float(np.dot(t2, t2)), 1e-12))
+            d2_mean = float(np.mean(np.diff(y_rec_norm, n=2)))
+            acc = 0.60 * ((v2 - v1) / max(1.0, float(half))) + 0.40 * d2_mean
+        elif w == 3:
+            acc = float(y_rec_norm[2] - 2.0 * y_rec_norm[1] + y_rec_norm[0])
+        else:
+            acc = 0.0
+
+        tail_len = max(3, w // 2)
+        rec_level = 0.65 * float(np.mean(y_rec[-tail_len:])) + 0.35 * float(np.mean(y_rec))
+        z_break = (rec_level - mu_prior) / denom_sd
+        hurst_val = float(hurst_by_id.get(sid, 0.5))
+
+        z_pos = max(0.0, z_break) / 3.0
+        v_pos = max(0.0, vel * 15.0)
+        a_pos = max(0.0, acc * 25.0)
+        h_pos = max(0.0, hurst_val - 0.5)
+        raw_strength = 0.45 * z_pos + 0.30 * v_pos + 0.15 * a_pos + 0.10 * h_pos
+        if z_break < 0.0 and vel < 0.0:
+            t_score = float(np.clip(0.15 * math.exp(0.5 * z_break), 0.0, 0.25))
+        else:
+            t_score = float(np.clip(1.0 - math.exp(-1.5 * raw_strength), 0.0, 1.0))
+
+        if (z_break >= 1.5 and vel > 0.005 and acc >= -0.005) or (z_break >= 2.2 and vel > 0.01):
+            regime = "accelerating_breakout"
+        elif z_break >= 0.8 and vel > 0.002:
+            regime = "steady_growth" if acc >= -0.01 else "maturing_plateau"
+        elif z_break >= 1.0 and vel <= 0.002:
+            regime = "maturing_plateau"
+        elif vel < -0.008 and z_break < -0.8:
+            regime = "declining"
+        else:
+            regime = "stable"
+
+        kinematics_by_id[sid] = {
+            "trend_score": t_score,
+            "trend_regime": regime,
+            "recent_velocity": vel,
+            "recent_acceleration": acc,
+            "breakout_zscore": z_break,
+            "hurst_exp": hurst_val,
+        }
+
+    # Build pair lookup and evaluate directed lead-lag (including prior-window lag when a leader
+    # has just surged in the recent window ahead of its follower).
+    pairs_by_src: dict[str, list[dict[str, Any]]] = {sid: [] for sid in series_ids}
+    pair_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in sim_res.pairs_df.to_dict(orient="records"):
+        sa = str(row["ts_id"])
+        sb = str(row["neighbor_ts_id"])
+        r_copy = {str(k): v for k, v in row.items()}
+        pairs_by_src.setdefault(sa, []).append(r_copy)
+        pair_map[(sa, sb)] = r_copy
+
+    leader_for_id: dict[str, tuple[str, int]] = {}
+    followers_by_leader: dict[str, list[str]] = {sid: [] for sid in series_ids}
+
+    for sid_i in series_ids:
+        yi = series_map[sid_i]
+        best_leader = ""
+        best_lag = 0
+        best_leader_score = -1.0
+        for sid_j in series_ids:
+            if sid_j == sid_i:
+                continue
+            kj = kinematics_by_id[sid_j]
+            if kj["trend_regime"] not in ("accelerating_breakout", "steady_growth"):
+                continue
+            p_ji = pair_map.get((sid_j, sid_i))
+            sim_ji = float(p_ji["similarity_score"]) if p_ji is not None else 0.0
+            opt_lag = int(p_ji["optimal_lag"]) if p_ji is not None else 0
+            lag_corr = float(p_ji["lag_correlation"]) if p_ji is not None else 0.0
+
+            # Also check pre-breakout / detrended lag if leader surged ahead of follower at the tail
+            if opt_lag <= 0 or lag_corr < 0.45:
+                yj = series_map[sid_j]
+                zj, _, _, fj = _zscore(yj)
+                zi, _, _, fi = _zscore(yi)
+                alt_lag, alt_corr = _compute_optimal_lead_lag(zj, zi, fj, fi, max_lag=eff_max_lag)
+                if alt_lag > 0 and alt_corr > lag_corr:
+                    opt_lag, lag_corr = alt_lag, alt_corr
+                if (opt_lag <= 0 or lag_corr < 0.45) and min(yj.size, yi.size) > eff_window + 6:
+                    cut = max(6, int(eff_window) // 2)
+                    zj_p, _, _, fjp = _zscore(yj[:-cut])
+                    zi_p, _, _, fip = _zscore(yi[:-cut])
+                    p_lag, p_corr = _compute_optimal_lead_lag(
+                        zj_p, zi_p, fjp, fip, max_lag=eff_max_lag
+                    )
+                    if p_lag > 0 and p_corr >= 0.50:
+                        opt_lag, lag_corr = p_lag, p_corr
+
+            if (
+                opt_lag > 0
+                and lag_corr >= 0.45
+                and sim_ji >= 0.25
+                and (
+                    kj["trend_score"] > kinematics_by_id[sid_i]["trend_score"] - 0.05
+                    or kj["breakout_zscore"] >= kinematics_by_id[sid_i]["breakout_zscore"]
+                )
+            ):
+                cand_rank_score = float(kj["trend_score"]) * 0.6 + lag_corr * 0.4
+                if cand_rank_score > best_leader_score:
+                    best_leader_score = cand_rank_score
+                    best_leader = sid_j
+                    best_lag = int(opt_lag)
+
+        if best_leader and best_lag > 0:
+            leader_for_id[sid_i] = (best_leader, best_lag)
+            followers_by_leader.setdefault(best_leader, []).append(sid_i)
+
+    eff_k_rel = max(1, int(top_k_related))
+    rows_out: list[dict[str, Any]] = []
+    for sid in series_ids:
+        k_info = kinematics_by_id[sid]
+        regime = str(k_info["trend_regime"])
+        leader_id, lag_steps = leader_for_id.get(sid, ("", 0))
+        own_followers = followers_by_leader.get(sid, [])
+
+        if not leader_id and regime in ("accelerating_breakout", "steady_growth"):
+            leader_id = sid
+            lag_steps = 0
+
+        # Build co_promote_candidates prioritizing lagging followers and top similarity twins
+        rel_ids: list[str] = []
+        for f_sid in own_followers:
+            if f_sid != sid and f_sid not in rel_ids:
+                rel_ids.append(f_sid)
+        for p_row in pairs_by_src.get(sid, []):
+            nbr = str(p_row["neighbor_ts_id"])
+            if nbr != sid and nbr not in rel_ids:
+                rel_ids.append(nbr)
+            if len(rel_ids) >= eff_k_rel:
+                break
+        co_promote_str = ",".join(rel_ids[:eff_k_rel])
+
+        if lag_steps > 0 and leader_id and leader_id != sid:
+            action = "co_promote_lagging_twin"
+        elif regime == "accelerating_breakout":
+            if own_followers or float(k_info["breakout_zscore"]) < 6.0:
+                action = "promote_trend_leader"
+            else:
+                action = "replenish_breakout_risk"
+        elif regime == "steady_growth":
+            action = "promote_trend_leader"
+        elif regime == "declining":
+            action = "clearance_candidate"
+        else:
+            action = "hold_baseline"
+
+        rows_out.append(
+            {
+                "ts_id": sid,
+                "trend_score": round(float(k_info["trend_score"]), 6),
+                "trend_regime": regime,
+                "recent_velocity": round(float(k_info["recent_velocity"]), 6),
+                "recent_acceleration": round(float(k_info["recent_acceleration"]), 6),
+                "breakout_zscore": round(float(k_info["breakout_zscore"]), 6),
+                "hurst_exp": round(float(k_info["hurst_exp"]), 6),
+                "similarity_cluster_id": cluster_by_id.get(sid, "cluster_0"),
+                "leading_bellwether_ts_id": leader_id,
+                "lag_behind_leader": int(lag_steps),
+                "co_promote_candidates": co_promote_str,
+                "recommended_merchandising_action": action,
+            }
+        )
+
+    out_df = pd.DataFrame(rows_out, columns=out_cols)
+    return out_df.sort_values(
+        ["trend_score", "breakout_zscore", "ts_id"],
+        ascending=[False, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+emerging_trends_df = detect_emerging_trends_df

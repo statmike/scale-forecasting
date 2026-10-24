@@ -26,10 +26,13 @@ from scale_forecasting.similarity import (
     SimilarityMatrixResult,
     cluster_by_similarity_df,
     compute_similarity_matrix,
+    detect_emerging_trends_df,
     embed_series_df,
+    emerging_trends_df,
     extract_foundation_embeddings,
     find_similar_series_df,
     plot_similarity_map,
+    recommend_substitutes_df,
 )
 from scale_forecasting.worker import is_panel_model, run_panel
 
@@ -436,3 +439,427 @@ def test_pathological_edge_cases_and_plot_similarity_map() -> None:
 
     ax = plot_similarity_map(res_edge)
     assert ax is not None
+
+
+def _make_multimodal_retail_panel(n_obs: int = 36) -> pd.DataFrame:
+    """Create a retail panel with text descriptions, product attributes, hierarchy levels,
+    and inventory stock to test coincidental seasonal twin separation vs. true substitutes."""
+    dates = pd.date_range("2025-06-01", periods=n_obs, freq="D")
+    t = np.arange(n_obs, dtype=float)
+    summer_wave = 120.0 + 35.0 * np.sin(2.0 * np.pi * t / 7.0)
+    alt_wave = 90.0 + 15.0 * np.cos(2.0 * np.pi * t / 7.0)
+
+    skus = [
+        (
+            "oat_milk_vanilla_64oz",
+            summer_wave,
+            "Organic Oat Milk Vanilla 64oz Refrigerated Carton",
+            "Grocery",
+            "Dairy",
+            "Plant Milk",
+            "OatCo",
+            4.99,
+            "[0.95, 0.85, 0.05]",
+            0.0,  # out of stock query item
+        ),
+        (
+            "oat_milk_orig_64oz",
+            summer_wave * 0.995,
+            "Organic Oat Milk Original 64oz Refrigerated Carton",
+            "Grocery",
+            "Dairy",
+            "Plant Milk",
+            "OatCo",
+            4.99,
+            "[0.95, 0.86, 0.04]",
+            180.0,
+        ),
+        (
+            "almond_milk_64oz",
+            summer_wave * 0.85 + 3.0,
+            "Unsweetened Almond Milk 64oz Refrigerated Carton",
+            "Grocery",
+            "Dairy",
+            "Plant Milk",
+            "NutCo",
+            3.99,
+            "[0.82, 0.78, 0.10]",
+            45.0,
+        ),
+        (
+            "oat_milk_choco_oos",
+            summer_wave * 0.90 + 3.0 * np.cos(2.0 * np.pi * t / 7.0),
+            "Sweetened Chocolate Oat Milk Beverage 64oz Carton",
+            "Grocery",
+            "Dairy",
+            "Plant Milk",
+            "OatCo",
+            5.49,
+            "[0.88, 0.75, 0.12]",
+            0.0,  # out of stock candidate
+        ),
+        (
+            "greek_yogurt_32oz",
+            alt_wave,
+            "Plain Strained Greek Yogurt 32oz Family Tub",
+            "Grocery",
+            "Dairy",
+            "Yogurt",
+            "DairyFarm",
+            5.99,
+            "[0.45, 0.55, 0.30]",
+            90.0,
+        ),
+        (
+            "sunscreen_spf50",
+            summer_wave,  # identical seasonal curve to oat_milk_vanilla_64oz!
+            "Broad Spectrum Sport Sunscreen Lotion SPF 50 Waterproof",
+            "Personal Care",
+            "Suncare",
+            "Lotion",
+            "SunGuard",
+            11.99,
+            "[0.02, 0.05, 0.98]",
+            220.0,
+        ),
+    ]
+    frames: list[pd.DataFrame] = []
+    for (
+        tid,
+        y_vals,
+        desc,
+        dept,
+        cat,
+        subcat,
+        brand,
+        price,
+        emb_str,
+        stock,
+    ) in skus:
+        frames.append(
+            pd.DataFrame(
+                {
+                    "ts_id": tid,
+                    "ds": dates,
+                    "y": y_vals,
+                    "description": desc,
+                    "department": dept,
+                    "category": cat,
+                    "subcategory": subcat,
+                    "brand": brand,
+                    "price": price,
+                    "text_embedding": emb_str,
+                    "inventory_units": stock,
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_multimodal_semantic_attribute_and_hierarchy_lca_similarity() -> None:
+    """F16: Multi-modal text TF-IDF/LSA, Gower attributes, and Wu-Palmer LCA tree similarity
+    separate coincidental seasonal twins (Oat Milk vs. Sunscreen) while ranking true substitutes #1.
+    """
+    panel = _make_multimodal_retail_panel()
+
+    # Pure behavioral similarity treats oat_milk_vanilla_64oz and sunscreen_spf50 as identical twins
+    behav_res = compute_similarity_matrix(panel, method="hybrid")
+    assert float(behav_res.matrix_df.loc["oat_milk_vanilla_64oz", "sunscreen_spf50"]) > 0.90
+
+    # Multi-modal similarity with text, attributes, and hierarchy LCA
+    mm_res = compute_similarity_matrix(
+        panel,
+        method="hybrid",
+        text_cols=["description"],
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    assert {"semantic_sim", "hierarchy_sim"}.issubset(mm_res.pairs_df.columns)
+
+    pairs_q = mm_res.pairs_df[mm_res.pairs_df["ts_id"] == "oat_milk_vanilla_64oz"].set_index(
+        "neighbor_ts_id"
+    )
+    # Wu-Palmer LCA hierarchy similarity:
+    # Same leaf subcategory (depth 3 / 3) -> 1.0
+    assert float(pairs_q.loc["oat_milk_orig_64oz", "hierarchy_sim"]) == pytest.approx(1.0)
+    # Shared department + category (2 * 2 / (3 + 3) = 2/3)
+    assert float(pairs_q.loc["greek_yogurt_32oz", "hierarchy_sim"]) == pytest.approx(2.0 / 3.0)
+    # Disjoint department -> 0.0
+    assert float(pairs_q.loc["sunscreen_spf50", "hierarchy_sim"]) == pytest.approx(0.0)
+
+    # Semantic similarity separates Oat Milk from Sunscreen and ranks Oat Milk Original highest
+    assert float(pairs_q.loc["oat_milk_orig_64oz", "semantic_sim"]) > 0.75
+    assert float(pairs_q.loc["sunscreen_spf50", "semantic_sim"]) < 0.15
+
+    # Composite multi-modal similarity ranks Oat Milk Original #1 and pushes Sunscreen far down
+    sim_orig = float(mm_res.matrix_df.loc["oat_milk_vanilla_64oz", "oat_milk_orig_64oz"])
+    sim_sun = float(mm_res.matrix_df.loc["oat_milk_vanilla_64oz", "sunscreen_spf50"])
+    assert sim_orig > 0.80
+    assert sim_sun < 0.35
+
+    # Verify embedding_col and within_hierarchy_level hard constraint in find_similar_series_df
+    nbrs = find_similar_series_df(
+        panel,
+        query_ts_id="oat_milk_vanilla_64oz",
+        mode="recent_window",
+        window=14,
+        top_k=5,
+        text_cols=["description"],
+        embedding_col="text_embedding",
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="category",
+    )
+    assert {"semantic_sim", "hierarchy_sim"}.issubset(nbrs.columns)
+    assert "sunscreen_spf50" not in set(nbrs["neighbor_ts_id"])
+    assert str(nbrs.iloc[0]["neighbor_ts_id"]) == "oat_milk_orig_64oz"
+
+    # Verify embed_series_df and cluster_by_similarity_df accept multi-modal parameters
+    emb_df = embed_series_df(
+        panel,
+        text_cols=["description"],
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    assert len(emb_df) == 6
+    clusters_df = cluster_by_similarity_df(
+        panel,
+        n_clusters=2,
+        min_cluster_size=1,
+        text_cols=["description"],
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    by_id = clusters_df.set_index("ts_id")
+    assert (
+        by_id.loc["oat_milk_vanilla_64oz", "similarity_cluster_id"]
+        == by_id.loc["oat_milk_orig_64oz", "similarity_cluster_id"]
+    )
+    assert (
+        by_id.loc["oat_milk_vanilla_64oz", "similarity_cluster_id"]
+        != by_id.loc["sunscreen_spf50", "similarity_cluster_id"]
+    )
+
+
+def test_recommend_substitutes_df_stockout_aware_ranking() -> None:
+    """F18a: recommend_substitutes_df ranks in-stock substitutes #1 and filters out-of-stock."""
+    panel = _make_multimodal_retail_panel()
+
+    subs_in_stock = recommend_substitutes_df(
+        panel,
+        query_ts_id="oat_milk_vanilla_64oz",
+        top_k=5,
+        text_cols=["description"],
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="subcategory",
+        inventory_col="inventory_units",
+        exclude_out_of_stock=True,
+    )
+    expected_cols = {
+        "query_ts_id",
+        "substitute_ts_id",
+        "rank",
+        "substitution_score",
+        "similarity_score",
+        "semantic_sim",
+        "hierarchy_sim",
+        "available_units",
+        "stock_status",
+        "substitution_rationale",
+    }
+    assert expected_cols.issubset(subs_in_stock.columns)
+    assert not subs_in_stock.empty
+    # Out-of-stock oat_milk_choco_oos and cross-subcategory items are excluded
+    assert "oat_milk_choco_oos" not in set(subs_in_stock["substitute_ts_id"])
+    assert "sunscreen_spf50" not in set(subs_in_stock["substitute_ts_id"])
+    assert str(subs_in_stock.iloc[0]["substitute_ts_id"]) == "oat_milk_orig_64oz"
+    assert int(subs_in_stock.iloc[0]["rank"]) == 1
+    assert str(subs_in_stock.iloc[0]["stock_status"]) in {"in_stock_surplus", "adequate_stock"}
+    assert float(subs_in_stock.iloc[0]["substitution_score"]) > float(
+        subs_in_stock.iloc[1]["substitution_score"]
+    )
+
+    # Including out-of-stock and safety_stock items tests all 4 stock_status enum literals
+    inv_df = pd.DataFrame(
+        [
+            {"ts_id": "oat_milk_vanilla_64oz", "on_hand": 100.0, "safety_stock": 20.0},
+            {"ts_id": "oat_milk_orig_64oz", "on_hand": 120.0, "safety_stock": 25.0},
+            {"ts_id": "almond_milk_64oz", "on_hand": 18.0, "safety_stock": 25.0},
+            {"ts_id": "oat_milk_choco_oos", "on_hand": 0.0, "safety_stock": 15.0},
+            {"ts_id": "dairy_milk_whole_64oz", "on_hand": 24.0, "safety_stock": 20.0},
+            {"ts_id": "sunscreen_spf50", "on_hand": 200.0, "safety_stock": 30.0},
+        ]
+    )
+    subs_all = recommend_substitutes_df(
+        panel,
+        inv_df,
+        query_ts_id=["oat_milk_vanilla_64oz"],
+        top_k=5,
+        text_cols=["description"],
+        attribute_cols=["brand", "price"],
+        hierarchy_cols=["department", "category", "subcategory"],
+        within_hierarchy_level="subcategory",
+        require_in_stock=False,
+    )
+    valid_stock_statuses = {
+        "in_stock_surplus",
+        "adequate_stock",
+        "low_stock_risk",
+        "out_of_stock",
+    }
+    assert set(subs_all["stock_status"]).issubset(valid_stock_statuses)
+    by_sub = subs_all.set_index("substitute_ts_id")
+    assert str(by_sub.loc["oat_milk_choco_oos", "stock_status"]) == "out_of_stock"
+    assert float(by_sub.loc["oat_milk_choco_oos", "substitution_score"]) == pytest.approx(0.0)
+    assert str(by_sub.loc["almond_milk_64oz", "stock_status"]) == "low_stock_risk"
+
+
+def test_detect_emerging_trends_df_breakout_and_bellwether_lead_lag() -> None:
+    """F18b: detect_emerging_trends_df identifies breakouts and bellwether lead-lag followers."""
+    assert emerging_trends_df is detect_emerging_trends_df
+
+    n_obs = 48
+    dates = pd.date_range("2025-01-01", periods=n_obs, freq="D")
+    t = np.arange(n_obs, dtype=float)
+    rng = np.random.default_rng(7)
+
+    # Bellwether leader: steady baseline until day 24, then steep accelerating breakout
+    ramp = np.maximum(0.0, t - 24.0)
+    y_leader = 30.0 + 1.8 * ramp + 0.18 * (ramp**2) + 2.0 * np.sin(2.0 * np.pi * t / 7.0)
+    # Follower lags leader by 4 days
+    ramp_lag = np.maximum(0.0, (t - 4.0) - 24.0)
+    y_follower = (
+        30.0 + 1.8 * ramp_lag + 0.18 * (ramp_lag**2) + 2.0 * np.sin(2.0 * np.pi * (t - 4.0) / 7.0)
+    )
+    # Steady stationary series
+    y_steady = 50.0 + 3.0 * np.sin(2.0 * np.pi * t / 7.0) + rng.normal(0.0, 0.5, size=n_obs)
+    # Declining series
+    y_decline = np.maximum(5.0, 120.0 - 2.0 * t + rng.normal(0.0, 0.5, size=n_obs))
+
+    panel = pd.concat(
+        [
+            pd.DataFrame({"ts_id": "leader_viral", "ds": dates, "y": y_leader}),
+            pd.DataFrame({"ts_id": "follower_lag4", "ds": dates, "y": y_follower}),
+            pd.DataFrame({"ts_id": "steady_mature", "ds": dates, "y": y_steady}),
+            pd.DataFrame({"ts_id": "declining_sku", "ds": dates, "y": y_decline}),
+        ],
+        ignore_index=True,
+    )
+
+    trends = detect_emerging_trends_df(panel, window=14, baseline_window=24, max_lag=7)
+    required_cols = {
+        "ts_id",
+        "trend_score",
+        "trend_regime",
+        "recent_velocity",
+        "recent_acceleration",
+        "breakout_zscore",
+        "hurst_exp",
+        "similarity_cluster_id",
+        "leading_bellwether_ts_id",
+        "lag_behind_leader",
+        "co_promote_candidates",
+        "recommended_merchandising_action",
+    }
+    assert required_cols.issubset(trends.columns)
+    assert len(trends) == 4
+
+    valid_regimes = {
+        "accelerating_breakout",
+        "steady_growth",
+        "maturing_plateau",
+        "declining",
+        "stable",
+    }
+    valid_actions = {
+        "promote_trend_leader",
+        "co_promote_lagging_twin",
+        "replenish_breakout_risk",
+        "clearance_candidate",
+        "hold_baseline",
+    }
+    assert set(trends["trend_regime"]).issubset(valid_regimes)
+    assert set(trends["recommended_merchandising_action"]).issubset(valid_actions)
+
+    by_id = trends.set_index("ts_id")
+    assert str(trends.iloc[0]["ts_id"]) in {"leader_viral", "follower_lag4"}
+    assert str(by_id.loc["leader_viral", "trend_regime"]) == "accelerating_breakout"
+    assert float(by_id.loc["leader_viral", "breakout_zscore"]) > 2.0
+    assert float(by_id.loc["leader_viral", "recent_velocity"]) > 0.0
+    assert str(by_id.loc["declining_sku", "trend_regime"]) == "declining"
+    assert (
+        str(by_id.loc["declining_sku", "recommended_merchandising_action"]) == "clearance_candidate"
+    )
+    # Follower lags behind leader_viral and receives co-promotion recommendation
+    assert str(by_id.loc["follower_lag4", "leading_bellwether_ts_id"]) == "leader_viral"
+    assert int(by_id.loc["follower_lag4", "lag_behind_leader"]) > 0
+    assert (
+        str(by_id.loc["follower_lag4", "recommended_merchandising_action"])
+        == "co_promote_lagging_twin"
+    )
+    assert "follower_lag4" in str(by_id.loc["leader_viral", "co_promote_candidates"])
+
+
+def test_sdk_playground_and_report_phase2_surfaces(tmp_path) -> None:
+    """Verify top-level exports, Forecaster, Playground, and export_report Phase 2 surfaces."""
+    import scale_forecasting as sf
+    from scale_forecasting.playground import bakeoff, run_model
+    from scale_forecasting.report import export_report
+
+    assert sf.recommend_substitutes_df is recommend_substitutes_df
+    assert sf.detect_emerging_trends_df is detect_emerging_trends_df
+    assert sf.emerging_trends_df is detect_emerging_trends_df
+
+    panel = _make_multimodal_retail_panel()
+    f = sf.Forecaster.from_dict(
+        {
+            "run_name": "sim_p2_sdk_test",
+            "data": {"source_table": "source_series", "horizon": 7, "freq": "D"},
+            "models": ["naive_mean"],
+        }
+    )
+    subs_f = f.recommend_substitutes_df(
+        data=panel,
+        query_ts_id="oat_milk_vanilla_64oz",
+        text_cols=["description"],
+        hierarchy_cols=["department", "category", "subcategory"],
+    )
+    assert not subs_f.empty
+    trends_f = f.emerging_trends_df(data=panel, window=14)
+    assert not trends_f.empty
+    assert len(f.detect_emerging_trends_df(data=panel, window=14)) == len(trends_f)
+    assert not f.cluster_by_similarity_df(data=panel).empty
+    assert not f.embed_series_df(data=panel).empty
+
+    bench = bakeoff(models=["naive_mean"], horizon=7)
+    subs_b = bench.recommend_substitutes_df(
+        data=panel,
+        query_ts_id="oat_milk_vanilla_64oz",
+        text_cols=["description"],
+    )
+    assert not subs_b.empty
+    trends_b = bench.emerging_trends_df(window=14)
+    assert not trends_b.empty
+    assert len(bench.detect_emerging_trends_df(window=14)) == len(trends_b)
+    assert not bench.cluster_by_similarity_df().empty
+    assert not bench.embed_series_df().empty
+
+    pg_run = run_model("naive_mean", horizon=7)
+    assert not pg_run.recommend_substitutes_df(
+        data=panel, query_ts_id="oat_milk_vanilla_64oz"
+    ).empty
+    assert not pg_run.emerging_trends_df(data=panel, window=14).empty
+    assert not pg_run.detect_emerging_trends_df(data=panel, window=14).empty
+    assert not pg_run.cluster_by_similarity_df(data=panel).empty
+    assert not pg_run.embed_series_df(data=panel).empty
+
+    out_path = export_report(
+        bench,
+        tmp_path / "report.html",
+        substitutes_df=subs_b,
+        emerging_trends_df=trends_b,
+    )
+    html_text = out_path.read_text(encoding="utf-8")
+    assert "SKU Substitute" in html_text
+    assert "Emerging Trends" in html_text
