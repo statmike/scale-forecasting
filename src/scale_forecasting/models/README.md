@@ -6,32 +6,35 @@ Every model lives in its own file and registers itself on import via `register(M
 
 ```mermaid
 flowchart TB
-    base["BaseModel (base_model.py)<br/>fit(y, X) · predict(horizon, X_future, quantiles)<br/>fit_panel(panel, ...) · predict_panel(horizon, ...)<br/>feature_attributions · search_space(trial) · recondition(y, X)"]
+    base["BaseModel (base_model.py)<br/>fit(y, X) · predict(horizon, X_future, quantiles) · fit_panel(panel, ...) · predict_panel(horizon, ...)<br/>feature_attributions · search_space(trial) · recondition(y, X)"]
 
-    subgraph stat["Family: statistical (18 Python Models)"]
-        naive["Baselines, Spectral & Intermittent<br/>naive_mean · naive_seasonal · naive_drift<br/>naive_moving_average · croston · fft"]
-        ets["Smoothing, Theta & Decomposition<br/>theta · auto_theta · holtwinters · autoets<br/>auto_ces · tbats · stl_bagging"]
-        ss["ARIMA, State-Space & Additive<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+    subgraph stat["1. Family: statistical (18 Python Models)"]
+        direction TB
+        naive["Baselines, Spectral & Intermittent (6)<br/>naive_mean · naive_seasonal · naive_drift · naive_moving_average · croston · fft"]
+        ets["Smoothing, Theta & Decomposition (7)<br/>theta · auto_theta · holtwinters · autoets · auto_ces · tbats · stl_bagging"]
+        ss["ARIMA, State-Space & Additive (5)<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+        naive --> ets --> ss
     end
 
-    subgraph ml["Family: ml (5 Python Models via _lag_forecaster.py)"]
-        lag["Autoregressive Lag & Calendar Matrix + Two-Tier Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
+    subgraph ml["2. Family: ml (5 Python Models via _lag_forecaster.py)"]
+        lag["Autoregressive Lag & Calendar Matrix + @monotone Sign Constraints + Two-Tier Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
     end
 
-    subgraph dl["Family: deep_learning (8 Python GPU/CPU Models — Local, Global & Hybrid)"]
-        np["neuralprophet · tide · tft · tsmixer · patchtst<br/>PyTorch Local, Global & Hybrid Panel Forecasters"]
+    subgraph dl["3. Family: deep_learning (8 Python GPU/CPU Models — Local, Global, @similarity_global & Hybrid)"]
+        direction TB
+        np["neuralprophet · tide · tft · tsmixer · patchtst<br/>PyTorch Local, Global, @similarity_global & Hybrid Panel Forecasters"]
         fnd["chronos_bolt · chronos2 · timesfm_torch<br/>Open-Weight Zero-Shot Foundation Forecasters"]
+        np --> fnd
     end
 
-    subgraph aml["Family: automl (4 Vertex AI AutoML / Tabular Workflow Models)"]
-        vaml["_vertex_automl_base.py<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
+    subgraph managed["4. Managed Cloud Families: automl (4) & native (2)"]
+        direction TB
+        vaml["Family: automl (_vertex_automl_base.py)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
+        bq["Family: native (bigquery_native.py)<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG) · timesfm / bq_timesfm (AI.FORECAST)"]
+        vaml --> bq
     end
 
-    subgraph nat["Family: native (2 BigQuery SQL Models)"]
-        bq["bigquery_native.py<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG) · timesfm / bq_timesfm (AI.FORECAST)"]
-    end
-
-    base --> stat & ml & dl & aml & nat
+    base --> stat --> ml --> dl --> managed
 ```
 
 ---

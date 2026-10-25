@@ -1374,6 +1374,18 @@ class EvolutionEvaluator:
             lock_score = self._eval_naive_baseline_lockdown()
             return float(np.mean(s_base)), s_base, p_base, lock_score
 
+        if self.target == "similarity_kernel":
+            s_base, p_base = self._eval_similarity_kernel(
+                self.inner_df, kernel_fn=None, is_lockdown=False
+            )
+            lock_s, _ = self._eval_similarity_kernel(
+                self.inner_df,
+                kernel_fn=None,
+                is_lockdown=True,
+                lockdown_truth_df=self.lockdown_truth_df,
+            )
+            return float(np.mean(s_base)), s_base, p_base, float(np.mean(lock_s))
+
         # target == "policy"
         base_models = sorted(
             m
@@ -1784,6 +1796,150 @@ class EvolutionEvaluator:
             point_losses.extend((np.abs(y_lock - yh) / denom_pt).tolist())
         return series_losses, point_losses
 
+    def _eval_similarity_kernel(
+        self,
+        panel_df: pd.DataFrame,
+        kernel_fn: Any | None,
+        *,
+        is_lockdown: bool,
+        lockdown_truth_df: pd.DataFrame | None = None,
+    ) -> tuple[list[float], list[float]]:
+        """Evaluate a candidate similarity kernel via analog/k-NN cross-series pooling."""
+        series_records: list[tuple[np.ndarray, np.ndarray]] = []
+        if not is_lockdown:
+            for _, grp in panel_df.groupby(self.ts_id_col, sort=True):
+                grp_s = grp.sort_values(self.date_col).reset_index(drop=True)
+                y_all = (
+                    pd.to_numeric(grp_s[self.target_col], errors="coerce")
+                    .ffill()
+                    .bfill()
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                eff_h = min(self.horizon, max(2, len(y_all) // 4))
+                if len(y_all) <= eff_h:
+                    continue
+                series_records.append((y_all[:-eff_h], y_all[-eff_h:]))
+        else:
+            assert lockdown_truth_df is not None
+            for tid, grp_lock in lockdown_truth_df.groupby(self.ts_id_col, sort=True):
+                grp_in = panel_df[panel_df[self.ts_id_col].astype(str) == str(tid)].sort_values(
+                    self.date_col
+                )
+                if grp_in.empty:
+                    continue
+                y_tr = (
+                    pd.to_numeric(grp_in[self.target_col], errors="coerce")
+                    .ffill()
+                    .bfill()
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                y_lock = (
+                    pd.to_numeric(
+                        grp_lock.sort_values(self.date_col)[self.target_col], errors="coerce"
+                    )
+                    .ffill()
+                    .bfill()
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                if len(y_tr) == 0 or len(y_lock) == 0:
+                    continue
+                series_records.append((y_tr, y_lock))
+
+        if not series_records:
+            return [float("inf")], [float("inf")]
+
+        n_series = len(series_records)
+        max_h = max(len(y_v) for _, y_v in series_records)
+        feat_rows: list[np.ndarray] = []
+        cont_rows: list[np.ndarray] = []
+        means: list[float] = []
+        stds: list[float] = []
+        last_vals: list[float] = []
+
+        for y_tr, _ in series_records:
+            mu = float(np.mean(y_tr))
+            sd = max(1e-6, float(np.std(y_tr)))
+            z_tr = (y_tr - mu) / sd
+            means.append(mu)
+            stds.append(sd)
+            last_vals.append(float(y_tr[-1]))
+
+            tail_len = 14
+            if len(z_tr) >= tail_len:
+                z_tail = z_tr[-tail_len:]
+            else:
+                z_tail = np.pad(z_tr, (tail_len - len(z_tr), 0), mode="edge")
+            vel_tail = np.diff(z_tail, prepend=z_tail[0])
+            acc_tail = np.diff(vel_tail, prepend=vel_tail[0])
+
+            period = min(7, max(2, len(z_tr) // 2))
+            t_idx = np.arange(len(z_tr), dtype=float)
+            t_mean = float(np.mean(t_idx))
+            denom = float(np.dot(t_idx - t_mean, t_idx - t_mean)) + 1e-6
+            slope = float(np.dot(t_idx - t_mean, z_tr)) / denom if len(z_tr) >= 4 else 0.0
+            trend_tr = slope * (t_idx - t_mean)
+            detrended = z_tr - trend_tr
+
+            s_prof = np.zeros(7, dtype=float)
+            for rem in range(7):
+                r_mod = rem % period
+                vals_rem = detrended[r_mod::period]
+                s_prof[rem] = float(np.mean(vals_rem)) if len(vals_rem) > 0 else 0.0
+            s_prof -= float(np.mean(s_prof[:period]))
+            feat_rows.append(np.concatenate([z_tail, vel_tail, acc_tail, s_prof]))
+
+            term_trend = float(trend_tr[-1])
+            cont = np.zeros(max_h, dtype=float)
+            for step in range(max_h):
+                idx_rem = (len(z_tr) + step) % period
+                cont[step] = term_trend + float(s_prof[idx_rem]) + 0.5 * slope * float(step + 1)
+            cont_rows.append(cont)
+
+        features_mat = np.vstack(feat_rows)
+        cont_mat = np.vstack(cont_rows)
+
+        if kernel_fn is None:
+            sim_mat = np.ones((n_series, n_series), dtype=float) / max(1, n_series)
+        else:
+            raw_sim = kernel_fn(features_mat.copy(), self.profile_dict)
+            sim_arr = np.asarray(raw_sim, dtype=float)
+            if sim_arr.ndim != 2 or sim_arr.shape != (n_series, n_series):
+                raise ValueError(
+                    "compute_evolved_similarity_kernel must return shape "
+                    f"({n_series}, {n_series}); got {sim_arr.shape}."
+                )
+            if not np.all(np.isfinite(sim_arr)):
+                raise ValueError("compute_evolved_similarity_kernel returned non-finite values.")
+            sim_mat = np.clip(sim_arr, 0.0, 1.0)
+
+        series_losses: list[float] = []
+        point_losses: list[float] = []
+        for idx_i, (_, y_val) in enumerate(series_records):
+            eff_h = len(y_val)
+            if kernel_fn is None:
+                w_row = sim_mat[idx_i]
+                w_sum = max(1e-9, float(np.sum(w_row)))
+                z_pool = (w_row / w_sum) @ cont_mat[:, :eff_h]
+                pred_pool = means[idx_i] + stds[idx_i] * z_pool
+                pred = 0.50 * pred_pool + 0.50 * last_vals[idx_i]
+            else:
+                w_row = np.power(np.maximum(0.0, sim_mat[idx_i]), 3.0)
+                w_sum = float(np.sum(w_row))
+                if w_sum <= 1e-9:
+                    w_row = np.zeros(n_series, dtype=float)
+                    w_row[idx_i] = 1.0
+                    w_sum = 1.0
+                z_pool = (w_row / w_sum) @ cont_mat[:, :eff_h]
+                pred = means[idx_i] + stds[idx_i] * z_pool
+
+            series_losses.append(_series_wape(y_val, pred))
+            denom_pt = max(1e-6, float(np.mean(np.abs(y_val))))
+            point_losses.extend((np.abs(y_val - pred) / denom_pt).tolist())
+        return series_losses, point_losses
+
     def evaluate_candidate_inner(
         self,
         code: str,
@@ -1917,6 +2073,10 @@ class EvolutionEvaluator:
                 s_cand, p_cand = self._score_ensemble_weights_inner(w_cand)
             elif self.target == "model":
                 s_cand, p_cand = self._eval_model_class(symbol, is_lockdown=False)
+            elif self.target == "similarity_kernel":
+                s_cand, p_cand = self._eval_similarity_kernel(
+                    self.inner_df, kernel_fn=symbol, is_lockdown=False
+                )
             else:
                 # target == "policy"
                 base_w = AutoPolicyWeights.from_defaults()
@@ -2033,6 +2193,14 @@ class EvolutionEvaluator:
                 lock_cand_score = self._score_ensemble_weights_lockdown(w_cand)
             elif self.target == "model":
                 s_lock, _ = self._eval_model_class(symbol, is_lockdown=True)
+                lock_cand_score = float(np.mean(s_lock)) if s_lock else float("inf")
+            elif self.target == "similarity_kernel":
+                s_lock, _ = self._eval_similarity_kernel(
+                    self.inner_df,
+                    kernel_fn=symbol,
+                    is_lockdown=True,
+                    lockdown_truth_df=self.lockdown_truth_df,
+                )
                 lock_cand_score = float(np.mean(s_lock)) if s_lock else float("inf")
             else:
                 base_w = AutoPolicyWeights.from_defaults()

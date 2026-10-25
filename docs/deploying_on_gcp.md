@@ -23,17 +23,14 @@ the module comment (next to the resource) wins.
 ## The shape: two stages
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Stage1["Stage 1 · terraform/bootstrap/ (Local State, Run Once)"]
-        B1["GCP Project (optional)<br/>+ Billing Link"]
-        B2["GCS State Bucket<br/><project_id>-tfstate"]
-        B1 --> B2
+        B1["GCP Project (optional) + Billing Link"] --> B2["GCS State Bucket (<project_id>-tfstate)"]
     end
     subgraph Stage2["Stage 2 · terraform/main/ (Remote State in GCS)"]
-        M_API["apis"] --> M_IAM["iam"] & M_STO["storage"] & M_BQ["bigquery"] & M_BUD["budget"] & M_NET["network"] & M_CON["container"]
-        M_IAM & M_STO & M_BQ & M_NET & M_CON --> M_SEED["seed (100k series) · smoke"]
-        M_IAM & M_STO & M_NET --> M_COLAB["colab (sf-main)"]
-        M_IAM & M_STO & M_NET --> M_COMP["composer · gke (optional)"]
+        M_API["1. apis (Enable Google Cloud APIs)"] --> M_CORE["2. Foundation Modules<br/>iam · storage · bigquery · budget · network · container"]
+        M_CORE --> M_DATA["3. Data & Verification<br/>seed (100k series) · smoke"]
+        M_DATA --> M_WORK["4. Interactive & Scheduled Runtimes<br/>colab (sf-main) · composer · gke (optional)"]
     end
     Stage1 --> Stage2
 ```

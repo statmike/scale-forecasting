@@ -918,7 +918,11 @@ def chunk_cells(
     if source.empty or not models:
         return []
 
-    if cfg.hierarchy.enabled or has_simplex_models(cfg, models):
+    if (
+        cfg.hierarchy.enabled
+        or cfg.features.similarity_cluster_feature
+        or has_simplex_models(cfg, models)
+    ):
         return [source.assign(**{_MODEL_COL: model}).reset_index(drop=True) for model in models]
 
     panel_models = [m for m in models if is_panel_model(m, cfg)]

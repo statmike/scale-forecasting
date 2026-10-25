@@ -50,6 +50,7 @@ from .auto_policy import (
     EXPOSURE_TIERS,
     SCALE_REGIMES,
     DataProfile,
+    DatasetProfile,
     PanelAutoProfile,
     classify_scale_regime,
     estimate_continue_confidence,
@@ -86,6 +87,7 @@ __all__ = [
     "AutofocusPassRecord",
     "ConfigBlueprint",
     "DataProfile",
+    "DatasetProfile",
     "NextLoopPreview",
     "PanelAutoProfile",
     "auto_forecast",
@@ -1317,7 +1319,13 @@ class AutoForecastSession:
             )
 
         # 4. Does global provide an advantage over local?
-        global_models = [m for m in champ.config.models if "@global" in m]
+        global_models = [
+            m for m in champ.config.models if "@global" in m or "@similarity_global" in m
+        ]
+        sim_global_models = [m for m in champ.config.models if "@similarity_global" in m]
+        opt_k = int(getattr(self.profile, "optimal_similarity_clusters", 1))
+        sim_sil = float(getattr(self.profile, "similarity_silhouette_score", 0.0))
+        mean_sim = float(getattr(self.profile, "mean_pairwise_similarity", 0.0))
         donor_sim = float(
             diag.get(
                 "cold_start_donor_similarity",
@@ -1332,12 +1340,19 @@ class AutoForecastSession:
             if cs_transfer_on
             else ""
         )
+        sim_note = (
+            f" Trajectory similarity clustering identified K={opt_k} peer clusters "
+            f"(silhouette={sim_sil:.2f}, mean_similarity={mean_sim:.2f}"
+            + (f", similarity_global={sim_global_models}" if sim_global_models else "")
+            + ")."
+        )
         if global_models:
             q4_verdict = "global_active"
             q4_ans = (
-                f"Cross-series @global models ({', '.join(global_models)}) are active for "
-                f"scale_regime='{self.profile.scale_regime}' (n_series={self.profile.n_series}, "
-                f"corr={self.profile.cross_series_corr:.2f}).{donor_note}"
+                f"Cross-series @global/@similarity_global models ({', '.join(global_models)}) are "
+                f"active for scale_regime='{self.profile.scale_regime}' "
+                f"(n_series={self.profile.n_series}, corr={self.profile.cross_series_corr:.2f})."
+                f"{sim_note}{donor_note}"
             )
         else:
             q4_verdict = "local_per_series_optimal"
@@ -1345,19 +1360,22 @@ class AutoForecastSession:
                 f"Per-series local and zero-shot models are optimal for "
                 f"scale_regime='{self.profile.scale_regime}' (n_series={self.profile.n_series}, "
                 f"corr={self.profile.cross_series_corr:.2f}), avoiding global neural overfitting."
-                f"{donor_note}"
+                f"{sim_note}{donor_note}"
             )
         q4_ev = (
             f"n_series={self.profile.n_series}, scale_regime='{self.profile.scale_regime}', "
             f"cross_series_corr={self.profile.cross_series_corr:.2f}, "
+            f"optimal_similarity_clusters={opt_k}, similarity_silhouette_score={sim_sil:.2f}, "
             f"global_models={global_models}, cold_start_transfer={cs_transfer_on}, "
             f"cold_start_donor_similarity={donor_sim:.2f}"
         )
 
         # 5. Is reconciliation being done correctly?
+        sim_hier_on = bool(getattr(champ.config.hierarchy, "similarity_hierarchy", False))
         has_spatial = bool(
             self.profile.hierarchy_id_cols
-            or (champ.config.hierarchy.enabled and champ.config.hierarchy.levels)
+            or sim_hier_on
+            or (champ.config.hierarchy.enabled and (champ.config.hierarchy.levels or sim_hier_on))
         )
         has_temporal = bool(
             champ.config.hierarchy.reconcile_temporal
@@ -1419,8 +1437,9 @@ class AutoForecastSession:
                 else "check_tree"
             )
             q5_ans = (
-                f"Yes — cross_temporal reconciliation ('{rec_m}', mode=cross_temporal) achieved "
-                f"exact spatial coherence (residual={max_coh:.6f}) and temporal coherence "
+                f"Yes — cross_temporal reconciliation ('{rec_m}', mode=cross_temporal, "
+                f"similarity_hierarchy={sim_hier_on}) achieved exact spatial coherence "
+                f"(residual={max_coh:.6f}) and temporal coherence "
                 f"(residual={temp_coh:.6f} across aggregations={temp_aggs}, "
                 f"spatial_weight_alpha={alpha_str}), {neg_cnt} negative leaves, "
                 f"{rec_lift:+.2f}% tree-wide accuracy change, and "
@@ -1430,7 +1449,8 @@ class AutoForecastSession:
                 f"mode='cross_temporal', method='{rec_m}', coherence_gap={max_coh:.6f}, "
                 f"temporal_coherence_gap={temp_coh:.6f}, temporal_aggregations={temp_aggs}, "
                 f"spatial_weight_alpha={alpha_str}, cross_temporal_beats_spatial={ct_beat}, "
-                f"negative_leaves={neg_cnt}, levels={len(hval_df)}"
+                f"similarity_hierarchy={sim_hier_on}, negative_leaves={neg_cnt}, "
+                f"levels={len(hval_df)}"
             )
         elif has_spatial and not hval_df.empty:
             all_row = hval_df[hval_df["hierarchy_level"] == "All Hierarchy Nodes"]
@@ -1443,13 +1463,15 @@ class AutoForecastSession:
                 "coherent_and_verified" if max_coh < 1e-4 and neg_cnt == 0 else "check_tree"
             )
             q5_ans = (
-                f"Yes — fold-safe '{rec_m}' spatial_only reconciliation achieved exact additive "
+                f"Yes — fold-safe '{rec_m}' spatial_only reconciliation "
+                f"(similarity_hierarchy={sim_hier_on}) achieved exact additive "
                 f"coherence (residual={max_coh:.6f}), {neg_cnt} negative leaves, and "
                 f"{rec_lift:+.2f}% tree-wide accuracy change."
             )
             q5_ev = (
                 f"mode='spatial_only', method='{rec_m}', coherence_gap={max_coh:.6f}, "
-                f"negative_leaves={neg_cnt}, levels={len(hval_df)}"
+                f"similarity_hierarchy={sim_hier_on}, negative_leaves={neg_cnt}, "
+                f"levels={len(hval_df)}"
             )
         elif has_temporal:
             all_row = (
@@ -1483,18 +1505,25 @@ class AutoForecastSession:
             q5_ans = (
                 f"Yes — temporal_only reconciliation ('{rec_m}') on flat panel verified exact "
                 f"multi-horizon bucket coherence (temporal_residual={temp_coh:.6f} across "
-                f"temporal_aggregations={temp_aggs}) with {rec_lift:+.2f}% accuracy change."
+                f"temporal_aggregations={temp_aggs}, similarity_hierarchy={sim_hier_on}) "
+                f"with {rec_lift:+.2f}% accuracy change."
             )
             q5_ev = (
                 f"mode='temporal_only', method='{rec_m}', temporal_coherence_gap={temp_coh:.6f}, "
-                f"temporal_aggregations={temp_aggs}, reconciliation_lift_pct={rec_lift:+.2f}%"
+                f"temporal_aggregations={temp_aggs}, similarity_hierarchy={sim_hier_on}, "
+                f"reconciliation_lift_pct={rec_lift:+.2f}%"
             )
         else:
             q5_verdict = "not_applicable_flat_panel"
             q5_ans = (
-                "Flat panel (no hierarchy columns); output.floor enforces non-negativity directly."
+                "Flat panel (no explicit hierarchy columns; "
+                f"similarity_hierarchy={sim_hier_on}, similarity_clusters={opt_k}); "
+                "output.floor enforces non-negativity directly."
             )
-            q5_ev = f"mode='none', hierarchy_id_cols={list(self.profile.hierarchy_id_cols)}"
+            q5_ev = (
+                f"mode='none', hierarchy_id_cols={list(self.profile.hierarchy_id_cols)}, "
+                f"similarity_hierarchy={sim_hier_on}, optimal_similarity_clusters={opt_k}"
+            )
 
         if is_simplex:
             from .simplex import verify_simplex_coherence
@@ -2485,6 +2514,59 @@ def inspect_panel_for_auto(
         4,
     )
 
+    mean_pairwise_similarity = round(max(0.0, float(cross_series_corr)), 4)
+    optimal_similarity_clusters = 1
+    similarity_silhouette_score = 0.0
+    lead_lag_pairs_count = 0
+    has_similarity_clusters = False
+    dominant_cluster_archetype = "steady_baseline"
+    if sampled_n_series >= 2 and not hist_df.empty:
+        try:
+            from .similarity import cluster_by_similarity_df, compute_similarity_matrix
+
+            sim_ids = [str(s) for s in hist_df[eff_ts].drop_duplicates().iloc[:24]]
+            sim_sub = hist_df[hist_df[eff_ts].astype(str).isin(sim_ids)]
+            sim_res = compute_similarity_matrix(
+                sim_sub,
+                method="hybrid",
+                ts_id_col=eff_ts,
+                date_col=eff_date,
+                target_col=eff_target,
+                max_lag=min(3, max(1, eff_horizon // 2)),
+                top_k=max(3, min(10, len(sim_ids) - 1)),
+            )
+            mean_pairwise_similarity = round(
+                float(sim_res.diagnostics.get("mean_pairwise_similarity", cross_series_corr)), 4
+            )
+            if not sim_res.pairs_df.empty and "optimal_lag" in sim_res.pairs_df.columns:
+                lead_lag_pairs_count = int(
+                    (
+                        (sim_res.pairs_df["optimal_lag"].abs() > 0)
+                        & (sim_res.pairs_df["similarity_score"] >= 0.50)
+                    ).sum()
+                )
+            cl_df = cluster_by_similarity_df(
+                sim_sub,
+                n_clusters="auto",
+                method="hybrid",
+                ts_id_col=eff_ts,
+                date_col=eff_date,
+                target_col=eff_target,
+                similarity_result=sim_res,
+            )
+            if not cl_df.empty:
+                optimal_similarity_clusters = int(
+                    max(1, int(cl_df["similarity_cluster_id"].nunique()))
+                )
+                similarity_silhouette_score = round(float(cl_df["silhouette_score"].mean()), 4)
+                if "cluster_archetype" in cl_df.columns:
+                    dominant_cluster_archetype = str(cl_df["cluster_archetype"].mode().iloc[0])
+            has_similarity_clusters = bool(
+                optimal_similarity_clusters >= 2 and similarity_silhouette_score >= 0.25
+            )
+        except Exception:  # noqa: BLE001 - fallback when similarity profiling encounters degenerate data
+            pass
+
     return PanelAutoProfile(
         source_table=source_table_name,
         ts_id_col=eff_ts,
@@ -2525,6 +2607,12 @@ def inspect_panel_for_auto(
         simplex_total=simplex_total,
         cold_start_donor_similarity=cold_start_donor_similarity,
         residual_drift_ks_stat=residual_drift_ks_stat,
+        mean_pairwise_similarity=mean_pairwise_similarity,
+        optimal_similarity_clusters=optimal_similarity_clusters,
+        similarity_silhouette_score=similarity_silhouette_score,
+        lead_lag_pairs_count=lead_lag_pairs_count,
+        has_similarity_clusters=has_similarity_clusters,
+        dominant_cluster_archetype=dominant_cluster_archetype,
     )
 
 
@@ -3780,7 +3868,9 @@ def _execute_local_panel_pass(
         else panel_df[y_num.isna()].copy()
     )
     work_fut = fut_rows
-    if exec_cfg.hierarchy.enabled and exec_cfg.hierarchy.levels:
+    if exec_cfg.hierarchy.enabled and (
+        exec_cfg.hierarchy.levels or exec_cfg.hierarchy.similarity_hierarchy
+    ):
         with contextlib.suppress(Exception):
             work_hist, hier_spec = build_hierarchy(hist_only_df, exec_cfg)
             if not fut_rows.empty:
@@ -3789,10 +3879,15 @@ def _execute_local_panel_pass(
                     c
                     for lvl in exec_cfg.hierarchy.levels
                     for c in lvl
-                    if c in hist_only_df.columns and c not in fut_filled.columns
+                    if c in work_hist.columns and c not in fut_filled.columns
                 ]
+                if (
+                    "__sim_cluster_id__" in work_hist.columns
+                    and "__sim_cluster_id__" not in fut_filled.columns
+                ):
+                    attr_cols.append("__sim_cluster_id__")
                 if attr_cols:
-                    meta_map = hist_only_df[[ts_col, *dict.fromkeys(attr_cols)]].drop_duplicates(
+                    meta_map = work_hist[[ts_col, *dict.fromkeys(attr_cols)]].drop_duplicates(
                         subset=[ts_col]
                     )
                     fut_filled = fut_filled.merge(meta_map, on=ts_col, how="left")

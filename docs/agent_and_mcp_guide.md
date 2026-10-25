@@ -12,7 +12,7 @@ flowchart TD
 
     subgraph Surfaces["Four Agent-First Surfaces (Zero Extra Dependencies)"]
         S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md + .agents/skills/ & .agents/skills.json"]
-        S2["2. Built-In MCP Server (7 Resources, 11 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
+        S2["2. Built-In MCP Server (7 Resources, 12 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
         S3["3. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json (IDE Autocomplete via $schema)"]
         S4["4. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt (Single-File RAG / Context Bundle)"]
     end
@@ -162,7 +162,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `forecast://catalog/configs` | `application/json` | All 62 shipped configs (20 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
 | `forecast://catalog/views` | `application/json` | The 4 source tables, 5 registry tables, and 5 analytical SQL views. |
 
-### 11 MCP Tools (`tools/list` & `tools/call`)
+### 12 MCP Tools (`tools/list` & `tools/call`)
 
 | Tool Name | Requires `[gcp]`? | Requires `--allow-launch`? | Purpose |
 | :--- | :---: | :---: | :--- |
@@ -170,13 +170,14 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `list_catalog` | No | No | Query models (with optional `family` and `available_only` filters), metrics, runtimes, GPUs, extras, views, shipped configs, `benchmarks` (`20` DGPs including `cold_start_short_history` and `regime_shift_volatility_drift`), or `auto_tiers` (exposure tiers & scale regimes). |
 | `inspect_config_schema` | No | No | Inspect the top-level `RunConfig` overview or drill into a specific section/class (`compute`, `backtest`, `FamilyCompute`, etc.). |
 | `validate_and_dry_run` | No | No | Validate a `RunConfig` (dict, JSON string, or file path), compute deterministic `run_id`, estimate workload, resolve per-family DAG nodes, and check local model extras. |
-| `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, workbench diagnostics (`include_fva`, `include_horizon_decay`, `include_bias_report`, `include_exceptions`, `include_inventory_policy`, `include_promo_elasticity`, `temporal_reconciliation_method`, `allocate_target`, `scenarios`), and Track L risk & prescriptive optimization (`include_tail_risk`, `copula_type` in `("auto", "gaussian", "student_t", "iman_conover", "empirical")`, `include_aci`, `optimize_inventory_params`, `optimize_scenario_params`). |
+| `run_playground` | No | No | Run a real Python model on deterministic synthetic panel data via `worker.run_cell` with optional 3-fold backtesting, workbench diagnostics (`include_fva`, `include_horizon_decay`, `include_bias_report`, `include_exceptions`, `include_inventory_policy`, `include_promo_elasticity`, `temporal_reconciliation_method`, `allocate_target`, `scenarios`), Track L risk & prescriptive optimization (`include_tail_risk`, `copula_type` in `("auto", "gaussian", "student_t", "iman_conover", "empirical")`, `include_aci`, `optimize_inventory_params`, `optimize_scenario_params`), and Track P similarity diagnostics (`include_similarity`, `similarity_method`, `similarity_n_clusters`, `similarity_top_k`). |
 | `plan_execution` | Mode-dependent | Only `stage_only` | Plan or emit execution artifacts: `dry_run`, `emit_airflow` (with `--with-retry`), `feasibility` (live BQ), `quota` (live GCP quotas), or `stage_only` (uploads to GCS). |
 | `inspect_registry` | Yes | No | Read-only live BigQuery registry inspection: `doctor`, `recent_runs` (`v_run_summary`), `probe_run` (live runtime reconciliation), or `retry_preview` (surgical cell repair table). |
-| `review_run` | Yes | No | Full data-science, risk, and supply-chain evaluation of a `run_id` (`review_run` + `calibration_report` + optional workbench diagnostics including `include_inventory_policy`, `include_promo_elasticity`, `temporal_reconciliation_method`, `allocate_target`, `include_tail_risk`, `copula_type` in `("auto", "gaussian", "student_t", "iman_conover", "empirical")`, `include_aci`, `optimize_inventory_params`, `optimize_scenario_params`): champion models, ensemble lift, leaderboard, online ACI coverage, copula VaR/CVaR tail risk, portfolio inventory replenishment, and prescriptive price/promo calendars. |
+| `review_run` | Yes | No | Full data-science, risk, and supply-chain evaluation of a `run_id` (`review_run` + `calibration_report` + optional workbench diagnostics including `include_inventory_policy`, `include_promo_elasticity`, `temporal_reconciliation_method`, `allocate_target`, `include_tail_risk`, `copula_type` in `("auto", "gaussian", "student_t", "iman_conover", "empirical")`, `include_aci`, `optimize_inventory_params`, `optimize_scenario_params`, `include_similarity`, `similarity_method`, `similarity_n_clusters`, `similarity_top_k`): champion models, ensemble lift, leaderboard, online ACI coverage, copula VaR/CVaR tail risk, portfolio inventory replenishment, prescriptive price/promo calendars, and digital-twin similarity diagnostics. |
 | `launch_or_repair_run` | Yes | **Yes** | Safety-gated execution and repair: `run` (launch multi-family DAG), `retry` (submit surgical repair), `settle` (repair stale job rows), `cancel` (stop cloud jobs), or `close_runs`. |
 | `build_auto_config` | Only for BQ table | No | Synthesize a glass-box `RunConfig` and `ConfigBlueprint` (`Forecaster.build_config`) across the 4 exposure tiers (`first_light`, `wide_field`, `deep_sky`, `deep_field`) and 5 `n_series` scale regimes; returns Step 0 `profile_table`, `rationale`, `baseline_models`, `duration_estimate`, and optional emitted Airflow DAG. |
 | `run_auto_forecast` | Only for cloud run | Only for cloud run | Execute `Forecaster.auto()` with optional multi-branch `autofocus=True` tournament (including Branch 2c `cold_start_analog_transfer`) across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables; returns Step 0 `profile_table`, `autofocus_ledger`, `baseline_value` ladder, `hierarchy_value`, `model_comparison`, and the **7-Question `practitioner_assessment`**. |
+| `compute_time_series_similarity` | Only for BQ table | No | Compute 7-lens time-series similarity (`hybrid`, `physics_attractor`, `spectral_phase`, `elastic_dtw`, `minirocket`, `structural_signature`, `foundation_latent`), silhouette-optimal behavioral clusters (`cluster_by_similarity_df`), 2D phase-space & econometric embeddings (`embed_series_df`), and top-$k$ digital-twin analog lookup (`query_ts_id`, `mode` in `("full_history", "launch_prefix", "recent_window")`) across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables. |
 
 ### Safety-By-Default (`--allow-launch`)
 

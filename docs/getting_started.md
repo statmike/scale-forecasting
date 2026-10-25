@@ -3,7 +3,7 @@
 This guide takes you from a fresh Python environment to your first local forecast in five minutes, and from there to your first distributed forecast run on Google Cloud.
 
 ```mermaid
-flowchart LR
+flowchart TD
     S1["1. Install<br/>Offline or with [gcp]"] --> S2["2. Fit locally<br/>playground & sample_data"]
     S2 --> S3["3. Plan a cloud run<br/>RunConfig & dry_run()"]
     S3 --> S4["4. Connect or deploy<br/>SF_* env & doctor()"]

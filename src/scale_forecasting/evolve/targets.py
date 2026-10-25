@@ -1,6 +1,6 @@
 """Evolutionary targets (`# EVOLVE-BLOCK`) built on top of `Forecaster.auto()`.
 
-Defines the four bounded code-synthesis targets for ``scale_forecasting.evolve``:
+Defines the five bounded code-synthesis targets for ``scale_forecasting.evolve``:
 
 1. ``"features"`` (:func:`synthesize_evolved_features`) — synthesizes causal lag, rolling,
    harmonic, and exogenous interaction covariates (``evolved_feat_*``) strictly from past and
@@ -12,6 +12,9 @@ Defines the four bounded code-synthesis targets for ``scale_forecasting.evolve``
    ``numpy``/``scipy``/``statsmodels`` primitives.
 4. ``"policy"`` (:func:`evolve_policy_weights`) — tunes :class:`AutoPolicyWeights` decision
    thresholds and action confidence priors for :mod:`scale_forecasting.auto_policy`.
+5. ``"similarity_kernel"`` (:func:`compute_evolved_similarity_kernel`) — synthesizes a custom
+   positive-definite / pairwise time-series similarity kernel over multi-lens dynamical feature
+   embeddings for analog transfer and cluster-aware cross-series pooling.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ __all__ = [
     "EvolvedForecaster",
     "TargetSpec",
     "build_mutation_prompt",
+    "compute_evolved_similarity_kernel",
     "compute_evolved_weights",
     "deterministic_mock_candidates",
     "evolve_policy_weights",
@@ -48,7 +52,13 @@ __all__ = [
     "synthesize_evolved_features",
 ]
 
-EVOLVE_TARGETS: tuple[str, ...] = ("features", "ensemble", "model", "policy")
+EVOLVE_TARGETS: tuple[str, ...] = (
+    "features",
+    "ensemble",
+    "model",
+    "policy",
+    "similarity_kernel",
+)
 EVOLVE_BLOCK_START: str = "# EVOLVE-BLOCK-START"
 EVOLVE_BLOCK_END: str = "# EVOLVE-BLOCK-END"
 
@@ -83,6 +93,8 @@ class AutoPolicyWeights:
     first_light_include_regression_lags: bool = True
     first_light_selection_rule: str = "best_single"
     tree_n_estimators_fast: int = 60
+    enable_similarity_global: bool = True
+    similarity_silhouette_threshold: float = 0.30
     action_weights: dict[str, tuple[float, float]] = field(default_factory=_default_action_weights)
 
     @classmethod
@@ -485,6 +497,44 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     # EVOLVE-BLOCK-END
 
 
+def compute_evolved_similarity_kernel(
+    features_mat: np.ndarray,
+    profile: dict[str, Any] | None = None,
+) -> np.ndarray:
+    """Synthesize an ``(N, N)`` similarity matrix in ``[0.0, 1.0]`` over per-series embeddings."""
+    _ = profile
+    x_raw = np.asarray(features_mat, dtype=float)
+    if x_raw.ndim == 1:
+        x_raw = x_raw.reshape(-1, 1)
+    n_series = int(x_raw.shape[0])
+    if n_series <= 1:
+        return np.ones((max(1, n_series), max(1, n_series)), dtype=float)
+    x_clean = np.nan_to_num(x_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    col_mean = np.mean(x_clean, axis=0, keepdims=True)
+    col_std = np.where(
+        np.std(x_clean, axis=0, keepdims=True) > 1e-8, np.std(x_clean, axis=0, keepdims=True), 1.0
+    )
+    x_norm = (x_clean - col_mean) / col_std
+
+    # EVOLVE-BLOCK-START
+    norms = np.linalg.norm(x_norm, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-8, norms, 1.0)
+    unit_x = x_norm / norms
+    cos_sim = np.clip(unit_x @ unit_x.T, -1.0, 1.0)
+    sq_dists = np.sum((x_norm[:, None, :] - x_norm[None, :, :]) ** 2, axis=-1)
+    med_sq = float(np.median(sq_dists)) if sq_dists.size > 0 else 1.0
+    rbf_sim = np.exp(-sq_dists / max(1e-6, 2.0 * med_sq))
+    sim_matrix = 0.55 * np.maximum(0.0, cos_sim) + 0.45 * rbf_sim
+    # EVOLVE-BLOCK-END
+
+    sim_out = np.asarray(sim_matrix, dtype=float)
+    sim_out = np.nan_to_num(sim_out, nan=0.0, posinf=1.0, neginf=0.0)
+    sim_out = 0.5 * (sim_out + sim_out.T)
+    sim_out = np.clip(sim_out, 0.0, 1.0)
+    np.fill_diagonal(sim_out, 1.0)
+    return sim_out
+
+
 # ---------------------------------------------------------------------------
 # Seed Templates & Block Extraction / Injection Helpers
 # ---------------------------------------------------------------------------
@@ -789,6 +839,52 @@ def evolve_policy_weights(base_weights: AutoPolicyWeights) -> AutoPolicyWeights:
     # EVOLVE-BLOCK-END
 '''
 
+_SIMILARITY_KERNEL_SEED_CODE = '''\
+from __future__ import annotations
+from typing import Any
+import numpy as np
+
+
+def compute_evolved_similarity_kernel(
+    features_mat: np.ndarray,
+    profile: dict[str, Any] | None = None,
+) -> np.ndarray:
+    """Synthesize an (N, N) similarity matrix in [0.0, 1.0] over per-series embeddings."""
+    _ = profile
+    x_raw = np.asarray(features_mat, dtype=float)
+    if x_raw.ndim == 1:
+        x_raw = x_raw.reshape(-1, 1)
+    n_series = int(x_raw.shape[0])
+    if n_series <= 1:
+        return np.ones((max(1, n_series), max(1, n_series)), dtype=float)
+    x_clean = np.nan_to_num(x_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    col_mean = np.mean(x_clean, axis=0, keepdims=True)
+    col_std = np.where(
+        np.std(x_clean, axis=0, keepdims=True) > 1e-8,
+        np.std(x_clean, axis=0, keepdims=True),
+        1.0,
+    )
+    x_norm = (x_clean - col_mean) / col_std
+
+    # EVOLVE-BLOCK-START
+    norms = np.linalg.norm(x_norm, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-8, norms, 1.0)
+    unit_x = x_norm / norms
+    cos_sim = np.clip(unit_x @ unit_x.T, -1.0, 1.0)
+    sq_dists = np.sum((x_norm[:, None, :] - x_norm[None, :, :]) ** 2, axis=-1)
+    med_sq = float(np.median(sq_dists)) if sq_dists.size > 0 else 1.0
+    rbf_sim = np.exp(-sq_dists / max(1e-6, 2.0 * med_sq))
+    sim_matrix = 0.55 * np.maximum(0.0, cos_sim) + 0.45 * rbf_sim
+    # EVOLVE-BLOCK-END
+
+    sim_out = np.asarray(sim_matrix, dtype=float)
+    sim_out = np.nan_to_num(sim_out, nan=0.0, posinf=1.0, neginf=0.0)
+    sim_out = 0.5 * (sim_out + sim_out.T)
+    sim_out = np.clip(sim_out, 0.0, 1.0)
+    np.fill_diagonal(sim_out, 1.0)
+    return sim_out
+'''
+
 
 _TARGET_SPECS: dict[str, TargetSpec] = {
     "features": TargetSpec(
@@ -884,6 +980,31 @@ _TARGET_SPECS: dict[str, TargetSpec] = {
             "Parent Program:\n```python\n{parent_code}\n```\n\n"
             "Return ONLY valid Python code for evolve_policy_weights with # EVOLVE-BLOCK-START "
             "and # EVOLVE-BLOCK-END markers."
+        ),
+    ),
+    "similarity_kernel": TargetSpec(
+        target="similarity_kernel",
+        entrypoint="compute_evolved_similarity_kernel",
+        description=(
+            "Synthesize an (N, N) pairwise time-series similarity kernel matrix in [0.0, 1.0] "
+            "over multi-lens dynamical feature embeddings for digital-twin analog pooling."
+        ),
+        seed_code=_SIMILARITY_KERNEL_SEED_CODE,
+        system_instruction=(
+            "You are an expert dynamical-systems similarity kernel architect inside "
+            "scale-forecasting. Mutate only the Python code between # EVOLVE-BLOCK-START and "
+            "# EVOLVE-BLOCK-END inside compute_evolved_similarity_kernel(features_mat, profile) "
+            "to populate `sim_matrix: np.ndarray` of shape (n_series, n_series) with values in "
+            "[0.0, 1.0]. Allowed modules: numpy, math."
+        ),
+        mutation_prompt_template=(
+            "Target: similarity_kernel (compute_evolved_similarity_kernel)\n"
+            "Generation: {generation}\n"
+            "Prior Walk-Forward Diagnostics: {diagnostics}\n\n"
+            "Parent Program:\n```python\n{parent_code}\n```\n\n"
+            "Return ONLY valid Python code containing # EVOLVE-BLOCK-START and # EVOLVE-BLOCK-END "
+            "that populates `sim_matrix: np.ndarray` to maximize within-regime digital-twin "
+            "pooling accuracy and minimize cross-regime negative transfer."
         ),
     ),
 }
@@ -1177,6 +1298,39 @@ return base_weights.with_updates(
 """,
 )
 
+_MOCK_SIMILARITY_KERNEL_BLOCKS: tuple[str, ...] = (
+    """\
+norms = np.linalg.norm(x_norm, axis=1, keepdims=True)
+norms = np.where(norms > 1e-8, norms, 1.0)
+unit_x = x_norm / norms
+cos_pos = np.maximum(0.0, np.clip(unit_x @ unit_x.T, -1.0, 1.0))
+sq_dists = np.sum((x_norm[:, None, :] - x_norm[None, :, :]) ** 2, axis=-1)
+med_sq = float(np.median(sq_dists[sq_dists > 1e-9])) if np.any(sq_dists > 1e-9) else 1.0
+rbf_sharp = np.exp(-sq_dists / max(1e-6, 0.75 * med_sq))
+sim_matrix = np.power(0.65 * cos_pos + 0.35 * rbf_sharp, 2.0)
+""",
+    """\
+norms = np.linalg.norm(x_norm, axis=1, keepdims=True)
+norms = np.where(norms > 1e-8, norms, 1.0)
+unit_x = x_norm / norms
+cos_pos = np.maximum(0.0, np.clip(unit_x @ unit_x.T, -1.0, 1.0))
+l1_dists = np.sum(np.abs(x_norm[:, None, :] - x_norm[None, :, :]), axis=-1)
+med_l1 = float(np.median(l1_dists[l1_dists > 1e-9])) if np.any(l1_dists > 1e-9) else 1.0
+lap_sim = np.exp(-l1_dists / max(1e-6, 0.85 * med_l1))
+sim_matrix = np.power(0.60 * cos_pos + 0.40 * lap_sim, 1.75)
+""",
+    """\
+norms = np.linalg.norm(x_norm, axis=1, keepdims=True)
+norms = np.where(norms > 1e-8, norms, 1.0)
+unit_x = x_norm / norms
+cos_pos = np.maximum(0.0, np.clip(unit_x @ unit_x.T, -1.0, 1.0))
+sq_dists = np.sum((x_norm[:, None, :] - x_norm[None, :, :]) ** 2, axis=-1)
+local_scale = np.sqrt(np.maximum(1e-6, np.median(sq_dists, axis=1, keepdims=True)))
+self_tuning_rbf = np.exp(-sq_dists / np.maximum(1e-6, local_scale @ local_scale.T))
+sim_matrix = 0.50 * (cos_pos ** 2) + 0.50 * self_tuning_rbf
+""",
+)
+
 
 def deterministic_mock_candidates(target: str, count: int = 3) -> list[str]:
     """Return ``count`` deterministic, AST-safe, causal candidate programs for ``target``."""
@@ -1186,6 +1340,7 @@ def deterministic_mock_candidates(target: str, count: int = 3) -> list[str]:
         "ensemble": _MOCK_ENSEMBLE_BLOCKS,
         "model": _MOCK_MODEL_BLOCKS,
         "policy": _MOCK_POLICY_BLOCKS,
+        "similarity_kernel": _MOCK_SIMILARITY_KERNEL_BLOCKS,
     }
     blocks = blocks_by_target[spec.target]
     candidates: list[str] = []
@@ -1224,5 +1379,9 @@ for model_type, grp in work.groupby("model_type", sort=False):
     wape = float(np.sum(abs_err)) / denom
     scores[str(model_type)] = 1.0 / max(1e-6, wape ** 3)
 """,
+    ),
+    "similarity_kernel": inject_evolve_block(
+        _SIMILARITY_KERNEL_SEED_CODE,
+        _MOCK_SIMILARITY_KERNEL_BLOCKS[-1],
     ),
 }

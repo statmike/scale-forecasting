@@ -25,7 +25,10 @@ def main(argv: list[str] | None = None) -> int:
         "--target",
         default="features",
         choices=list(EVOLVE_TARGETS),
-        help="Evolutionary target (# EVOLVE-BLOCK): features, ensemble, model, or policy.",
+        help=(
+            "Evolutionary target (# EVOLVE-BLOCK): "
+            "features, ensemble, model, policy, or similarity_kernel."
+        ),
     )
     parser.add_argument(
         "--backend",

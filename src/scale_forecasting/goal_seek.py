@@ -123,6 +123,35 @@ def _build_flat_hierarchy_spec(
     )
 
 
+def _canonicalize_sim_cluster_node_id(
+    nid: str,
+    *,
+    bottom_ids: set[str] | None = None,
+) -> str:
+    """Canonicalize shorthand similarity-cluster aliases (e.g. ``'__sim_cluster_0__'``,
+    ``'sim_cluster_0'``, ``'cluster_0'``) to ``'similarity_cluster_id=cluster_0'``."""
+    s = str(nid).strip()
+    if s.startswith("__sim_cluster_") and s.endswith("__"):
+        cid = s[len("__sim_cluster_") : -2]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if s.startswith("sim_cluster_"):
+        cid = s[len("sim_cluster_") :]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if s.startswith("__cluster_") and s.endswith("__"):
+        cid = s[len("__cluster_") : -2]
+        if cid:
+            return f"similarity_cluster_id=cluster_{cid}"
+    if (
+        s.startswith("cluster_")
+        and s[len("cluster_") :].isdigit()
+        and (bottom_ids is None or s not in bottom_ids)
+    ):
+        return f"similarity_cluster_id={s}"
+    return s
+
+
 def _infer_hierarchy_spec_from_frame(
     df: pd.DataFrame,
     *,
@@ -131,6 +160,11 @@ def _infer_hierarchy_spec_from_frame(
     history_df: pd.DataFrame | None,
     ts_id_col: str,
     date_col: str,
+    target_node: str | None = None,
+    raw_target: Any = None,
+    similarity_hierarchy: bool = False,
+    similarity_n_clusters: int | Literal["auto"] = "auto",
+    similarity_method: str = "hybrid",
 ) -> tuple[HierarchySpec, bool]:
     """Resolve `(HierarchySpec, include_agg_nodes_in_output)` from spec, config, or frame IDs."""
     if hier_spec is not None:
@@ -147,11 +181,14 @@ def _infer_hierarchy_spec_from_frame(
 
     if (
         parsed_cfg is not None
-        and parsed_cfg.hierarchy.levels
+        and (
+            parsed_cfg.hierarchy.levels
+            or getattr(parsed_cfg.hierarchy, "similarity_hierarchy", False)
+        )
         and history_df is not None
         and not history_df.empty
     ):
-        needed = {c for lvl in parsed_cfg.hierarchy.levels for c in lvl}
+        needed = {c for lvl in parsed_cfg.hierarchy.levels for c in lvl} - {"similarity_cluster_id"}
         if needed.issubset(history_df.columns):
             _, built_spec = build_hierarchy(history_df, parsed_cfg)
             return built_spec, True
@@ -169,6 +206,105 @@ def _infer_hierarchy_spec_from_frame(
             bottom_ids = [TOTAL_NODE_ID]
             has_total = False
 
+    bottom_set = set(bottom_ids)
+    # Inspect target_node and raw_target for any requested intermediate nodes (e.g.,
+    # "similarity_cluster_id=cluster_0", "__sim_cluster_0__", or "region=North") even when df only
+    # has flat leaf rows.
+    extra_inter_candidates: list[str] = []
+    if target_node:
+        cand_tn = _canonicalize_sim_cluster_node_id(str(target_node), bottom_ids=bottom_set)
+        if cand_tn != TOTAL_NODE_ID and "=" in cand_tn:
+            extra_inter_candidates.append(cand_tn)
+    if isinstance(raw_target, Mapping):
+        for k in raw_target:
+            ks = _canonicalize_sim_cluster_node_id(str(k), bottom_ids=bottom_set)
+            if ks != TOTAL_NODE_ID and "=" in ks:
+                extra_inter_candidates.append(ks)
+    elif isinstance(raw_target, pd.DataFrame) and ts_id_col in raw_target.columns:
+        for k in raw_target[ts_id_col].dropna().astype(str).unique().tolist():
+            ks = _canonicalize_sim_cluster_node_id(k, bottom_ids=bottom_set)
+            if ks != TOTAL_NODE_ID and "=" in ks:
+                extra_inter_candidates.append(ks)
+
+    ref_df = history_df.copy() if (history_df is not None and not history_df.empty) else df.copy()
+    needs_sim_cluster = (
+        bool(similarity_hierarchy)
+        or (parsed_cfg is not None and getattr(parsed_cfg.hierarchy, "similarity_hierarchy", False))
+        or any("similarity_cluster_id=" in cand for cand in [*inter_ids, *extra_inter_candidates])
+    )
+
+    if needs_sim_cluster and "similarity_cluster_id" not in ref_df.columns and len(bottom_ids) >= 1:
+        from .similarity import cluster_by_similarity_df
+
+        ref_dcol = "ds" if "ds" in ref_df.columns else date_col
+        ref_tcol = "y" if "y" in ref_df.columns else ("yhat" if "yhat" in ref_df.columns else "y")
+        n_clust: int | Literal["auto"] = (
+            similarity_n_clusters
+            if similarity_n_clusters != "auto"
+            else (
+                getattr(parsed_cfg.hierarchy, "similarity_n_clusters", "auto")
+                if parsed_cfg is not None
+                else "auto"
+            )
+        )
+        sim_method = (
+            str(similarity_method)
+            if similarity_method != "hybrid"
+            else (
+                str(getattr(parsed_cfg.hierarchy, "similarity_method", "hybrid"))
+                if parsed_cfg is not None
+                else "hybrid"
+            )
+        )
+        bottom_ref = ref_df[ref_df[ts_id_col].astype(str).isin(bottom_ids)].copy()
+        if not bottom_ref.empty and ref_tcol in bottom_ref.columns:
+            eff_min_size = 1 if (isinstance(n_clust, int) or len(bottom_ids) < 4) else 2
+            cluster_res = cluster_by_similarity_df(
+                bottom_ref,
+                n_clusters=n_clust,
+                method=sim_method,
+                min_cluster_size=eff_min_size,
+                ts_id_col=ts_id_col,
+                date_col=ref_dcol,
+                target_col=ref_tcol,
+                cluster_col="similarity_cluster_id",
+            )
+            if isinstance(cluster_res, tuple):
+                _, cmap = cluster_res
+            else:
+                c_col = (
+                    "similarity_cluster_id"
+                    if "similarity_cluster_id" in cluster_res.columns
+                    else "cluster_id"
+                )
+                t_col_res = ts_id_col if ts_id_col in cluster_res.columns else "ts_id"
+                cmap = dict(
+                    zip(
+                        cluster_res[t_col_res].astype(str),
+                        cluster_res[c_col].astype(str),
+                        strict=False,
+                    )
+                )
+            ref_df["similarity_cluster_id"] = (
+                ref_df[ts_id_col].astype(str).map(cmap).fillna(TOTAL_NODE_ID)
+            )
+
+    if needs_sim_cluster and "similarity_cluster_id" in ref_df.columns:
+        for cval in sorted(
+            ref_df.loc[ref_df[ts_id_col].astype(str).isin(bottom_ids), "similarity_cluster_id"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        ):
+            cand_nid = f"similarity_cluster_id={cval}"
+            if cand_nid not in inter_ids:
+                inter_ids.append(cand_nid)
+
+    for cand_nid in extra_inter_candidates:
+        if cand_nid not in inter_ids and cand_nid not in bottom_ids:
+            inter_ids.append(cand_nid)
+
     if not inter_ids:
         return _build_flat_hierarchy_spec(bottom_ids), has_total
 
@@ -179,8 +315,6 @@ def _infer_hierarchy_spec_from_frame(
     node_ids: list[str] = [TOTAL_NODE_ID]
     level_nodes: dict[str, list[str]] = {TOTAL_NODE_ID: [TOTAL_NODE_ID]}
 
-    # Check if attribute columns exist in history_df or df.
-    ref_df = history_df if (history_df is not None and not history_df.empty) else df
     piv_yhat = (
         df.pivot_table(index=date_col, columns=ts_id_col, values="yhat", aggfunc="first")
         if "yhat" in df.columns and date_col in df.columns
@@ -675,6 +809,9 @@ def allocate_target(
     date_col: str = "ds",
     ts_id_col: str = "ts_id",
     target_col: str = "y",
+    similarity_hierarchy: bool = False,
+    similarity_n_clusters: int | Literal["auto"] = "auto",
+    similarity_method: str = "hybrid",
     return_result: bool = False,
 ) -> pd.DataFrame | GoalSeekResult:
     """Optimally disaggregate a top-down or regional target across leaf series and dates (pure).
@@ -772,6 +909,11 @@ def allocate_target(
         history_df=history_df,
         ts_id_col=ts_id_col,
         date_col=dcol,
+        target_node=eff_target_node,
+        raw_target=raw_target,
+        similarity_hierarchy=similarity_hierarchy,
+        similarity_n_clusters=similarity_n_clusters,
+        similarity_method=similarity_method,
     )
     bottom_ids = list(resolved_spec.bottom_ids)
     n_b = len(bottom_ids)
@@ -1016,7 +1158,7 @@ def allocate_target(
     eq_rhs: list[float] = []
 
     def _node_s_row(nid_raw: str) -> np.ndarray:
-        nid = str(nid_raw)
+        nid = _canonicalize_sim_cluster_node_id(str(nid_raw), bottom_ids=set(b_to_idx))
         if nid in node_to_idx:
             return resolved_spec.summing_matrix[node_to_idx[nid]].copy()
         # Allow shorthand like "North" matching "region=North".
@@ -1028,7 +1170,7 @@ def allocate_target(
             r[b_to_idx[nid]] = 1.0
             return r
         raise ConfigError(
-            f"Unknown hierarchy node '{nid}'; available nodes: {list(resolved_spec.node_ids)}"
+            f"Unknown hierarchy node '{nid_raw}'; available nodes: {list(resolved_spec.node_ids)}"
         )
 
     # Process locked_nodes and locks.
@@ -1140,7 +1282,7 @@ def allocate_target(
         # Determine whether keys are hierarchy node IDs or dates/steps.
         sample_keys = list(raw_target.keys())
         is_node_mapping = all(
-            str(k) in node_to_idx
+            _canonicalize_sim_cluster_node_id(str(k), bottom_ids=set(b_to_idx)) in node_to_idx
             or str(k) in b_to_idx
             or any(cand.endswith(f"={k}") for cand in node_to_idx)
             for k in sample_keys
@@ -1306,7 +1448,15 @@ def allocate_target(
     for r in df.to_dict(orient="records"):
         orig_by_key[(str(r[ts_id_col]), r[dcol])] = {str(k): v for k, v in r.items()}
 
-    target_node_idx = node_to_idx.get(eff_target_node, 0)
+    canon_tn = _canonicalize_sim_cluster_node_id(eff_target_node, bottom_ids=set(b_to_idx))
+    if canon_tn in node_to_idx:
+        target_node_idx = node_to_idx[canon_tn]
+    else:
+        target_node_idx = 0
+        for cand_nid, r_idx in node_to_idx.items():
+            if cand_nid.endswith(f"={canon_tn}") or cand_nid == canon_tn:
+                target_node_idx = r_idx
+                break
     records: list[dict[str, Any]] = []
     for nid in output_node_ids:
         n_idx = node_to_idx[nid]

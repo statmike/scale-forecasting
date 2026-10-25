@@ -129,6 +129,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         "launch_or_repair_run",
         "build_auto_config",
         "run_auto_forecast",
+        "compute_time_series_similarity",
     ]
 
     # 1. probe_environment
@@ -577,3 +578,66 @@ def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
     assert not is_err_scen, scen_res
     assert scen_res["status"] == "ok"
     assert len(scen_res["rows"]) >= 1
+
+    # Track P: compute_time_series_similarity tool and similarity schema flags
+    assert "include_similarity" in pg_props
+    assert "include_substitutes" in pg_props
+    assert "include_emerging_trends" in pg_props
+    assert "text_cols" in pg_props
+    assert "include_similarity" in rev_props
+    assert "include_substitutes" in rev_props
+    assert "include_emerging_trends" in rev_props
+    auto_props = tools["run_auto_forecast"]["inputSchema"]["properties"]
+    assert "similarity_kernel" in auto_props["evolve_target"]["enum"]
+
+    is_err_sim, sim_res = _call_tool(
+        server,
+        "compute_time_series_similarity",
+        {
+            "method": "hybrid",
+            "mode": "full_history",
+            "top_k": 2,
+            "n_clusters": 2,
+            "include_substitutes": True,
+            "include_emerging_trends": True,
+        },
+    )
+    assert not is_err_sim, sim_res
+    assert sim_res["status"] == "ok"
+    assert len(sim_res["top_pairs"]) >= 1
+    assert len(sim_res["clusters"]) >= 1
+    assert len(sim_res["substitutes"]) >= 1
+    assert len(sim_res["emerging_trends"]) >= 1
+
+    is_err_sub, sub_res = _call_tool(
+        server,
+        "compute_time_series_similarity",
+        {"method": "hybrid", "mode": "substitutes", "top_k": 2},
+    )
+    assert not is_err_sub, sub_res
+    assert sub_res["status"] == "ok"
+    assert len(sub_res["substitutes"]) >= 1
+
+    is_err_tr, tr_res = _call_tool(
+        server,
+        "compute_time_series_similarity",
+        {"method": "hybrid", "mode": "emerging_trends", "window": 10},
+    )
+    assert not is_err_tr, tr_res
+    assert tr_res["status"] == "ok"
+    assert len(tr_res["emerging_trends"]) >= 1
+
+    is_err_pg, pg_res = _call_tool(
+        server,
+        "run_playground",
+        {
+            "models": ["naive_mean"],
+            "n_series": 3,
+            "horizon": 7,
+            "include_substitutes": True,
+            "include_emerging_trends": True,
+        },
+    )
+    assert not is_err_pg, pg_res
+    assert "substitutes" in pg_res
+    assert "emerging_trends" in pg_res

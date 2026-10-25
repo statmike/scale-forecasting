@@ -347,3 +347,35 @@ def test_compute_and_plot_inventory_frontier_and_validation() -> None:
         optimize_inventory_portfolio(preds_df, min_service_level=1.2)
     with pytest.raises((ConfigError, ValueError)):
         optimize_inventory_portfolio(preds_df, unit_cost=-5.0)
+
+
+def test_copula_inventory_optimization_with_similarity_shrinkage_pooling() -> None:
+    """Verify F7 (`similarity_shrinkage=True` in `optimize_inventory_portfolio`): forwards
+    similarity shrinkage into cross-series copula trajectory generation and records
+    `similarity_shrinkage_weight` in `portfolio_summary`.
+    """
+    preds_df, oof_df = _make_multi_sku_predictions_and_oof()
+
+    opt_shrunk = optimize_inventory_portfolio(
+        preds_df,
+        oof_df=oof_df,
+        uncertainty_source="copula",
+        copula_type="gaussian",
+        n_paths=200,
+        similarity_shrinkage=True,
+        similarity_weight=0.45,
+        seed=42,
+    )
+    opt_unshrunk = optimize_inventory_portfolio(
+        preds_df,
+        oof_df=oof_df,
+        uncertainty_source="copula",
+        copula_type="gaussian",
+        n_paths=200,
+        similarity_shrinkage=False,
+        seed=42,
+    )
+    assert list(opt_shrunk.columns) == list(INVENTORY_OPTIMIZER_COLUMNS)
+    shrunk_w = float(opt_shrunk.attrs["portfolio_summary"]["similarity_shrinkage_weight"])
+    assert abs(shrunk_w - 0.45) < 1e-6
+    assert float(opt_unshrunk.attrs["portfolio_summary"]["similarity_shrinkage_weight"]) == 0.0

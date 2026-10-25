@@ -10,32 +10,29 @@ This subpackage implements the five execution engines that run model families ac
 The three Python engines (`spark_explode`, `ray_engine`, and `vertex_engine`) execute the exact same per-series unit of work — [`worker.run_cell(series, model_name, cfg)`](../worker.py) (plus [`worker.run_panel_model`](../worker.py) for cross-series global/hybrid models) — and stream results incrementally to the BigQuery registry so partial progress is durable even if a job is interrupted. The Vertex AI AutoML engine (`automl_engine`) compiles and dispatches managed KFP v2 Tabular Workflow pipelines or AutoML training jobs and harvests quantiles and two-tier explanations into the registry. The BigQuery native engine compiles `RunConfig` into multi-series `CREATE MODEL` and `ML.FORECAST` / `AI.FORECAST` SQL statements that execute entirely inside BigQuery.
 
 ```mermaid
-flowchart TB
+flowchart TD
     src[("Source Series Table<br/>source_series_iceberg or source_series_native<br/>(Snapshot-pinned at run start)")]
 
-    subgraph py_engines["Python Engines (Shared worker.run_cell / run_panel_model Contract)"]
-        direction LR
-        spark["Spark Engine (spark_explode.py · spark_io.py)<br/>1. Read via spark-bigquery connector (Arrow)<br/>2. Cross-join series × Python models<br/>3. Cost-weighted bucketing + applyInPandas<br/>4. Stream bucket results via Storage Write API"]
-        ray["Ray Engine (ray_engine.py · ray_io.py)<br/>1. Read via BigQuery Storage Read API (Arrow)<br/>2. Shard into cost-weighted cell chunks<br/>3. Dispatch @ray.remote tasks on Vertex Ray or GKE Ray<br/>4. Stream chunk results via Storage Write API"]
-        vtx["Vertex, GCE & GKE Engine (vertex_engine.py)<br/>1. Read via Storage Read API + contiguous shard pushdown<br/>2. Dedicated per-model VMs/pods (global/DL) or ThreadPoolExecutor (LPT)<br/>3. Stream chunk results + GCS worker-pool barrier"]
+    subgraph py_engines["1. Python Engines (Shared worker.run_cell / run_panel_model Contract)"]
+        direction TB
+        spark["Spark Engine (spark_explode.py · spark_io.py)<br/>Read via spark-bigquery connector (Arrow) · Cost-weighted bucketing + applyInPandas · Stream bucket results"]
+        ray["Ray Engine (ray_engine.py · ray_io.py)<br/>Read via BigQuery Storage Read API (Arrow) · Shard into cost-weighted chunks · Dispatch @ray.remote tasks"]
+        vtx["Vertex, GCE & GKE Engine (vertex_engine.py)<br/>Read via Storage Read API + contiguous shard pushdown · Dedicated per-model VMs/pods or ThreadPoolExecutor (LPT)"]
+        spark --> ray --> vtx
     end
 
-    subgraph automl_eng["Vertex AI AutoML Engine (automl_engine.py)"]
-        aml["Tabular Workflow & AutoML Engine<br/>1. Stage snapshot-pinned BQ training & prediction views<br/>2. Compile GCPC pipeline (L2L · TiDE · TFT · Seq2Seq+)<br/>3. Submit PipelineJob & BatchPredictionJob (with explanations)<br/>4. Score 21-metric panel, reconcile & stream registry rows"]
+    cell["2. worker.run_cell / run_panel_model<br/>Identical fit · backtest · calibrate · reconcile · predict"]
+
+    subgraph managed_engines["3. Managed AutoML & BigQuery SQL Engines"]
+        direction TB
+        aml["Vertex AI AutoML Engine (automl_engine.py)<br/>Stage snapshot-pinned BQ views · Compile GCPC pipeline (L2L · TiDE · TFT · Seq2Seq+) · Score 21-metric panel"]
+        bq["BigQuery SQL Engine (bigquery_engine.py · bigquery_sql.py)<br/>Rolling-origin backtest folds in SQL · CREATE OR REPLACE MODEL (ARIMA_PLUS / XREG) · ML.FORECAST / AI.FORECAST (TimesFM)"]
+        aml --> bq
     end
 
-    subgraph bq_engine["BigQuery SQL Engine (bigquery_engine.py · bigquery_sql.py)"]
-        bq["SQL Native Engine<br/>1. Rolling-origin backtest folds in SQL<br/>2. CREATE OR REPLACE MODEL (ARIMA_PLUS / XREG)<br/>3. ML.FORECAST / AI.FORECAST (TimesFM)<br/>4. Compute 21-metric panel & write registry rows"]
-    end
+    reg[("4. BigQuery Run Registry<br/>forecast_metadata · forecast_predictions · backtest_oof")]
 
-    cell["worker.run_cell / run_panel_model<br/>Identical fit · backtest · calibrate · reconcile · predict"]
-    reg[("BigQuery Run Registry<br/>forecast_metadata · forecast_predictions · backtest_oof")]
-
-    src --> spark & ray & vtx & aml & bq
-    spark & ray & vtx --> cell
-    cell --> reg
-    aml --> reg
-    bq --> reg
+    src --> py_engines --> cell --> managed_engines --> reg
 ```
 
 ---

@@ -73,7 +73,7 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     is active, returns ``[_MODEL_COL]`` so each model's full panel lands in one bucket for coherent
     aggregation, reconciliation, and simplex closure.
     """
-    if cfg.hierarchy.enabled:
+    if cfg.hierarchy.enabled or cfg.features.similarity_cluster_feature:
         return [_MODEL_COL]
     from ..simplex import has_simplex_models
 
@@ -380,13 +380,17 @@ def run_group(
     by_model = params_by_model or {}
 
     hier_cols = (
-        {col for level in cfg.hierarchy.levels for col in level} if cfg.hierarchy.enabled else set()
+        {col for level in cfg.hierarchy.levels for col in level if col != "similarity_cluster_id"}
+        if cfg.hierarchy.enabled
+        else set()
     )
     can_reconcile = (
         cfg.hierarchy.enabled
         and not pdf.empty
-        and bool(hier_cols)
-        and hier_cols.issubset(pdf.columns)
+        and (
+            cfg.hierarchy.similarity_hierarchy
+            or (bool(hier_cols) and hier_cols.issubset(pdf.columns))
+        )
     )
 
     results: list[CellResult] = []
@@ -396,6 +400,10 @@ def run_group(
         for raw_model, model_sub in pdf.groupby(_MODEL_COL, sort=False):
             mname = str(raw_model)
             clean_panel = model_sub.drop(columns=helper_cols)
+            if cfg.features.similarity_cluster_feature and not clean_panel.empty:
+                from ..features import add_similarity_features
+
+                clean_panel = add_similarity_features(clean_panel, cfg)
             spec = None
             if can_reconcile:
                 from ..reconciliation import build_hierarchy, reconcile_cells
@@ -431,6 +439,10 @@ def run_group(
         # untagged frame: run any panel models (`global`/`hybrid`) across the whole group first,
         # then run local models per series.
         clean_panel = pdf.drop(columns=helper_cols) if not pdf.empty else pdf
+        if cfg.features.similarity_cluster_feature and not clean_panel.empty:
+            from ..features import add_similarity_features
+
+            clean_panel = add_similarity_features(clean_panel, cfg)
         spec = None
         if can_reconcile:
             from ..reconciliation import build_hierarchy, reconcile_cells
@@ -547,7 +559,9 @@ def _needed_columns(cfg: RunConfig) -> list[str]:
     each series once per model, so narrow rows matter). Order-preserving + de-duplicated.
     """
     hierarchy_cols = (
-        [col for level in cfg.hierarchy.levels for col in level] if cfg.hierarchy.enabled else []
+        [col for level in cfg.hierarchy.levels for col in level if col != "similarity_cluster_id"]
+        if cfg.hierarchy.enabled
+        else []
     )
     wanted = [
         cfg.data.ts_id_col,
@@ -720,10 +734,20 @@ def add_bucket(
     key = [F.col(c) for c in bucket_key_cols(cfg)]
     flat = F.pmod(F.hash(*key), F.lit(n_buckets))
     panel_models = [m for m in cfg.models if is_panel_model(m, cfg) or has_simplex_models(cfg, [m])]
-    if panel_models and not cfg.hierarchy.enabled and not has_simplex_models(cfg):
+    if (
+        panel_models
+        and not cfg.hierarchy.enabled
+        and not cfg.features.similarity_cluster_feature
+        and not has_simplex_models(cfg)
+    ):
         panel_flat = F.pmod(F.hash(F.col(_MODEL_COL)), F.lit(n_buckets))
         flat = F.when(F.col(_MODEL_COL).isin(panel_models), panel_flat).otherwise(flat)
-    if not allocation or cfg.hierarchy.enabled or has_simplex_models(cfg):
+    if (
+        not allocation
+        or cfg.hierarchy.enabled
+        or cfg.features.similarity_cluster_feature
+        or has_simplex_models(cfg)
+    ):
         return df.withColumn(_BUCKET_COL, flat)
 
     panel_set = set(panel_models)

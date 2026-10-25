@@ -60,7 +60,14 @@ flowchart TD
         M1 --> M2 --> M3
     end
 
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+    subgraph S9["Stage 9: Multi-Lens & Multi-Modal Similarity, Merchandising Intelligence & Similarity-Woven Decisioning (Track P)"]
+        P_SIM1["7-Lens + Multi-Modal PSD Similarity (similarity.py)<br/>hybrid · physics_attractor · spectral_phase · elastic_dtw · minirocket · structural_signature · foundation_latent · text_cols / attribute_cols / hierarchy_cols"]
+        P_SIM2["Cluster-Aware Global Pooling, Day-0 to Day-14 NPI Handoff & Latent Hierarchies<br/>@similarity_global · @similarity_cold_start (cold_start_handoff) · hierarchy.similarity_hierarchy"]
+        P_SIM3["SKU Substitutes, Emerging Trends, Copulas, Inventory Pooling & OOF Smoothing<br/>recommend_substitutes_df · detect_emerging_trends_df · similarity_shrinkage · similarity_pooling · ensemble.similarity_smoothing"]
+        P_SIM1 --> P_SIM2 --> P_SIM3
+    end
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
 ```
 
 ---
@@ -242,11 +249,44 @@ flowchart TD
 
 | Capability | SDK / Workbench Entrypoint | Key Parameters & Outputs |
 | :--- | :--- | :--- |
-| **Cold-Start & NPI Analog Donor Transfer** | `features={"cold_start_transfer": True, "cold_start_min_obs": 14, "cold_start_method": "auto"}`<br/>`forecaster.cold_start_transfer_df(method="auto", top_k_donors=3)`<br/>`sf.cold_start_transfer_df(panel_df, min_obs=14)` | Matches ultra-short-history series ($n < \text{min\_obs}$) to mature donor peers using static metadata, hierarchy lineage, and normalized early-ramp shape (`analog_transfer`), or fits parametric `bass_diffusion` ($p, q, m$) and `weibull_lifecycle` curves with empirical-Bayes shrinkage. Automatically evaluated as Branch 2c (`cold_start_analog_transfer`) in `Forecaster.auto()` and surfaced in `f.assess()` Question 4. |
+| **Cold-Start & NPI Analog Donor Transfer** | `features={"cold_start_transfer": True, "cold_start_min_obs": 14, "cold_start_method": "auto"}`<br/>`forecaster.cold_start_transfer_df(method="auto", top_k_donors=3)`<br/>`sf.cold_start_transfer_df(panel_df, min_obs=14)` | Matches ultra-short-history series (`n < min_obs`) to mature donor peers using static metadata, hierarchy lineage, and normalized early-ramp shape (`analog_transfer`), or fits parametric `bass_diffusion` ($p, q, m$) and `weibull_lifecycle` curves with empirical-Bayes shrinkage. Automatically evaluated as Branch 2c (`cold_start_analog_transfer`) in `Forecaster.auto()` and surfaced in `f.assess()` Question 4. |
 | **Online Adaptive Conformal Inference (ACI)** | `output={"calibration_method": "aci_normalized", "aci_gamma": 0.05}`<br/>`forecaster.aci_df(gamma=0.05, normalized=True, horizon_delay=True)`<br/>`sf.compute_aci_df(oof_df, predictions_df=..., gamma=0.05)` | Updates the effective miscoverage rate $\alpha_{t+1} = \text{clip}(\alpha_t + \gamma(\alpha - \text{err}_{t-h+1}), [0.001, 0.999])$ online under distribution shift (`aci`) and scales intervals by an exponentially weighted volatility estimate $\hat{\sigma}_t$ (`aci_normalized`), guaranteeing finite-sample long-run coverage recovery after structural breaks. |
 | **Joint Cross-Series & Cross-Horizon Copula Trajectories & Tail Risk** | `forecaster.sample_trajectories(n_paths=500, copula_type="auto")`<br/>`forecaster.tail_risk_df(alphas=(0.90, 0.95, 0.99), window=7)`<br/>`sf.sample_trajectories(preds_df, oof_df=..., copula_type="student_t")` | Fits shrinkage-regularized Gaussian or heavy-tailed Student-$t$ copulas ($\nu=4$) over out-of-fold residual rank correlations across $(H \times N)$ series-horizon cells, enforces non-negative `floor`/`cap`, simplex closure, and hierarchical coherence per path, and computes portfolio `var_alpha`, `cvar_alpha`, `stockout_prob`, and `expected_shortfall_cost`. |
 | **Multi-SKU Portfolio-Constrained Inventory Optimizer** | `forecaster.optimize_inventory_df(max_budget=50000.0, max_volume=1200.0, target_portfolio_fill_rate=0.96, uncertainty_source="copula")`<br/>`sf.optimize_inventory_portfolio(preds_df, oof_df=..., max_budget=...)` | Solves joint multi-SKU replenishment (`recommended_order_qty`, `reorder_point`, `safety_stock`, `achieved_service_level`, `expected_total_cost`, `shadow_price_budget`) under shared working-capital (`max_budget`), warehouse capacity (`max_volume`), aggregate fill-rate (`target_portfolio_fill_rate`), and discrete `vendor_moq` / `order_multiple` constraints using either analytical or copula-trajectory distributions. Visualize with `forecaster.plot_inventory_frontier()`. |
 | **Prescriptive Price & Promo Calendar Optimizer** | `forecaster.optimize_scenario(objective="risk_adjusted_profit", price_bounds=(-0.10, 0.10), max_promo_days=3, min_cooldown_days=2, risk_aversion_lambda=0.3)`<br/>`sf.optimize_scenario(panel_df, config=..., objective="gross_profit")` | Optimizes the forward price and promotional calendar over the Double-ML causal response surface (`elasticity.py`)—incorporating own-price elasticity, promo lift, post-promo pull-forward dip, cross-SKU halo/cannibalization, hierarchical coherence, and inventory holding/stockout cost—subject to price bounds, promo frequency/cooldown rules, margin floors, and capacity caps. Visualize with `forecaster.plot_optimal_scenario()`. |
+
+---
+
+## 8. Multi-Lens & Multi-Modal Time-Series Similarity, Merchandising Intelligence & Similarity-Woven Decisioning (Track P)
+
+Track P ([`similarity.py`](./api/similarity.md)) elevates time-series similarity from an isolated diagnostic into a **first-class structural primitive** woven across cold-start transfer, global model pooling, hierarchy discovery, SKU substitution & emerging trend detection, copula tail-risk shrinkage, portfolio inventory pooling, promo cannibalization priors, ensemble OOF selection, and AlphaEvolve kernel synthesis:
+
+```mermaid
+flowchart TD
+    subgraph LENS["1. Seven Temporal Lenses + Multi-Modal Metadata (similarity.py)"]
+        L1["Physics & Spectral Lenses<br/>physics_attractor (Takens · Rosenstein Lyapunov · Hurst · Permutation Entropy)<br/>spectral_phase (FFT Coherence · Hilbert Kuramoto Phase · Lead-Lag tau*)"]
+        L2["Elastic, Convolutional, Structural, Foundation & Multi-Modal Lenses<br/>elastic_dtw · minirocket (84-dim PPV) · structural_signature · foundation_latent<br/>+ text_cols (TF-IDF) · attribute_cols (Gower) · hierarchy_cols (LCA)"]
+        L3["Adaptive Hybrid PSD Kernel (method='hybrid')<br/>Eigenvalue-Clipped Symmetric PSD Matrix S in [0, 1]^{N x N} (S_{i,i} = 1)"]
+        L1 --> L2 --> L3
+    end
+    subgraph WEAVE["2. Similarity-Woven System & Merchandising Integrations"]
+        W1["Day-0 to Day-14 Cold-Start Handoff & Cluster-Aware Global Pooling<br/>@similarity_cold_start (cold_start_handoff='auto') · @similarity_global (similarity_cluster_feature)"]
+        W2["SKU Substitute Recommendations, Emerging Trends & Latent Hierarchies<br/>recommend_substitutes_df · detect_emerging_trends_df · hierarchy.similarity_hierarchy · ensemble.similarity_smoothing"]
+        W3["Similarity-Regularized Copulas, Inventory Pooling & Cannibalization Priors<br/>sample_trajectories(similarity_shrinkage=True) · optimize_inventory_df(similarity_pooling=True) · promo_elasticity_df(use_similarity_priors=True)"]
+        W1 --> W2 --> W3
+    end
+    LENS --> WEAVE
+```
+
+| Similarity Lens / Integration | SDK / Config Entrypoint | Mathematical & Operational Behavior |
+| :--- | :--- | :--- |
+| **7 Similarity Lenses, Multi-Modal Fusion & Digital-Twin Search** | `forecaster.similarity_df(method="hybrid", text_cols=..., attribute_cols=..., hierarchy_cols=...)`<br/>`forecaster.cluster_by_similarity_df(n_clusters=None)`<br/>`forecaster.find_similar_series_df(query_ts_id, top_k=5)`<br/>`forecaster.plot_similarity_map()` | Computes symmetric positive semi-definite (PSD) similarity matrices ($S_{i,i}=1, S_{i,j} \in [0, 1]$) across `"hybrid"`, `"physics_attractor"`, `"spectral_phase"`, `"elastic_dtw"`, `"minirocket"`, `"structural_signature"`, and `"foundation_latent"`, fused with character/word $n$-gram TF-IDF (`semantic_sim`), Gower attributes, and LCA tree similarity (`hierarchy_sim`), plus directed lead-lag shift discovery ($\tau_{i \to j}^*$) and spectral clustering. |
+| **SKU Substitute & Cannibalization Recommender** | `forecaster.recommend_substitutes_df(inventory_df=..., text_cols=..., hierarchy_cols=..., within_hierarchy_level=...)`<br/>`sf.recommend_substitutes_df(panel_df, inventory_df=...)` | Ranks in-stock digital-twin substitutes for each query SKU (`substitution_score`, `similarity_score`, `semantic_sim`, `hierarchy_sim`, `available_units`, `stock_status` in `{"in_stock_surplus", "adequate_stock", "low_stock_risk", "out_of_stock"}`, `substitution_rationale`), optionally restricted to the same category/department (`within_hierarchy_level`). |
+| **Emerging Trend & Breakout Detector** | `forecaster.emerging_trends_df(window=14)`<br/>`sf.detect_emerging_trends_df(panel_df, window=14)` |Combines kinematic velocity ($\dot{y}_t$), acceleration ($\ddot{y}_t$), recent-vs-baseline breakout $z$-scores, Hurst persistence ($H > 0.55$), and Kuramoto lead-lag bellwether shifts ($\tau_{i \to j}^* > 0$) to classify `trend_regime` (`{"accelerating_breakout", "steady_growth", "maturing_plateau", "declining", "stable"}`) and prescribe `recommended_merchandising_action` (`{"promote_trend_leader", "co_promote_lagging_twin", "replenish_breakout_risk", "clearance_candidate", "hold_baseline"}`). |
+| **Cluster-Aware Global Pooling (`@similarity_global`)** | `models=["lightgbm@similarity_global", "regression_lags@similarity_global"]`<br/>`features={"similarity_cluster_feature": True}` | Partitions heterogeneous panels into homogeneous dynamical clusters before fitting global tabular or deep-learning models (both locally and via distributed `spark_io.add_bucket` panel isolation), eliminating cross-regime negative transfer. |
+| **Day-0 to Day-14 Cold-Start Transfer (`@similarity_cold_start`)** | `models=["theta@similarity_cold_start"]`<br/>`features={"cold_start_transfer": True, "cold_start_matching": "hybrid", "cold_start_handoff": "auto"}`<br/>`sf.match_cold_start_launch_prefix_df(panel_df)` | Smoothly transitions from Day-0 pre-launch metadata/semantic/hierarchy donor matching (`0` history observations) through Day-1 to Day-14 launch-prefix kinematic/DTW matching via ramp weight $\alpha(n) = \text{clip}(n / n_{\text{min}}, 0, 1)$. |
+| **Latent Similarity Hierarchy (`similarity_hierarchy`)** | `hierarchy={"enabled": True, "similarity_hierarchy": True, "reconciliation_methods": ["mint_shrink"]}` | Auto-discovers a 2-level hierarchy (`__total__ -> similarity_cluster_id -> ts_id`) on flat panels without metadata columns and reconciles via `mint_shrink`, `mint_nonneg`, `cross_temporal_mint`, and `allocate_target()`. |
+| **Copula Shrinkage, Inventory Pooling, Cannibalization & OOF Smoothing** | `sample_trajectories(similarity_shrinkage=True)`<br/>`optimize_inventory_df(similarity_pooling=True)`<br/>`promo_elasticity_df(use_similarity_priors=True)`<br/>`ensemble={"similarity_smoothing": 0.25}` | Regularizes high-dimensional copula correlations toward $S_{i,j}$ when $K_{\text{folds}} < N_{\text{series}}$, pools sparse OOF residuals across digital twins for safety-stock sizing, weights cross-SKU cannibalization candidates by $S_{i,j}$ (`similarity_prior_weight`), and smooths noisy per-series OOF losses across top-$K$ neighbors before `"champion"` / `"inverse_error"` selection. |
 
 ---
 

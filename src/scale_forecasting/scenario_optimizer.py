@@ -472,6 +472,9 @@ def _estimate_sku_structural_params(
     price_col: str | None,
     pull_forward_lags: int,
     cannibalization_weight: float,
+    use_similarity_priors: bool = True,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Estimate `(price_elasticity, promo_lift_rate, lag_dip_rates, cannib_matrix)` for leaf SKUs.
 
@@ -490,6 +493,7 @@ def _estimate_sku_structural_params(
     # Post-promo pull-forward dip decays geometrically across lags 1..L
     default_lag_weights = np.array([-0.08 * (0.6**k) for k in range(eff_lags)], dtype=float)
     lag_dip_rates = np.tile(default_lag_weights[None, :], (n_b, 1))
+    decomp_sim_weights: pd.DataFrame | None = None
 
     if history_df is not None and not history_df.empty:
         work = history_df.copy()
@@ -509,7 +513,13 @@ def _estimate_sku_structural_params(
                 promo_col=promo_col,
                 price_col=price_col,
                 pull_forward_lags=eff_lags,
+                use_similarity_priors=use_similarity_priors,
+                similarity_matrix=similarity_matrix,
+                similarity_method=similarity_method,
             )
+            sw_attr = decomp.attrs.get("similarity_weights")
+            if isinstance(sw_attr, pd.DataFrame):
+                decomp_sim_weights = sw_attr
             _, det_price = detect_treatment_cols(
                 work,
                 promo_col=promo_col,
@@ -564,11 +574,48 @@ def _estimate_sku_structural_params(
     # Cross-SKU cannibalization matrix Gamma_{i, j} <= 0 for j != i
     cannib_matrix = np.zeros((n_b, n_b), dtype=float)
     if n_b >= 2 and float(cannibalization_weight) > 0.0:
+        w_tilde = np.zeros((n_b, n_b), dtype=float)
+        b_list = [str(b) for b in bottom_ids]
+        if use_similarity_priors:
+            if decomp_sim_weights is not None:
+                w_arr = (
+                    decomp_sim_weights.reindex(index=b_list, columns=b_list)
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+            elif similarity_matrix is not None:
+                if isinstance(similarity_matrix, pd.DataFrame):
+                    s_arr = (
+                        similarity_matrix.reindex(index=b_list, columns=b_list)
+                        .fillna(0.0)
+                        .to_numpy(dtype=float)
+                    )
+                else:
+                    s_arr = np.asarray(similarity_matrix, dtype=float).copy()
+                w_arr = np.maximum(0.0, s_arr) if s_arr.shape == (n_b, n_b) else np.ones((n_b, n_b))
+            else:
+                w_arr = np.ones((n_b, n_b), dtype=float)
+
+            np.fill_diagonal(w_arr, 0.0)
+            for i in range(n_b):
+                r_sum = float(np.sum(w_arr[i]))
+                if r_sum > 1e-12:
+                    w_tilde[i] = w_arr[i] / r_sum
+                else:
+                    for j in range(n_b):
+                        if i != j:
+                            w_tilde[i, j] = 1.0 / float(n_b - 1)
+        else:
+            for i in range(n_b):
+                for j in range(n_b):
+                    if i != j:
+                        w_tilde[i, j] = 1.0 / float(n_b - 1)
+
         for i in range(n_b):
-            peer_rate = -0.06 * float(cannibalization_weight) * promo_lift_rate[i] / float(n_b - 1)
+            total_row_cannib = -0.06 * float(cannibalization_weight) * promo_lift_rate[i]
             for j in range(n_b):
                 if i != j:
-                    cannib_matrix[i, j] = peer_rate
+                    cannib_matrix[i, j] = total_row_cannib * float(w_tilde[i, j])
 
     _ = (horizon, base_yhat, base_price, base_promo)
     return eps_vec, promo_lift_rate, lag_dip_rates, cannib_matrix
@@ -621,6 +668,9 @@ def optimize_scenario(
     risk_alpha: float | None = None,
     pull_forward_lags: int = 3,
     cannibalization_weight: float = 1.0,
+    use_similarity_priors: bool = True,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
     reconcile: bool = True,
     hier_spec: HierarchySpec | None = None,
     temp_spec: Any = None,
@@ -806,11 +856,16 @@ def optimize_scenario(
     if (
         resolved_hier is None
         and parsed_cfg is not None
-        and parsed_cfg.hierarchy.levels
+        and (
+            parsed_cfg.hierarchy.levels
+            or getattr(parsed_cfg.hierarchy, "similarity_hierarchy", False)
+        )
         and resolved_hist is not None
         and not resolved_hist.empty
     ):
-        needed_cols = {c for lvl in parsed_cfg.hierarchy.levels for c in lvl}
+        needed_cols = {c for lvl in parsed_cfg.hierarchy.levels for c in lvl} - {
+            "similarity_cluster_id"
+        }
         if needed_cols.issubset(resolved_hist.columns):
             try:
                 _, resolved_hier = build_hierarchy(resolved_hist, parsed_cfg)
@@ -995,6 +1050,9 @@ def optimize_scenario(
         price_col=eff_price_col,
         pull_forward_lags=pull_forward_lags,
         cannibalization_weight=cannibalization_weight,
+        use_similarity_priors=use_similarity_priors,
+        similarity_matrix=similarity_matrix,
+        similarity_method=similarity_method,
     )
     n_lags = lag_dip_rates.shape[1]
 

@@ -181,6 +181,23 @@ def _extract_predictions_and_oof(
     )
 
 
+def _extract_history_df(
+    predictions_or_obj: Any,
+    history_df: pd.DataFrame | None,
+) -> pd.DataFrame | None:
+    """Resolve `history_df` from an explicit DataFrame or a fitted `Forecaster` / `BakeOff`."""
+    if history_df is not None:
+        return history_df
+    if isinstance(predictions_or_obj, pd.DataFrame):
+        hist_attr = predictions_or_obj.attrs.get("history_df")
+        return hist_attr if isinstance(hist_attr, pd.DataFrame) else None
+    for attr in ("_history_df", "history_df", "series"):
+        cand = getattr(predictions_or_obj, attr, None)
+        if isinstance(cand, pd.DataFrame):
+            return cand
+    return None
+
+
 def _resolve_sku_param(
     param: Any,
     tid: str,
@@ -375,12 +392,17 @@ def _get_or_sample_copula_paths(
     predictions_df: pd.DataFrame,
     oof_df: pd.DataFrame | None,
     *,
+    history_df: pd.DataFrame | None = None,
     trajectories_df: pd.DataFrame | None,
     copula_paths: pd.DataFrame | None,
     copula_type: str,
     n_paths: int,
     seed: int,
     confidence_level: float,
+    similarity_shrinkage: bool = True,
+    similarity_weight: float | Literal["auto"] = "auto",
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
 ) -> pd.DataFrame:
     """Resolve pre-computed copula trajectories or sample them via `copula.py` (with fallback)."""
     if trajectories_df is not None and not trajectories_df.empty:
@@ -397,9 +419,15 @@ def _get_or_sample_copula_paths(
             return sample_fn(
                 predictions_df,
                 oof_df=oof_df,
+                history_df=history_df,
                 n_paths=int(n_paths),
                 copula_type=copula_type,
+                cross_series=True,
                 reconcile=False,
+                similarity_shrinkage=bool(similarity_shrinkage),
+                similarity_weight=similarity_weight,
+                similarity_matrix=similarity_matrix,
+                similarity_method=similarity_method,
                 seed=int(seed),
             )
     except Exception:  # noqa: BLE001 - fallback when copula module is unavailable or fails
@@ -419,6 +447,7 @@ def optimize_inventory_portfolio(
     predictions_df: pd.DataFrame,
     oof_df: pd.DataFrame | None = None,
     *,
+    history_df: pd.DataFrame | None = None,
     inventory_df: pd.DataFrame | Mapping[str, Mapping[str, Any]] | None = None,
     trajectories_df: pd.DataFrame | None = None,
     copula_paths: pd.DataFrame | None = None,
@@ -452,6 +481,10 @@ def optimize_inventory_portfolio(
     random_seed: int | None = None,
     confidence_level: float = 0.80,
     strict_feasibility: bool = False,
+    similarity_shrinkage: bool = True,
+    similarity_weight: float | Literal["auto"] = "auto",
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
 ) -> pd.DataFrame:
     """Optimize multi-SKU replenishment policies under shared budget, volume, and lot constraints.
 
@@ -494,6 +527,7 @@ def optimize_inventory_portfolio(
             f"uncertainty_source={uncertainty_source!r} must be 'copula' or 'analytical'."
         )
 
+    resolved_hist = _extract_history_df(predictions_df, history_df)
     pred_df, resolved_oof = _extract_predictions_and_oof(predictions_df, oof_df)
     if pred_df is None or pred_df.empty:
         empty_df = pd.DataFrame(columns=INVENTORY_OPTIMIZER_COLUMNS)
@@ -617,12 +651,17 @@ def optimize_inventory_portfolio(
         paths_df = _get_or_sample_copula_paths(
             pred_df,
             resolved_oof,
+            history_df=resolved_hist,
             trajectories_df=trajectories_df,
             copula_paths=copula_paths,
             copula_type=copula_type,
             n_paths=n_paths,
             seed=eff_seed,
             confidence_level=confidence_level,
+            similarity_shrinkage=similarity_shrinkage,
+            similarity_weight=similarity_weight,
+            similarity_matrix=similarity_matrix,
+            similarity_method=similarity_method,
         )
         copula_type_used = str(paths_df.attrs.get("copula_type_selected", copula_type))
 
@@ -1238,6 +1277,11 @@ def optimize_inventory_portfolio(
         "n_skus": int(n_rows),
         "uncertainty_source": str(eff_source),
         "copula_type": str(copula_type_used),
+        "similarity_shrinkage_weight": (
+            float(paths_df.attrs.get("similarity_shrinkage_weight", 0.0))
+            if paths_df is not None
+            else 0.0
+        ),
         "max_budget": float(max_budget) if max_budget is not None else None,
         "total_order_spend": total_spend,
         "total_order_cost": total_spend,

@@ -16,6 +16,7 @@ Public surface: ``available_models``, ``model_catalog``, ``metric_catalog``, ``s
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -206,6 +207,39 @@ def build_config(
     return RunConfig.model_validate(raw)
 
 
+def _resolve_pg_panel(
+    series: pd.DataFrame,
+    panel_df: pd.DataFrame | None = None,
+    data: pd.DataFrame | None = None,
+    *,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+) -> pd.DataFrame:
+    """Resolve a multi-series panel for `PlaygroundRun` / `BakeOff` similarity methods."""
+    import numpy as np
+
+    chosen = (
+        data
+        if (data is not None and not data.empty)
+        else (panel_df if (panel_df is not None and not panel_df.empty) else series)
+    )
+    if chosen is None or chosen.empty:
+        return sample_data(n_series=3, history=90)
+    work = chosen.copy()
+    if ts_id_col not in work.columns:
+        work[ts_id_col] = "series_0"
+    if work[ts_id_col].nunique() >= 2:
+        return work
+    base_id = str(work[ts_id_col].iloc[0])
+    peer = work.copy()
+    peer[ts_id_col] = f"{base_id}__peer"
+    if target_col in peer.columns:
+        y_vals = pd.to_numeric(peer[target_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        peer[target_col] = 0.92 * y_vals + 0.08 * np.roll(y_vals, 1)
+    return pd.concat([work, peer], ignore_index=True)
+
+
 @dataclass(frozen=True)
 class PlaygroundRun:
     """One model run on one series — the CellResult plus the series it ran on."""
@@ -213,6 +247,7 @@ class PlaygroundRun:
     result: CellResult
     series: pd.DataFrame
     backtest: bool
+    panel_df: pd.DataFrame | None = None
 
     @property
     def predictions(self) -> pd.DataFrame:
@@ -220,9 +255,9 @@ class PlaygroundRun:
         return self.result.predictions
 
     @property
-    def oof(self) -> pd.DataFrame | None:
+    def oof(self) -> pd.DataFrame:
         """Convenience alias for ``self.result.oof``."""
-        return self.result.oof
+        return self.result.oof  # type: ignore[return-value]
 
     def horizon_decay_df(self, *, metric: str = "wape") -> pd.DataFrame:
         """Compute lead-time error decay across horizon steps for this run's backtest OOF."""
@@ -259,6 +294,251 @@ class PlaygroundRun:
             else None
         )
         return rollup_time(preds, freq=freq, oof_df=oof, level=level)
+
+    def similarity_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str = "hybrid",
+        top_k: int | None = None,
+        max_lag: int | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute tidy pairwise trajectory similarity across the playground panel
+        (`similarity.compute_similarity_matrix`).
+        """
+        from .similarity import compute_similarity_matrix
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        return compute_similarity_matrix(
+            panel,
+            method=method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            top_k=int(top_k) if top_k is not None else 10,
+            **kwargs,
+        ).pairs_df
+
+    def similarity_matrix_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str = "hybrid",
+        max_lag: int | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute the symmetric $(N, N)$ trajectory similarity matrix DataFrame
+        (`similarity.compute_similarity_matrix`).
+        """
+        from .similarity import compute_similarity_matrix
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        return compute_similarity_matrix(
+            panel,
+            method=method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            **kwargs,
+        ).matrix_df
+
+    def similarity_clusters_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        n_clusters: int | str = "auto",
+        method: str = "hybrid",
+        min_cluster_size: int = 2,
+        max_clusters: int = 8,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Partition series into behavioral similarity clusters
+        (`similarity.cluster_by_similarity_df`)."""
+        from .similarity import cluster_by_similarity_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        return cluster_by_similarity_df(
+            panel,
+            n_clusters=n_clusters,  # type: ignore[arg-type]
+            method=method,
+            min_cluster_size=min_cluster_size,
+            max_clusters=max_clusters,
+            **kwargs,
+        )
+
+    cluster_by_similarity_df = similarity_clusters_df
+
+    def similarity_embeddings_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str = "hybrid",
+        n_components: int = 2,
+        include_foundation: bool = False,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Extract per-series physical/econometric invariants and 2D coordinates
+        (`similarity.embed_series_df`)."""
+        from .similarity import embed_series_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = "foundation_latent" if include_foundation and method == "hybrid" else method
+        return embed_series_df(
+            panel,
+            method=eff_method,
+            n_components=n_components,
+            **kwargs,
+        )
+
+    embed_series_df = similarity_embeddings_df
+
+    def find_similar_series_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        mode: str = "full_history",
+        method: str = "hybrid",
+        prefix_len: int | None = None,
+        max_lag: int = 0,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Retrieve Top-$K$ similar peer series (`similarity.find_similar_series_df`)."""
+        from .similarity import find_similar_series_df as _find_similar_series_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        return _find_similar_series_df(
+            panel,
+            query_ts_id=eff_query or self.result.ts_id,
+            top_k=top_k,
+            mode=mode,
+            method=method,
+            prefix_len=prefix_len,
+            max_lag=max_lag,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            **kwargs,
+        )
+
+    def plot_similarity_map(
+        self,
+        sim_or_clusters_or_panel: Any = None,
+        *,
+        data: pd.DataFrame | None = None,
+        query_ts_id: str | None = None,
+        n_clusters: int | str = "auto",
+        method: str = "hybrid",
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Render the 2-panel trajectory similarity heatmap & 2D MDS cluster map
+        (`similarity.plot_similarity_map`).
+        """
+        from .similarity import plot_similarity_map as _plot_similarity_map
+
+        target = (
+            sim_or_clusters_or_panel
+            if sim_or_clusters_or_panel is not None
+            else _resolve_pg_panel(self.series, self.panel_df, data)
+        )
+        return _plot_similarity_map(
+            target,
+            query_ts_id=query_ts_id or self.result.ts_id,
+            n_clusters=n_clusters,  # type: ignore[arg-type]
+            method=method,
+            ax=ax,
+            title=title,
+            **kwargs,
+        )
+
+    def recommend_substitutes_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        inventory_df: pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | Sequence[str] | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        require_in_stock: bool = True,
+        on_hand_col: str = "on_hand",
+        safety_stock_col: str = "safety_stock",
+        method: str = "hybrid",
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Recommend stockout-aware substitutes (`similarity.recommend_substitutes_df`)."""
+        from .similarity import recommend_substitutes_df as _recommend_substitutes_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        return _recommend_substitutes_df(
+            panel,
+            inventory_df=inventory_df,
+            query_ts_id=eff_query,
+            top_k=top_k,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            on_hand_col=on_hand_col,
+            safety_stock_col=safety_stock_col,
+            method=method,
+            **kwargs,
+        )
+
+    def emerging_trends_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        window: int = 14,
+        top_k_related: int = 3,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        max_lag: int = 7,
+        method: str = "hybrid",
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Detect emerging trends and bellwethers (`similarity.detect_emerging_trends_df`)."""
+        from .similarity import detect_emerging_trends_df as _detect_emerging_trends_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        return _detect_emerging_trends_df(
+            panel,
+            window=window,
+            top_k_related=top_k_related,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max_lag,
+            method=method,
+            **kwargs,
+        )
+
+    detect_emerging_trends_df = emerging_trends_df
 
     def inventory_policy_df(
         self,
@@ -479,15 +759,37 @@ class PlaygroundRun:
         price_col: str | None = None,
         confounders: list[str] | None = None,
         summary: bool = False,
+        use_similarity_priors: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str = "hybrid",
     ) -> pd.DataFrame:
         """Compute cross-fitted Double-ML promo & price elasticity decomposition on this series."""
         from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
 
+        eff_use_sim = (
+            bool(similarity_pooling)
+            and (similarity_weight is None or float(similarity_weight) > 0.0)
+            if similarity_pooling is not None
+            else (
+                bool(use_similarity_priors)
+                and (similarity_weight is None or float(similarity_weight) > 0.0)
+            )
+        )
+        src_panel = (
+            self.panel_df
+            if (self.panel_df is not None and not self.panel_df.empty and eff_use_sim)
+            else self.series
+        )
         decomp = compute_promo_elasticity_decomposition(
-            self.series,
+            src_panel,
             promo_col=promo_col,
             price_col=price_col,
             confounders=confounders,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=similarity_matrix,
+            similarity_method=similarity_method,
         )
         return summarize_promo_elasticity(decomp) if summary else decomp
 
@@ -668,9 +970,16 @@ class PlaygroundRun:
         min_obs: int | None = None,
         min_history_points: int = 14,
         method: Any = None,
+        matching: str | None = None,
+        cold_start_matching: str | None = None,
+        similarity_method: str | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
         top_k_donors: int = 3,
         donor_pool_df: pd.DataFrame | None = None,
         return_result: bool = False,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
         from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
@@ -684,15 +993,26 @@ class PlaygroundRun:
             if self.result.oof is not None and not self.result.oof.empty
             else None
         )
-        panel = donor_pool_df if donor_pool_df is not None else self.series
+        panel = (
+            donor_pool_df
+            if donor_pool_df is not None
+            else (self.panel_df if self.panel_df is not None else self.series)
+        )
+        eff_matching = cold_start_matching if cold_start_matching is not None else matching
         return _cold_start_transfer_df(
             panel,
             forecasts_df=preds,
             oof_df=oof,
             min_obs=min_obs if min_obs is not None else min_history_points,
             method=method,
+            matching=eff_matching,  # type: ignore[arg-type]
+            similarity_method=similarity_method,  # type: ignore[arg-type]
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=list(hierarchy_cols) if hierarchy_cols is not None else (),
             top_k_donors=top_k_donors,
             horizon=len(self.result.predictions) or 14,
+            **kwargs,
         )
 
     def plot_cold_start_transfer(
@@ -787,6 +1107,10 @@ class PlaygroundRun:
         df_t: float = 4.0,
         cross_series: bool = True,
         reconcile: bool = True,
+        similarity_shrinkage: bool = True,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str = "hybrid",
         floor: float | None = None,
         cap: float | None = None,
         seed: int = 42,
@@ -816,6 +1140,10 @@ class PlaygroundRun:
             df_t=df_t,
             cross_series=cross_series,
             reconcile=reconcile,
+            similarity_shrinkage=similarity_shrinkage,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=similarity_matrix,
+            similarity_method=similarity_method,
             floor=eff_floor,
             cap=cap,
             seed=seed,
@@ -835,6 +1163,11 @@ class PlaygroundRun:
         stockout_cost: float | None = None,
         n_paths: int = 300,
         copula_type: str = "auto",
+        reconcile: bool = True,
+        similarity_shrinkage: bool = True,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str = "hybrid",
         seed: int = 42,
         **_kwargs: Any,
     ) -> pd.DataFrame:
@@ -852,7 +1185,16 @@ class PlaygroundRun:
         eff_traj = (
             trajectories_df
             if trajectories_df is not None
-            else self.sample_trajectories(n_paths=n_paths, copula_type=copula_type, seed=seed)
+            else self.sample_trajectories(
+                n_paths=n_paths,
+                copula_type=copula_type,
+                reconcile=reconcile,
+                similarity_shrinkage=similarity_shrinkage,
+                similarity_weight=similarity_weight,
+                similarity_matrix=similarity_matrix,
+                similarity_method=similarity_method,
+                seed=seed,
+            )
         )
         return compute_tail_risk(
             eff_traj,
@@ -926,6 +1268,11 @@ class PlaygroundRun:
         backorders: float | dict[str, float] = 0.0,
         uncertainty_source: str = "copula",
         copula_type: str = "auto",
+        similarity_shrinkage: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str = "hybrid",
         n_paths: int = 300,
         seed: int = 42,
         return_result: bool = False,
@@ -945,9 +1292,15 @@ class PlaygroundRun:
         eff_source: Any = "analytical" if uncertainty_source == "ar1" else uncertainty_source
         eff_uc = unit_cost if not isinstance(unit_cost, str) else 10.0
         eff_uv = unit_volume if not isinstance(unit_volume, str) else 1.0
+        eff_sim_shrink = (
+            bool(similarity_pooling)
+            if similarity_pooling is not None
+            else bool(similarity_shrinkage)
+        )
         return optimize_inventory_portfolio(
             preds,
             oof_df=oof,
+            history_df=self.series,
             inventory_df=inventory_df,
             trajectories_df=trajectories_df,
             copula_paths=copula_paths,
@@ -973,6 +1326,10 @@ class PlaygroundRun:
             backorders=backorders,
             uncertainty_source=eff_source,
             copula_type=copula_type,
+            similarity_shrinkage=eff_sim_shrink,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=similarity_matrix,
+            similarity_method=similarity_method,
             n_paths=n_paths,
             seed=seed,
         )
@@ -1034,6 +1391,11 @@ class PlaygroundRun:
         cvar_alpha: float = 0.95,
         pull_forward_lags: int = 3,
         cannibalization_weight: float = 1.0,
+        cannibalization_strength: float | None = None,
+        use_similarity_priors: bool = True,
+        cross_sku_elasticity: bool | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_method: str = "hybrid",
         reconcile: bool = True,
         include_inventory_impact: bool = True,
         lead_time: float = 7.0,
@@ -1054,6 +1416,16 @@ class PlaygroundRun:
             self.result.oof.assign(ts_id=self.result.ts_id, model_type=self.result.model_type)
             if self.result.oof is not None and not self.result.oof.empty
             else None
+        )
+        eff_cannib = (
+            float(cannibalization_strength)
+            if cannibalization_strength is not None
+            else float(cannibalization_weight)
+        )
+        eff_use_sim = (
+            bool(cross_sku_elasticity)
+            if cross_sku_elasticity is not None
+            else bool(use_similarity_priors)
         )
         return _optimize_scenario(
             self.series,
@@ -1084,7 +1456,10 @@ class PlaygroundRun:
             risk_aversion_lambda=risk_aversion_lambda,
             cvar_alpha=cvar_alpha,
             pull_forward_lags=pull_forward_lags,
-            cannibalization_weight=cannibalization_weight,
+            cannibalization_weight=eff_cannib,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=similarity_matrix,
+            similarity_method=similarity_method,
             reconcile=reconcile,
             include_inventory_impact=include_inventory_impact,
             lead_time=lead_time,
@@ -1127,6 +1502,10 @@ class PlaygroundRun:
         cold_start_df: pd.DataFrame | None = None,
         inventory_opt_df: pd.DataFrame | None = None,
         scenario_opt_df: pd.DataFrame | None = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_clusters_df: pd.DataFrame | None = None,
+        substitutes_df: pd.DataFrame | None = None,
+        emerging_trends_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -1143,6 +1522,10 @@ class PlaygroundRun:
             cold_start_df=cold_start_df,
             inventory_opt_df=inventory_opt_df,
             scenario_opt_df=scenario_opt_df,
+            similarity_df=similarity_df,
+            similarity_clusters_df=similarity_clusters_df,
+            substitutes_df=substitutes_df,
+            emerging_trends_df=emerging_trends_df,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )
@@ -1164,6 +1547,306 @@ class BakeOff:
     series: pd.DataFrame
     config: RunConfig
     oof: pd.DataFrame | None = None
+    panel_df: pd.DataFrame | None = None
+
+    def similarity_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        top_k: int | None = None,
+        max_lag: int | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute tidy pairwise time-series similarity edges
+        (`similarity.compute_similarity_matrix`)."""
+        from .similarity import compute_similarity_matrix
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        res = compute_similarity_matrix(
+            panel,
+            cfg=self.config,
+            method=eff_method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            top_k=int(top_k) if top_k is not None else 10,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+        return res.pairs_df
+
+    def similarity_matrix_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        max_lag: int | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Compute square `(N, N)` similarity DataFrame indexed by `ts_id`."""
+        from .similarity import compute_similarity_matrix
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        res = compute_similarity_matrix(
+            panel,
+            cfg=self.config,
+            method=eff_method,
+            max_lag=int(max_lag) if max_lag is not None else 0,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+        return res.matrix_df
+
+    def similarity_clusters_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        n_clusters: int | str = "auto",
+        method: str | None = None,
+        min_cluster_size: int = 2,
+        max_clusters: int = 8,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Partition series into behavioral similarity clusters
+        (`similarity.cluster_by_similarity_df`)."""
+        from .similarity import cluster_by_similarity_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        eff_k = (
+            self.config.features.similarity_n_clusters
+            if n_clusters == "auto" and self.config.features.similarity_n_clusters != "auto"
+            else n_clusters
+        )
+        return cluster_by_similarity_df(
+            panel,
+            cfg=self.config,
+            n_clusters=eff_k,  # type: ignore[arg-type]
+            method=eff_method,
+            min_cluster_size=min_cluster_size,
+            max_clusters=max_clusters,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    cluster_by_similarity_df = similarity_clusters_df
+
+    def similarity_embeddings_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        method: str | None = None,
+        n_components: int = 2,
+        include_foundation: bool = False,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Extract per-series physical & econometric invariants and 2D coordinates."""
+        from .similarity import embed_series_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = (
+            "foundation_latent"
+            if include_foundation and method is None
+            else (method or self.config.features.similarity_method)
+        )
+        return embed_series_df(
+            panel,
+            cfg=self.config,
+            method=eff_method,
+            n_components=n_components,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    embed_series_df = similarity_embeddings_df
+
+    def find_similar_series_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        mode: str = "full_history",
+        method: str | None = None,
+        prefix_len: int | None = None,
+        max_lag: int = 0,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Rank top-K most similar peer series to ``query_ts_id``."""
+        from .similarity import find_similar_series_df as _find_similar_series_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        ts_col = self.config.data.ts_id_col
+        eff_query = (
+            eff_query
+            if eff_query is not None
+            else str(
+                self.series[ts_col].iloc[0]
+                if ts_col in self.series.columns and not self.series.empty
+                else panel[ts_col].iloc[0]
+            )
+        )
+        eff_method = method or self.config.features.similarity_method
+        return _find_similar_series_df(
+            panel,
+            query_ts_id=eff_query,
+            cfg=self.config,
+            top_k=top_k,
+            mode=mode,
+            method=eff_method,
+            prefix_len=prefix_len,
+            max_lag=max_lag,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            ts_id_col=ts_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    def plot_similarity_map(
+        self,
+        similarity_or_clusters_df: Any = None,
+        *,
+        data: pd.DataFrame | None = None,
+        query_ts_id: str | None = None,
+        method: str | None = None,
+        n_clusters: int | str = "auto",
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Render a 2-panel similarity heatmap and MDS behavioral cluster projection."""
+        from .similarity import plot_similarity_map as _plot_similarity_map
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        return _plot_similarity_map(
+            similarity_or_clusters_df if similarity_or_clusters_df is not None else panel,
+            cfg=self.config,
+            query_ts_id=query_ts_id,
+            method=eff_method,
+            n_clusters=n_clusters,  # type: ignore[arg-type]
+            ax=ax,
+            title=title,
+            **kwargs,
+        )
+
+    def recommend_substitutes_df(
+        self,
+        query_ts_id_or_data: str | pd.DataFrame | None = None,
+        inventory_df: pd.DataFrame | None = None,
+        *,
+        query_ts_id: str | Sequence[str] | None = None,
+        data: pd.DataFrame | None = None,
+        top_k: int = 5,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        within_hierarchy_level: str | Sequence[str] | None = None,
+        require_in_stock: bool = True,
+        on_hand_col: str = "on_hand",
+        safety_stock_col: str = "safety_stock",
+        method: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Recommend stockout-aware substitutes (`similarity.recommend_substitutes_df`)."""
+        from .similarity import recommend_substitutes_df as _recommend_substitutes_df
+
+        eff_data = data
+        eff_query = query_ts_id
+        if isinstance(query_ts_id_or_data, pd.DataFrame):
+            eff_data = query_ts_id_or_data
+        elif isinstance(query_ts_id_or_data, str) and eff_query is None:
+            eff_query = query_ts_id_or_data
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, eff_data)
+        eff_method = method or self.config.features.similarity_method
+        return _recommend_substitutes_df(
+            panel,
+            inventory_df=inventory_df,
+            query_ts_id=eff_query,
+            top_k=top_k,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            within_hierarchy_level=within_hierarchy_level,
+            require_in_stock=require_in_stock,
+            on_hand_col=on_hand_col,
+            safety_stock_col=safety_stock_col,
+            method=eff_method,
+            cfg=self.config,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    def emerging_trends_df(
+        self,
+        data: pd.DataFrame | None = None,
+        *,
+        window: int = 14,
+        top_k_related: int = 3,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
+        max_lag: int = 7,
+        method: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Detect emerging trends and bellwethers (`similarity.detect_emerging_trends_df`)."""
+        from .similarity import detect_emerging_trends_df as _detect_emerging_trends_df
+
+        panel = _resolve_pg_panel(self.series, self.panel_df, data)
+        eff_method = method or self.config.features.similarity_method
+        return _detect_emerging_trends_df(
+            panel,
+            window=window,
+            top_k_related=top_k_related,
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
+            hierarchy_cols=hierarchy_cols,
+            max_lag=max_lag,
+            method=eff_method,
+            cfg=self.config,
+            ts_id_col=self.config.data.ts_id_col,
+            date_col=self.config.data.date_col,
+            target_col=self.config.data.target_col,
+            freq=self.config.data.freq,
+            **kwargs,
+        )
+
+    detect_emerging_trends_df = emerging_trends_df
 
     def fva_df(
         self,
@@ -1420,14 +2103,32 @@ class BakeOff:
         price_col: str | None = None,
         confounders: list[str] | None = None,
         summary: bool = False,
+        use_similarity_priors: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_method: str = "hybrid",
+        pooling_strength: float = 0.5,
     ) -> pd.DataFrame:
         """Compute cross-fitted Double-ML promo & price elasticity decomposition on this bake-off's
         series.
         """
         from .elasticity import compute_promo_elasticity_decomposition, summarize_promo_elasticity
 
+        _ = pooling_strength
+        eff_use_sim = (
+            bool(similarity_pooling)
+            and (similarity_weight is None or float(similarity_weight) > 0.0)
+            if similarity_pooling is not None
+            else (
+                bool(use_similarity_priors)
+                and (similarity_weight is None or float(similarity_weight) > 0.0)
+            )
+        )
+        panel_src = self.panel_df if (eff_use_sim and self.panel_df is not None) else self.series
         decomp = compute_promo_elasticity_decomposition(
-            self.series,
+            panel_src,
             ts_id_col=self.config.data.ts_id_col,
             date_col=self.config.data.date_col,
             target_col=self.config.data.target_col,
@@ -1436,6 +2137,11 @@ class BakeOff:
             confounders=confounders,
             freq=self.config.data.freq,
             holidays=self.config.features.holidays,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=(
+                similarity_matrix if similarity_matrix is not None else similarity_df
+            ),
+            similarity_method=similarity_method,
         )
         return summarize_promo_elasticity(decomp) if summary else decomp
 
@@ -1632,10 +2338,17 @@ class BakeOff:
         min_obs: int | None = None,
         min_history_points: int = 14,
         method: Any = None,
+        matching: str | None = None,
+        cold_start_matching: str | None = None,
+        similarity_method: str | None = None,
+        text_cols: Sequence[str] | str | None = None,
+        attribute_cols: Sequence[str] | None = None,
+        hierarchy_cols: Sequence[str] | None = None,
         top_k_donors: int = 3,
         donor_pool_df: pd.DataFrame | None = None,
         model_type: str | None = None,
         return_result: bool = False,
+        **kwargs: Any,
     ) -> pd.DataFrame:
         """Synthesize cold-start / NPI trajectories via analog donor matching (`cold_start`)."""
         from .cold_start import cold_start_transfer_df as _cold_start_transfer_df
@@ -1645,7 +2358,17 @@ class BakeOff:
         preds = self.predictions
         if eff_model is not None and "model_type" in preds.columns:
             preds = preds[preds["model_type"].astype(str) == eff_model].copy()
-        panel = donor_pool_df if donor_pool_df is not None else self.series
+        panel = (
+            donor_pool_df
+            if donor_pool_df is not None
+            else (self.panel_df if self.panel_df is not None else self.series)
+        )
+        eff_matching = cold_start_matching if cold_start_matching is not None else matching
+        eff_hier_cols = (
+            list(hierarchy_cols)
+            if hierarchy_cols is not None
+            else [c for lvl in self.config.hierarchy.levels for c in lvl]
+        )
         return _cold_start_transfer_df(
             panel,
             cfg=self.config,
@@ -1653,14 +2376,19 @@ class BakeOff:
             oof_df=self.oof,
             min_obs=min_obs if min_obs is not None else min_history_points,
             method=method,
+            matching=eff_matching,  # type: ignore[arg-type]
+            similarity_method=similarity_method,  # type: ignore[arg-type]
+            text_cols=text_cols,
+            attribute_cols=attribute_cols,
             static_covariates=self.config.features.static_covariates,
-            hierarchy_cols=[c for lvl in self.config.hierarchy.levels for c in lvl],
+            hierarchy_cols=eff_hier_cols,
             top_k_donors=top_k_donors,
             ts_id_col=self.config.data.ts_id_col,
             date_col=self.config.data.date_col,
             target_col=self.config.data.target_col,
             horizon=self.config.data.horizon,
             freq=self.config.data.freq,
+            **kwargs,
         )
 
     def plot_cold_start_transfer(
@@ -1752,6 +2480,11 @@ class BakeOff:
         copula_type: str = "auto",
         df_t: float = 4.0,
         cross_series: bool = True,
+        similarity_shrinkage: bool = True,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_method: str = "hybrid",
         reconcile: bool = True,
         reconcile_hierarchy: bool = True,
         floor: float | None = None,
@@ -1779,12 +2512,18 @@ class BakeOff:
         return _sample_trajectories(
             preds,
             oof_df=oof,
-            history_df=self.series,
+            history_df=self.panel_df if self.panel_df is not None else self.series,
             cfg=self.config,
             n_paths=n_paths,
             copula_type=copula_type,
             df_t=df_t,
             cross_series=cross_series,
+            similarity_shrinkage=similarity_shrinkage,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=(
+                similarity_matrix if similarity_matrix is not None else similarity_df
+            ),
+            similarity_method=similarity_method,
             reconcile=reconcile and reconcile_hierarchy,
             floor=eff_floor,
             cap=eff_cap,
@@ -1805,6 +2544,8 @@ class BakeOff:
         stockout_cost: float | None = None,
         n_paths: int = 300,
         copula_type: str = "auto",
+        similarity_shrinkage: bool = False,
+        similarity_df: pd.DataFrame | None = None,
         seed: int = 42,
         model_type: str | None = None,
         **_kwargs: Any,
@@ -1824,7 +2565,12 @@ class BakeOff:
             trajectories_df
             if trajectories_df is not None
             else self.sample_trajectories(
-                n_paths=n_paths, copula_type=copula_type, seed=seed, model_type=model_type
+                n_paths=n_paths,
+                copula_type=copula_type,
+                similarity_shrinkage=similarity_shrinkage,
+                similarity_df=similarity_df,
+                seed=seed,
+                model_type=model_type,
             )
         )
         return compute_tail_risk(
@@ -1901,6 +2647,12 @@ class BakeOff:
         backorders: float | dict[str, float] = 0.0,
         uncertainty_source: str = "copula",
         copula_type: str = "auto",
+        similarity_shrinkage: bool = True,
+        similarity_pooling: bool | None = None,
+        similarity_weight: float | str = "auto",
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_method: str = "hybrid",
         n_paths: int = 300,
         seed: int = 42,
         return_result: bool = False,
@@ -1913,6 +2665,11 @@ class BakeOff:
         eff_source: Any = "analytical" if uncertainty_source == "ar1" else uncertainty_source
         eff_uc = unit_cost if not isinstance(unit_cost, str) else 10.0
         eff_uv = unit_volume if not isinstance(unit_volume, str) else 1.0
+        eff_sim_shrink = (
+            bool(similarity_pooling)
+            if similarity_pooling is not None
+            else bool(similarity_shrinkage)
+        )
         return optimize_inventory_portfolio(
             self.predictions,
             oof_df=self.oof,
@@ -1943,6 +2700,13 @@ class BakeOff:
             backorders=backorders,
             uncertainty_source=eff_source,
             copula_type=copula_type,
+            similarity_shrinkage=eff_sim_shrink,
+            similarity_weight=similarity_weight,  # type: ignore[arg-type]
+            similarity_matrix=(
+                similarity_matrix if similarity_matrix is not None else similarity_df
+            ),
+            similarity_method=similarity_method,
+            history_df=self.panel_df if self.panel_df is not None else self.series,
             n_paths=n_paths,
             seed=seed,
         )
@@ -2004,6 +2768,13 @@ class BakeOff:
         cvar_alpha: float = 0.95,
         pull_forward_lags: int = 3,
         cannibalization_weight: float = 1.0,
+        cannibalization_strength: float | None = None,
+        use_similarity_priors: bool = True,
+        cross_sku_elasticity: bool | None = None,
+        similarity_cannibalization: bool | None = None,
+        similarity_matrix: pd.DataFrame | Any = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_method: str = "hybrid",
         reconcile: bool = True,
         include_inventory_impact: bool = True,
         lead_time: float = 7.0,
@@ -2026,12 +2797,26 @@ class BakeOff:
                 preds = preds[preds["model_type"].astype(str) == eff_model].copy()
             if oof is not None and not oof.empty and "model_type" in oof.columns:
                 oof = oof[oof["model_type"].astype(str) == eff_model].copy()
+        eff_cannib = (
+            float(cannibalization_strength)
+            if cannibalization_strength is not None
+            else float(cannibalization_weight)
+        )
+        eff_use_sim = (
+            bool(similarity_cannibalization)
+            if similarity_cannibalization is not None
+            else (
+                bool(cross_sku_elasticity)
+                if cross_sku_elasticity is not None
+                else bool(use_similarity_priors)
+            )
+        )
         return _optimize_scenario(
             self.series,
             config=self.config,
             predictions_df=preds,
             oof_df=oof,
-            history_df=self.series,
+            history_df=self.panel_df if self.panel_df is not None else self.series,
             future_covariates_df=future_covariates_df,
             trajectories_df=trajectories_df,
             model_type=eff_model,
@@ -2056,7 +2841,12 @@ class BakeOff:
             risk_aversion_lambda=risk_aversion_lambda,
             cvar_alpha=cvar_alpha,
             pull_forward_lags=pull_forward_lags,
-            cannibalization_weight=cannibalization_weight,
+            cannibalization_weight=eff_cannib,
+            use_similarity_priors=eff_use_sim,
+            similarity_matrix=(
+                similarity_matrix if similarity_matrix is not None else similarity_df
+            ),
+            similarity_method=similarity_method,
             reconcile=reconcile,
             include_inventory_impact=include_inventory_impact,
             lead_time=lead_time,
@@ -2100,6 +2890,10 @@ class BakeOff:
         cold_start_df: pd.DataFrame | None = None,
         inventory_opt_df: pd.DataFrame | None = None,
         scenario_opt_df: pd.DataFrame | None = None,
+        similarity_df: pd.DataFrame | None = None,
+        similarity_clusters_df: pd.DataFrame | None = None,
+        substitutes_df: pd.DataFrame | None = None,
+        emerging_trends_df: pd.DataFrame | None = None,
         write_json: bool = False,
         include_json_sidecar: bool = False,
     ) -> Any:
@@ -2116,6 +2910,10 @@ class BakeOff:
             cold_start_df=cold_start_df,
             inventory_opt_df=inventory_opt_df,
             scenario_opt_df=scenario_opt_df,
+            similarity_df=similarity_df,
+            similarity_clusters_df=similarity_clusters_df,
+            substitutes_df=substitutes_df,
+            emerging_trends_df=emerging_trends_df,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
         )
@@ -2369,6 +3167,7 @@ def bakeoff(
         series=series,
         config=cfg,
         oof=all_oof,
+        panel_df=data,
     )
 
 
@@ -2424,7 +3223,7 @@ def run_model(
         raise ValueError(f"ts_id '{chosen}' not in data; available: {available}")
 
     result = run_cell(series, model, cfg)
-    return PlaygroundRun(result=result, series=series, backtest=backtest)
+    return PlaygroundRun(result=result, series=series, backtest=backtest, panel_df=data)
 
 
 def summarize(run: PlaygroundRun) -> str:

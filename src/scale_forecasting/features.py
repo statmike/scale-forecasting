@@ -77,6 +77,10 @@ VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
         "cold_start_transfer",
         "cold_start_min_obs",
         "cold_start_method",
+        "cold_start_matching",
+        "similarity_cluster_feature",
+        "similarity_method",
+        "similarity_n_clusters",
         "calibration_method",
         "aci_gamma",
     }
@@ -128,6 +132,7 @@ VALID_ABLATION_MODES: frozenset[str] = frozenset(
         "local",
         "global",
         "hybrid",
+        "similarity_global",
         "local_univariate",
         "local_cov_none",
         "local_cov_future_only",
@@ -411,11 +416,11 @@ def clean_model_params(params: Mapping[str, Any]) -> dict[str, Any]:
 def _parse_mode_token(mode: str) -> tuple[str | None, str | None]:
     """Parse a canonical ablation or tag token into ``(training_mode, covariate_mode)``."""
     token = mode.strip()
-    if token in ("local", "global", "hybrid"):
+    if token in ("similarity_global", "local", "global", "hybrid"):
         return token, None
     if token in VALID_COVARIATE_MODES:
         return None, token
-    for prefix in ("local_", "global_", "hybrid_"):
+    for prefix in ("similarity_global_", "local_", "global_", "hybrid_"):
         if token.startswith(prefix):
             rest = token[len(prefix) :]
             if rest in VALID_COVARIATE_MODES:
@@ -431,7 +436,7 @@ class ModelVariantSpec:
     base_model: str
     variant_tag: str | None
     scope_capability: Literal["local_only", "multi_scope", "global_only"]
-    training_mode: Literal["local", "global", "hybrid"]
+    training_mode: Literal["local", "global", "hybrid", "similarity_global"]
     cov_profile: CovProfile
     is_univariate: bool
     covariates_used: tuple[str, ...]
@@ -563,8 +568,7 @@ def resolve_model_variant(
 
         if not matched_col_slice:
             # Composable token parser: supports both single tags (@v2.5, @transform_log1p, @direct,
-            # @monotone) and compound tags (@v2.5_univariate, @global_v2.5_cov_all, @tiny_global,
-            # @direct_transform_log1p, @global+monotone, @direct+monotone).
+            # @monotone, @similarity_global, @similarity_cold_start) and compound tags.
             rem_tag = variant_tag.replace("+", "_")
             for multi_cov in sorted(VALID_COVARIATE_MODES, key=len, reverse=True):
                 if "_" in multi_cov and multi_cov in rem_tag:
@@ -589,10 +593,20 @@ def resolve_model_variant(
                     if "cold_start_method" not in variant_explicit:
                         raw_params["cold_start_method"] = cs_m
                     rem_tag = rem_tag.replace(cs_m, "")
+            if "similarity_cold_start" in rem_tag:
+                if "cold_start_transfer" not in variant_explicit:
+                    raw_params["cold_start_transfer"] = True
+                if "cold_start_matching" not in variant_explicit:
+                    raw_params["cold_start_matching"] = "similarity"
+                rem_tag = rem_tag.replace("similarity_cold_start", "")
             if "cold_start" in rem_tag:
                 if "cold_start_transfer" not in variant_explicit:
                     raw_params["cold_start_transfer"] = True
                 rem_tag = rem_tag.replace("cold_start", "")
+            if "similarity_global" in rem_tag:
+                if "training_mode" not in variant_explicit:
+                    raw_params["training_mode"] = "similarity_global"
+                rem_tag = rem_tag.replace("similarity_global", "")
             for aci_tok in ("aci_normalized", "aci_norm"):
                 if aci_tok in rem_tag:
                     if "calibration_method" not in variant_explicit:
@@ -665,13 +679,16 @@ def resolve_model_variant(
     raw_tm = raw_params.get("training_mode")
     tm_str = str(raw_tm) if raw_tm is not None else default_tm
     supported_tms = model_cls.supported_training_modes()
-    if tm_str not in supported_tms:
+    req_tm_check = "global" if tm_str == "similarity_global" else tm_str
+    if req_tm_check not in supported_tms:
         raise ConfigError(
             f"model_params.{model_name}.training_mode={tm_str!r} is not supported by "
             f"'{model_name}' (supported modes: {list(supported_tms)})."
         )
-    training_mode: Literal["local", "global", "hybrid"] = (
-        "global" if tm_str == "global" else ("hybrid" if tm_str == "hybrid" else "local")
+    training_mode: Literal["local", "global", "hybrid", "similarity_global"] = (
+        "similarity_global"
+        if tm_str == "similarity_global"
+        else ("global" if tm_str == "global" else ("hybrid" if tm_str == "hybrid" else "local"))
     )
 
     has_feature_overrides = any(k in raw_params for k in VARIANT_FEATURE_META_KEYS)
@@ -692,6 +709,7 @@ def resolve_model_variant(
         new_simplex_sum = f.simplex_sum
         new_mono_constraints: dict[str, Any] = dict(f.monotonic_constraints)
         new_holiday_window = f.holiday_window
+        new_sim_cluster_feature = f.similarity_cluster_feature
 
         if "transform" in raw_params and raw_params["transform"] is not None:
             tr_val = str(raw_params["transform"])
@@ -723,6 +741,7 @@ def resolve_model_variant(
                 )
             if cm in ("univariate", "cov_none"):
                 new_exog, new_future, new_past, new_static, new_lags = [], [], [], [], {}
+                new_sim_cluster_feature = False
             elif cm in ("cov_future_only", "future_only", "xreg"):
                 new_past, new_static = [], []
             elif cm in ("cov_past_only", "past_only"):
@@ -807,6 +826,29 @@ def resolve_model_variant(
             if "cold_start_method" in raw_params and raw_params["cold_start_method"] is not None
             else f.cold_start_method
         )
+        new_cs_matching = (
+            str(raw_params["cold_start_matching"])
+            if "cold_start_matching" in raw_params and raw_params["cold_start_matching"] is not None
+            else f.cold_start_matching
+        )
+        if (
+            "similarity_cluster_feature" in raw_params
+            and raw_params["similarity_cluster_feature"] is not None
+        ):
+            new_sim_cluster_feature = bool(raw_params["similarity_cluster_feature"])
+        new_sim_method = (
+            str(raw_params["similarity_method"])
+            if "similarity_method" in raw_params and raw_params["similarity_method"] is not None
+            else f.similarity_method
+        )
+        new_sim_n_clusters = (
+            raw_params["similarity_n_clusters"]
+            if (
+                "similarity_n_clusters" in raw_params
+                and raw_params["similarity_n_clusters"] is not None
+            )
+            else f.similarity_n_clusters
+        )
 
         kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
         new_lags = {k: list(v) for k, v in new_lags.items() if k in kept_dynamic}
@@ -829,6 +871,10 @@ def resolve_model_variant(
                 "cold_start_transfer": new_cs_transfer,
                 "cold_start_min_obs": new_cs_min_obs,
                 "cold_start_method": new_cs_method,
+                "cold_start_matching": new_cs_matching,
+                "similarity_cluster_feature": new_sim_cluster_feature,
+                "similarity_method": new_sim_method,
+                "similarity_n_clusters": new_sim_n_clusters,
             }
         )
         cand_cfg = cfg if cand_features == f else cfg.model_copy(update={"features": cand_features})
@@ -1057,7 +1103,8 @@ def expand_model_variants(
         cls = seed_spec.model_cls
         req_scope, req_cov = _parse_mode_token(mode_str)
         eff_scope = req_scope if req_scope is not None else seed_spec.training_mode
-        if eff_scope not in cls.supported_training_modes():
+        req_tm_check = "global" if eff_scope == "similarity_global" else eff_scope
+        if req_tm_check not in cls.supported_training_modes():
             return
         if not _cov_mode_is_feasible(req_cov, f, cls):
             return
@@ -1463,6 +1510,83 @@ def _trading_day_terms(index: pd.DatetimeIndex, freq: str) -> dict[str, np.ndarr
     }
 
 
+def _parse_similarity_cluster_col(series: pd.Series) -> np.ndarray:
+    """Parse numeric or string ``similarity_cluster_id`` values into a float array."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().all():
+        return numeric.to_numpy(dtype=float)
+    out = np.zeros(len(series), dtype=float)
+    for idx, val in enumerate(series):
+        if pd.isna(val):
+            out[idx] = 0.0
+            continue
+        if isinstance(val, (int, float, np.number)):
+            out[idx] = float(val)
+            continue
+        text = str(val).strip()
+        digits = "".join(ch for ch in text if ch.isdigit())
+        out[idx] = float(int(digits)) if digits else 0.0
+    return out
+
+
+def add_similarity_features(
+    panel_df: pd.DataFrame,
+    cfg: RunConfig,
+    *,
+    cutoff_ds: pd.Timestamp | str | None = None,
+) -> pd.DataFrame:
+    """Attach fold-safe ``similarity_cluster_id`` and ``similarity_to_medoid`` to ``panel_df``.
+
+    When ``cutoff_ds`` is provided (e.g., inside a walk-forward backtest fold), similarity
+    clustering is computed strictly on rows with ``ds <= cutoff_ds`` so future validation targets
+    never leak into the cluster assignment or medoid proximity score.
+    """
+    if panel_df.empty:
+        return panel_df.copy()
+    d, f = cfg.data, cfg.features
+    id_col = d.ts_id_col
+    date_col = d.date_col
+    target_col = d.target_col
+    if id_col not in panel_df.columns or target_col not in panel_df.columns:
+        out = panel_df.copy()
+        out["similarity_cluster_id"] = 0
+        out["similarity_to_medoid"] = 1.0
+        return out
+
+    source_df = panel_df
+    if cutoff_ds is not None and date_col in panel_df.columns:
+        cutoff_ts = pd.Timestamp(cutoff_ds)
+        ds_parsed = pd.to_datetime(panel_df[date_col])
+        sliced = panel_df.loc[ds_parsed <= cutoff_ts]
+        if not sliced.empty:
+            source_df = sliced
+
+    from .similarity import cluster_by_similarity_df
+
+    clusters_df = cluster_by_similarity_df(
+        source_df,
+        cfg=cfg,
+        n_clusters=f.similarity_n_clusters,
+        method=f.similarity_method,
+        min_cluster_size=2,
+        ts_id_col=id_col,
+        date_col=date_col,
+        target_col=target_col,
+    )
+    cluster_int_map: dict[str, int] = {}
+    sim_medoid_map: dict[str, float] = {}
+    for _, row in clusters_df.iterrows():
+        uid = str(row["ts_id"])
+        cluster_int_map[uid] = int(row.get("cluster_int_id", 0))
+        sim_medoid_map[uid] = float(row.get("similarity_to_medoid", 1.0))
+
+    out = panel_df.copy()
+    uid_str = out[id_col].astype(str)
+    out["similarity_cluster_id"] = uid_str.map(lambda u: cluster_int_map.get(u, 0)).astype(int)
+    out["similarity_to_medoid"] = uid_str.map(lambda u: sim_medoid_map.get(u, 1.0)).astype(float)
+    return out
+
+
 def build_features(
     series: pd.DataFrame,
     cfg: RunConfig,
@@ -1478,7 +1602,8 @@ def build_features(
     `_with_inferred_freq`). ``X`` carries any configured dynamic covariates (``exog``,
     ``future_covariates``, ``past_covariates``), an ``is_holiday`` flag, Fourier terms,
     ``trading_days`` terms, ``level_shift``, ``is_outlier`` (when ``outlier_policy="flag"``),
-    and lagged covariates — aligned to ``y`` — or None when nothing is configured.
+    similarity cluster features (when ``similarity_cluster_feature=True``), and lagged covariates
+    — aligned to ``y`` — or None when nothing is configured.
     """
     d, f = cfg.data, cfg.features
     exog_lags = {} if owns_covariate_lags else f.exog_lags
@@ -1532,6 +1657,23 @@ def build_features(
     if f.level_shift:
         cols["level_shift"] = level_shift_step(y)
 
+    # Similarity cluster membership and medoid proximity features (fold-safe).
+    if f.similarity_cluster_feature:
+        if "similarity_cluster_id" in frame.columns:
+            cols["similarity_cluster_id"] = _parse_similarity_cluster_col(
+                frame["similarity_cluster_id"]
+            )
+        else:
+            cols["similarity_cluster_id"] = np.zeros(len(frame), dtype=float)
+        if "similarity_to_medoid" in frame.columns:
+            cols["similarity_to_medoid"] = (
+                pd.to_numeric(frame["similarity_to_medoid"], errors="coerce")
+                .fillna(1.0)
+                .to_numpy(dtype=float)
+            )
+        else:
+            cols["similarity_to_medoid"] = np.ones(len(frame), dtype=float)
+
     # Outlier dummy when outlier_policy == "flag".
     if outlier_flag is not None:
         cols["is_outlier"] = outlier_flag
@@ -1581,6 +1723,15 @@ def build_future_features(
         known.update(_trading_day_terms(future, d.freq))
     if f.level_shift and "level_shift" in X.columns:
         known["level_shift"] = np.full(h, float(X["level_shift"].to_numpy()[-1]))
+    if f.similarity_cluster_feature:
+        if "similarity_cluster_id" in X.columns:
+            known["similarity_cluster_id"] = np.full(
+                h, float(X["similarity_cluster_id"].to_numpy()[-1])
+            )
+        if "similarity_to_medoid" in X.columns:
+            known["similarity_to_medoid"] = np.full(
+                h, float(X["similarity_to_medoid"].to_numpy()[-1])
+            )
     if "is_outlier" in X.columns:
         known["is_outlier"] = np.zeros(h, dtype=float)
 

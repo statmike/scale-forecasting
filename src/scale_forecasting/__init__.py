@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.7.0"
+    __version__ = "1.8.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -120,6 +120,15 @@ _LAZY: dict[str, tuple[str, str]] = {
     # Hierarchical aggregation + coherent reconciliation.
     "HierarchySpec": (".reconciliation", "HierarchySpec"),
     "build_hierarchy": (".reconciliation", "build_hierarchy"),
+    "materialize_similarity_hierarchy": (
+        ".reconciliation",
+        "materialize_similarity_hierarchy",
+    ),
+    "ensure_hierarchy_nodes_present": (
+        ".reconciliation",
+        "ensure_hierarchy_nodes_present",
+    ),
+    "reconcile_run": (".reconciliation", "reconcile_run"),
     "reconcile_matrix": (".reconciliation", "reconcile_matrix"),
     "reconcile_forecasts": (".reconciliation", "reconcile_forecasts"),
     "reconcile_oof": (".reconciliation", "reconcile_oof"),
@@ -240,6 +249,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "build_holiday_window_features": (".holiday_window", "build_holiday_window_features"),
     "PROMO_ELASTICITY_COLUMNS": (".elasticity", "PROMO_ELASTICITY_COLUMNS"),
     "compute_promo_elasticity": (".elasticity", "compute_promo_elasticity"),
+    "estimate_promo_elasticity": (".elasticity", "estimate_promo_elasticity"),
     "compute_promo_elasticity_decomposition": (
         ".elasticity",
         "compute_promo_elasticity_decomposition",
@@ -270,6 +280,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "NextLoopPreview": (".auto", "NextLoopPreview"),
     "PanelAutoProfile": (".auto", "PanelAutoProfile"),
     "DataProfile": (".auto", "DataProfile"),
+    "DatasetProfile": (".auto", "DatasetProfile"),
     "inspect_panel_for_auto": (".auto", "inspect_panel_for_auto"),
     "build_config": (".auto", "build_config"),
     "auto_forecast": (".auto", "auto_forecast"),
@@ -345,6 +356,30 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ScenarioOptimizationResult": (".scenario_optimizer", "ScenarioOptimizationResult"),
     "optimize_scenario": (".scenario_optimizer", "optimize_scenario"),
     "plot_optimal_scenario": (".scenario_optimizer", "plot_optimal_scenario"),
+    # Time-series similarity, dynamical embeddings & similarity-regularized pipelines (Track P).
+    "SIMILARITY_METHODS": (".similarity", "SIMILARITY_METHODS"),
+    "VALID_SIMILARITY_METHODS": (".similarity", "VALID_SIMILARITY_METHODS"),
+    "SimilarityMethod": (".similarity", "SimilarityMethod"),
+    "SimilarityMatrixResult": (".similarity", "SimilarityMatrixResult"),
+    "embed_series_df": (".similarity", "embed_series_df"),
+    "compute_similarity_matrix": (".similarity", "compute_similarity_matrix"),
+    "cluster_by_similarity_df": (".similarity", "cluster_by_similarity_df"),
+    "find_similar_series_df": (".similarity", "find_similar_series_df"),
+    "plot_similarity_map": (".similarity", "plot_similarity_map"),
+    "recommend_substitutes_df": (".similarity", "recommend_substitutes_df"),
+    "detect_emerging_trends_df": (".similarity", "detect_emerging_trends_df"),
+    "emerging_trends_df": (".similarity", "emerging_trends_df"),
+    "extract_foundation_embeddings": (".similarity", "extract_foundation_embeddings"),
+    "shrink_correlation_toward_similarity": (
+        ".copula",
+        "shrink_correlation_toward_similarity",
+    ),
+    "COLD_START_MATCHING_MODES": (".config", "COLD_START_MATCHING_MODES"),
+    "ColdStartMatching": (".config", "ColdStartMatching"),
+    "smooth_oof_losses_by_similarity": (
+        ".ensembler",
+        "smooth_oof_losses_by_similarity",
+    ),
 }
 
 __all__ = [
@@ -387,6 +422,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         AutofocusPassRecord,
         ConfigBlueprint,
         DataProfile,
+        DatasetProfile,
         NextLoopPreview,
         PanelAutoProfile,
         auto_forecast,
@@ -425,6 +461,10 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         forecast_cold_start_series,
         plot_cold_start_transfer,
     )
+    from .config import (  # noqa: F401
+        COLD_START_MATCHING_MODES,
+        ColdStartMatching,
+    )
     from .copula import (  # noqa: F401
         COPULA_TYPES,
         VALID_COPULA_TYPES,
@@ -435,6 +475,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         sample_copula_trajectories,
         sample_joint_trajectories,
         sample_trajectories,
+        shrink_correlation_toward_similarity,
         summarize_trajectory_risk,
         tail_risk_df,
     )
@@ -460,6 +501,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         PROMO_ELASTICITY_COLUMNS,
         compute_promo_elasticity,
         compute_promo_elasticity_decomposition,
+        estimate_promo_elasticity,
         make_confounded_promo_dgp,
         plot_promo_elasticity,
         promo_elasticity_df,
@@ -473,6 +515,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         run_group,
     )
     from .ensemble_run import ensemble_cross_runs, merge_configs_for_ensemble  # noqa: F401
+    from .ensembler import smooth_oof_losses_by_similarity  # noqa: F401
     from .evolve import (  # noqa: F401
         EvolveConfig,
         EvolveResult,
@@ -525,10 +568,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .reconciliation import (  # noqa: F401
         HierarchySpec,
         build_hierarchy,
+        ensure_hierarchy_nodes_present,
+        materialize_similarity_hierarchy,
         reconcile_cells,
         reconcile_forecasts,
         reconcile_matrix,
         reconcile_oof,
+        reconcile_run,
         verify_coherence,
     )
     from .report import (  # noqa: F401
@@ -587,6 +633,21 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         build_explain_frame,
         build_trace_frame,
         plot_trace,
+    )
+    from .similarity import (  # noqa: F401
+        SIMILARITY_METHODS,
+        VALID_SIMILARITY_METHODS,
+        SimilarityMatrixResult,
+        SimilarityMethod,
+        cluster_by_similarity_df,
+        compute_similarity_matrix,
+        detect_emerging_trends_df,
+        embed_series_df,
+        emerging_trends_df,
+        extract_foundation_embeddings,
+        find_similar_series_df,
+        plot_similarity_map,
+        recommend_substitutes_df,
     )
     from .simplex import (  # noqa: F401
         DEFAULT_ZERO_DELTA,

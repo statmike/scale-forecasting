@@ -645,3 +645,146 @@ def test_fit_learned_and_combine_oof_ignore_nan_truth_rows() -> None:
     assert all(np.isfinite(list(w.values())).all() for w in weights.values())
     blended = combine_oof(oof, cfg, learned_weights=weights)
     assert not blended.empty
+
+
+def test_smooth_oof_losses_by_similarity_and_ensemble_smoothing() -> None:
+    """Verify F9 (`smooth_oof_losses_by_similarity` and `ensemble.similarity_smoothing > 0` in
+    `combine_oof` / `build_ensembles` and `combine_calculated`): borrows OOF loss strength across
+    top-K similar neighbors to prevent single-fold outlier noise from hijacking inverse-error
+    ensemble weights.
+    """
+    from scale_forecasting.ensembler import build_ensembles, smooth_oof_losses_by_similarity
+
+    assert build_ensembles is combine_oof
+
+    # 1. Direct mathematical verification of smooth_oof_losses_by_similarity
+    # On s1, model 0 ('theta') had a fluke 0.50 loss while model 1 ('sarimax') had 0.10.
+    # On s1's twin neighbors s2 and s3, model 0 ('theta') is far superior (0.05 vs 0.80).
+    raw_losses = {
+        "s1": np.array([0.50, 0.10], dtype=float),
+        "s2": np.array([0.05, 0.80], dtype=float),
+        "s3": np.array([0.05, 0.80], dtype=float),
+        "s4": np.array([0.90, 0.05], dtype=float),
+    }
+    sim_df = pd.DataFrame(
+        [
+            [1.0, 0.95, 0.90, 0.02],
+            [0.95, 1.0, 0.92, 0.02],
+            [0.90, 0.92, 1.0, 0.02],
+            [0.02, 0.02, 0.02, 1.0],
+        ],
+        index=["s1", "s2", "s3", "s4"],
+        columns=["s1", "s2", "s3", "s4"],
+    )
+
+    unsmoothed = smooth_oof_losses_by_similarity(raw_losses, sim_df, smoothing=0.0)
+    np.testing.assert_allclose(unsmoothed["s1"], raw_losses["s1"])
+
+    smoothed = smooth_oof_losses_by_similarity(
+        raw_losses,
+        sim_df,
+        smoothing=0.75,
+        top_k_neighbors=2,
+    )
+    # With top_k_neighbors=2, s1 pools only from s2 and s3 (ignoring orthogonal s4), flipping
+    # model 0 ('theta') to have a lower smoothed loss than model 1 ('sarimax') on s1!
+    assert float(smoothed["s1"][0]) < float(smoothed["s1"][1])
+
+    # 2. Verify combine_oof and combine_calculated with similarity_smoothing > 0
+    cfg_unsmoothed = RunConfig(
+        run_name="ens-no-smooth",
+        data={"source_table": "t"},
+        models=["theta", "sarimax"],
+        ensemble={"enabled": True, "strategies": ["inverse_error"], "similarity_smoothing": 0.0},
+        backtest={"enabled": True, "n_folds": 2, "decision_metric": "wape"},
+    )
+    cfg_smoothed = RunConfig(
+        run_name="ens-smooth",
+        data={"source_table": "t"},
+        models=["theta", "sarimax"],
+        ensemble={
+            "enabled": True,
+            "strategies": ["inverse_error"],
+            "similarity_smoothing": 0.75,
+        },
+        backtest={"enabled": True, "n_folds": 2, "decision_metric": "wape"},
+    )
+
+    dates = pd.date_range("2025-01-01", periods=10, freq="D")
+    oof_rows: list[dict[str, object]] = []
+    for sid in ("s1", "s2", "s3"):
+        for fold_id in (0, 1):
+            for dt in dates[:5] if fold_id == 0 else dates[5:]:
+                yt = 100.0
+                # On inner fold 0: s1 has theta err 50 / sarimax 10; twins s2 & s3 have 5 / 80
+                if fold_id == 0:
+                    err_theta = 50.0 if sid == "s1" else 5.0
+                    err_sarimax = 10.0 if sid == "s1" else 80.0
+                else:
+                    err_theta = 0.0
+                    err_sarimax = 20.0
+                oof_rows.append(
+                    {
+                        "ts_id": sid,
+                        "model_type": "theta",
+                        "fold_id": fold_id,
+                        "ds": dt,
+                        "y_true": yt,
+                        "yhat": yt + err_theta if fold_id == 0 else 10.0,
+                    }
+                )
+                oof_rows.append(
+                    {
+                        "ts_id": sid,
+                        "model_type": "sarimax",
+                        "fold_id": fold_id,
+                        "ds": dt,
+                        "y_true": yt,
+                        "yhat": yt + err_sarimax if fold_id == 0 else 30.0,
+                    }
+                )
+    oof_df = pd.DataFrame(oof_rows)
+    sim_3 = sim_df.loc[["s1", "s2", "s3"], ["s1", "s2", "s3"]]
+
+    blend_0 = combine_oof(oof_df, cfg_unsmoothed, similarity_matrix=sim_3)
+    blend_s = combine_oof(oof_df, cfg_smoothed, similarity_matrix=sim_3)
+
+    s1_hold_0 = float(
+        blend_0[(blend_0["ts_id"] == "s1") & (blend_0["fold_id"] == 1)]["yhat"].iloc[0]
+    )
+    s1_hold_s = float(
+        blend_s[(blend_s["ts_id"] == "s1") & (blend_s["fold_id"] == 1)]["yhat"].iloc[0]
+    )
+    # Without smoothing, s1 prefers sarimax (30.0); with smoothing, s1 is pulled toward theta (10.0)
+    assert s1_hold_s < s1_hold_0 - 5.0
+
+    # Also verify combine_calculated with similarity_smoothing
+    base_preds = _base_df(
+        [
+            ("s1", "theta", "d1", 10.0),
+            ("s1", "sarimax", "d1", 30.0),
+            ("s2", "theta", "d1", 10.0),
+            ("s2", "sarimax", "d1", 30.0),
+            ("s3", "theta", "d1", 10.0),
+            ("s3", "sarimax", "d1", 30.0),
+        ]
+    )
+    metric_df = _series_metric_df(
+        [
+            ("s1", "theta", 0.50),
+            ("s1", "sarimax", 0.10),
+            ("s2", "theta", 0.05),
+            ("s2", "sarimax", 0.80),
+            ("s3", "theta", 0.05),
+            ("s3", "sarimax", 0.80),
+        ]
+    )
+    calc_0 = {
+        r["ts_id"]: r["yhat"]
+        for r in combine_calculated(base_preds, cfg_unsmoothed, metric_df, similarity_matrix=sim_3)
+    }
+    calc_s = {
+        r["ts_id"]: r["yhat"]
+        for r in combine_calculated(base_preds, cfg_smoothed, metric_df, similarity_matrix=sim_3)
+    }
+    assert calc_s["s1"] < calc_0["s1"] - 5.0

@@ -10,12 +10,11 @@ This mirrors [adding a model](./adding_a_model.md) deliberately: same factory pa
 one-thing-one-file rule, same `register(...)` at the bottom of the file.
 
 ```mermaid
-flowchart LR
+flowchart TD
     M["1. Copy docs/metric_template.py<br/>→ metrics/my_metric.py"] --> Reg["2. Register in metrics/__init__.py<br/>+ append to METRIC_NAMES"]
-    Reg --> DDL["registry/ddl.py<br/>CREATE TABLE + ADD COLUMN IF NOT EXISTS"]
-    Reg --> Proto["registry/write_api.py<br/>Storage Write API Proto Field"]
-    Reg --> Score["metrics.compute_metrics<br/>Spark · Ray · Vertex · AutoML · BigQuery · Ensembles"]
-    Reg --> Rev["registry/reads.py & review.py<br/>mean_ / p10_ / p50_ / p90_"]
+    Reg --> DDL["3. registry/ddl.py & write_api.py<br/>CREATE TABLE + ADD COLUMN IF NOT EXISTS + Storage Write API Proto Field"]
+    DDL --> Score["4. metrics.compute_metrics<br/>Spark · Ray · Vertex · AutoML · BigQuery · Ensembles"]
+    Score --> Rev["5. registry/reads.py & review.py<br/>mean_ / p10_ / p50_ / p90_ Leaderboard Aggregations"]
 ```
 
 ## The 4-step checklist

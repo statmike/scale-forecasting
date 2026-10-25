@@ -24,6 +24,7 @@ summary payload) combining:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html
 import json
 import math
@@ -320,9 +321,19 @@ def _extract_target_frames(
         out["leaderboard_df"] = target.leaderboard
         out["predictions_df"] = target.predictions
         out["oof_df"] = target.oof
-        out["history_df"] = getattr(target, "series", None)
+        panel_df = getattr(target, "panel_df", None)
+        out["history_df"] = panel_df if panel_df is not None else getattr(target, "series", None)
         if hasattr(target, "inventory_policy_df"):
             out["inventory_policy_df"] = target.inventory_policy_df()
+        if hasattr(target, "similarity_df") and callable(target.similarity_df):
+            with contextlib.suppress(Exception):
+                out["similarity_df"] = target.similarity_df()
+        if hasattr(target, "similarity_clusters_df") and callable(target.similarity_clusters_df):
+            with contextlib.suppress(Exception):
+                out["similarity_clusters_df"] = target.similarity_clusters_df()
+        if hasattr(target, "emerging_trends_df") and callable(target.emerging_trends_df):
+            with contextlib.suppress(Exception):
+                out["emerging_trends_df"] = target.emerging_trends_df()
         if hasattr(target, "config"):
             eff_run_id = getattr(target.config, "run_name", eff_run_id)
             if metric is None:
@@ -334,9 +345,19 @@ def _extract_target_frames(
         out["predictions_df"] = res.predictions.assign(ts_id=res.ts_id, model_type=res.model_type)
         if res.oof is not None and not res.oof.empty:
             out["oof_df"] = res.oof.assign(ts_id=res.ts_id, model_type=res.model_type)
-        out["history_df"] = target.series
+        panel_df = getattr(target, "panel_df", None)
+        out["history_df"] = panel_df if panel_df is not None else target.series
         if hasattr(target, "inventory_policy_df"):
             out["inventory_policy_df"] = target.inventory_policy_df()
+        if hasattr(target, "similarity_df") and callable(target.similarity_df):
+            with contextlib.suppress(Exception):
+                out["similarity_df"] = target.similarity_df()
+        if hasattr(target, "similarity_clusters_df") and callable(target.similarity_clusters_df):
+            with contextlib.suppress(Exception):
+                out["similarity_clusters_df"] = target.similarity_clusters_df()
+        if hasattr(target, "emerging_trends_df") and callable(target.emerging_trends_df):
+            with contextlib.suppress(Exception):
+                out["emerging_trends_df"] = target.emerging_trends_df()
     # 3. AutoForecastSession duck-typing
     elif hasattr(target, "leaderboard_df") and isinstance(
         getattr(target, "leaderboard_df", None), pd.DataFrame
@@ -381,6 +402,12 @@ def _extract_target_frames(
             out["tail_risk_df"] = _try_df(target.tail_risk_df)
         if hasattr(target, "cold_start_transfer_df"):
             out["cold_start_df"] = _try_df(target.cold_start_transfer_df)
+        if hasattr(target, "similarity_df"):
+            out["similarity_df"] = _try_df(target.similarity_df)
+        if hasattr(target, "similarity_clusters_df"):
+            out["similarity_clusters_df"] = _try_df(target.similarity_clusters_df)
+        if hasattr(target, "emerging_trends_df"):
+            out["emerging_trends_df"] = _try_df(target.emerging_trends_df)
         if hasattr(target, "autofocus_ledger_df"):
             out["autofocus_ledger_df"] = _try_df(target.autofocus_ledger_df)
         if getattr(target, "blueprint", None) is not None:
@@ -410,6 +437,10 @@ def _extract_target_frames(
             "cold_start_df",
             "inventory_opt_df",
             "scenario_opt_df",
+            "similarity_df",
+            "similarity_clusters_df",
+            "substitutes_df",
+            "emerging_trends_df",
         ):
             if target.get(k) is not None:
                 out[k] = target.get(k)
@@ -445,6 +476,10 @@ def build_report_payload(
     cold_start_df: pd.DataFrame | None = None,
     inventory_opt_df: pd.DataFrame | None = None,
     scenario_opt_df: pd.DataFrame | None = None,
+    similarity_df: pd.DataFrame | None = None,
+    similarity_clusters_df: pd.DataFrame | None = None,
+    substitutes_df: pd.DataFrame | None = None,
+    emerging_trends_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> dict[str, Any]:
     """Assemble the structured dictionary backing both HTML and JSON report exports."""
@@ -492,6 +527,37 @@ def build_report_payload(
             inventory_opt_df = ext.get("inventory_opt_df")
         if scenario_opt_df is None:
             scenario_opt_df = ext.get("scenario_opt_df")
+        if similarity_df is None:
+            similarity_df = ext.get("similarity_df")
+        if similarity_clusters_df is None:
+            similarity_clusters_df = ext.get("similarity_clusters_df")
+        if substitutes_df is None:
+            substitutes_df = ext.get("substitutes_df")
+        if emerging_trends_df is None:
+            emerging_trends_df = ext.get("emerging_trends_df")
+
+    if (
+        (similarity_df is None or similarity_clusters_df is None or emerging_trends_df is None)
+        and history_df is not None
+        and not history_df.empty
+        and "ts_id" in history_df.columns
+        and history_df["ts_id"].nunique() >= 2
+    ):
+        from .similarity import (
+            cluster_by_similarity_df,
+            compute_similarity_matrix,
+            detect_emerging_trends_df,
+        )
+
+        try:
+            if similarity_df is None:
+                similarity_df = compute_similarity_matrix(history_df).pairs_df
+            if similarity_clusters_df is None:
+                similarity_clusters_df = cluster_by_similarity_df(history_df)
+            if emerging_trends_df is None:
+                emerging_trends_df = detect_emerging_trends_df(history_df)
+        except Exception:  # noqa: BLE001 - optional similarity computation falls back cleanly
+            pass
 
     if fva_df is None and oof_df is not None and not oof_df.empty:
         fva_df = compute_fva(oof_df, metric=metric, series_df=history_df)
@@ -549,6 +615,10 @@ def build_report_payload(
     cold_start_recs = _df_to_records(cold_start_df)
     inv_opt_recs = _df_to_records(inventory_opt_df)
     scen_opt_recs = _df_to_records(scenario_opt_df)
+    sim_recs = _df_to_records(similarity_df)
+    sim_cluster_recs = _df_to_records(similarity_clusters_df)
+    subs_recs = _df_to_records(substitutes_df)
+    trends_recs = _df_to_records(emerging_trends_df)
     explorer = _build_explorer_series_map(predictions_df, history_df)
 
     best_model = "n/a"
@@ -594,6 +664,10 @@ def build_report_payload(
         "cold_start": cold_start_recs,
         "inventory_optimization": inv_opt_recs,
         "scenario_optimization": scen_opt_recs,
+        "similarity": sim_recs,
+        "similarity_clusters": sim_cluster_recs,
+        "substitutes": subs_recs,
+        "emerging_trends": trends_recs,
         "explorer": explorer,
     }
 
@@ -663,6 +737,10 @@ def render_html_report(
     cold_start_df: pd.DataFrame | None = None,
     inventory_opt_df: pd.DataFrame | None = None,
     scenario_opt_df: pd.DataFrame | None = None,
+    similarity_df: pd.DataFrame | None = None,
+    similarity_clusters_df: pd.DataFrame | None = None,
+    substitutes_df: pd.DataFrame | None = None,
+    emerging_trends_df: pd.DataFrame | None = None,
     metric: str = "wape",
 ) -> str:
     """Render a complete, self-contained single-file interactive HTML report."""
@@ -691,6 +769,10 @@ def render_html_report(
         cold_start_df=cold_start_df,
         inventory_opt_df=inventory_opt_df,
         scenario_opt_df=scenario_opt_df,
+        similarity_df=similarity_df,
+        similarity_clusters_df=similarity_clusters_df,
+        substitutes_df=substitutes_df,
+        emerging_trends_df=emerging_trends_df,
         metric=metric,
     )
     title = str(payload.get("title", title))
@@ -746,6 +828,22 @@ def render_html_report(
     scen_opt_html = _html_table(
         payload.get("scenario_optimization", []),
         empty_msg="No prescriptive scenario optimization rows.",
+    )
+    sim_html = _html_table(
+        payload.get("similarity", [])[:50],
+        empty_msg="No pairwise time-series similarity edges computed.",
+    )
+    sim_clusters_html = _html_table(
+        payload.get("similarity_clusters", []),
+        empty_msg="No similarity behavioral cluster assignments computed.",
+    )
+    subs_html = _html_table(
+        payload.get("substitutes", [])[:50],
+        empty_msg="No retail assortment substitution recommendations computed.",
+    )
+    trends_html = _html_table(
+        payload.get("emerging_trends", []),
+        empty_msg="No emerging trend breakout rows computed.",
     )
     af_html = _html_table(
         payload["autofocus_ledger"],
@@ -955,6 +1053,15 @@ def render_html_report(
     <h2>Cold-Start &amp; NPI Analog Donor Transfer</h2>
     {cold_start_html}
   </div>
+  <div class="card">
+    <h2>Time-Series Similarity &amp; Dynamical Archetypes</h2>
+    {sim_clusters_html}
+    {sim_html}
+    <h3>Emerging Trends &amp; Breakout Detection</h3>
+    {trends_html}
+    <h3>SKU Substitute &amp; Cannibalization Recommendations</h3>
+    {subs_html}
+  </div>
 </section>
 
 <section id="tab-inventory" class="tab-panel">
@@ -1151,6 +1258,10 @@ def export_report(
     cold_start_df: pd.DataFrame | None = None,
     inventory_opt_df: pd.DataFrame | None = None,
     scenario_opt_df: pd.DataFrame | None = None,
+    similarity_df: pd.DataFrame | None = None,
+    similarity_clusters_df: pd.DataFrame | None = None,
+    substitutes_df: pd.DataFrame | None = None,
+    emerging_trends_df: pd.DataFrame | None = None,
     write_json: bool = False,
     include_json_sidecar: bool = False,
 ) -> Path:
@@ -1177,6 +1288,10 @@ def export_report(
         cold_start_df=cold_start_df,
         inventory_opt_df=inventory_opt_df,
         scenario_opt_df=scenario_opt_df,
+        similarity_df=similarity_df,
+        similarity_clusters_df=similarity_clusters_df,
+        substitutes_df=substitutes_df,
+        emerging_trends_df=emerging_trends_df,
         metric=eff_metric,
     )
     out.write_text(html_str, encoding="utf-8")
@@ -1194,6 +1309,10 @@ def export_report(
             cold_start_df=cold_start_df,
             inventory_opt_df=inventory_opt_df,
             scenario_opt_df=scenario_opt_df,
+            similarity_df=similarity_df,
+            similarity_clusters_df=similarity_clusters_df,
+            substitutes_df=substitutes_df,
+            emerging_trends_df=emerging_trends_df,
             metric=eff_metric,
         )
         json_path = out.with_suffix(".json")

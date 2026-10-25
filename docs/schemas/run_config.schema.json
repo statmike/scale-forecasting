@@ -711,6 +711,13 @@
           "title": "Prune Threshold",
           "type": "number"
         },
+        "similarity_smoothing": {
+          "default": 0.0,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Similarity Smoothing",
+          "type": "number"
+        },
         "strategies": {
           "default": [
             "median"
@@ -998,6 +1005,7 @@
               "local",
               "global",
               "hybrid",
+              "similarity_global",
               "local_univariate",
               "local_cov_none",
               "local_cov_future_only",
@@ -1036,6 +1044,17 @@
           ],
           "default": null,
           "title": "Censored Col"
+        },
+        "cold_start_matching": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "attribute",
+            "similarity",
+            "hybrid"
+          ],
+          "title": "Cold Start Matching",
+          "type": "string"
         },
         "cold_start_method": {
           "default": "auto",
@@ -1167,6 +1186,38 @@
           "title": "Regime Routing",
           "type": "boolean"
         },
+        "similarity_cluster_feature": {
+          "default": false,
+          "title": "Similarity Cluster Feature",
+          "type": "boolean"
+        },
+        "similarity_method": {
+          "default": "hybrid",
+          "enum": [
+            "hybrid",
+            "physics_attractor",
+            "spectral_phase",
+            "elastic_dtw",
+            "minirocket",
+            "structural_signature",
+            "foundation_latent"
+          ],
+          "title": "Similarity Method",
+          "type": "string"
+        },
+        "similarity_n_clusters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "const": "auto",
+              "type": "string"
+            }
+          ],
+          "default": "auto",
+          "title": "Similarity N Clusters"
+        },
         "simplex_sum": {
           "anyOf": [
             {
@@ -1274,6 +1325,38 @@
           },
           "title": "Reconciliation Methods",
           "type": "array"
+        },
+        "similarity_hierarchy": {
+          "default": false,
+          "title": "Similarity Hierarchy",
+          "type": "boolean"
+        },
+        "similarity_method": {
+          "default": "hybrid",
+          "enum": [
+            "hybrid",
+            "physics_attractor",
+            "spectral_phase",
+            "elastic_dtw",
+            "minirocket",
+            "structural_signature",
+            "foundation_latent"
+          ],
+          "title": "Similarity Method",
+          "type": "string"
+        },
+        "similarity_n_clusters": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "const": "auto",
+              "type": "string"
+            }
+          ],
+          "default": "auto",
+          "title": "Similarity N Clusters"
         },
         "spatial_temporal_weight": {
           "anyOf": [

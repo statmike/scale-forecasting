@@ -238,3 +238,173 @@ def test_cold_start_config_and_worker_pipeline() -> None:
     assert len(cell.predictions) == 7
     assert cell.fit_diagnostics.get("cold_start_transfer") is not None
     assert cell.fit_diagnostics["cold_start_transfer"]["is_cold_start"] is True
+
+
+def test_cold_start_similarity_and_hybrid_matching() -> None:
+    """Verify cold_start_matching='similarity'|'hybrid' and @similarity_cold_start transfer."""
+    panel = _make_npi_panel()
+    cfg = RunConfig.model_validate(
+        {
+            "run_name": "test_similarity_cold_start",
+            "data": {"source_table": "p.d.t", "horizon": 7, "freq": "D"},
+            "models": ["naive_mean@similarity_cold_start"],
+            "features": {
+                "cold_start_min_obs": 14,
+                "cold_start_method": "analog_transfer",
+                "cold_start_matching": "similarity",
+                "similarity_method": "hybrid",
+            },
+        }
+    )
+    variant = resolve_model_variant(cfg, "naive_mean@similarity_cold_start")
+    assert variant.effective_cfg.features.cold_start_transfer is True
+    assert variant.effective_cfg.features.cold_start_matching == "similarity"
+
+    s5 = panel[panel["ts_id"] == "npi_5obs"][["ts_id", "ds", "y"]].reset_index(drop=True)
+    cell = run_cell(
+        "npi_5obs",
+        s5,
+        "naive_mean@similarity_cold_start",
+        cfg,
+        cold_start_donor_pool=panel[["ts_id", "ds", "y"]],
+    )
+    assert cell.status == "ok"
+    assert len(cell.predictions) == 7
+    cs_diag = cell.fit_diagnostics["cold_start_transfer"]
+    assert cs_diag["is_cold_start"] is True
+    assert cs_diag["matching_mode_used"] == "similarity"
+    assert float(cs_diag["donor_similarity_score"]) > 0.0
+    assert len(cs_diag["top_donor_ts_ids"]) >= 1
+
+    hybrid_report = cold_start_transfer_df(
+        panel,
+        horizon=7,
+        freq="D",
+        min_obs=14,
+        matching="hybrid",
+        similarity_method="hybrid",
+        static_covariates=["category", "brand_tier"],
+    )
+    assert "matching_mode_used" in hybrid_report.columns
+    assert "donor_similarity_score" in hybrid_report.columns
+    assert "top_donor_ts_ids" in hybrid_report.columns
+    npi_row = hybrid_report[hybrid_report["ts_id"] == "npi_5obs"].iloc[0]
+    assert str(npi_row["matching_mode_used"]) == "hybrid"
+    assert float(npi_row["donor_similarity_score"]) > 0.0
+
+
+def test_multimodal_day0_to_day14_cold_start_handoff() -> None:
+    """F17: Verify continuous Day-0 (0 obs) -> Day-5 (5 obs) -> Mature (28 obs) cold-start
+    handoff using text_cols, attribute_cols, hierarchy_cols, and embedding_col."""
+    dates = pd.date_range("2025-01-01", periods=28, freq="D")
+    t = np.arange(28, dtype=float)
+    oat_curve = 180.0 + 30.0 * np.sin(2.0 * np.pi * t / 7.0)
+    soda_curve = 25.0 + 4.0 * np.cos(2.0 * np.pi * t / 7.0)
+
+    panel = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_oat_orig",
+                    "ds": dates,
+                    "y": oat_curve,
+                    "description": "Organic Oat Milk Original 64oz Carton",
+                    "category": "Dairy",
+                    "subcategory": "Plant Milk",
+                    "brand": "OatCo",
+                    "size_oz": 64.0,
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_oat_choco",
+                    "ds": dates,
+                    "y": oat_curve * 0.92,
+                    "description": "Organic Oat Milk Chocolate 64oz Carton",
+                    "category": "Dairy",
+                    "subcategory": "Plant Milk",
+                    "brand": "OatCo",
+                    "size_oz": 64.0,
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "ts_id": "donor_soda_can",
+                    "ds": dates,
+                    "y": soda_curve,
+                    "description": "Sparkling Cola Soda 12oz Aluminum Can",
+                    "category": "Beverages",
+                    "subcategory": "Carbonated",
+                    "brand": "FizzCo",
+                    "size_oz": 12.0,
+                }
+            ),
+            # Day-0 pre-launch SKU (n_obs == 0: y is NaN) with Oat Milk metadata
+            pd.DataFrame(
+                {
+                    "ts_id": "npi_day0_oat_vanilla",
+                    "ds": [pd.Timestamp("2025-01-28")],
+                    "y": [np.nan],
+                    "description": "Organic Oat Milk Vanilla 64oz Carton",
+                    "category": "Dairy",
+                    "subcategory": "Plant Milk",
+                    "brand": "OatCo",
+                    "size_oz": 64.0,
+                }
+            ),
+            # Day-5 early-launch SKU (n_obs == 5)
+            pd.DataFrame(
+                {
+                    "ts_id": "npi_day5_oat_barista",
+                    "ds": dates[:5],
+                    "y": oat_curve[:5] * 1.05,
+                    "description": "Organic Oat Milk Barista Edition 64oz Carton",
+                    "category": "Dairy",
+                    "subcategory": "Plant Milk",
+                    "brand": "OatCo",
+                    "size_oz": 64.0,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    report = cold_start_transfer_df(
+        panel,
+        horizon=7,
+        freq="D",
+        min_obs=14,
+        cold_start_matching="hybrid",
+        text_cols=["description"],
+        attribute_cols=["brand", "size_oz"],
+        hierarchy_cols=["category", "subcategory"],
+    )
+    by_id = report.set_index("ts_id")
+
+    # 1. Day-0 pre-launch SKU (n_obs == 0) matches Oat Milk donors purely from metadata
+    day0 = by_id.loc["npi_day0_oat_vanilla"]
+    assert int(day0["n_obs"]) == 0
+    assert bool(day0["is_cold_start"]) is True
+    assert str(day0["lifecycle_stage"]) == "pre_launch"
+    assert abs(float(day0["empirical_bayes_weight"])) < 1e-9
+    assert float(day0["donor_similarity_score"]) > 0.65
+    assert str(day0["top_donor_ts_ids"]).startswith("donor_oat_")
+    # Prior scale transfers from high-volume Oat Milk (~180) rather than Soda (~25)
+    assert float(day0["prior_scale"]) > 120.0
+    assert float(day0["yhat_mean"]) > 120.0
+
+    # 2. Day-5 early-launch SKU (n_obs == 5) blends metadata + 5-day launch prefix
+    day5 = by_id.loc["npi_day5_oat_barista"]
+    assert int(day5["n_obs"]) == 5
+    assert bool(day5["is_cold_start"]) is True
+    assert str(day5["lifecycle_stage"]) == "early_launch"
+    assert 0.0 < float(day5["empirical_bayes_weight"]) < 1.0
+    assert float(day5["donor_similarity_score"]) > 0.65
+    assert str(day5["top_donor_ts_ids"]).startswith("donor_oat_")
+
+    # 3. Mature SKU (n_obs == 28) is not cold-start
+    mature = by_id.loc["donor_oat_orig"]
+    assert int(mature["n_obs"]) == 28
+    assert bool(mature["is_cold_start"]) is False
+    assert str(mature["lifecycle_stage"]) == "mature"
+    assert str(mature["method_used"]) == "none"

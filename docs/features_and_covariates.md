@@ -1,6 +1,6 @@
-# Feature Engineering, Three-Tier Covariates, Compositional Simplex & Cold-Start Transfer
+# Feature Engineering, Three-Tier Covariates, Compositional Simplex, Similarity & Cold-Start Transfer
 
-`scale-forecasting` provides a declarative, leak-free feature engineering, target-transformation, and cold-start transfer pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), and [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
+`scale-forecasting` provides a declarative, leak-free feature engineering, target-transformation, time-series similarity, and cold-start transfer pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py), and [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
 
 ```mermaid
 flowchart TD
@@ -18,11 +18,11 @@ flowchart TD
         C1 --> C2 --> C3
     end
 
-    subgraph S3["3. Model Variants, Guardrails, Ablation Ladders & Cold-Start Transfer"]
+    subgraph S3["3. Model Variants, Guardrails, Similarity Clustering & Cold-Start Transfer"]
         V1["Capability-Aware Routing & Fallback<br/>features.on_unsupported_covariates = 'fallback' | 'error'"]
         V2["Monotonic Economic Sign Constraints<br/>features.monotonic_constraints = {'price_index': -1, 'promo_flag': 1} (@monotone)"]
-        V3["Orthogonal Variant Taxonomy & Ablation Ladders<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @local"]
-        V4["Cold-Start & NPI Analog Donor Transfer (cold_start.py)<br/>features.cold_start_transfer · cold_start_min_obs · cold_start_method"]
+        V3["Orthogonal Variant Taxonomy & Cluster-Aware Global Pooling<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @similarity_global · @local"]
+        V4["7-Lens & Multi-Modal Time-Series Similarity & Cold-Start Transfer (similarity.py · cold_start.py)<br/>@similarity_cold_start · cold_start_matching = 'auto' | 'attribute' | 'similarity' | 'hybrid' · similarity_cluster_feature"]
         V1 --> V2 --> V3 --> V4
     end
 
@@ -37,7 +37,7 @@ Different model families consume exogenous information in fundamentally differen
 
 | Covariate Tier | `RunConfig` Field | Cutoff & Horizon Rule | Models Supporting Tier |
 | :--- | :--- | :--- | :--- |
-| **Static Covariates** | `features.static_covariates` | Constant per `ts_id` across history and horizon (e.g., `["region", "category"]`). Categorical strings are deterministically encoded. | Global/hybrid panel models (`tide`, `tft`, `tsmixer`, `lightgbm@global`, `xgboost@global`, `catboost@global`) and Vertex AI AutoML (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`). |
+| **Static Covariates** | `features.static_covariates` | Constant per `ts_id` across history and horizon (e.g., `["region", "category"]`). Categorical strings are deterministically encoded. | Global/hybrid panel models (`tide`, `tft`, `tsmixer`, `lightgbm@global`, `lightgbm@similarity_global`, `xgboost@global`, `catboost@global`) and Vertex AI AutoML (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`). |
 | **Known-Future Covariates** | `features.future_covariates` (alias `features.exog`) | Must be present in both historical training rows (`ds <= cutoff_date`) and future horizon rows (`cutoff_date < ds <= cutoff_date + H`). | `sarimax`, `prophet`, `regression_lags`, all `ml` tree models (`lightgbm`, `xgboost`, `catboost`, `random_forest`, `extra_trees`), `neuralprophet`, `tide`, `tft`, `tsmixer`, `chronos2`, `vertex_*`, and `arima_plus`. |
 | **Historical-Only Past Covariates** | `features.past_covariates` | Observed only up to `ds <= cutoff_date`. Strictly masked beyond `cutoff_date` during backtesting and HPO to prevent lookahead leakage; projected into future steps via `exog_lags` or cutoff carry-forward for tabular models. | Native encoder consumption in `tide`, `tft`, `tsmixer`, `neuralprophet`, and `vertex_*`; lagged/carried consumption in `ml`, `statistical`, and `arima_plus`. |
 
@@ -68,18 +68,36 @@ Forecasting each share independently in raw space produces predictions that drif
 
 ---
 
-## 3. Cold-Start & New Product Introduction (NPI) Analog Transfer (`cold_start.py`)
+## 3. Cold-Start & New Product Introduction (NPI) Analog Transfer (`cold_start.py`) & Multi-Lens Similarity (`similarity.py`)
 
-When launching **new SKUs, newly opened stores, or short-history products** with fewer than `features.cold_start_min_obs` observations (default `14`), univariate local statistical models lack sufficient degrees of freedom to estimate seasonal profiles or trend slopes reliably. Setting `features.cold_start_transfer = True` activates [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py):
+When launching **new SKUs, newly opened stores, or short-history products** with fewer than `features.cold_start_min_obs` observations (default `14`), univariate local statistical models lack sufficient degrees of freedom to estimate seasonal profiles or trend slopes reliably. Setting `features.cold_start_transfer = True` (or appending `@similarity_cold_start` to any model name) activates [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py) and [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py):
 
 | `features.cold_start_method` | Mechanism | Best For |
 | :--- | :--- | :--- |
-| **`"auto"`** *(default)* | Selects `"analog_transfer"` when mature donor series ($n \ge \max(2 \cdot \text{min\_obs}, m + H)$) exist in the panel and falls back to `"bass_diffusion"` / `"weibull_lifecycle"` otherwise. | Heterogeneous enterprise catalogs mixing mature and newly launched series (`cold_start_short_history`). |
-| **`"analog_transfer"`** | Computes a composite donor similarity score combining static covariate affinity, hierarchical lineage overlap, and normalized early-ramp trajectory correlation over the $k$ observed post-launch periods, then transfers the top-$K$ donors' seasonal shape scaled by empirical-Bayes level shrinkage. | Retail SKU launches, new store openings, and replacement product rollouts with peer history. |
+| **`"auto"`** *(default)* | Selects `"analog_transfer"` when mature donor series ($n \ge \max(2 n_{\min}, m + H)$) exist in the panel and falls back to `"bass_diffusion"` / `"weibull_lifecycle"` otherwise. | Heterogeneous enterprise catalogs mixing mature and newly launched series (`cold_start_short_history`). |
+| **`"analog_transfer"`** | Computes a composite donor similarity score governed by `features.cold_start_matching` (`"auto"`, `"attribute"`, `"similarity"`, or `"hybrid"`), smoothly blending Day-0 pre-launch metadata/semantic/hierarchy priors with Day-1..14 kinematic launch-prefix matching (`cold_start_handoff`), then transfers the top-$K$ donors' seasonal shape scaled by empirical-Bayes level shrinkage. | Retail SKU launches, new store openings, and replacement product rollouts with peer history. |
 | **`"bass_diffusion"`** | Fits the Bass (1969) innovation/imitation S-curve $y(t) = m \cdot \frac{(p+q)^2}{p} \frac{e^{-(p+q)t}}{(1 + (q/p)e^{-(p+q)t})^2}$ regularized toward panel priors $(\bar{p}, \bar{q})$. | Technology adoption, subscription cohorts, and cumulative launch ramps without close analogs. |
 | **`"weibull_lifecycle"`** | Fits a 3-parameter Weibull launch-peak-decay curve $y(t) = A \cdot (k/\lambda)(t/\lambda)^{k-1} e^{-(t/\lambda)^k}$ with empirical-Bayes shape stabilization. | Fashion, seasonal apparel, media, and promotional limited-edition lifecycles. |
 
-`Forecaster.profile_data()` automatically counts short-history series (`n_cold_start_series`, `cold_start_fraction`), `Forecaster.auto()` evaluates Branch 2c (`cold_start_analog_transfer`) when cold-start series are detected, and `f.assess()` reports cold-start transfer lift in Question 4.
+### Seven Similarity Lenses, Multi-Modal Metadata Fusion, `@similarity_global` Cluster Pooling & Merchandising Intelligence (`similarity.py`)
+
+`scale_forecasting.similarity` computes symmetric positive semi-definite (PSD) similarity matrices ($S_{i,i} = 1, S_{i,j} \in [0, 1]$) across **7 temporal lenses** plus optional **multi-modal retail metadata** (`text_cols` character/word $n$-gram TF-IDF + SVD LSA, `attribute_cols` Gower similarity, and `hierarchy_cols` Wu–Palmer Lowest Common Ancestor tree distance):
+
+| Similarity Lens (`method`) | Representation & Mathematical Invariants | Primary Use Case |
+| :--- | :--- | :--- |
+| **`"hybrid"`** *(default)* | Consensus PSD fusion of rank-normalized RBF kernels across `"physics_attractor"` (`0.30`), `"spectral_phase"` (`0.25`), `"minirocket"` / `"elastic_dtw"` (`0.25`), and `"structural_signature"` (`0.20`), plus optional `semantic_sim` and `hierarchy_sim`. | General-purpose digital-twin discovery, `@similarity_global` cluster pooling, `similarity_hierarchy`, and SKU substitution. |
+| **`"physics_attractor"`** | Takens delay-coordinate state-space reconstruction, kinematic phase portraits $(y_t, \dot{y}_t, \ddot{y}_t)$, Sliced Wasserstein attractor cloud distance, Rosenstein maximal Lyapunov exponent $\lambda_{\max}$, Permutation Entropy $H_{\text{perm}}$, Sample Entropy, and Ornstein–Uhlenbeck damping rate $\kappa_{\text{OU}}$. | Separating chaotic, mean-reverting ($H < 0.5$), persistent ($H > 0.5$), and limit-cycle dynamical regimes; matching early launch-prefix velocity/acceleration. |
+| **`"spectral_phase"`** | FFT Hilbert analytic signal $z_t = y_t + i\mathcal{H}(y_t) = A_t e^{i\theta_t}$, pairwise Kuramoto phase-locking order parameter $R_{i,j}$, Welch PSD Jensen–Shannon divergence, and directed cross-correlation lead-lag shift $\tau_{i \to j}^*$. | Discovering shared dominant periodicities, phase coherence, and bellwether lead-lag relationships across series. |
+| **`"elastic_dtw"`** | Scale-normalized Sakoe–Chiba banded Dynamic Time Warping / Time-Warp Edit Distance (`TWED`) with physical elastic spring stiffness penalty $\nu > 0$. | Shape-based matching under phase shifts, launch timing offsets, and local time warping. |
+| **`"minirocket"`** | Deterministic pure-NumPy bank of `84` ternary dilated convolutional kernels ($\mathbf{w} \in \{-1, 2\}^9, \sum w_k = 0$) across exponential dilations `(1, 2, 4, 8)` with Proportion of Positive Values (`PPV`) pooling. | Fast $O(N \cdot T)$ multiscale local motif, promo-spike, and morphological shape matching. |
+| **`"structural_signature"`** | `24`-dimensional standardized econometric vector: STL trend/seasonal strength, peak phase, Hurst exponent $H$ ($R/S$), ACF lags `1..7`, PACF lags `1..3`, spectral entropy, Syntetos–Boylan $(\log \text{ADI}, \log \text{CV}^2)$, skewness, kurtosis, ARCH(1), level-shift, zero-inflation, velocity, and curvature ratios. | Interpretable econometric regime grouping across smooth, erratic, intermittent, and lumpy demand. |
+| **`"foundation_latent"`** | Pooled context encoder embeddings from pretrained time-series foundation models (`chronos_bolt`, `chronos2`, `timesfm_torch`, `sundial` via `extract_foundation_embeddings`) with deterministic L2-normalized `"minirocket"` + `"structural_signature"` fallback on pure core. | Zero-shot neural representation clustering and foundation-space analog retrieval. |
+
+- **Cluster-Aware Global Pooling (`<model>@similarity_global` & `features.similarity_cluster_feature`):** Appending `@similarity_global` to any global-capable model (e.g., `"lightgbm@similarity_global"`, `"regression_lags@similarity_global"`, `"tide@similarity_global"`) partitions the panel strictly within each fold cutoff via `similarity.cluster_by_similarity_df()` and fits an isolated global model per behavioral cluster (`_run_similarity_global_panel_model` in `worker.py` and cluster-isolated buckets in `spark_io.py`), preventing negative transfer between incompatible regimes. Setting `features.similarity_cluster_feature = True` injects `similarity_cluster_id` (`0..K-1`) as a feature into standard models.
+- **Day-0 to Day-14 Cold-Start Digital-Twin Matching (`features.cold_start_matching` & `@similarity_cold_start`):** Setting `features.cold_start_matching` to `"hybrid"` or `"similarity"` (or using `<model>@similarity_cold_start`) routes short-history cold-start series through `similarity.match_cold_start_launch_prefix_df()`, smoothly ramping from Day-0 pre-launch semantic/attribute/hierarchy donor priors (`0` observations) to Day-1..14 kinematic launch-prefix matching.
+- **SKU Substitute Recommendations & Emerging Trend Detection (`recommend_substitutes_df` & `detect_emerging_trends_df`):** `sf.recommend_substitutes_df(panel_df, inventory_df=..., text_cols=..., hierarchy_cols=..., within_hierarchy_level=...)` ranks in-stock digital-twin substitutes when an item is low or out of stock, while `sf.detect_emerging_trends_df(panel_df, window=14)` combines kinematic velocity ($\dot{y}_t$), acceleration ($\ddot{y}_t$), Hurst persistence ($H$), and Kuramoto lead-lag shifts ($\tau_{i \to j}^*$) to flag accelerating breakouts and lagging co-promotion candidates.
+
+`Forecaster.profile_data()` automatically computes `optimal_similarity_clusters`, `similarity_silhouette_score`, and `has_similarity_clusters`, `Forecaster.auto()` evaluates `<model>@similarity_global`, `@similarity_cold_start`, and `hierarchy.similarity_hierarchy=True` in `autofocus`, and `f.assess()` reports digital-twin, cluster-pooling, and latent-hierarchy diagnostics in Questions 4 and 5.
 
 ---
 
@@ -160,5 +178,5 @@ See also:
 - [Notebook 05: Covariates and Global Models](./notebooks/05_covariates_and_global_models.ipynb)
 - [Notebook 06: Hierarchical Reconciliation, THieF & Compositional Simplex](./notebooks/06_hierarchical_reconciliation.ipynb)
 - [Configuration Reference](./configuration_reference.md)
-- [API Reference: `features`](./api/features.md), [`simplex`](./api/simplex.md), [`monotonicity`](./api/monotonicity.md), [`holiday_window`](./api/holiday_window.md), [`cold_start`](./api/cold_start.md)
+- [API Reference: `features`](./api/features.md), [`simplex`](./api/simplex.md), [`monotonicity`](./api/monotonicity.md), [`holiday_window`](./api/holiday_window.md), [`cold_start`](./api/cold_start.md), [`similarity`](./api/similarity.md)
 

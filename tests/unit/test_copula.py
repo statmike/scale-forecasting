@@ -261,3 +261,102 @@ def test_copula_three_mode_hierarchical_temporal_and_cross_temporal_coherence() 
     assert scores["crps"] >= 0.0
     assert scores["energy_score"] >= 0.0
     assert scores["variogram_score"] >= 0.0
+
+
+def test_shrink_correlation_toward_similarity_and_regularized_copula_sampling() -> None:
+    """Verify F7 (`shrink_correlation_toward_similarity` and `similarity_shrinkage=True` in
+    `sample_trajectories`): regularizes noisy short-OOF cross-series correlations toward the PSD
+    pairwise trajectory similarity matrix.
+    """
+    from scale_forecasting.copula import shrink_correlation_toward_similarity
+
+    emp = np.array(
+        [
+            [1.0, -0.35, 0.10],
+            [-0.35, 1.0, -0.20],
+            [0.10, -0.20, 1.0],
+        ],
+        dtype=float,
+    )
+    sim = pd.DataFrame(
+        [
+            [1.0, 0.90, 0.25],
+            [0.90, 1.0, 0.30],
+            [0.25, 0.30, 1.0],
+        ],
+        index=["sku_0", "sku_1", "sku_2"],
+        columns=["sku_0", "sku_1", "sku_2"],
+    )
+
+    shrunk_auto = shrink_correlation_toward_similarity(
+        emp,
+        sim,
+        n_samples=3,
+        weight="auto",
+        series_ids=["sku_0", "sku_1", "sku_2"],
+    )
+    assert shrunk_auto.shape == (3, 3)
+    np.testing.assert_allclose(np.diag(shrunk_auto), 1.0, atol=1e-7)
+    np.testing.assert_allclose(shrunk_auto, shrunk_auto.T, atol=1e-7)
+    eigvals = np.linalg.eigvalsh(shrunk_auto)
+    assert np.all(eigvals > 0.0)
+    # With n_samples=3, p=3 -> auto weight = 3 / (3 + 3) = 0.50, pulling (0, 1) above emp[0, 1]
+    assert float(shrunk_auto[0, 1]) > float(emp[0, 1]) + 0.40
+
+    shrunk_zero = shrink_correlation_toward_similarity(emp, sim, weight=0.0)
+    shrunk_one = shrink_correlation_toward_similarity(
+        emp,
+        sim,
+        weight=1.0,
+        series_ids=["sku_0", "sku_1", "sku_2"],
+    )
+    assert abs(float(shrunk_zero[0, 1]) - float(emp[0, 1])) < 1e-4
+    assert abs(float(shrunk_one[0, 1]) - 0.90) < 1e-4
+
+    # Verify sample_trajectories with cross_series=True and similarity_shrinkage=True vs False
+    hist_dates = pd.date_range("2025-01-01", periods=30, freq="D")
+    f_dates = pd.date_range("2025-01-31", periods=7, freq="D")
+    t_idx = np.arange(len(hist_dates), dtype=float)
+    hist_rows: list[dict[str, object]] = []
+    pred_rows: list[dict[str, object]] = []
+    for i, sid in enumerate(["sku_0", "sku_1", "sku_2"]):
+        base_wave = 50.0 + 12.0 * np.sin(2.0 * np.pi * t_idx / 7.0) if i < 2 else 30.0 + 0.8 * t_idx
+        for dt, yv in zip(hist_dates, base_wave, strict=True):
+            hist_rows.append({"ts_id": sid, "ds": dt, "y": float(yv)})
+        for dt in f_dates:
+            pred_rows.append(
+                {
+                    "ts_id": sid,
+                    "model_type": "theta",
+                    "forecast_date": dt,
+                    "ds": dt,
+                    "yhat": 50.0,
+                    "yhat_lower": 40.0,
+                    "yhat_upper": 60.0,
+                }
+            )
+    hist_df = pd.DataFrame(hist_rows)
+    pred_df = pd.DataFrame(pred_rows)
+
+    traj_shrunk = sample_trajectories(
+        pred_df,
+        history_df=hist_df,
+        n_paths=100,
+        cross_series=True,
+        similarity_shrinkage=True,
+        similarity_weight=0.55,
+        seed=42,
+    )
+    traj_unshrunk = sample_trajectories(
+        pred_df,
+        history_df=hist_df,
+        n_paths=100,
+        cross_series=True,
+        similarity_shrinkage=False,
+        seed=42,
+    )
+    assert abs(float(traj_shrunk.attrs["similarity_shrinkage_weight"]) - 0.55) < 1e-6
+    assert float(traj_unshrunk.attrs["similarity_shrinkage_weight"]) == 0.0
+    corr_shrunk = np.asarray(traj_shrunk.attrs["cross_series_correlation"], dtype=float)
+    assert corr_shrunk.shape == (3, 3)
+    assert float(corr_shrunk[0, 1]) > float(corr_shrunk[0, 2])

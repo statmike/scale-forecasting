@@ -427,32 +427,28 @@ from its GCS URI, and dispatches to the named engine's `run()`. That's the whole
 ## The full call tree
 
 ```mermaid
-flowchart LR
-    subgraph Entry["Entrypoints"]
+flowchart TD
+    subgraph Entry["1. Entrypoints"]
         Caller["CLI · Notebook · Airflow · SDK"] --> MainRun["main.run(cfg)"]
         Play["playground.run_model()"]
     end
 
-    subgraph Orchestration["DAG Planning & Dispatch"]
-        MainRun --> PlanDag["dag.plan_dag() +<br/>lifecycle.run_header()"]
-        PlanDag --> FamLaunch["job_launch.launch_family_job()"]
-        PlanDag --> NatLaunch["job_launch.launch_native_job()"]
-        PlanDag --> EnsLaunch["job_launch.launch_ensemble_job()"]
+    subgraph Orchestration["2. DAG Planning & Dispatch"]
+        MainRun --> PlanDag["dag.plan_dag() + lifecycle.run_header()"]
+        PlanDag --> FamLaunch["job_launch.launch_family_job() · launch_native_job() · launch_ensemble_job()"]
     end
 
-    subgraph Runtimes["Distributed Runtimes"]
-        FamLaunch --> SparkSub["SparkSubmitter<br/>submit_batch / submit_cluster_job<br/>-> spark_entry -> spark_explode.run"]
-        FamLaunch --> RaySub["RaySubmitter & GkeSubmitter (gke_mode=ray)<br/>submit_ray / submit_gke<br/>-> ray_entry -> ray_engine.run"]
-        FamLaunch --> VtxSub["VertexSubmitter, GceSubmitter & GkeSubmitter (gke_mode=job)<br/>submit_vertex_job / submit_gce_job / submit_gke<br/>-> vertex_entry -> vertex_engine.run"]
-        FamLaunch --> AutoMLSub["VertexAutoMLSubmitter<br/>automl_submit<br/>-> automl_engine.run"]
-        NatLaunch --> BQRun["bigquery_engine.run()<br/>(BQML + AI.FORECAST)"]
-        EnsLaunch --> EnsRun["ensemble.run_ensembles()"]
+    subgraph Runtimes["3. Distributed & Managed Runtimes"]
+        direction TB
+        PySubs["Python Submitters<br/>SparkSubmitter (spark_explode) · RaySubmitter / GkeSubmitter (ray_engine)<br/>VertexSubmitter / GceSubmitter / GkeSubmitter (vertex_engine)"]
+        MgdSubs["Managed & SQL Runners<br/>VertexAutoMLSubmitter (automl_engine) · bigquery_engine.run() · ensemble.run_ensembles()"]
+        FamLaunch --> PySubs --> MgdSubs
     end
 
-    subgraph Worker["Shared Unit of Work"]
-        SparkSub & RaySub & VtxSub --> RunGroup["spark_io.run_group() +<br/>worker.run_panel_model()"]
-        RunGroup & Play --> RunCell["worker.run_cell()<br/>1. features.build_features<br/>2. hpo.tune_model<br/>3. backtest.backtest_cell<br/>4. BaseModel.fit, predict & explain"]
-        RunCell & AutoMLSub & BQRun & EnsRun --> WriteCells["registry.cells.write_cells()<br/>(Storage Write API)"]
+    subgraph Worker["4. Shared Unit of Work & Registry Write"]
+        PySubs --> RunGroup["spark_io.run_group() + worker.run_panel_model()"]
+        RunGroup & Play --> RunCell["worker.run_cell()<br/>1. features.build_features · 2. hpo.tune_model · 3. backtest.backtest_cell · 4. BaseModel.fit, predict & explain"]
+        RunCell & MgdSubs --> WriteCells["registry.cells.write_cells() (Storage Write API)"]
     end
 ```
 

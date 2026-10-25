@@ -70,13 +70,17 @@ Target transforms (including compositional `clr`/`ilr` simplex transforms), coun
 | `outlier_sigma` | `float` | `3.5` | `> 0.0` |
 | `regime_routing` | `bool` | `false` | — |
 | `include_univariate_baselines` | `bool` | `false` | — |
-| `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
+| `ablation_modes` | `list['univariate' \| 'cov_none' \| 'cov_future_only' \| 'cov_past_only' \| 'cov_static_only' \| 'cov_dynamic' \| 'cov_future_static' \| 'cov_past_static' \| 'cov_all' \| 'local' \| 'global' \| 'hybrid' \| 'similarity_global' \| 'local_univariate' \| 'local_cov_none' \| 'local_cov_future_only' \| 'local_cov_past_only' \| 'local_cov_static_only' \| 'local_cov_dynamic' \| 'local_cov_future_static' \| 'local_cov_past_static' \| 'local_cov_all' \| 'global_univariate' \| 'global_cov_none' \| 'global_cov_future_only' \| 'global_cov_past_only' \| 'global_cov_static_only' \| 'global_cov_dynamic' \| 'global_cov_future_static' \| 'global_cov_past_static' \| 'global_cov_all' \| 'hybrid_univariate' \| 'hybrid_cov_none' \| 'hybrid_cov_all']` | `[]` | — |
 | `ablation_models` | `list[str]` | `[]` | — |
 | `monotonic_constraints` | `dict[str, -1 \| 0 \| 1]` | `{}` | — |
 | `holiday_window` | `HolidayWindowConfig \| None` | `null` | — |
 | `cold_start_transfer` | `bool` | `false` | — |
 | `cold_start_min_obs` | `int` | `14` | `>= 1` |
 | `cold_start_method` | `'auto' \| 'analog_transfer' \| 'bass_diffusion' \| 'weibull_lifecycle'` | `"auto"` | — |
+| `cold_start_matching` | `'auto' \| 'attribute' \| 'similarity' \| 'hybrid'` | `"auto"` | — |
+| `similarity_cluster_feature` | `bool` | `false` | — |
+| `similarity_method` | `'hybrid' \| 'physics_attractor' \| 'spectral_phase' \| 'elastic_dtw' \| 'minirocket' \| 'structural_signature' \| 'foundation_latent'` | `"hybrid"` | — |
+| `similarity_n_clusters` | `int \| 'auto'` | `"auto"` | — |
 
 ### `backtest (BacktestConfig)`
 
@@ -141,6 +145,7 @@ Calculated (`mean`, `median`, `inverse_error`) and learned (`nnls`, `ridge`, `xg
 | `top_k` | `int \| None` | `null` | `> 0` |
 | `parsimony_margin` | `float` | `0.0` | `>= 0.0` |
 | `variant_policy` | `'all' \| 'best_per_base_model' \| 'primary_only'` | `"all"` | — |
+| `similarity_smoothing` | `float` | `0.0` | `>= 0.0`, `<= 1.0` |
 
 ### `hierarchy (HierarchyConfig)`
 
@@ -156,6 +161,9 @@ Cross-sectional aggregation levels, FPP3 reconciliation (`bottom_up`, `mint_shri
 | `temporal_aggregations` | `list[int] \| None` | `null` | — |
 | `cross_temporal` | `bool` | `false` | — |
 | `spatial_temporal_weight` | `float \| 'auto'` | `"auto"` | — |
+| `similarity_hierarchy` | `bool` | `false` | — |
+| `similarity_n_clusters` | `int \| 'auto'` | `"auto"` | — |
+| `similarity_method` | `'hybrid' \| 'physics_attractor' \| 'spectral_phase' \| 'elastic_dtw' \| 'minirocket' \| 'structural_signature' \| 'foundation_latent'` | `"hybrid"` | — |
 
 ### `compute (ComputeConfig)`
 
@@ -313,6 +321,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `<model>@transform_log1p` / `<model>@transform_boxcox` / `<model>@transform_clr` / `<model>@transform_ilr` / `<model>@transform_none` | Per-model target transform override (including compositional simplex `transform_clr` and `transform_ilr` isometric log-ratio transforms). |
 | `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`). |
 | `<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized` | Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized CQR (`aci_normalized`) interval calibration override. |
+| `<model>@similarity_global` / `<model>@similarity_cold_start` | Enable similarity-clustered global pooling (`@similarity_global`, injecting `__similarity_cluster_id__`) or similarity-driven cold-start donor transfer (`@similarity_cold_start`, `cold_start_matching = 'similarity'`). |
 
 ---
 
@@ -326,6 +335,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 6. **Covariate & Compositional Simplex Hygiene (`features`):** `future_covariates` and `past_covariates` must be disjoint; `static_covariates` must be disjoint from dynamic covariates; every key in `exog_lags` and `monotonic_constraints` must name a declared covariate; `transform` in `('clr', 'ilr')` automatically sets `simplex_sum = 1.0` when unset.
 7. **Hierarchy & Cross-Temporal Hygiene (`hierarchy`):** When `hierarchy.enabled = true`, both `levels` and `reconciliation_methods` must be non-empty. `hierarchy.cross_temporal = true` or `'cross_temporal_mint'` in `reconciliation_methods` automatically enables `reconcile_temporal = true` and validates `spatial_temporal_weight` (`'auto'` or float in `[0, 1]`).
 8. **Per-Family Runtime & Hardware Constraints (`compute.families`):** Only `deep_learning` and `automl` families may request `hardware = "gpu"` or `gpu_type`. Family `automl` must use `runtime = "vertex_automl"`. `runtime = "gce"` is strictly single-VM (`workers = 1`).
+9. **Time-Series Similarity, Multi-Modal Matching & Merchandising (`features`, `hierarchy`, `ensemble`):** `features.cold_start_matching = 'similarity'` uses 7-lens (`hybrid`, `physics_attractor`, `spectral_phase`, `elastic_dtw`, `minirocket`, `structural_signature`, `foundation_latent`) and multi-modal (`text_cols`, `attribute_cols`, `hierarchy_cols`) Day-0 to Day-14 donor matching (`similarity_method`). `features.similarity_cluster_feature = true` or `<model>@similarity_global` injects cluster labels into global models. `hierarchy.similarity_hierarchy = true` auto-discovers latent cluster hierarchies on flat panels, `ensemble.similarity_smoothing = true` applies Laplacian graph smoothing across per-series stacker weights, and `recommend_substitutes_df` / `detect_emerging_trends_df` provide inventory-aware SKU substitution and emerging trend breakout intelligence.
 
 ---
 

@@ -26,7 +26,7 @@ Learning (DML) estimator:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -37,6 +37,7 @@ __all__ = [
     "compute_promo_elasticity",
     "compute_promo_elasticity_decomposition",
     "detect_treatment_cols",
+    "estimate_promo_elasticity",
     "make_confounded_promo_dgp",
     "plot_promo_elasticity",
     "promo_elasticity_df",
@@ -59,6 +60,8 @@ PROMO_ELASTICITY_COLUMNS: tuple[str, ...] = (
     "promo_lift_pct",
     "naive_ols_lift",
     "confounding_bias_pct",
+    "top_cannibal_ts_id",
+    "cannibal_similarity_score",
 )
 
 _PROMO_CANDIDATES: tuple[str, ...] = (
@@ -353,6 +356,9 @@ def compute_promo_elasticity_decomposition(
     pull_forward_lags: int = 3,
     n_folds: int = 5,
     l2_alpha: float = 1.0,
+    use_similarity_priors: bool = True,
+    similarity_matrix: pd.DataFrame | np.ndarray | None = None,
+    similarity_method: str = "hybrid",
 ) -> pd.DataFrame:
     """Decompose observed demand into baseline, causal promo lift, pull-forward dip,
     and cannibalization.
@@ -380,6 +386,13 @@ def compute_promo_elasticity_decomposition(
             pull-forward dips.
         n_folds: Number of cross-fitting folds for DML residualization.
         l2_alpha: L2 regularization penalty on nuisance seasonal/trend controls.
+        use_similarity_priors: When ``True`` (default), weights cross-SKU peer promotional
+            exposure $P^{\\text{peer}}_{i,t} = \\sum_{j \\ne i} \\tilde{W}_{i,j} P_{j,t}$ by
+            pairwise trajectory similarity so substitute SKUs receive higher cannibalization weight
+            than unrelated SKUs.
+        similarity_matrix: Optional precomputed $(N, N)$ trajectory similarity matrix.
+        similarity_method: Similarity kernel method used when computing the similarity prior on
+            the fly (default ``"hybrid"``).
 
     Returns:
         DataFrame with canonical columns :data:`PROMO_ELASTICITY_COLUMNS`.
@@ -395,7 +408,7 @@ def compute_promo_elasticity_decomposition(
         feat_obj = getattr(cfg, "features", None)
         if feat_obj is not None:
             eff_holidays = getattr(feat_obj, "holidays", None)
-        elif isinstance(cfg, dict):
+        elif isinstance(cfg, Mapping):
             eff_holidays = cfg.get("features", {}).get("holidays")
     _ = freq
 
@@ -453,17 +466,101 @@ def compute_promo_elasticity_decomposition(
             eff_promo_col = None
 
     # Compute peer promotion intensity across other series on the same date
-    n_series = int(work[ts_id_col].nunique())
+    series_ids = [str(x) for x in work[ts_id_col].drop_duplicates().tolist()]
+    n_series = len(series_ids)
+    top_cannibal_by_series: dict[str, tuple[str | None, float]] = dict.fromkeys(
+        series_ids, (None, 0.0)
+    )
+    w_tilde = np.zeros((n_series, n_series), dtype=np.float64)
+
     if n_series >= 2:
-        date_sum = work.groupby(date_col)["_promo_intensity"].transform("sum")
-        date_cnt = work.groupby(date_col)["_promo_intensity"].transform("count")
-        peer_mean = np.where(
-            date_cnt > 1,
-            (date_sum - work["_promo_intensity"]) / np.maximum(1, date_cnt - 1),
-            0.0,
-        )
-        # Cannibalization occurs when peers promote more strongly than the focal SKU
-        work["_peer_promo"] = np.maximum(0.0, peer_mean - work["_promo_intensity"])
+        if use_similarity_priors:
+            sim_prior = similarity_matrix
+            if sim_prior is None:
+                sim_prior = df.attrs.get("similarity_matrix")
+            if sim_prior is None:
+                from .similarity import compute_similarity_matrix
+
+                sim_prior = compute_similarity_matrix(
+                    work,
+                    method=similarity_method,
+                    ts_id_col=ts_id_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                ).matrix_df
+
+            if isinstance(sim_prior, pd.DataFrame):
+                sim_arr = (
+                    sim_prior.reindex(index=series_ids, columns=series_ids)
+                    .fillna(0.0)
+                    .to_numpy(dtype=np.float64)
+                )
+            else:
+                sim_arr = np.asarray(sim_prior, dtype=np.float64).copy()
+                if sim_arr.shape != (n_series, n_series):
+                    sim_arr = np.ones((n_series, n_series), dtype=np.float64)
+
+            w_pos = np.maximum(0.0, sim_arr.copy())
+            np.fill_diagonal(w_pos, 0.0)
+            for idx_i, tid_i in enumerate(series_ids):
+                peer_indices = [j for j in range(n_series) if j != idx_i]
+                best_j = max(
+                    peer_indices,
+                    key=lambda j: (float(w_pos[idx_i, j]), float(sim_arr[idx_i, j])),
+                )
+                top_cannibal_by_series[tid_i] = (
+                    series_ids[best_j],
+                    round(float(w_pos[idx_i, best_j]), 4),
+                )
+                row_sum = float(np.sum(w_pos[idx_i]))
+                if row_sum > 1e-12:
+                    w_tilde[idx_i] = w_pos[idx_i] / row_sum
+                else:
+                    for j in peer_indices:
+                        w_tilde[idx_i, j] = 1.0 / float(n_series - 1)
+
+            piv_promo = (
+                work.pivot_table(
+                    index=date_col,
+                    columns=ts_id_col,
+                    values="_promo_intensity",
+                    aggfunc="mean",
+                )
+                .reindex(columns=series_ids)
+                .fillna(0.0)
+            )
+            peer_mat = piv_promo.to_numpy(dtype=np.float64) @ w_tilde.T
+            peer_wide = pd.DataFrame(peer_mat, index=piv_promo.index, columns=series_ids)
+            peer_long = peer_wide.melt(
+                ignore_index=False,
+                var_name=ts_id_col,
+                value_name="_peer_weighted",
+            ).reset_index()
+            peer_long[ts_id_col] = peer_long[ts_id_col].astype(str)
+            work[ts_id_col] = work[ts_id_col].astype(str)
+            work = work.merge(peer_long, on=[date_col, ts_id_col], how="left")
+            peer_weighted = work["_peer_weighted"].fillna(0.0).to_numpy(dtype=np.float64)
+            work["_peer_promo"] = np.maximum(
+                0.0, peer_weighted - work["_promo_intensity"].to_numpy(dtype=np.float64)
+            )
+        else:
+            for idx_i, tid_i in enumerate(series_ids):
+                peer_indices = [j for j in range(n_series) if j != idx_i]
+                top_cannibal_by_series[tid_i] = (
+                    series_ids[peer_indices[0]],
+                    round(1.0 / float(n_series - 1), 4),
+                )
+                for j in peer_indices:
+                    w_tilde[idx_i, j] = 1.0 / float(n_series - 1)
+            date_sum = work.groupby(date_col)["_promo_intensity"].transform("sum")
+            date_cnt = work.groupby(date_col)["_promo_intensity"].transform("count")
+            peer_mean = np.where(
+                date_cnt > 1,
+                (date_sum - work["_promo_intensity"]) / np.maximum(1, date_cnt - 1),
+                0.0,
+            )
+            # Cannibalization occurs when peers promote more strongly than the focal SKU
+            work["_peer_promo"] = np.maximum(0.0, peer_mean - work["_promo_intensity"])
     else:
         work["_peer_promo"] = 0.0
 
@@ -471,6 +568,8 @@ def compute_promo_elasticity_decomposition(
     out_frames: list[pd.DataFrame] = []
 
     for tid, grp in work.groupby(ts_id_col, sort=False):
+        tid_str = str(tid)
+        top_can_id, top_can_score = top_cannibal_by_series.get(tid_str, (None, 0.0))
         grp = grp.sort_values(date_col).reset_index(drop=True)
         n_t = len(grp)
         y_vec = grp[target_col].to_numpy(dtype=np.float64)
@@ -483,7 +582,7 @@ def compute_promo_elasticity_decomposition(
             out_frames.append(
                 pd.DataFrame(
                     {
-                        "ts_id": str(tid),
+                        "ts_id": tid_str,
                         "ds": grp[date_col],
                         "y": y_vec,
                         "baseline_demand": y_vec.copy(),
@@ -498,6 +597,8 @@ def compute_promo_elasticity_decomposition(
                         "promo_lift_pct": np.zeros(n_t, dtype=np.float64),
                         "naive_ols_lift": np.zeros(n_t, dtype=np.float64),
                         "confounding_bias_pct": np.zeros(n_t, dtype=np.float64),
+                        "top_cannibal_ts_id": top_can_id,
+                        "cannibal_similarity_score": float(top_can_score),
                     }
                 )
             )
@@ -632,7 +733,7 @@ def compute_promo_elasticity_decomposition(
         out_frames.append(
             pd.DataFrame(
                 {
-                    "ts_id": str(tid),
+                    "ts_id": tid_str,
                     "ds": grp[date_col],
                     "y": np.round(y_vec, 4),
                     "baseline_demand": np.round(baseline_demand, 4),
@@ -647,18 +748,28 @@ def compute_promo_elasticity_decomposition(
                     "promo_lift_pct": np.round(promo_lift_pct, 4),
                     "naive_ols_lift": np.round(naive_ols_lift, 4),
                     "confounding_bias_pct": np.round(confounding_bias_pct, 4),
+                    "top_cannibal_ts_id": top_can_id,
+                    "cannibal_similarity_score": float(top_can_score),
                 }
             )
         )
 
     if not out_frames:
         return pd.DataFrame(columns=list(PROMO_ELASTICITY_COLUMNS))
-    return pd.concat(out_frames, ignore_index=True)
+    res_df = pd.concat(out_frames, ignore_index=True)
+    res_df.attrs["similarity_weights"] = pd.DataFrame(
+        w_tilde,
+        index=series_ids,
+        columns=series_ids,
+    )
+    res_df.attrs["top_cannibal_by_series"] = top_cannibal_by_series
+    return res_df
 
 
 # Public aliases for SDK / diagnostic ergonomics
 promo_elasticity_df = compute_promo_elasticity_decomposition
 compute_promo_elasticity = compute_promo_elasticity_decomposition
+estimate_promo_elasticity = compute_promo_elasticity_decomposition
 
 
 def summarize_promo_elasticity(decomp_df: pd.DataFrame) -> pd.DataFrame:
@@ -675,6 +786,8 @@ def summarize_promo_elasticity(decomp_df: pd.DataFrame) -> pd.DataFrame:
         "total_cannibalization_dip",
         "total_net_incremental_units",
         "net_to_gross_lift_ratio",
+        "top_cannibal_ts_id",
+        "cannibal_similarity_score",
     ]
     if decomp_df is None or decomp_df.empty or "ts_id" not in decomp_df.columns:
         return pd.DataFrame(columns=summary_cols)
@@ -694,6 +807,14 @@ def summarize_promo_elasticity(decomp_df: pd.DataFrame) -> pd.DataFrame:
         tot_can = float(grp["cannibalization_dip"].sum())
         tot_net = float(grp["net_incremental_units"].sum())
         ratio = tot_net / max(1e-6, tot_gross) if tot_gross > 1e-6 else 0.0
+        top_can_id = (
+            grp["top_cannibal_ts_id"].iloc[0] if "top_cannibal_ts_id" in grp.columns else None
+        )
+        top_can_score = (
+            float(grp["cannibal_similarity_score"].iloc[0])
+            if "cannibal_similarity_score" in grp.columns
+            else 0.0
+        )
         rows.append(
             {
                 "ts_id": str(tid),
@@ -707,6 +828,8 @@ def summarize_promo_elasticity(decomp_df: pd.DataFrame) -> pd.DataFrame:
                 "total_cannibalization_dip": round(tot_can, 4),
                 "total_net_incremental_units": round(tot_net, 4),
                 "net_to_gross_lift_ratio": round(ratio, 4),
+                "top_cannibal_ts_id": top_can_id,
+                "cannibal_similarity_score": round(top_can_score, 4),
             }
         )
     return pd.DataFrame(rows, columns=summary_cols)
