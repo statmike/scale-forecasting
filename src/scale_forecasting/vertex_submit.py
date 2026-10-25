@@ -33,16 +33,18 @@ from typing import TYPE_CHECKING, Any
 
 from . import capacity, quota, staging
 from .batch_infra import BatchInfra
+from .code_delivery import VERTEX_BOOTSTRAP_CODE
 from .commands import build_driver_args
 from .config import RunConfig, resolve_vm_machine_type
-from .engines.ray_io import _ACCELERATOR_TYPES, pool_families, resolve_job_gpu
+from .engines.ray_io import ACCELERATOR_TYPES as _ACCELERATOR_TYPES
+from .engines.ray_io import pool_families, resolve_job_gpu
 from .engines.vertex_engine import effective_worker_count, plan_vertex_pool
 from .errors import ConfigError, EngineError, configure_cli_logging, get_logger, require_extra
 from .job_outcome import launch_window_start
 from .job_wait import is_stalled
 from .probes.vocabulary import ProbeHandle
 from .profiling.source import profile_for_run
-from .ray_cluster import _resolve_regions
+from .ray_cluster import resolve_regions as _resolve_regions
 from .registry.header import merge_header_telemetry, sizing_telemetry_path
 from .registry.ids import make_run_id, vertex_job_id
 from .registry.jobs import update_job
@@ -59,29 +61,7 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-# Self-contained bootstrap snippet passed to `/opt/venv/bin/python -c` inside the CustomJob
-# container. Downloads the content-addressed `scale_forecasting-<code_hash>.zip` from GCS using the
-# pre-baked `google-cloud-storage` client in `/opt/venv`, switches to a writable scratch working
-# directory when the image's WORKDIR (`/opt/scale-forecasting`) is owned by root (container runs as
-# `USER spark`), inserts the zip at `sys.path[0]`, and hands the remaining driver arguments to
-# `scale_forecasting.vertex_entry.main`.
-VERTEX_BOOTSTRAP_CODE = (
-    "import os, sys, tempfile, google.cloud.storage as gcs\n"
-    "td = tempfile.mkdtemp(prefix='sf_vertex_')\n"
-    "os.environ.setdefault('MPLCONFIGDIR', os.path.join(td, 'mpl'))\n"
-    "if not os.access(os.getcwd(), os.W_OK):\n"
-    "    os.chdir(td)\n"
-    "argv = sys.argv[1:]\n"
-    "idx = argv.index('--package-uri')\n"
-    "uri = argv[idx + 1]\n"
-    "rest = argv[:idx] + argv[idx + 2:]\n"
-    "b, p = uri[5:].split('/', 1)\n"
-    "zp = os.path.join(td, 'scale_forecasting.zip')\n"
-    "gcs.Client().bucket(b).blob(p).download_to_filename(zp)\n"
-    "sys.path.insert(0, zp)\n"
-    "from scale_forecasting.vertex_entry import main\n"
-    "main(rest)\n"
-)
+# `VERTEX_BOOTSTRAP_CODE` is defined in `code_delivery.py` and re-exported here for callers.
 
 _POLL_INTERVAL_SECONDS = 15.0
 _WATCHDOG_CHECK_SECONDS = 300.0
@@ -741,3 +721,8 @@ def main(argv: list[str] | None = None) -> str:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+def job_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_job_client`."""
+    return _job_client(*args, **kwargs)

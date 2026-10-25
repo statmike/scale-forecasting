@@ -22,17 +22,28 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .batch_infra import BatchInfra
-from .cluster_deps import _VENV_JOB_PROPERTIES, _resolve_cluster_deps, _stage_cluster_init
-from .cluster_telemetry import _job_client, _stamp_cluster_telemetry
+from .cluster_deps import VENV_JOB_PROPERTIES as _VENV_JOB_PROPERTIES
+from .cluster_deps import resolve_cluster_deps as _resolve_cluster_deps
+from .cluster_deps import stage_cluster_init as _stage_cluster_init
+from .cluster_telemetry import job_client as _job_client
+from .cluster_telemetry import stamp_cluster_telemetry as _stamp_cluster_telemetry
 from .commands import build_driver_args
 from .compute_fallback import resolve_candidates
 from .dataproc_cluster import (
-    _DEFAULT_WORKER_COUNT,
-    _cluster_client,
-    _create_cluster_across_candidates,
-    _delete_cluster,
+    DEFAULT_WORKER_COUNT as _DEFAULT_WORKER_COUNT,
+)
+from .dataproc_cluster import (
+    cluster_client as _cluster_client,
+)
+from .dataproc_cluster import (
     cluster_name,
     cluster_sizing,
+)
+from .dataproc_cluster import (
+    create_cluster_across_candidates as _create_cluster_across_candidates,
+)
+from .dataproc_cluster import (
+    delete_cluster as _delete_cluster,
 )
 from .errors import EngineError, JobIdTaken, get_logger
 from .hardware import spark_executor_env

@@ -60,7 +60,7 @@ from .models.base_model import (
     ModelContext,
 )
 from .registry.ids import make_model_hash, make_run_id
-from .resources.catalog import _INTRAOP_ENV_VARS
+from .resources.catalog import INTRAOP_ENV_VARS as _INTRAOP_ENV_VARS
 
 _log = get_logger(__name__)
 
@@ -267,7 +267,7 @@ def _process_rss_bytes() -> int | None:
     *this* module (``measure_fit`` drives ``run_cell``) — a module-level import would be a cycle.
     The lazy call is a ``sys.modules`` hit after the first cell.
     """
-    from .profiling.measure import _rss_bytes
+    from .profiling.measure import rss_bytes as _rss_bytes
 
     return _rss_bytes()
 
@@ -290,7 +290,7 @@ def _peak_gpu_bytes() -> int | None:
     global _gpu_probe_useful
     if _gpu_probe_useful is False:
         return None
-    from .profiling.measure import _peak_gpu_bytes as probe
+    from .profiling.measure import peak_gpu_bytes as probe
 
     peak = probe()
     _gpu_probe_useful = peak is not None
@@ -1713,3 +1713,18 @@ def _target(series: pd.DataFrame, cfg: RunConfig) -> pd.Series:
     if cfg.features.censored_col or cfg.features.outlier_policy != "none":
         raw, _ = clean_training_target(raw, series, cfg)
     return raw
+
+
+def backtest_outcome(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_backtest_outcome`."""
+    return _backtest_outcome(*args, **kwargs)
+
+
+def model_context(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_model_context`."""
+    return _model_context(*args, **kwargs)
+
+
+def worker_id(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_worker_id`."""
+    return _worker_id(*args, **kwargs)

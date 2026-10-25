@@ -1990,7 +1990,9 @@ def _report_cluster_node(cfg: Any, node: Any, settings: Any, profile: Any) -> li
     from .batch_infra import BatchInfra
     from .compute_fallback import resolve_candidates
     from .dataproc_cluster import (
-        _DEFAULT_WORKER_COUNT,
+        DEFAULT_WORKER_COUNT as _DEFAULT_WORKER_COUNT,
+    )
+    from .dataproc_cluster import (
         cluster_sizing,
         master_machine_type,
         worker_machine_type,

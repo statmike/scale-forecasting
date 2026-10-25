@@ -15,9 +15,9 @@ archive (`_resolve_cluster_deps`), and the upload of the script (`_stage_cluster
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .batch_infra import _ENV_VENV_ARCHIVE
+from .batch_infra import ENV_VENV_ARCHIVE as _ENV_VENV_ARCHIVE
 from .errors import ConfigError
 
 if TYPE_CHECKING:
@@ -111,3 +111,22 @@ def _stage_cluster_init(infra: BatchInfra) -> str:
     bucket = client.bucket(infra.code_bucket)
     bucket.blob(name).upload_from_string(data, content_type="text/x-shellscript")
     return f"gs://{infra.code_bucket}/{name}"
+
+
+VENV_ARCHIVE_METADATA_KEY = _VENV_ARCHIVE_METADATA_KEY
+
+VENV_DIR = _VENV_DIR
+
+VENV_DIR_METADATA_KEY = _VENV_DIR_METADATA_KEY
+
+VENV_JOB_PROPERTIES = _VENV_JOB_PROPERTIES
+
+
+def resolve_cluster_deps(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_resolve_cluster_deps`."""
+    return _resolve_cluster_deps(*args, **kwargs)
+
+
+def stage_cluster_init(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_stage_cluster_init`."""
+    return _stage_cluster_init(*args, **kwargs)

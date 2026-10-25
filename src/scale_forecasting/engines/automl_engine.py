@@ -67,9 +67,13 @@ from ..registry.tables import bigquery_client
 from ..seasonality import seasonal_period
 from ..worker import (
     CellResult,
-    _backtest_outcome,
-    _worker_id,
     rollup_metrics,
+)
+from ..worker import (
+    backtest_outcome as _backtest_outcome,
+)
+from ..worker import (
+    worker_id as _worker_id,
 )
 
 if TYPE_CHECKING:
@@ -455,8 +459,8 @@ def resolve_prior_tuning_artifact_uri(
                 uri = bp.get("stage_1_tuning_result_artifact_uri")
                 if isinstance(uri, str) and uri.startswith("gs://"):
                     return uri
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as exc:
+                _log.debug("Failed to parse best_params_json for prior tuning URI: %s", exc)
         art = row.get("model_artifact")
         if isinstance(art, str) and art.startswith("gs://") and "tuning" in art:
             return art
@@ -2124,7 +2128,8 @@ def run(
     from ..registry.cells import write_cells
     from ..registry.lifecycle import run_header
     from ..settings import Settings as _Settings
-    from .ray_engine import _assert_source_supports_folds, _read_source_series
+    from .ray_engine import assert_source_supports_folds as _assert_source_supports_folds
+    from .ray_engine import read_source_series as _read_source_series
 
     settings = settings or _Settings.resolve()
     run_id = make_run_id(cfg)

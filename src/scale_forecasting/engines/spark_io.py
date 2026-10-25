@@ -852,3 +852,21 @@ def make_group_runner(
         return status
 
     return _run
+
+
+MODEL_COL = _MODEL_COL
+
+
+def needed_columns(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_needed_columns`."""
+    return _needed_columns(*args, **kwargs)
+
+
+def resolve_source_table(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_resolve_source_table`."""
+    return _resolve_source_table(*args, **kwargs)
+
+
+def snapshot_millis(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_snapshot_millis`."""
+    return _snapshot_millis(*args, **kwargs)

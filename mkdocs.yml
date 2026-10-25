@@ -145,6 +145,7 @@ nav:
   - API Reference:
       - Overview: api/index.md
       - Forecaster (SDK): api/sdk.md
+      - Forecaster workbench (mixin): api/workbench.md
       - Auto-forecaster & autofocus: api/auto.md
       - evolve: api/evolve.md
       - Synthetic DGP benchmarks: api/benchmarks.md

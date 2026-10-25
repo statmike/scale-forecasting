@@ -461,3 +461,27 @@ def _append_via_write_api(
                 exc,
             )
             time.sleep(backoff)
+
+
+CELL_TABLES = _CELL_TABLES
+
+META_SPEC = _META_SPEC
+
+OOF_SPEC = _OOF_SPEC
+
+PRED_SPEC = _PRED_SPEC
+
+
+def append_via_write_api(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_append_via_write_api`."""
+    return _append_via_write_api(*args, **kwargs)
+
+
+def encode_rows(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_encode_rows`."""
+    return _encode_rows(*args, **kwargs)
+
+
+def proto_for(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_proto_for`."""
+    return _proto_for(*args, **kwargs)

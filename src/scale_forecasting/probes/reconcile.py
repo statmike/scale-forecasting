@@ -27,10 +27,12 @@ from typing import TYPE_CHECKING, Any
 from ..errors import ConfigError
 from .runtimes import get_probe
 from .vocabulary import (
-    _AWAITING_CAPACITY,
-    _EMITTED,
-    _REGISTRY_RUNNING,
-    _TERMINAL,
+    AWAITING_CAPACITY as _AWAITING_CAPACITY,
+)
+from .vocabulary import (
+    EMITTED as _EMITTED,
+)
+from .vocabulary import (
     NATIVE_FAILED,
     NATIVE_NOT_FOUND,
     NATIVE_RUNNING,
@@ -44,6 +46,12 @@ from .vocabulary import (
     VERDICT_UNKNOWN,
     ProbeHandle,
     ProbeResult,
+)
+from .vocabulary import (
+    REGISTRY_RUNNING as _REGISTRY_RUNNING,
+)
+from .vocabulary import (
+    TERMINAL as _TERMINAL,
 )
 
 if TYPE_CHECKING:
@@ -498,7 +506,7 @@ def read_and_probe(
     from ..config import RunConfig
     from ..registry.jobs import read_run_jobs
     from ..registry.reads import read_progress, read_run_config, read_run_summary
-    from ..review import _assemble_progress
+    from ..review import assemble_progress as _assemble_progress
 
     summary = read_run_summary(run_id, settings=settings)
     raw = read_run_config(run_id, settings=settings)

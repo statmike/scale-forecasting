@@ -58,6 +58,7 @@ Public surface: ``Calibration``, ``StepCalibration``, ``calibrate_from_oof``,
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -69,6 +70,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from .config import OutputConfig
+
+_log = logging.getLogger(__name__)
 
 # Which functional `yhat` carries. "raw" is the model's own output untouched; "median" and "mean"
 # add the corresponding residual statistic. Config defaults this from `decision_metric` rather than
@@ -476,8 +479,8 @@ def apply_quantile_and_cost_rules(
                     for k, v in loaded.items():
                         if isinstance(v, (int, float)) and math.isfinite(float(v)):
                             parsed_map[round(float(k), 6)] = float(v)
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                _log.debug("Skipped malformed quantile JSON payload at row %d: %s", i, exc)
 
         # Anchor center and spread for any quantile not yet in parsed_map (e.g. backtest=False).
         center = parsed_map.get(0.5, float(yh[i]) if math.isfinite(yh[i]) else 0.0)

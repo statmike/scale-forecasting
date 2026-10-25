@@ -2564,8 +2564,8 @@ def inspect_panel_for_auto(
             has_similarity_clusters = bool(
                 optimal_similarity_clusters >= 2 and similarity_silhouette_score >= 0.25
             )
-        except Exception:  # noqa: BLE001 - fallback when similarity profiling encounters degenerate data
-            pass
+        except Exception as exc:  # noqa: BLE001 - fallback when similarity profiling encounters degenerate data
+            _log.debug("Step 0 similarity profiling skipped: %s", exc, exc_info=True)
 
     return PanelAutoProfile(
         source_table=source_table_name,

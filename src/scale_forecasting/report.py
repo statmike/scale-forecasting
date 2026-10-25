@@ -556,8 +556,10 @@ def build_report_payload(
                 similarity_clusters_df = cluster_by_similarity_df(history_df)
             if emerging_trends_df is None:
                 emerging_trends_df = detect_emerging_trends_df(history_df)
-        except Exception:  # noqa: BLE001 - optional similarity computation falls back cleanly
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional similarity computation falls back cleanly
+            import logging
+
+            logging.getLogger(__name__).debug("Optional report similarity section skipped: %s", exc)
 
     if fva_df is None and oof_df is not None and not oof_df.empty:
         fva_df = compute_fva(oof_df, metric=metric, series_df=history_df)

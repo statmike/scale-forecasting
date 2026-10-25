@@ -29,6 +29,7 @@ The 3-Gate Anti-Overfitting Ratchet
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import os
 import time
@@ -56,6 +57,8 @@ from .targets import (
     compute_evolved_weights,
     get_target_seed,
 )
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "CandidateEvaluation",
@@ -1235,8 +1238,8 @@ class EvolutionEvaluator:
                 if not base_inner.empty:
                     _, spec = build_hierarchy(base_inner, f_cfg)
                     return spec
-            except Exception:  # noqa: BLE001 - fallback to OOF structure inspection
-                pass
+            except Exception as exc:  # noqa: BLE001 - fallback to OOF structure inspection
+                _log.debug("Evolve hierarchy spec build fell back to OOF inspection: %s", exc)
         if not self.oof_df.empty and "ts_id" in self.oof_df.columns:
             all_ids = sorted(self.oof_df["ts_id"].astype(str).unique())
             if "__total__" in all_ids:

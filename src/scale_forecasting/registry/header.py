@@ -20,12 +20,16 @@ from typing import TYPE_CHECKING, Any
 
 from ..errors import get_logger
 from .params import (
-    _HEADER_PARAM_TYPES,
-    _status_guard_param,
+    HEADER_PARAM_TYPES as _HEADER_PARAM_TYPES,
+)
+from .params import (
     header_param,
     render_status_guard,
     render_telemetry_merge,
     telemetry_merge_params,
+)
+from .params import (
+    status_guard_param as _status_guard_param,
 )
 from .rows import assemble_header_row
 from .tables import bigquery_client, resolve_settings

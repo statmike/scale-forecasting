@@ -133,119 +133,8 @@ def test_every_copy_of_the_terminal_status_set_agrees() -> None:
 # The test below fails on any entry that is NOT here (so the list can only shrink) and on any
 # entry here that no longer exists (so it is never stale). To clear a failure, promote the helper
 # — drop the underscore, give it a docstring — or move it to a shared module; do not add here.
-_PRIVATE_CROSS_IMPORTS = """
-cluster_deps.py .batch_infra _ENV_VENV_ARCHIVE
-cluster_submit.py .cluster_deps _VENV_JOB_PROPERTIES
-cluster_submit.py .cluster_deps _resolve_cluster_deps
-cluster_submit.py .cluster_deps _stage_cluster_init
-cluster_submit.py .cluster_telemetry _job_client
-cluster_submit.py .cluster_telemetry _stamp_cluster_telemetry
-cluster_submit.py .dataproc_cluster _DEFAULT_WORKER_COUNT
-cluster_submit.py .dataproc_cluster _cluster_client
-cluster_submit.py .dataproc_cluster _create_cluster_across_candidates
-cluster_submit.py .dataproc_cluster _delete_cluster
-config.py .metrics.base_metric _REGISTRY
-dataproc_cluster.py .cluster_deps _VENV_ARCHIVE_METADATA_KEY
-dataproc_cluster.py .cluster_deps _VENV_DIR
-dataproc_cluster.py .cluster_deps _VENV_DIR_METADATA_KEY
-dataproc_cluster.py .cluster_deps _resolve_cluster_deps
-dataproc_cluster.py .cluster_deps _stage_cluster_init
-engines/automl_engine.py ..worker _backtest_outcome
-engines/automl_engine.py ..worker _worker_id
-engines/automl_engine.py .ray_engine _assert_source_supports_folds
-engines/automl_engine.py .ray_engine _read_source_series
-engines/bigquery_engine.py ..registry.rows _as_date
-engines/bigquery_engine.py ..registry.rows _as_float
-engines/bigquery_engine.py ..registry.write_api _META_SPEC
-engines/bigquery_engine.py ..registry.write_api _OOF_SPEC
-engines/bigquery_engine.py ..registry.write_api _append_via_write_api
-engines/bigquery_engine.py ..registry.write_api _encode_rows
-engines/bigquery_engine.py ..registry.write_api _proto_for
-engines/ray_engine.py .spark_io _MODEL_COL
-engines/ray_engine.py .spark_io _needed_columns
-engines/ray_engine.py .spark_io _resolve_source_table
-engines/ray_engine.py .spark_io _snapshot_millis
-engines/ray_io.py .spark_io _MODEL_COL
-engines/vertex_engine.py .ray_engine _assert_source_supports_folds
-engines/vertex_engine.py .ray_engine _chunk_count
-engines/vertex_engine.py .ray_engine _create_read_session
-engines/vertex_engine.py .ray_engine _failed_chunk_status
-engines/vertex_engine.py .ray_engine _limit_series
-engines/vertex_engine.py .ray_engine _needed_columns
-engines/vertex_engine.py .ray_engine _read_source_series
-engines/vertex_engine.py .ray_engine _read_streams
-engines/vertex_engine.py .ray_engine _resolve_fleetwide_hpo
-engines/vertex_engine.py .ray_engine _stamp_executed_sizing
-ensemble_run.py .registry.rows _as_float
-ensemble_run.py .registry.write_api _META_SPEC
-ensemble_run.py .registry.write_api _OOF_SPEC
-ensemble_run.py .registry.write_api _PRED_SPEC
-hpo.py .worker _model_context
-job_launch.py .registry.lifecycle _STICKY_STATUSES
-launch_plan.py .job_launch _entry_handle
-launch_plan.py .job_launch _system_job_id
-metrics/__init__.py .base_metric _REGISTRY
-models/__init__.py .base_model _REGISTRY
-playground.py .ensemble_run _apply_weights
-probes/cancel.py .vocabulary _AWAITING_CAPACITY
-probes/cancel.py .vocabulary _CANCELLED
-probes/cancel.py .vocabulary _TERMINAL
-probes/cancel.py .vocabulary _parse_ts
-probes/reconcile.py ..review _assemble_progress
-probes/reconcile.py .vocabulary _AWAITING_CAPACITY
-probes/reconcile.py .vocabulary _EMITTED
-probes/reconcile.py .vocabulary _REGISTRY_RUNNING
-probes/reconcile.py .vocabulary _TERMINAL
-probes/runtimes.py ..automl_submit _pipeline_client
-probes/runtimes.py ..batch_telemetry _batch_client
-probes/runtimes.py ..gke_submit _ephemeral_cluster_name
-probes/runtimes.py ..ray_cluster _get_cluster
-probes/runtimes.py ..ray_cluster _init_vertex
-probes/runtimes.py ..ray_jobs _connect_job_client
-probes/runtimes.py ..ray_jobs _is_job_absent_error
-probes/runtimes.py ..vertex_submit _job_client
-probes/runtimes.py .vocabulary _parse_ts
-probes/settle.py .vocabulary _EMITTED
-probes/settle.py .vocabulary _TERMINAL
-profiling/cost.py .measure _MIN_WALL_S
-quota.py .dataproc_cluster _DEFAULT_WORKER_COUNT
-registry/cells.py .write_api _CELL_TABLES
-registry/cells.py .write_api _META_SPEC
-registry/cells.py .write_api _OOF_SPEC
-registry/cells.py .write_api _PRED_SPEC
-registry/cells.py .write_api _append_via_write_api
-registry/cells.py .write_api _encode_rows
-registry/cells.py .write_api _proto_for
-registry/header.py .params _HEADER_PARAM_TYPES
-registry/header.py .params _status_guard_param
-registry/jobs.py .params _JOB_PARAM_TYPES
-registry/jobs.py .params _job_param
-registry/jobs.py .params _status_guard_param
-resources/cluster.py .catalog _DEFAULT_TARGET_CELLS_PER_SLOT
-resources/cluster.py .catalog _MIB
-resources/cluster.py .catalog _SPARK_JVM_MB_PER_CORE
-resources/fleet.py .catalog _DEFAULT_TARGET_CELLS_PER_SLOT
-resources/fleet.py .catalog _MAX_SLOT_MEMORY_FRACTION
-resources/fleet.py .catalog _MIN_GPU_FRACTION
-resources/fleet.py .catalog _RESERVED_CORES_PER_UNIT
-resources/fleet.py .catalog _SCHEDULABLE_MEMORY_FRACTION
-resources/serverless.py .catalog _DEFAULT_TARGET_CELLS_PER_SLOT
-resources/serverless.py .catalog _MIB
-resources/serverless.py .catalog _MIN_GPU_FRACTION
-resources/serverless.py .catalog _SPARK_JVM_MB_PER_CORE
-resources/slot.py .catalog _DEFAULT_SLOT_CORES
-resources/slot.py .catalog _MIN_GPU_FRACTION
-resources/slot.py .catalog _NOMINAL_GPU_FRACTION
-sdk.py .ensemble_run _override_ensemble
-submit.py .batch_infra _DEFAULT_TTL_SECONDS
-submit.py .batch_telemetry _batch_client
-submit.py .batch_telemetry _stamp_job_telemetry
-vertex_submit.py .engines.ray_io _ACCELERATOR_TYPES
-vertex_submit.py .ray_cluster _resolve_regions
-worker.py .profiling.measure _peak_gpu_bytes
-worker.py .profiling.measure _rss_bytes
-worker.py .resources.catalog _INTRAOP_ENV_VARS
-"""
+# Burned down from 92 to 0 in Track F.2 (v1.8.2): zero private cross-module imports are permitted.
+_PRIVATE_CROSS_IMPORTS = ""
 
 
 def _parse_private_cross_imports(block: str) -> set[tuple[str, str, str]]:
@@ -289,7 +178,7 @@ def test_cross_module_private_imports_only_ratchet_down() -> None:
     """A leading underscore means "not for use outside this module"; importing it elsewhere says
     otherwise. Every such import is a small lie about the module's surface, and the honest fix is
     cheap: drop the underscore (the helper is shared, so say so) or move it to a module whose job
-    is to be shared. The list above is the debt as of this test's introduction; it may only shrink.
+    is to be shared. The list above was burned down to zero in v1.8.2 and must remain empty.
     """
     live = _private_cross_imports()
     allowed = _parse_private_cross_imports(_PRIVATE_CROSS_IMPORTS)
@@ -299,7 +188,7 @@ def test_cross_module_private_imports_only_ratchet_down() -> None:
         "new cross-module imports of underscore-prefixed names:\n  "
         + "\n  ".join(" ".join(entry) for entry in added)
         + "\n\nPromote the helper (drop the underscore, add a docstring) or move it to a shared"
-        " module. Do not add it to _PRIVATE_CROSS_IMPORTS; that list only ratchets down."
+        " module. Do not add it to _PRIVATE_CROSS_IMPORTS; that list is permanently zero."
     )
 
     removed = sorted(allowed - live)
@@ -311,9 +200,125 @@ def test_cross_module_private_imports_only_ratchet_down() -> None:
 
 
 def test_the_ratchet_sees_private_names_but_not_private_modules() -> None:
-    """Guard the guard: the walker must count a known private-name import and skip the private
-    module imports (``from . import _lag_forecaster``) that the lag-based models rely on."""
+    """Guard the guard: the walker must skip private module imports
+    (``from . import _lag_forecaster``) that the lag-based models rely on, while
+    `_parse_private_cross_imports` parses 3-tuples.
+    """
     live = _private_cross_imports()
-    assert ("worker.py", ".resources.catalog", "_INTRAOP_ENV_VARS") in live
+    assert live == set()
     assert not any(name == "_lag_forecaster" for _, _, name in live)
-    assert all(len(entry) == 3 for entry in _parse_private_cross_imports(_PRIVATE_CROSS_IMPORTS))
+    sample = _parse_private_cross_imports("worker.py .resources.catalog _INTRAOP_ENV_VARS")
+    assert sample == {("worker.py", ".resources.catalog", "_INTRAOP_ENV_VARS")}
+
+
+# --- Track F.2 Anti-"Vibe-Code" & Enterprise Hardening AST Tripwires ---------------------------
+
+
+def test_no_silent_except_pass() -> None:
+    """Forbid bare `except ...: pass` in production source (`src/scale_forecasting/`).
+
+    Every exception handler must either log with context, record a structured diagnostic, re-raise,
+    or use `contextlib.suppress(SpecificException)` when suppression is genuinely the intent.
+    """
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.ExceptHandler)
+                and len(node.body) == 1
+                and isinstance(node.body[0], ast.Pass)
+            ):
+                offenders.append(f"{path.relative_to(SRC)}:{node.lineno}")
+    assert not offenders, "silent `except ...: pass` blocks in src/:\n  " + "\n  ".join(offenders)
+
+
+def test_no_local_file_workarounds_or_hardcoded_tmp() -> None:
+    """Forbid hardcoded `/tmp/` file paths in Python runtime logic (`use tempfile` instead).
+
+    Allowed exceptions:
+    - `cluster_deps.py` and `gce_submit.py`: bash startup scripts executed inside remote VMs.
+    - `agent_surfaces.py` and `benchmarks.py`: CLI docstring/markdown examples.
+    """
+    allowed_files = {
+        "cluster_deps.py",
+        "gce_submit.py",
+        "agent_surfaces.py",
+        "benchmarks.py",
+    }
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = str(path.relative_to(SRC))
+        if rel in allowed_files:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value.startswith("/tmp/")
+            ):
+                offenders.append(f"{rel}:{node.lineno}: {node.value!r}")
+    assert not offenders, "hardcoded `/tmp/` literals in src/:\n  " + "\n  ".join(offenders)
+
+
+def test_no_sys_path_or_monkeypatch_in_src() -> None:
+    """Forbid `sys.path` mutation outside `code_delivery.py` and `unittest.mock` in `src/`."""
+    sys_path_offenders: list[str] = []
+    mock_offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = str(path.relative_to(SRC))
+        text = path.read_text(encoding="utf-8")
+        if "sys.path" in text and rel != "code_delivery.py":
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "path"
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "sys"
+                ):
+                    sys_path_offenders.append(f"{rel}:{node.lineno}")
+        if "unittest.mock" in text or "monkeypatch" in text:
+            tree = ast.parse(text, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                    "unittest.mock"
+                ):
+                    mock_offenders.append(f"{rel}:{node.lineno}")
+    assert not sys_path_offenders, (
+        "`sys.path` access outside `code_delivery.py`:\n  " + "\n  ".join(sys_path_offenders)
+    )
+    assert not mock_offenders, "`unittest.mock` imports in src/:\n  " + "\n  ".join(mock_offenders)
+
+
+def test_no_eval_or_unsandboxed_exec() -> None:
+    """Forbid `eval()` anywhere in `src/` and restrict `exec()` to `evolve/sandbox.py`."""
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        rel = str(path.relative_to(SRC))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "eval":
+                    offenders.append(f"{rel}:{node.lineno}: eval()")
+                elif node.func.id == "exec" and rel != "evolve/sandbox.py":
+                    offenders.append(f"{rel}:{node.lineno}: exec() outside evolve/sandbox.py")
+    assert not offenders, "unsafe eval()/exec() calls in src/:\n  " + "\n  ".join(offenders)
+
+
+def test_hub_module_line_count_ceilings() -> None:
+    """Enforce Anti-Bloat Guardrail 3: hub modules (`sdk.py`, `playground.py`, `workbench.py`) must
+    remain below 3,500 lines.
+    """
+    ceilings = {
+        "sdk.py": 3500,
+        "playground.py": 3500,
+        "workbench.py": 3500,
+    }
+    offenders: list[str] = []
+    for rel, max_lines in ceilings.items():
+        n_lines = len((SRC / rel).read_text(encoding="utf-8").splitlines())
+        if n_lines >= max_lines:
+            offenders.append(f"{rel}: {n_lines} lines >= ceiling {max_lines}")
+    assert not offenders, "hub modules exceeding line-count ceiling:\n  " + "\n  ".join(offenders)

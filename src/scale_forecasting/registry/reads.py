@@ -945,8 +945,12 @@ def read_series_covariates(
                 ).result()
             ]
             rows.extend(fut_rows)
-        except Exception:  # noqa: BLE001 - optional future table
-            pass
+        except Exception as exc:  # noqa: BLE001 - optional future table
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Optional synthetic_future_covariates query skipped: %s", exc
+            )
     return rows
 
 

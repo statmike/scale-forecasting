@@ -270,3 +270,13 @@ def _stamp_job_telemetry(
         _log.info("batch %s telemetry stamped: %s", batch_id, telemetry)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("batch %s telemetry capture failed (non-fatal): %r", batch_id, exc)
+
+
+def batch_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_batch_client`."""
+    return _batch_client(*args, **kwargs)
+
+
+def stamp_job_telemetry(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_stamp_job_telemetry`."""
+    return _stamp_job_telemetry(*args, **kwargs)

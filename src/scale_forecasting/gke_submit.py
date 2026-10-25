@@ -43,6 +43,11 @@ from urllib.parse import quote
 
 from . import capacity, quota, staging
 from .batch_infra import BatchInfra
+from .code_delivery import (
+    RAY_GKE_BOOTSTRAP_CODE,
+    RAY_GKE_WORKER_BOOTSTRAP_CODE,
+    VERTEX_BOOTSTRAP_CODE,
+)
 from .commands import build_driver_args
 from .compute_fallback import US_ZONES, Candidate, resolve_candidates
 from .config import RunConfig, resolve_vm_machine_type
@@ -62,7 +67,6 @@ from .resources.catalog import intraop_env_vars, machine_cores, machine_memory_b
 from .resources.fleet import RuntimeResourcePlan
 from .router import split_by_runtime
 from .settings import Settings
-from .vertex_submit import VERTEX_BOOTSTRAP_CODE
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -85,94 +89,8 @@ _GKE_ACCELERATOR_TYPES = {
     "A100_80GB": "nvidia-a100-80gb",
 }
 
-# Bootstrap snippet for Ray-on-GKE driver/head pods. Downloads `scale_forecasting-<hash>.zip`,
-# extracts it into a local directory added to `PYTHONPATH` so all Ray worker processes spawned by
-# `raylet` inherit the staged package, starts a local Ray head daemon when `RAY_ADDRESS` is not
-# pre-configured, waits for any companion worker pods (`SF_RAY_EXPECTED_NODES`), and invokes
-# `scale_forecasting.ray_entry.main`.
-RAY_GKE_BOOTSTRAP_CODE = (
-    "import os, subprocess, sys, tempfile, time, zipfile, google.cloud.storage as gcs\n"
-    "td = tempfile.mkdtemp(prefix='sf_ray_gke_')\n"
-    "os.environ.setdefault('MPLCONFIGDIR', os.path.join(td, 'mpl'))\n"
-    "if not os.access(os.getcwd(), os.W_OK):\n"
-    "    os.chdir(td)\n"
-    "argv = sys.argv[1:]\n"
-    "idx = argv.index('--package-uri')\n"
-    "uri = argv[idx + 1]\n"
-    "rest = argv[:idx] + argv[idx + 2:]\n"
-    "b, p = uri[5:].split('/', 1)\n"
-    "zp = os.path.join(td, 'scale_forecasting.zip')\n"
-    "gcs.Client().bucket(b).blob(p).download_to_filename(zp)\n"
-    "code_dir = os.path.join(td, 'code')\n"
-    "with zipfile.ZipFile(zp, 'r') as zf:\n"
-    "    zf.extractall(code_dir)\n"
-    "py_path = os.environ.get('PYTHONPATH', '')\n"
-    "os.environ['PYTHONPATH'] = f'{code_dir}:{py_path}' if py_path else code_dir\n"
-    "sys.path.insert(0, code_dir)\n"
-    "started_local_head = False\n"
-    "if not os.environ.get('RAY_ADDRESS'):\n"
-    "    cmd = [\n"
-    "        '/opt/venv/bin/ray', 'start', '--head', '--port=6379',\n"
-    "        '--include-dashboard=false', '--disable-usage-stats',\n"
-    "    ]\n"
-    "    subprocess.run(cmd, check=True)\n"
-    "    os.environ['RAY_ADDRESS'] = 'auto'\n"
-    "    started_local_head = True\n"
-    "expected = int(os.environ.get('SF_RAY_EXPECTED_NODES', '1'))\n"
-    "if expected > 1:\n"
-    "    import ray\n"
-    "    ray.init(address=os.environ['RAY_ADDRESS'])\n"
-    "    deadline = time.time() + 600\n"
-    "    while time.time() < deadline:\n"
-    "        alive = [n for n in ray.nodes() if n.get('Alive')]\n"
-    "        if len(alive) >= expected:\n"
-    "            break\n"
-    "        time.sleep(2)\n"
-    "    ray.shutdown()\n"
-    "from scale_forecasting.ray_entry import main\n"
-    "try:\n"
-    "    main(rest)\n"
-    "finally:\n"
-    "    if started_local_head:\n"
-    "        subprocess.run(['/opt/venv/bin/ray', 'stop'], check=False)\n"
-)
-
-# Bootstrap snippet for Ray-on-GKE companion worker pods when `worker_count > 1`.
-RAY_GKE_WORKER_BOOTSTRAP_CODE = (
-    "import os, socket, subprocess, sys, tempfile, time, zipfile, google.cloud.storage as gcs\n"
-    "td = tempfile.mkdtemp(prefix='sf_ray_worker_')\n"
-    "os.environ.setdefault('MPLCONFIGDIR', os.path.join(td, 'mpl'))\n"
-    "if not os.access(os.getcwd(), os.W_OK):\n"
-    "    os.chdir(td)\n"
-    "uri = os.environ['SF_PACKAGE_URI']\n"
-    "b, p = uri[5:].split('/', 1)\n"
-    "zp = os.path.join(td, 'scale_forecasting.zip')\n"
-    "gcs.Client().bucket(b).blob(p).download_to_filename(zp)\n"
-    "code_dir = os.path.join(td, 'code')\n"
-    "with zipfile.ZipFile(zp, 'r') as zf:\n"
-    "    zf.extractall(code_dir)\n"
-    "py_path = os.environ.get('PYTHONPATH', '')\n"
-    "os.environ['PYTHONPATH'] = f'{code_dir}:{py_path}' if py_path else code_dir\n"
-    "head_addr = os.environ['SF_RAY_HEAD_ADDRESS']\n"
-    "host, port_s = head_addr.rsplit(':', 1)\n"
-    "port = int(port_s)\n"
-    "resolved_addr = head_addr\n"
-    "deadline = time.time() + 600\n"
-    "while time.time() < deadline:\n"
-    "    try:\n"
-    "        with socket.create_connection((host, port), timeout=5):\n"
-    "            resolved_addr = f'{socket.gethostbyname(host)}:{port}'\n"
-    "            break\n"
-    "    except OSError:\n"
-    "        time.sleep(2)\n"
-    "subprocess.run(\n"
-    "    [\n"
-    "        '/opt/venv/bin/ray', 'start', f'--address={resolved_addr}',\n"
-    "        '--block', '--disable-usage-stats',\n"
-    "    ],\n"
-    "    check=True,\n"
-    ")\n"
-)
+# `RAY_GKE_BOOTSTRAP_CODE` and `RAY_GKE_WORKER_BOOTSTRAP_CODE` live in `code_delivery.py` and are
+# re-exported here for callers.
 
 
 def _ephemeral_cluster_name(job_name: str) -> str:
@@ -1611,3 +1529,8 @@ def main(argv: Sequence[str] | None = None) -> None:  # pragma: no cover - CLI e
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+def ephemeral_cluster_name(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_ephemeral_cluster_name`."""
+    return _ephemeral_cluster_name(*args, **kwargs)

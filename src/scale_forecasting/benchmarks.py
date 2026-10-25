@@ -1316,6 +1316,7 @@ def fetch_public_benchmark(
     """
     import csv
     import io
+    import tempfile
     import urllib.request
     from pathlib import Path
 
@@ -1326,7 +1327,8 @@ def fetch_public_benchmark(
     pub_spec = PUBLIC_BENCHMARK_SPECS[name]
     eff_n = int(n_series or pub_spec.default_n_series)
     h = pub_spec.horizon
-    root = Path(cache_dir or "/tmp/scale_forecasting_public_benchmarks") / name
+    default_cache = Path(tempfile.gettempdir()) / "scale_forecasting_public_benchmarks"
+    root = Path(cache_dir or default_cache) / name
     root.mkdir(parents=True, exist_ok=True)
 
     # 1. Monash Archive (.tsf inside .zip on Zenodo)

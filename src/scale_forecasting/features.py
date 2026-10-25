@@ -1376,8 +1376,10 @@ def regularize_series_grid(series: pd.DataFrame, cfg: RunConfig) -> pd.DataFrame
             if scol in indexed.columns:
                 indexed[scol] = indexed[scol].ffill().bfill()
 
-        # Fill target column according to grid_policy.
-        t_series = pd.to_numeric(indexed[d.target_col], errors="coerce")
+        # Fill target column according to grid_policy (coerce ±inf to NaN first).
+        t_series = pd.to_numeric(indexed[d.target_col], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
         if d.grid_policy in ("fill_zero", "zero_fill"):
             indexed[d.target_col] = t_series.fillna(0.0)
         elif d.grid_policy == "ffill":
@@ -1486,6 +1488,16 @@ def clean_training_target(
 
     # 2. Fold-safe outlier despiking or flagging.
     outlier_flag: np.ndarray | None = None
+    non_finite_mask = ~np.isfinite(arr)
+    if non_finite_mask.any() and f.outlier_policy != "none":
+        arr = (
+            pd.Series(np.where(non_finite_mask, np.nan, arr))
+            .interpolate(method="linear")
+            .ffill()
+            .bfill()
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+        )
     if f.outlier_policy != "none" and n >= 6:
         baseline = _local_seasonal_baseline(arr, period)
         resid = arr - baseline

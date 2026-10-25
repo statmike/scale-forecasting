@@ -97,7 +97,7 @@ def corrected_arm_for(decision_metric: str) -> str:
 
     Says nothing about whether a backtest exists — that is the caller's guard.
     """
-    from .metrics.base_metric import _REGISTRY
+    from .metrics.base_metric import REGISTRY as _REGISTRY
 
     metric_cls = _REGISTRY.get(decision_metric)
     return "mean" if metric_cls is not None and metric_cls.mean_optimal else "median"

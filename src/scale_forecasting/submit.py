@@ -35,7 +35,8 @@ from __future__ import annotations
 import argparse
 from typing import TYPE_CHECKING, Any
 
-from .batch_infra import _DEFAULT_TTL_SECONDS, BatchInfra, serverless_dep_properties
+from .batch_infra import DEFAULT_TTL_SECONDS as _DEFAULT_TTL_SECONDS
+from .batch_infra import BatchInfra, serverless_dep_properties
 from .commands import build_driver_args
 from .errors import (
     ConfigError,
@@ -583,7 +584,8 @@ def submit_batch(
     # the originals here where `monkeypatch.setattr(batch_telemetry, ...)` can no longer reach them.
     from google.api_core.exceptions import AlreadyExists
 
-    from .batch_telemetry import _batch_client, _stamp_job_telemetry
+    from .batch_telemetry import batch_client as _batch_client
+    from .batch_telemetry import stamp_job_telemetry as _stamp_job_telemetry
     from .job_outcome import launch_window_start
     from .profiling.source import profile_for_run
     from .registry.ids import make_run_id

@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.2] - 2026-10-25
+
+### Changed
+
+- **Enterprise Hardening & Anti-"Vibe-Code" AST Charter (`Track F.2`):**
+  - **Zero Silent Exception Swallowing ([`test_source_conventions.py`](./tests/unit/test_source_conventions.py)):** Remediated all 19 silent `except ...: pass` blocks across `src/scale_forecasting/` (`auto.py`, `benchmarks.py`, `diagnostics.py`, `elasticity.py`, `mcp.py`, `playground.py`, `reconciliation.py`, `report.py`, `scenario_optimizer.py`, `sdk.py`, `similarity.py`, `temporal_reconciliation.py`, `engines/automl_engine.py`, `engines/ray_gke.py`, `engines/spark_connect.py`, `models/TimesFM.py`, `models/neuralprophet.py`, `registry/ops.py`) with structured debug logging, explicit fallback values, or re-raises, and enabled `test_no_silent_except_pass` in `tests/unit/test_source_conventions.py`.
+  - **Zero Private Cross-Module Imports (`92 -> 0` Ratchet Completion):** Promoted shared helper functions and constants across 26 modules (`config.py`, `calibration.py`, `features.py`, `reconciliation.py`, `review.py`, `worker.py`, `engines/*`, `profiling/*`, `registry/*`, `resources/*`) to documented public module APIs (preserving backwards-compatible underscore aliases inside each defining module) and burned `_PRIVATE_CROSS_IMPORTS` down from `92` to `""` (`0` exceptions) in [`tests/unit/test_source_conventions.py`](./tests/unit/test_source_conventions.py).
+  - **Workbench Decomposition (`WorkbenchMixin` & `PlaygroundWorkbenchMixin` in [`workbench.py`](./src/scale_forecasting/workbench.py)):** Extracted 53 post-run interactive, diagnostic, similarity, and prescriptive methods into [`src/scale_forecasting/workbench.py`](./src/scale_forecasting/workbench.py) (`2,890` lines), reducing [`src/scale_forecasting/sdk.py`](./src/scale_forecasting/sdk.py) from `5,313` to `2,591` lines and [`src/scale_forecasting/playground.py`](./src/scale_forecasting/playground.py) from `3,301` to `2,571` lines, and added `test_hub_module_line_count_ceilings` (`< 3,500` lines) in `tests/unit/test_source_conventions.py`.
+  - **Portable Temp Directories & Consolidated Worker Bootstrap ([`code_delivery.py`](./src/scale_forecasting/code_delivery.py)):** Replaced hardcoded `/tmp/` cache paths in `benchmarks.py` and `evolve/runner.py` with `tempfile.gettempdir()`, consolidated remote worker zip bootstrap snippets (`VERTEX_BOOTSTRAP_CODE`, `RAY_GKE_BOOTSTRAP_CODE`, `RAY_GKE_WORKER_BOOTSTRAP_CODE`) into `src/scale_forecasting/code_delivery.py`, and enabled `test_no_local_file_workarounds_or_hardcoded_tmp`, `test_no_sys_path_or_monkeypatch_in_src`, and `test_no_eval_or_unsandboxed_exec`.
+  - **$O(N \cdot K)$ 100k-Series Canopy Similarity Scaling & 12-Case Pathological Torture Suite ([`similarity.py`](./src/scale_forecasting/similarity.py), [`test_pathological_torture_suite.py`](./tests/unit/test_pathological_torture_suite.py), [`test_sql_injection_safety.py`](./tests/unit/test_sql_injection_safety.py)):** Added `max_exact_pairwise_series: int = 2500` and `_compute_canopy_similarity_matrix` in `similarity.py` (clustering $N = 100,000$ series in `< 2.5s` and `< 235 MB` peak memory), added `±inf` sanitization in `features.py`, and added the 12-case pathological torture suite (`test_pathological_torture_suite.py`) and BigQuery SQL injection safety audit (`test_sql_injection_safety.py`).
+
+---
+
 ## [1.8.1] - 2026-10-25
 
 ### Added

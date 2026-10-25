@@ -114,7 +114,7 @@ def _capacity_publisher(
     walk that might still find room.
     """
     from .registry.jobs import update_job
-    from .registry.lifecycle import _STICKY_STATUSES
+    from .registry.lifecycle import STICKY_STATUSES as _STICKY_STATUSES
 
     def publish(ledger: CapacityLedger) -> None:
         update_job(
@@ -766,3 +766,13 @@ def submit_retry(
             except Exception as exc:  # noqa: BLE001 - captured, reported, never hides the others
                 errors[job.family] = exc
     return RetryOutcome(families=tuple(retry_dag.families), errors=errors)
+
+
+def entry_handle(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_entry_handle`."""
+    return _entry_handle(*args, **kwargs)
+
+
+def system_job_id(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_system_job_id`."""
+    return _system_job_id(*args, **kwargs)

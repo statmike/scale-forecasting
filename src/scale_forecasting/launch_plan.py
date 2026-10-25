@@ -666,7 +666,8 @@ def _file_emitted_rows(
     """
     from datetime import UTC, datetime
 
-    from .job_launch import _entry_handle, _system_job_id
+    from .job_launch import entry_handle as _entry_handle
+    from .job_launch import system_job_id as _system_job_id
     from .probes.vocabulary import ProbeHandle
     from .registry.header import write_header
     from .registry.ids import parse_job_key

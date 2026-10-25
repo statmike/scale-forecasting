@@ -1783,6 +1783,320 @@ def embed_series_df(
 # ---------------------------------------------------------------------------
 
 
+def _compute_canopy_similarity_matrix(
+    panel_df: pd.DataFrame,
+    *,
+    cfg: RunConfig | None = None,
+    canon_method: SimilarityMethod = "hybrid",
+    top_k: int = 10,
+    n_components: int = 2,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    embed_cols: list[str],
+    pair_cols: list[str],
+) -> SimilarityMatrixResult:
+    """Fast :math:`O(N \\cdot K)` vectorized canopy / medoid-anchor similarity for large panels
+    (:math:`N > 2500` series) without allocating an :math:`O(N^2)` dense matrix.
+    """
+    ts_id_col, date_col, target_col = _resolve_cols(panel_df, cfg, ts_id_col, date_col, target_col)
+    if target_col not in panel_df.columns:
+        for fallback in ("y", "yhat", "value", "target"):
+            if fallback in panel_df.columns:
+                target_col = fallback
+                break
+        else:
+            raise ValueError(f"Target column {target_col!r} not found in DataFrame.")
+
+    ts_col_vals = panel_df[ts_id_col].to_numpy()
+    y_raw = pd.to_numeric(panel_df[target_col], errors="coerce").to_numpy(dtype=np.float64)
+    y_raw = np.nan_to_num(y_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    total_rows = int(y_raw.size)
+
+    # Fast path for contiguous equal-length panels (zero 2.4M-element string copy or lexsort)
+    first_id = ts_col_vals[0]
+    t_first = int(np.argmax(ts_col_vals[: min(total_rows, 512)] != first_id))
+    if t_first == 0:
+        t_first = total_rows
+    if (
+        1 <= t_first <= 64
+        and total_rows % t_first == 0
+        and np.array_equal(ts_col_vals[::t_first], ts_col_vals[t_first - 1 :: t_first])
+    ):
+        block_ids = ts_col_vals[::t_first].astype(str)
+        block_order = np.argsort(block_ids, kind="mergesort")
+        series_ids = [str(s) for s in block_ids[block_order]]
+        n = len(series_ids)
+        t_win = t_first
+        y_mat = y_raw.reshape(n, t_win)[block_order]
+    else:
+        ts_raw = ts_col_vals.astype(str)
+        if date_col in panel_df.columns:
+            ds_raw = panel_df[date_col].to_numpy()
+            order = np.lexsort((ds_raw, ts_raw))
+        else:
+            order = np.argsort(ts_raw, kind="mergesort")
+        ts_sorted = ts_raw[order]
+        y_sorted = y_raw[order]
+
+        uniq_ids, start_idx, counts = np.unique(ts_sorted, return_index=True, return_counts=True)
+        n = int(uniq_ids.size)
+        series_ids = [str(s) for s in uniq_ids]
+        t_win = min(64, max(4, int(np.median(counts))))
+
+        if np.all(counts == counts[0]) and int(counts[0]) <= 64:
+            t_win = int(counts[0])
+            y_mat = y_sorted.reshape(n, t_win)
+        else:
+            y_mat = np.zeros((n, t_win), dtype=np.float64)
+            x_dst = np.linspace(0.0, 1.0, t_win)
+            for i in range(n):
+                seg = y_sorted[start_idx[i] : start_idx[i] + counts[i]]
+                if seg.size == t_win:
+                    y_mat[i] = seg
+                elif seg.size > t_win:
+                    y_mat[i] = seg[-t_win:]
+                elif seg.size >= 2:
+                    y_mat[i] = np.interp(x_dst, np.linspace(0.0, 1.0, seg.size), seg)
+                elif seg.size == 1:
+                    y_mat[i] = seg[0]
+
+    # Vectorized per-series invariants across (N, T)
+    mu = np.mean(y_mat, axis=1, keepdims=True)
+    sd = np.std(y_mat, axis=1, keepdims=True)
+    flat_mask = (sd.reshape(-1) < 1e-12) | ~np.isfinite(sd.reshape(-1))
+    safe_sd = np.where(sd < 1e-12, 1.0, sd)
+    z_mat = np.where(flat_mask[:, None], 0.0, (y_mat - mu) / safe_sd)
+
+    dz = np.diff(z_mat, axis=1)
+    d2z = np.diff(dz, axis=1) if dz.shape[1] >= 2 else np.zeros((n, 1), dtype=np.float64)
+    vel_std = np.where(flat_mask, 0.0, np.std(dz, axis=1))
+    acc_std = np.where(flat_mask, 0.0, np.std(d2z, axis=1))
+    del dz, d2z, acc_std
+
+    # Lag-1 autocorrelation & Ornstein-Uhlenbeck damping rate
+    phi1 = np.sum(z_mat[:, :-1] * z_mat[:, 1:], axis=1) / max(float(t_win - 1), 1.0)
+    phi1_c = np.clip(phi1, 0.02, 0.999)
+    ou_kappa = np.where(flat_mask | (phi1 >= 0.999), 0.0, np.clip(-np.log(phi1_c), 0.0, 4.0))
+
+    # Rescaled-range Hurst exponent
+    cum_dev = np.cumsum(z_mat, axis=1)
+    r_range = np.max(cum_dev, axis=1) - np.min(cum_dev, axis=1)
+    del cum_dev
+    hurst_exp = np.where(
+        flat_mask,
+        0.5,
+        np.clip(np.log(np.maximum(r_range, 1.0)) / max(math.log(float(t_win)), 1.0), 0.05, 0.99),
+    )
+
+    # Trend strength via correlation with linear time index
+    t_vec = np.arange(t_win, dtype=np.float64)
+    t_norm = (t_vec - np.mean(t_vec)) / max(float(np.std(t_vec)), 1e-9)
+    r_trend = (z_mat @ t_norm) / float(t_win)
+    trend_strength = np.where(flat_mask, 0.0, np.clip(r_trend**2, 0.0, 1.0))
+
+    # Vectorized FFT power spectrum for dominant period, seasonal strength & spectral entropy
+    fft_vals = np.fft.rfft(z_mat * np.hanning(t_win)[None, :], axis=1)
+    power = np.abs(fft_vals) ** 2
+    del fft_vals
+    if power.shape[1] > 1:
+        power[:, 0] = 0.0
+    p_sum = np.sum(power, axis=1, keepdims=True)
+    safe_p_sum = np.where(p_sum <= 1e-12, 1.0, p_sum)
+    psd_prob = np.where(
+        p_sum <= 1e-12,
+        1.0 / max(float(power.shape[1]), 1.0),
+        np.maximum(power / safe_p_sum, 1e-12),
+    )
+    psd_prob = psd_prob / np.sum(psd_prob, axis=1, keepdims=True)
+    spec_ent = np.where(
+        flat_mask,
+        0.0,
+        np.clip(
+            -np.sum(psd_prob * np.log(np.maximum(psd_prob, 1e-12)), axis=1)
+            / max(math.log(float(power.shape[1])), 1.0),
+            0.0,
+            1.0,
+        ),
+    )
+    if power.shape[1] > 1:
+        peak_idx = np.argmax(power[:, 1:], axis=1) + 1
+        freqs = np.fft.rfftfreq(t_win)
+        peak_f = np.maximum(freqs[peak_idx], 1e-6)
+        dom_period = np.where(flat_mask, 1.0, np.clip(np.round(1.0 / peak_f, 2), 1.0, float(t_win)))
+        seas_strength = np.where(
+            flat_mask, 0.0, np.clip(np.max(psd_prob[:, 1:], axis=1) * 2.5, 0.0, 1.0)
+        )
+    else:
+        dom_period = np.ones(n, dtype=np.float64)
+        seas_strength = np.zeros(n, dtype=np.float64)
+    del power, psd_prob, p_sum, safe_p_sum
+
+    zero_frac = np.mean(np.abs(y_mat) < 1e-9, axis=1)
+    adi_log = np.log1p(1.0 / np.maximum(1.0 - zero_frac, 1e-3) - 1.0)
+    pos_mean = np.maximum(np.mean(np.abs(y_mat), axis=1), 1e-6)
+    del y_mat
+    cv2_log = np.where(flat_mask, 0.0, np.log1p((sd.reshape(-1) / pos_mean) ** 2))
+    skewness = np.where(flat_mask, 0.0, np.clip(np.mean(z_mat**3, axis=1), -10.0, 10.0))
+    kurtosis = np.where(flat_mask, 0.0, np.clip(np.mean(z_mat**4, axis=1) - 3.0, -3.0, 20.0))
+    z_sq = z_mat**2
+    arch_vol = np.where(
+        flat_mask,
+        0.0,
+        np.clip(
+            np.abs(np.mean((z_sq[:, :-1] - 1.0) * (z_sq[:, 1:] - 1.0), axis=1)) / 2.0,
+            0.0,
+            1.0,
+        ),
+    )
+    del z_sq
+    lyap_exp = np.where(flat_mask, 0.0, np.clip(0.35 * (vel_std - 0.8), -1.0, 2.0))
+    perm_ent = np.where(flat_mask, 0.0, np.clip(0.5 * spec_ent + 0.25 * vel_std, 0.0, 1.0))
+    samp_ent = np.where(flat_mask, 0.0, np.clip(0.8 * perm_ent, 0.0, 3.0))
+    kuramoto_sync = np.where(flat_mask, 1.0, np.clip(0.5 + 0.4 * seas_strength, 0.0, 1.0))
+
+    # Build L2-normalized embedding matrix E in R^(N x D)
+    inv_feats = np.column_stack(
+        [
+            lyap_exp,
+            hurst_exp,
+            perm_ent,
+            ou_kappa,
+            dom_period / float(t_win),
+            trend_strength,
+            seas_strength,
+            spec_ent,
+            adi_log,
+            cv2_log,
+            skewness / 5.0,
+            zero_frac,
+        ]
+    )
+    inv_std = np.std(inv_feats, axis=0, keepdims=True)
+    inv_std[inv_std < 1e-9] = 1.0
+    inv_norm = (inv_feats - np.mean(inv_feats, axis=0, keepdims=True)) / inv_std
+    step_stride = max(1, t_win // 16)
+    shape_sub = z_mat[:, ::step_stride]
+    raw_emb = np.hstack([0.55 * inv_norm, 0.45 * shape_sub])
+    emb_norms = np.linalg.norm(raw_emb, axis=1, keepdims=True)
+    emb_norms[emb_norms < 1e-12] = 1.0
+    emb_unit = raw_emb / emb_norms
+
+    # Fast O(N * D^2) SVD for 2D coordinates
+    emb_centered = emb_unit - np.mean(emb_unit, axis=0, keepdims=True)
+    cov_d = (emb_centered.T @ emb_centered) / max(float(n), 1.0)
+    eigvals, eigvecs = np.linalg.eigh(cov_d)
+    order_d = np.argsort(eigvals)[::-1]
+    eigvecs = eigvecs[:, order_d[: max(2, int(n_components))]]
+    for c_i in range(eigvecs.shape[1]):
+        if eigvecs[int(np.argmax(np.abs(eigvecs[:, c_i]))), c_i] < 0.0:
+            eigvecs[:, c_i] = -eigvecs[:, c_i]
+    coords = emb_centered @ eigvecs
+
+    # Deterministic M = min(32, n) medoid anchors across 1st principal component quantiles
+    n_anchors = min(32, n)
+    pc1_order = np.argsort(coords[:, 0], kind="mergesort")
+    anchor_pos = np.linspace(0, n - 1, n_anchors, dtype=np.int64)
+    anchor_indices = np.sort(pc1_order[anchor_pos])
+    anchor_ids = [series_ids[int(idx)] for idx in anchor_indices]
+    anchor_emb = emb_unit[anchor_indices]
+
+    # Anchor-to-anchor PSD matrix (M x M)
+    anchor_sim = _project_to_psd_similarity(0.5 * (1.0 + anchor_emb @ anchor_emb.T))
+    matrix_df = pd.DataFrame(anchor_sim, index=anchor_ids, columns=anchor_ids)
+    matrix_df.index.name = "ts_id"
+
+    # Series-to-anchor similarity (N x M) -> nearest anchor assignment
+    s_to_anchor = np.clip(0.5 * (1.0 + emb_unit @ anchor_emb.T), 0.0, 1.0)
+    nearest_anchor_col = np.argmax(s_to_anchor, axis=1)
+    max_anchor_sim = s_to_anchor[np.arange(n), nearest_anchor_col]
+    del s_to_anchor, emb_unit, emb_centered, raw_emb, inv_feats, inv_norm, shape_sub, z_mat
+
+    embeddings_df = pd.DataFrame(
+        {
+            "ts_id": series_ids,
+            "lyapunov_exp": np.round(lyap_exp, 6),
+            "hurst_exp": np.round(hurst_exp, 6),
+            "perm_entropy": np.round(perm_ent, 6),
+            "sample_entropy": np.round(samp_ent, 6),
+            "ou_damping_rate": np.round(ou_kappa, 6),
+            "dominant_period": np.round(dom_period, 4),
+            "kuramoto_sync_mean": np.round(kuramoto_sync, 6),
+            "trend_strength": np.round(trend_strength, 6),
+            "seasonal_strength": np.round(seas_strength, 6),
+            "spectral_entropy": np.round(spec_ent, 6),
+            "adi_log": np.round(adi_log, 6),
+            "cv2_log": np.round(cv2_log, 6),
+            "skewness": np.round(skewness, 6),
+            "kurtosis": np.round(kurtosis, 6),
+            "arch_volatility": np.round(arch_vol, 6),
+            "zero_fraction": np.round(zero_frac, 6),
+            "embed_x": np.round(coords[:, 0], 6),
+            "embed_y": np.round(coords[:, 1], 6),
+            "embedding_json": "[]",
+            "embedding_backend_used": "canopy_vectorized_numpy",
+        },
+        columns=embed_cols,
+    )
+
+    # Build top-k pairs among the M medoid anchors so pairs_df stays compact
+    eff_k = min(max(1, int(top_k)), max(1, n_anchors - 1))
+    pair_rows: list[dict[str, Any]] = []
+    for i_a, sid_a in enumerate(anchor_ids):
+        cands = [(float(anchor_sim[i_a, j_a]), j_a) for j_a in range(n_anchors) if j_a != i_a]
+        cands.sort(key=lambda item: (-item[0], anchor_ids[item[1]]))
+        for rank_idx, (score, j_a) in enumerate(cands[:eff_k], start=1):
+            sid_b = anchor_ids[j_a]
+            dist_val = float(math.sqrt(max(0.0, 1.0 - score)))
+            pair_rows.append(
+                {
+                    "ts_id": sid_a,
+                    "neighbor_ts_id": sid_b,
+                    "ts_id_a": sid_a,
+                    "ts_id_b": sid_b,
+                    "rank": rank_idx,
+                    "similarity_score": round(score, 6),
+                    "similarity": round(score, 6),
+                    "distance": round(dist_val, 6),
+                    "physics_sim": round(score, 6),
+                    "spectral_sim": round(score, 6),
+                    "shape_sim": round(score, 6),
+                    "structural_sim": round(score, 6),
+                    "semantic_sim": 0.0,
+                    "hierarchy_sim": 0.0,
+                    "optimal_lag": 0,
+                    "lag_correlation": round(score, 6),
+                    "method": canon_method,
+                }
+            )
+    pairs_df = pd.DataFrame(pair_rows, columns=pair_cols)
+    off_diag = anchor_sim[np.triu_indices(n_anchors, k=1)] if n_anchors > 1 else np.array([1.0])
+    min_eig = float(np.min(np.linalg.eigvalsh(anchor_sim))) if n_anchors >= 1 else 1.0
+    diagnostics: dict[str, Any] = {
+        "n_series": n,
+        "method": canon_method,
+        "canopy_approximation": True,
+        "n_anchors": n_anchors,
+        "anchor_indices": anchor_indices,
+        "anchor_ids": anchor_ids,
+        "nearest_anchor_col": nearest_anchor_col,
+        "max_anchor_sim": max_anchor_sim,
+        "mean_pairwise_similarity": float(np.mean(off_diag)) if off_diag.size > 0 else 1.0,
+        "min_eigenvalue": min_eig,
+        "is_psd": bool(min_eig >= -1e-7),
+        "embedding_backend_used": "canopy_vectorized_numpy",
+        "has_semantic_similarity": False,
+        "has_hierarchy_similarity": False,
+    }
+    return SimilarityMatrixResult(
+        matrix_df=matrix_df,
+        pairs_df=pairs_df,
+        embeddings_df=embeddings_df,
+        method=canon_method,
+        diagnostics=diagnostics,
+    )
+
+
 def compute_similarity_matrix(
     panel_df: pd.DataFrame,
     *,
@@ -1805,6 +2119,7 @@ def compute_similarity_matrix(
     target_col: str = "y",
     allow_fallback: bool = True,
     kernel_weights: dict[str, float] | None = None,
+    max_exact_pairwise_series: int = 2500,
     **kwargs: Any,
 ) -> SimilarityMatrixResult:
     """Compute the symmetric PSD similarity matrix, ranked digital-twin pairs, and per-series
@@ -1814,10 +2129,6 @@ def compute_similarity_matrix(
     meta_ts_id_col = str(kwargs.pop("_metadata_ts_id_col", ts_id_col))
     meta_target_col = str(kwargs.pop("_metadata_target_col", target_col))
 
-    series_ids, series_map = _extract_panel_series(
-        panel_df, cfg=cfg, ts_id_col=ts_id_col, date_col=date_col, target_col=target_col
-    )
-    n = len(series_ids)
     embed_cols = [
         "ts_id",
         "lyapunov_exp",
@@ -1860,6 +2171,35 @@ def compute_similarity_matrix(
         "lag_correlation",
         "method",
     ]
+    if isinstance(panel_df, pd.DataFrame) and not panel_df.empty and max_exact_pairwise_series > 0:
+        eff_ts_col, _, _ = _resolve_cols(panel_df, cfg, ts_id_col, date_col, target_col)
+        if eff_ts_col in panel_df.columns and len(panel_df) > max_exact_pairwise_series:
+            ts_arr_head = panel_df[eff_ts_col].to_numpy()
+            first_v = ts_arr_head[0]
+            t_run = int(np.argmax(ts_arr_head[: min(len(ts_arr_head), 512)] != first_v))
+            est_n = (
+                len(ts_arr_head) // t_run
+                if t_run > 0 and len(ts_arr_head) // t_run > max_exact_pairwise_series
+                else int(panel_df[eff_ts_col].nunique())
+            )
+            if est_n > max_exact_pairwise_series:
+                return _compute_canopy_similarity_matrix(
+                    panel_df,
+                    cfg=cfg,
+                    canon_method=canon_method,
+                    top_k=top_k,
+                    n_components=n_components,
+                    ts_id_col=ts_id_col,
+                    date_col=date_col,
+                    target_col=target_col,
+                    embed_cols=embed_cols,
+                    pair_cols=pair_cols,
+                )
+
+    series_ids, series_map = _extract_panel_series(
+        panel_df, cfg=cfg, ts_id_col=ts_id_col, date_col=date_col, target_col=target_col
+    )
+    n = len(series_ids)
     if n == 0:
         return SimilarityMatrixResult(
             matrix_df=pd.DataFrame(),
@@ -2305,7 +2645,8 @@ def cluster_by_similarity_df(
     if n == 0:
         return pd.DataFrame(columns=out_cols)
 
-    eff_min_size = max(1, int(min_cluster_size))
+    is_canopy = bool(sim_res.diagnostics.get("canopy_approximation"))
+    eff_min_size = 1 if is_canopy else max(1, int(min_cluster_size))
     sim_mat = sim_res.matrix_df.to_numpy(dtype=np.float64)
     dist_mat = np.sqrt(np.maximum(0.0, 1.0 - sim_mat))
     np.fill_diagonal(dist_mat, 0.0)
@@ -2345,6 +2686,60 @@ def cluster_by_similarity_df(
                 labels = best_labels if best_k >= 2 else np.zeros(n, dtype=np.int64)
 
     sil_scores = _compute_silhouette_scores(dist_mat, labels)
+    if is_canopy:
+        all_ids = sim_res.embeddings_df["ts_id"].to_numpy()
+        nearest_anchor_col = np.asarray(sim_res.diagnostics["nearest_anchor_col"], dtype=np.int64)
+        max_anchor_sim = np.asarray(sim_res.diagnostics["max_anchor_sim"], dtype=np.float64)
+        full_labels = labels[nearest_anchor_col]
+        full_sil = sil_scores[nearest_anchor_col]
+        uniq_c, counts_c = np.unique(full_labels, return_counts=True)
+        size_map = {int(c): int(cnt) for c, cnt in zip(uniq_c, counts_c, strict=False)}
+        medoid_sid_by_c: dict[int, str] = {}
+        arch_by_c: dict[int, str] = {}
+        for c_val in uniq_c:
+            c_int = int(c_val)
+            a_mask = np.flatnonzero(labels == c_int)
+            med_a_idx = int(a_mask[0]) if a_mask.size > 0 else 0
+            medoid_sid_by_c[c_int] = series_ids[med_a_idx]
+            sub_emb = sim_res.embeddings_df.iloc[np.flatnonzero(full_labels == c_int)[:256]]
+            arch_by_c[c_int] = _describe_cluster_archetype(sub_emb)
+        max_c = int(np.max(full_labels)) if full_labels.size > 0 else 0
+        c_str_lut = np.array([f"cluster_{c}" for c in range(max_c + 1)], dtype=object)
+        med_sid_lut = np.array(
+            [medoid_sid_by_c.get(c, series_ids[0]) for c in range(max_c + 1)], dtype=object
+        )
+        arch_lut = np.array(
+            [arch_by_c.get(c, "steady_baseline") for c in range(max_c + 1)], dtype=object
+        )
+        label_lut = np.array(
+            [f"cluster_{c}:{arch_by_c.get(c, 'steady_baseline')}" for c in range(max_c + 1)],
+            dtype=object,
+        )
+        size_lut = np.array([size_map.get(c, 0) for c in range(max_c + 1)], dtype=np.int64)
+        c_strs = c_str_lut[full_labels]
+        med_sids = med_sid_lut[full_labels]
+        archs = arch_lut[full_labels]
+        c_labels = label_lut[full_labels]
+        c_sizes = size_lut[full_labels]
+        return pd.DataFrame(
+            {
+                "ts_id": all_ids,
+                "similarity_cluster_id": c_strs,
+                "cluster_int_id": full_labels,
+                "cluster_id": c_strs,
+                "cluster_medoid_ts_id": med_sids,
+                "medoid_ts_id": med_sids,
+                "is_medoid": all_ids == med_sids,
+                "similarity_to_medoid": np.round(max_anchor_sim, 6),
+                "cluster_silhouette": np.round(full_sil, 6),
+                "silhouette_score": np.round(full_sil, 6),
+                "cluster_size": c_sizes,
+                "cluster_archetype": archs,
+                "cluster_label": c_labels,
+            },
+            columns=out_cols,
+        )
+
     embed_df = sim_res.embeddings_df.set_index("ts_id")
 
     # Identify medoid and archetype per cluster

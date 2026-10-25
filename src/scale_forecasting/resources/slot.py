@@ -32,7 +32,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .catalog import _DEFAULT_SLOT_CORES, _MIN_GPU_FRACTION, _NOMINAL_GPU_FRACTION
+from .catalog import DEFAULT_SLOT_CORES as _DEFAULT_SLOT_CORES
+from .catalog import MIN_GPU_FRACTION as _MIN_GPU_FRACTION
+from .catalog import NOMINAL_GPU_FRACTION as _NOMINAL_GPU_FRACTION
 
 if TYPE_CHECKING:
     from ..profiling.cost import ComputeProfile

@@ -395,7 +395,9 @@ def _ensemble_batch(
     from .registry.artifacts import upload_artifact_bytes
     from .registry.header import merge_header_telemetry
     from .registry.rows import assemble_ensemble_oof_rows, stamp_ensemble_prediction_rows
-    from .registry.write_api import _META_SPEC, _OOF_SPEC, _PRED_SPEC
+    from .registry.write_api import META_SPEC as _META_SPEC
+    from .registry.write_api import OOF_SPEC as _OOF_SPEC
+    from .registry.write_api import PRED_SPEC as _PRED_SPEC
     from .seasonality import seasonal_period
     from .worker import rollup_metrics
 
@@ -982,7 +984,7 @@ def _ensemble_meta_row(
 
     from .metrics import METRIC_NAMES
     from .registry.ids import make_model_hash
-    from .registry.rows import _as_float
+    from .registry.rows import as_float as _as_float
 
     return {
         "run_id": run_id,
@@ -1416,3 +1418,13 @@ def _main(argv: list[str] | None = None) -> None:  # pragma: no cover - thin CLI
 
 if __name__ == "__main__":  # pragma: no cover - module entrypoint
     _main()
+
+
+def apply_weights(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_apply_weights`."""
+    return _apply_weights(*args, **kwargs)
+
+
+def override_ensemble(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_override_ensemble`."""
+    return _override_ensemble(*args, **kwargs)

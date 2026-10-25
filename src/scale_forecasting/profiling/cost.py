@@ -30,7 +30,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .measure import _MIN_WALL_S, MeasuredFit
+from .measure import MIN_WALL_S as _MIN_WALL_S
+from .measure import MeasuredFit
 from .numeric import as_number, as_optional_int, safe_max, safe_median, usable
 from .sampling import SampleSpec
 from .signature import DataSignature

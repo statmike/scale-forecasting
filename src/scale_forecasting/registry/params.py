@@ -148,3 +148,18 @@ def telemetry_merge_params(patch: Mapping[str, Any], *, caller: str) -> list[Any
     return [
         bigquery.ScalarQueryParameter(f"t{i}", "JSON", patch[path]) for i, path in enumerate(patch)
     ]
+
+
+HEADER_PARAM_TYPES = _HEADER_PARAM_TYPES
+
+JOB_PARAM_TYPES = _JOB_PARAM_TYPES
+
+
+def job_param(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_job_param`."""
+    return _job_param(*args, **kwargs)
+
+
+def status_guard_param(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_status_guard_param`."""
+    return _status_guard_param(*args, **kwargs)

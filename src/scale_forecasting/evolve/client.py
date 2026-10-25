@@ -410,8 +410,8 @@ class AlphaEvolveClient:
                 injected = inject_evolve_block(spec.seed_code, raw_code)
                 if validate_candidate_ast(injected).valid:
                     return injected
-            except Exception:  # noqa: BLE001 - fallback when raw program is malformed
-                pass
+            except Exception as exc:  # noqa: BLE001 - fallback when raw program is malformed
+                _log.debug("Acquired AlphaEvolve program failed AST validation: %s", exc)
             cands = deterministic_mock_candidates(spec.target, count=max(1, generation))
             return cands[(generation - 1) % len(cands)]
         _ = (diagnostics, generation)
@@ -637,8 +637,8 @@ class VertexGeminiEvolutionClient:
             injected = inject_evolve_block(spec.seed_code, raw_response)
             if validate_candidate_ast(injected).valid:
                 return injected
-        except Exception:  # noqa: BLE001 - malformed LLM block falls back cleanly
-            pass
+        except Exception as exc:  # noqa: BLE001 - malformed LLM block falls back cleanly
+            _log.debug("Vertex Gemini candidate block failed AST validation: %s", exc)
         cands = deterministic_mock_candidates(spec.target, count=max(1, generation))
         return cands[(generation - 1) % len(cands)]
 

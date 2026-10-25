@@ -116,7 +116,8 @@ def run(
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_run_id
     from ..registry.lifecycle import run_header
-    from ..registry.write_api import _META_SPEC, _OOF_SPEC
+    from ..registry.write_api import META_SPEC as _META_SPEC
+    from ..registry.write_api import OOF_SPEC as _OOF_SPEC
     from ..settings import Settings
     from ..worker import rollup_metrics
     from .bigquery_sql import (
@@ -471,7 +472,7 @@ def _oof_row(
     ``row`` is one record of `bigquery_sql.build_eval_query`'s output — the fold forecast joined to
     actuals — so this is the seam where that query's column names become table columns.
     """
-    from ..registry.rows import _as_date
+    from ..registry.rows import as_date as _as_date
 
     return {
         "run_id": run_id,
@@ -753,7 +754,8 @@ def _meta_row(
     from ..features import should_stamp_variant_diagnostics, variant_diagnostics_for
     from ..metrics import METRIC_NAMES
     from ..registry.ids import make_model_hash
-    from ..registry.rows import _as_date, _as_float
+    from ..registry.rows import as_date as _as_date
+    from ..registry.rows import as_float as _as_float
 
     status, note = None, None
     if n_folds_achieved is not None:
@@ -852,10 +854,16 @@ def _append_rows(  # pragma: no cover - GCP I/O, @gcp smoke
     directly. Empty input is a no-op.
     """
     from ..registry.write_api import (
-        _append_via_write_api,
-        _encode_rows,
-        _proto_for,
+        append_via_write_api as _append_via_write_api,
+    )
+    from ..registry.write_api import (
+        encode_rows as _encode_rows,
+    )
+    from ..registry.write_api import (
         get_write_client,
+    )
+    from ..registry.write_api import (
+        proto_for as _proto_for,
     )
 
     if not rows:

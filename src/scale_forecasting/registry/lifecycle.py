@@ -282,3 +282,6 @@ def run_job(
             merge_telemetry=fin.telemetry or None,
             **fin.extra,
         )
+
+
+STICKY_STATUSES = _STICKY_STATUSES

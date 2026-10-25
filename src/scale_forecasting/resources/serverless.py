@@ -24,10 +24,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .catalog import (
-    _DEFAULT_TARGET_CELLS_PER_SLOT,
-    _MIB,
-    _MIN_GPU_FRACTION,
-    _SPARK_JVM_MB_PER_CORE,
+    DEFAULT_TARGET_CELLS_PER_SLOT as _DEFAULT_TARGET_CELLS_PER_SLOT,
+)
+from .catalog import (
+    MIB as _MIB,
+)
+from .catalog import (
+    MIN_GPU_FRACTION as _MIN_GPU_FRACTION,
+)
+from .catalog import (
+    SPARK_JVM_MB_PER_CORE as _SPARK_JVM_MB_PER_CORE,
+)
+from .catalog import (
     intraop_env_vars,
 )
 from .fleet import RuntimeResourcePlan, UnitShape, max_slot_memory_bytes, plan_fleet

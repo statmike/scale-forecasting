@@ -44,11 +44,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .catalog import (
-    _DEFAULT_TARGET_CELLS_PER_SLOT,
-    _MAX_SLOT_MEMORY_FRACTION,
-    _MIN_GPU_FRACTION,
-    _RESERVED_CORES_PER_UNIT,
-    _SCHEDULABLE_MEMORY_FRACTION,
+    DEFAULT_TARGET_CELLS_PER_SLOT as _DEFAULT_TARGET_CELLS_PER_SLOT,
+)
+from .catalog import (
+    MAX_SLOT_MEMORY_FRACTION as _MAX_SLOT_MEMORY_FRACTION,
+)
+from .catalog import (
+    MIN_GPU_FRACTION as _MIN_GPU_FRACTION,
+)
+from .catalog import (
+    RESERVED_CORES_PER_UNIT as _RESERVED_CORES_PER_UNIT,
+)
+from .catalog import (
+    SCHEDULABLE_MEMORY_FRACTION as _SCHEDULABLE_MEMORY_FRACTION,
+)
+from .catalog import (
     device_floor_fraction,
     intraop_env_vars,
 )

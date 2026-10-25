@@ -396,3 +396,8 @@ def main(argv: list[str] | None = None) -> str:
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+def pipeline_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_pipeline_client`."""
+    return _pipeline_client(*args, **kwargs)

@@ -243,3 +243,19 @@ def _parse_ts(value: Any) -> datetime | None:
     else:
         return None
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+AWAITING_CAPACITY = _AWAITING_CAPACITY
+
+CANCELLED = _CANCELLED
+
+EMITTED = _EMITTED
+
+REGISTRY_RUNNING = _REGISTRY_RUNNING
+
+TERMINAL = _TERMINAL
+
+
+def parse_ts(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_parse_ts`."""
+    return _parse_ts(*args, **kwargs)

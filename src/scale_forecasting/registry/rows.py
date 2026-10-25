@@ -782,3 +782,8 @@ def _as_int(value: Any) -> int | None:
     if value is None or value != value:  # None or NaN
         return None
     return int(value)
+
+
+def as_float(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_as_float`."""
+    return _as_float(*args, **kwargs)

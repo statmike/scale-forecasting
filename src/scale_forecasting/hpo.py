@@ -427,6 +427,6 @@ def resolve_fleetwide(
 
 def _context(cfg: RunConfig) -> ModelContext:
     """Build the per-run `ModelContext` (lazy import of the worker helper avoids a cycle)."""
-    from .worker import _model_context
+    from .worker import model_context as _model_context
 
     return _model_context(cfg)

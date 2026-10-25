@@ -276,8 +276,10 @@ class NeuralProphetModel(BaseModel):
         """
         try:
             return str(self._model.trainer.strategy.root_device.type)
-        except Exception:  # noqa: BLE001 - the evidence is optional; the forecast is not
-            pass
+        except Exception as exc:  # noqa: BLE001 - the evidence is optional; the forecast is not
+            logging.getLogger(__name__).debug(
+                "NeuralProphet root_device probe fell back to model parameters: %s", exc
+            )
         try:
             return str(next(self._model.model.parameters()).device.type)
         except Exception:  # noqa: BLE001 - same

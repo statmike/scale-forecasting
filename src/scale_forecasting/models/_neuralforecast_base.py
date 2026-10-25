@@ -55,8 +55,8 @@ def ensure_mpl_dir() -> None:
     try:
         os.makedirs(target, exist_ok=True)
         os.environ["MPLCONFIGDIR"] = target
-    except OSError:
-        pass
+    except OSError as exc:
+        logging.getLogger(__name__).debug("MPLCONFIGDIR setup skipped: %s", exc)
 
 
 def quiet_lightning() -> None:
