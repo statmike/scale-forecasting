@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.8.0"
+    __version__ = "1.8.1"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -216,6 +216,7 @@ _LAZY: dict[str, tuple[str, str]] = {
     "McpServer": (".mcp", "McpServer"),
     # Forecaster Workbench diagnostics, scenario simulation & self-contained reports.
     "compute_demand_profile": (".features", "compute_demand_profile"),
+    "compute_degree_days_df": (".features", "compute_degree_days_df"),
     "compute_fva": (".diagnostics", "compute_fva"),
     "diebold_mariano_test": (".diagnostics", "diebold_mariano_test"),
     "wilcoxon_pvalue": (".diagnostics", "wilcoxon_pvalue"),
@@ -315,6 +316,8 @@ _LAZY: dict[str, tuple[str, str]] = {
     "build_cold_start_donor_catalog": (".cold_start", "build_cold_start_donor_catalog"),
     "fit_bass_diffusion": (".cold_start", "fit_bass_diffusion"),
     "fit_weibull_lifecycle": (".cold_start", "fit_weibull_lifecycle"),
+    "fit_arps_decline": (".cold_start", "fit_arps_decline"),
+    "apply_supersession_map": (".cold_start", "apply_supersession_map"),
     "forecast_cold_start_series": (".cold_start", "forecast_cold_start_series"),
     "cold_start_transfer_df": (".cold_start", "cold_start_transfer_df"),
     "cold_start_diagnostic_df": (".cold_start", "cold_start_diagnostic_df"),
@@ -451,11 +454,13 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         ColdStartDonorPool,
         ColdStartForecastResult,
         DonorProfile,
+        apply_supersession_map,
         build_cold_start_donor_catalog,
         build_cold_start_donor_pool,
         cold_start_diagnostic_df,
         cold_start_report_df,
         cold_start_transfer_df,
+        fit_arps_decline,
         fit_bass_diffusion,
         fit_weibull_lifecycle,
         forecast_cold_start_series,
@@ -521,7 +526,7 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         EvolveResult,
         run_evolution,
     )
-    from .features import compute_demand_profile  # noqa: F401
+    from .features import compute_degree_days_df, compute_demand_profile  # noqa: F401
     from .goal_seek import (  # noqa: F401
         GOAL_SEEK_COLUMNS,
         allocate_forecast_target,

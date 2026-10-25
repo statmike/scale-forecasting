@@ -210,6 +210,8 @@ _DEFAULT_ELIDED: dict[tuple[str, ...], object] = {
     ("features", "cold_start_min_obs"): 14,
     ("features", "cold_start_method"): "auto",
     ("features", "cold_start_matching"): "auto",
+    ("features", "supersession_map"): {},
+    ("features", "degree_day_cols"): {},
     ("features", "similarity_cluster_feature"): False,
     ("features", "similarity_method"): "hybrid",
     ("features", "similarity_n_clusters"): "auto",
@@ -368,6 +370,12 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
         features_payload["cold_start_method"] = eff_f.cold_start_method
         if eff_f.cold_start_matching != "auto":
             features_payload["cold_start_matching"] = eff_f.cold_start_matching
+    if eff_f.supersession_map:
+        features_payload["supersession_map"] = dict(sorted(eff_f.supersession_map.items()))
+    if eff_f.degree_day_cols:
+        features_payload["degree_day_cols"] = {
+            k: float(v) for k, v in sorted(eff_f.degree_day_cols.items())
+        }
     if eff_f.similarity_cluster_feature:
         features_payload["similarity_cluster_feature"] = True
         features_payload["similarity_method"] = eff_f.similarity_method

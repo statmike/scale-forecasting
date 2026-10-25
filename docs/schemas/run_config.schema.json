@@ -1062,7 +1062,8 @@
             "auto",
             "analog_transfer",
             "bass_diffusion",
-            "weibull_lifecycle"
+            "weibull_lifecycle",
+            "arps_decline"
           ],
           "title": "Cold Start Method",
           "type": "string"
@@ -1077,6 +1078,13 @@
           "default": false,
           "title": "Cold Start Transfer",
           "type": "boolean"
+        },
+        "degree_day_cols": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Degree Day Cols",
+          "type": "object"
         },
         "exog": {
           "items": {
@@ -1237,6 +1245,13 @@
           },
           "title": "Static Covariates",
           "type": "array"
+        },
+        "supersession_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Supersession Map",
+          "type": "object"
         },
         "trading_days": {
           "default": false,

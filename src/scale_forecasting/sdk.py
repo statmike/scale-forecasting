@@ -3360,6 +3360,8 @@ class Forecaster:
         similarity_weight: float | None = None,
         similarity_matrix: pd.DataFrame | Any = None,
         similarity_method: str | None = None,
+        adstock_decay: float | str = 0.0,
+        include_halo: bool = True,
         run_id: str | None = None,
     ) -> pd.DataFrame:
         """Compute cross-fitted Double-ML promo & price elasticity decomposition
@@ -3424,6 +3426,8 @@ class Forecaster:
             use_similarity_priors=eff_use_sim,
             similarity_matrix=similarity_matrix,
             similarity_method=eff_sim_method,
+            adstock_decay=adstock_decay,
+            include_halo=include_halo,
         )
         return summarize_promo_elasticity(decomp) if summary else decomp
 

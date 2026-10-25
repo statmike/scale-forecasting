@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
+from scipy.optimize import least_squares, minimize
 
 from .calibration import CALIBRATED_COLUMNS, rearrange_monotone_quantiles
 from .models.base_model import DEFAULT_QUANTILES
@@ -46,7 +46,13 @@ from .seasonality import seasonal_period
 if TYPE_CHECKING:
     from .config import ColdStartMatching, ColdStartMethod, RunConfig, SimilarityMethod
 
-ColdStartArchetype = Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle", "none"]
+ColdStartArchetype = Literal[
+    "analog_transfer",
+    "bass_diffusion",
+    "weibull_lifecycle",
+    "arps_decline",
+    "none",
+]
 
 _EPS = 1e-9
 _DEFAULT_KAPPA = 5.0
@@ -72,6 +78,7 @@ class DonorProfile:
     residual_quantiles: dict[float, float]
     bass_params: dict[str, float] = field(default_factory=dict)
     weibull_params: dict[str, float] = field(default_factory=dict)
+    arps_params: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -369,6 +376,394 @@ def fit_weibull_lifecycle(
     }
 
 
+def _arps_unit_basis(t: np.ndarray, b: float, d_i: float) -> np.ndarray:
+    """Evaluate the unit Arps (1945) decline curve $(1 + b D_i t)^{-1/b}$ (or $e^{-D_i t}$)."""
+    b_safe = float(np.clip(b, 0.0, 1.0))
+    d_safe = max(float(d_i), 0.0)
+    t_safe = np.maximum(0.0, np.asarray(t, dtype=float))
+    if d_safe <= 1e-12:
+        return np.ones_like(t_safe)
+    if b_safe < 1e-5:
+        return np.exp(-np.clip(d_safe * t_safe, 0.0, 60.0))
+    base = np.maximum(1.0 + b_safe * d_safe * t_safe, 1e-12)
+    return np.exp(-np.clip(np.log(base) / b_safe, 0.0, 60.0))
+
+
+def _arps_rate_curve(t: np.ndarray, q_i: float, b: float, d_i: float) -> np.ndarray:
+    """Evaluate the Arps (1945) decline rate $q(t)$ at $t \\ge 0$."""
+    q_safe = max(float(q_i), 0.0)
+    return np.maximum(0.0, q_safe * _arps_unit_basis(t, b, d_i))
+
+
+def _arps_cumulative_at(t_end: float, q_i: float, b: float, d_i: float) -> float:
+    """Analytical cumulative production $N_p(T) = \\int_0^T q(t)\\,dt$ under Arps decline."""
+    t_val = max(0.0, float(t_end))
+    q_val = max(0.0, float(q_i))
+    b_val = float(np.clip(b, 0.0, 1.0))
+    d_val = max(0.0, float(d_i))
+    if t_val <= 0.0 or q_val <= 0.0:
+        return 0.0
+    if d_val <= 1e-12:
+        return float(q_val * t_val)
+    if b_val < 1e-4:
+        return float((q_val / d_val) * (1.0 - math.exp(-min(d_val * t_val, 60.0))))
+    if abs(b_val - 1.0) < 1e-4:
+        return float((q_val / d_val) * math.log1p(d_val * t_val))
+    term = (1.0 + b_val * d_val * t_val) ** (1.0 - (1.0 / b_val))
+    return float((q_val / ((1.0 - b_val) * d_val)) * (1.0 - term))
+
+
+def _arps_cumulative_eur(
+    q_i: float,
+    b: float,
+    d_i: float,
+    *,
+    n_obs: int = 0,
+    q_econ: float = 1.0,
+    max_eur_steps: float = 3650.0,
+) -> tuple[float, float]:
+    """Compute ``(eur_total, eur_remaining)`` from $t=0$ to $q(T) = q_{\\text{econ}}$.
+
+    Integrates $q(t) = q_i (1 + b D_i t)^{-1/b}$ up to $T_{\\text{lim}} = \\min(T_{\\text{econ}},
+    T_{\\max})$, ensuring $T_{\\text{lim}} \\ge n_{\\text{obs}}$ so ``eur_total >= cumulative``.
+    """
+    q_val = max(0.0, float(q_i))
+    b_val = float(np.clip(b, 0.0, 1.0))
+    d_val = max(0.0, float(d_i))
+    t_max = max(float(max_eur_steps), float(max(0, n_obs)), 1.0)
+    q_lim = max(0.0, float(q_econ))
+
+    if q_val <= 0.0:
+        return 0.0, 0.0
+    if d_val <= 1e-9 or q_lim <= 0.0:
+        t_lim = t_max
+    elif q_val <= q_lim:
+        t_lim = float(max(0, n_obs))
+    elif b_val < 1e-4:
+        t_econ = math.log(q_val / q_lim) / d_val
+        t_lim = min(t_econ, t_max)
+    else:
+        t_econ = (((q_val / q_lim) ** b_val) - 1.0) / (b_val * d_val)
+        t_lim = min(t_econ, t_max)
+
+    t_obs = float(max(0, int(n_obs)))
+    t_total = max(t_lim, t_obs)
+    eur_total = _arps_cumulative_at(t_total, q_val, b_val, d_val)
+    cum_obs = _arps_cumulative_at(min(t_obs, t_total), q_val, b_val, d_val)
+    eur_rem = max(0.0, eur_total - cum_obs)
+    return float(eur_total), float(eur_rem)
+
+
+def fit_arps_decline(
+    y: np.ndarray,
+    horizon: int,
+    *,
+    seasonal_indices: np.ndarray | None = None,
+    q_econ: float = 1.0,
+    max_eur_steps: float = 3650.0,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Fit Arps (1945) hyperbolic/harmonic/exponential decline curve and compute analytical EUR.
+
+    Models physics-constrained depleting assets (oil/gas wells, geothermal reservoirs, battery
+    capacity degradation, legacy SaaS cohort decay):
+
+    $$q(t) = \\frac{q_i}{(1 + b D_i t)^{1/b}}, \\qquad 0 \\le b \\le 1, \\quad D_i > 0$$
+
+    with $b = 0$ reducing to exponential decline $q_i e^{-D_i t}$ and $b = 1$ to harmonic decline
+    $q_i / (1 + D_i t)$ for $t = 0, 1, \\dots, n-1$.
+
+    Returns
+    -------
+    tuple[np.ndarray, dict[str, float]]
+        ``(future_yhat, {"q_i": q_i, "b": b, "d_i": d_i, "eur_total": eur_total,
+        "eur_remaining": eur_rem})``.
+    """
+    arr = np.asarray(y, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    arr = np.maximum(0.0, arr)
+    n = int(arr.size)
+    h = max(1, int(horizon))
+
+    if n == 0:
+        qi_hat, b_hat, di_hat = 100.0, 0.5, 0.05
+    elif n == 1:
+        qi_hat = max(float(arr[0]), 1.0)
+        b_hat, di_hat = 0.5, 0.05
+    elif n == 2:
+        qi_hat = max(float(arr[0]), 1e-3)
+        b_hat = 0.5
+        if arr[0] > arr[1] > 0.0:
+            di_hat = float(np.clip(((arr[0] / arr[1]) ** b_hat - 1.0) / b_hat, 1e-4, 2.0))
+        else:
+            di_hat = 0.05
+    else:
+        if seasonal_indices is not None and seasonal_indices.size > 1:
+            m_per = seasonal_indices.size
+            s_factors = np.array([seasonal_indices[i % m_per] for i in range(n)], dtype=float)
+            y_deseas = arr / np.maximum(s_factors, 0.1)
+        else:
+            y_deseas = arr
+
+        t_obs = np.arange(0, n, dtype=float)
+        scale_y = max(float(np.max(y_deseas)), 1e-6)
+
+        def _solve_qi_and_resid(b_v: float, d_v: float) -> tuple[float, np.ndarray]:
+            g = _arps_unit_basis(t_obs, b_v, d_v)
+            denom = float(np.dot(g, g))
+            q_opt = max(float(np.dot(y_deseas, g) / max(denom, 1e-12)), 1e-6)
+            return q_opt, (q_opt * g - y_deseas) / scale_y
+
+        # 1. Coarse 2D grid search over (b, d_i) with variable projection for q_i
+        b_grid = (0.0, 0.15, 0.3, 0.5, 0.7, 0.85, 1.0)
+        d_grid = np.logspace(-3.5, 0.3, 18)
+        best_b, best_d = 0.5, 0.05
+        _, r0 = _solve_qi_and_resid(best_b, best_d)
+        best_loss = float(np.mean(r0**2))
+        for b_cand in b_grid:
+            for d_cand in d_grid:
+                _, r_vec = _solve_qi_and_resid(b_cand, float(d_cand))
+                loss = float(np.mean(r_vec**2))
+                if loss < best_loss:
+                    best_loss = loss
+                    best_b = b_cand
+                    best_d = float(d_cand)
+
+        # 2. Polish (b, d_i) jointly via Trust-Region Reflective nonlinear least squares
+        res_2d = least_squares(
+            lambda theta: _solve_qi_and_resid(float(theta[0]), float(theta[1]))[1],
+            x0=np.array([best_b, best_d], dtype=float),
+            bounds=([0.0, 1e-6], [1.0, 5.0]),
+            ftol=1e-12,
+            xtol=1e-12,
+            gtol=1e-12,
+            max_nfev=200,
+        )
+        b_hat = float(np.clip(res_2d.x[0], 0.0, 1.0))
+        di_hat = float(max(res_2d.x[1], 1e-6))
+        qi_hat, r_2d = _solve_qi_and_resid(b_hat, di_hat)
+        best_mse = float(np.mean(r_2d**2))
+
+        # 3. Also test exact boundary regimes b=0.0 (exponential) and b=1.0 (harmonic)
+        for b_bound in (0.0, 1.0):
+            res_1d = least_squares(
+                lambda d_arr, _b=b_bound: _solve_qi_and_resid(_b, float(d_arr[0]))[1],
+                x0=np.array([di_hat], dtype=float),
+                bounds=([1e-6], [5.0]),
+                ftol=1e-12,
+                xtol=1e-12,
+                gtol=1e-12,
+                max_nfev=100,
+            )
+            d_b = float(max(res_1d.x[0], 1e-6))
+            q_b, r_b = _solve_qi_and_resid(b_bound, d_b)
+            mse_b = float(np.mean(r_b**2))
+            if mse_b <= best_mse + 1e-11:
+                best_mse = mse_b
+                b_hat = b_bound
+                di_hat = d_b
+                qi_hat = q_b
+
+    t_fut = np.arange(n, n + h, dtype=float)
+    fut_curve = _arps_rate_curve(t_fut, qi_hat, b_hat, di_hat)
+    if seasonal_indices is not None and seasonal_indices.size > 1:
+        m_per = seasonal_indices.size
+        fut_s = np.array([seasonal_indices[(n + i) % m_per] for i in range(h)], dtype=float)
+        fut_curve = fut_curve * fut_s
+
+    eur_tot, eur_rem = _arps_cumulative_eur(
+        qi_hat,
+        b_hat,
+        di_hat,
+        n_obs=n,
+        q_econ=q_econ,
+        max_eur_steps=max_eur_steps,
+    )
+    return np.maximum(0.0, fut_curve), {
+        "q_i": round(float(qi_hat), 4),
+        "b": round(float(b_hat), 6),
+        "d_i": round(float(di_hat), 6),
+        "eur_total": round(float(eur_tot), 4),
+        "eur_remaining": round(float(eur_rem), 4),
+    }
+
+
+def apply_supersession_map(
+    panel_df: pd.DataFrame,
+    supersession_map: Mapping[str, str] | None,
+    *,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    overlap_mode: Literal["auto", "sum", "successor_only"] = "auto",
+    drop_predecessors: bool = False,
+) -> pd.DataFrame:
+    """Splice predecessor SKU histories onto successor SKUs across multi-generation chains.
+
+    Supports both ``{successor_id: predecessor_id}`` and ``{predecessor_id: successor_id}`` map
+    orientations by automatically orienting each linked pair from the earlier-starting series
+    (predecessor) to the later-starting series (successor), resolving multi-generation chains
+    (``v1 -> v2 -> v3``) in topological order, and reconciling phase-out/phase-in overlap windows.
+    """
+    if (
+        panel_df is None
+        or panel_df.empty
+        or not supersession_map
+        or ts_id_col not in panel_df.columns
+    ):
+        return panel_df.copy() if panel_df is not None else pd.DataFrame()
+
+    work = panel_df.copy()
+    has_dates = date_col in work.columns
+    has_target = target_col in work.columns
+
+    # Summarize start date and observation count per ts_id to orient edges deterministically.
+    min_ds_by_id: dict[str, Any] = {}
+    n_obs_by_id: dict[str, int] = {}
+    frames_by_id: dict[str, pd.DataFrame] = {}
+    for raw_id, grp in work.groupby(ts_id_col, sort=False):
+        tid = str(raw_id)
+        sorted_grp = grp.sort_values(date_col).reset_index(drop=True) if has_dates else grp.copy()
+        frames_by_id[tid] = sorted_grp
+        if has_dates and not sorted_grp.empty:
+            non_na_ds = sorted_grp[date_col].dropna()
+            if not non_na_ds.empty:
+                min_ds_by_id[tid] = non_na_ds.iloc[0]
+        if has_target and not sorted_grp.empty:
+            n_obs_by_id[tid] = int(
+                pd.to_numeric(sorted_grp[target_col], errors="coerce").notna().sum()
+            )
+        else:
+            n_obs_by_id[tid] = len(sorted_grp)
+
+    # Orient each (k, v) pair into pred -> succ
+    pred_of: dict[str, str] = {}
+    for raw_k, raw_v in supersession_map.items():
+        k, v = str(raw_k).strip(), str(raw_v).strip()
+        if not k or not v or k == v:
+            continue
+        ds_k, ds_v = min_ds_by_id.get(k), min_ds_by_id.get(v)
+        n_k, n_v = n_obs_by_id.get(k, 0), n_obs_by_id.get(v, 0)
+        if ds_k is not None and ds_v is not None and ds_k != ds_v:
+            if ds_k < ds_v:
+                pred, succ = k, v
+            else:
+                pred, succ = v, k
+        elif n_k != n_v:
+            if n_k > n_v:
+                pred, succ = k, v
+            else:
+                pred, succ = v, k
+        else:
+            # Default orientation: {successor_id: predecessor_id}
+            pred, succ = v, k
+        pred_of[succ] = pred
+
+    if not pred_of:
+        return work
+
+    # Resolve topological order across multi-generation chains (v1 -> v2 -> v3)
+    chains_by_succ: dict[str, list[str]] = {}
+    for succ in sorted(pred_of.keys()):
+        chain: list[str] = []
+        curr = succ
+        visited: set[str] = {succ}
+        while curr in pred_of:
+            p = pred_of[curr]
+            if p in visited:
+                break
+            visited.add(p)
+            chain.append(p)
+            curr = p
+        chain.reverse()  # oldest ancestor first: [v1, v2] for succ=v3
+        chains_by_succ[succ] = chain
+
+    # Sort successors by chain depth so v1 -> v2 splices before v2 -> v3
+    ordered_succs = sorted(chains_by_succ.keys(), key=lambda s: (len(chains_by_succ[s]), s))
+    all_predecessors: set[str] = set(pred_of.values())
+
+    meta_cols = [c for c in work.columns if c not in {ts_id_col, date_col, target_col}]
+
+    for succ in ordered_succs:
+        pred = pred_of[succ]
+        df_pred = frames_by_id.get(pred)
+        df_succ = frames_by_id.get(succ)
+        if df_pred is None or df_pred.empty:
+            continue
+        if df_succ is None or df_succ.empty:
+            spliced = df_pred.copy()
+            spliced[ts_id_col] = succ
+            frames_by_id[succ] = spliced
+            continue
+
+        if not has_dates:
+            spliced = pd.concat([df_pred.assign(**{ts_id_col: succ}), df_succ], ignore_index=True)
+            frames_by_id[succ] = spliced
+            continue
+
+        succ_min_ds = df_succ[date_col].min()
+        df_before = df_pred[df_pred[date_col] < succ_min_ds].copy()
+        df_overlap_pred = df_pred[df_pred[date_col] >= succ_min_ds].copy()
+
+        # Stamp successor ID and constant static metadata onto prepended predecessor rows
+        df_before[ts_id_col] = succ
+        for mcol in meta_cols:
+            if mcol in df_succ.columns:
+                non_na = df_succ[mcol].dropna()
+                if not non_na.empty and non_na.nunique() == 1:
+                    df_before[mcol] = non_na.iloc[0]
+
+        df_succ_adj = df_succ.copy()
+        if not df_overlap_pred.empty and has_target:
+            ov_map = df_overlap_pred.groupby(date_col, sort=False)[target_col].sum().to_dict()
+            common_mask = df_succ_adj[date_col].isin(ov_map.keys())
+            if common_mask.any():
+                y_succ_ov = pd.to_numeric(
+                    df_succ_adj.loc[common_mask, target_col], errors="coerce"
+                ).fillna(0.0)
+                y_pred_ov = (
+                    df_succ_adj.loc[common_mask, date_col].map(ov_map).astype(float).fillna(0.0)
+                )
+                should_sum = overlap_mode == "sum"
+                if overlap_mode == "auto":
+                    if not df_before.empty:
+                        mu_pre = float(pd.to_numeric(df_before[target_col], errors="coerce").mean())
+                        mu_succ = float(y_succ_ov.mean())
+                        mu_sum = float((y_succ_ov + y_pred_ov).mean())
+                        should_sum = abs(mu_sum - mu_pre) <= abs(mu_succ - mu_pre)
+                    else:
+                        should_sum = True
+                if should_sum:
+                    df_succ_adj.loc[common_mask, target_col] = (y_succ_ov + y_pred_ov).to_numpy(
+                        dtype=float
+                    )
+
+        spliced = (
+            pd.concat([df_before, df_succ_adj], ignore_index=True)
+            .sort_values(date_col)
+            .reset_index(drop=True)
+        )
+        frames_by_id[succ] = spliced
+
+    kept_ids = [
+        tid
+        for tid in frames_by_id
+        if not (drop_predecessors and tid in all_predecessors and tid not in chains_by_succ)
+    ]
+    if drop_predecessors:
+        kept_ids = [tid for tid in frames_by_id if tid not in all_predecessors]
+
+    out_frames = [frames_by_id[tid] for tid in kept_ids if not frames_by_id[tid].empty]
+    out_df = pd.concat(out_frames, ignore_index=True) if out_frames else work.iloc[0:0].copy()
+    out_df.attrs["supersession_chains"] = {
+        succ: {
+            "predecessors": chains_by_succ[succ],
+            "spliced_n_obs": len(frames_by_id.get(succ, ())),
+        }
+        for succ in ordered_succs
+    }
+    return out_df
+
+
 def _build_fallback_levels(
     static_covariates: Sequence[str],
     hierarchy_cols: Sequence[str],
@@ -575,7 +970,7 @@ def _compute_donor_launch_similarity(
 
 
 def _project_archetype_from_donors(
-    method: Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle"],
+    method: Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle", "arps_decline"],
     y_obs: np.ndarray,
     horizon: int,
     matched_donors: Sequence[DonorProfile],
@@ -624,6 +1019,20 @@ def _project_archetype_from_donors(
             yhat, params = fit_weibull_lifecycle(y_obs, h, seasonal_indices=seasonal_indices)
             if n_obs == 0:
                 yhat = yhat * (blended_scale / max(float(np.mean(yhat)), _EPS))
+            return yhat, (), (), eb_weight, prior_scale, blended_scale, params
+        if method == "arps_decline":
+            yhat, params = fit_arps_decline(y_obs, h, seasonal_indices=seasonal_indices)
+            if n_obs == 0:
+                scale_mult = blended_scale / max(float(np.mean(yhat)), _EPS)
+                yhat = yhat * scale_mult
+                qi_scaled = params["q_i"] * scale_mult
+                eur_t, eur_r = _arps_cumulative_eur(qi_scaled, params["b"], params["d_i"], n_obs=0)
+                params = {
+                    **params,
+                    "q_i": round(float(qi_scaled), 4),
+                    "eur_total": round(float(eur_t), 4),
+                    "eur_remaining": round(float(eur_r), 4),
+                }
             return yhat, (), (), eb_weight, prior_scale, blended_scale, params
         base_curve = np.array(
             [blended_scale * seasonal_indices[(n_obs + step) % m_per] for step in range(h)],
@@ -808,6 +1217,70 @@ def _project_archetype_from_donors(
             },
         )
 
+    if method == "arps_decline":
+        b_prior = float(
+            np.sum(top_weights * np.array([d.arps_params.get("b", 0.5) for d in top_donors]))
+        )
+        di_prior = float(
+            np.sum(top_weights * np.array([d.arps_params.get("d_i", 0.05) for d in top_donors]))
+        )
+        qi_ratio_prior = float(
+            np.sum(
+                top_weights
+                * np.array(
+                    [
+                        d.arps_params.get("q_i", d.mean_level * 1.5) / max(d.mean_level, _EPS)
+                        for d in top_donors
+                    ]
+                )
+            )
+        )
+        local_a: dict[str, float] = {}
+        if n_obs >= 3:
+            _, local_a = fit_arps_decline(y_obs, h, seasonal_indices=blended_seasonal)
+            w_arps = 1.0 if n_obs >= 14 else eb_weight
+            b_blend = float(np.clip(w_arps * local_a["b"] + (1.0 - w_arps) * b_prior, 0.0, 1.0))
+            di_blend = float(max(w_arps * local_a["d_i"] + (1.0 - w_arps) * di_prior, 1e-6))
+        else:
+            b_blend, di_blend = b_prior, di_prior
+
+        if n_obs >= 14 and "q_i" in local_a:
+            qi_blend = float(local_a["q_i"])
+        elif n_obs > 0:
+            t_pref = np.arange(0, n_obs, dtype=float)
+            obs_s = np.array([blended_seasonal[i % m_per] for i in range(n_obs)], dtype=float)
+            g_pref = _arps_unit_basis(t_pref, b_blend, di_blend) * obs_s
+            denom_g = float(np.dot(g_pref, g_pref))
+            qi_from_obs = (
+                float(np.dot(y_obs, g_pref) / max(denom_g, _EPS))
+                if denom_g > _EPS
+                else float(y_obs[0])
+            )
+            qi_prior = blended_scale * qi_ratio_prior
+            qi_blend = max(float(eb_weight * qi_from_obs + (1.0 - eb_weight) * qi_prior), _EPS)
+        else:
+            qi_blend = max(blended_scale * qi_ratio_prior, _EPS)
+
+        fut_t = np.arange(n_obs, n_obs + h, dtype=float)
+        fut_s = np.array([blended_seasonal[(n_obs + s) % m_per] for s in range(h)], dtype=float)
+        yhat = _arps_rate_curve(fut_t, qi_blend, b_blend, di_blend) * fut_s
+        eur_tot, eur_rem = _arps_cumulative_eur(qi_blend, b_blend, di_blend, n_obs=n_obs)
+        return (
+            np.maximum(0.0, yhat),
+            donor_ids,
+            weights_tuple,
+            eb_weight,
+            prior_scale,
+            blended_scale,
+            {
+                "q_i": round(float(qi_blend), 4),
+                "b": round(float(b_blend), 6),
+                "d_i": round(float(di_blend), 6),
+                "eur_total": round(float(eur_tot), 4),
+                "eur_remaining": round(float(eur_rem), 4),
+            },
+        )
+
     # method == "weibull_lifecycle"
     k_prior = float(
         np.sum(top_weights * np.array([d.weibull_params.get("k", 1.6) for d in top_donors]))
@@ -892,10 +1365,13 @@ def _evaluate_lodo_cv(
         return "analog_transfer", 0.0
 
     h_eval = max(3, min(int(horizon), 14))
-    candidates: tuple[Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle"], ...] = (
+    candidates: tuple[
+        Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle", "arps_decline"], ...
+    ] = (
         "analog_transfer",
         "bass_diffusion",
         "weibull_lifecycle",
+        "arps_decline",
     )
     abs_err_by_arch: dict[str, float] = dict.fromkeys(candidates, 0.0)
     naive_abs_err = 0.0
@@ -998,6 +1474,15 @@ def build_cold_start_donor_pool(
             pooled_residual_quantiles=default_qs,
         )
 
+    if cfg is not None and cfg.features.supersession_map:
+        panel_df = apply_supersession_map(
+            panel_df,
+            cfg.features.supersession_map,
+            ts_id_col=eff_ts_col,
+            date_col=eff_date_col,
+            target_col=eff_target_col,
+        )
+
     avail_cols = set(panel_df.columns) - {eff_ts_col, eff_date_col, eff_target_col}
     if not stat_cols and not hier_cols:
         # Auto-detect series-constant categorical/attribute columns in panel_df when not explicitly
@@ -1091,6 +1576,7 @@ def build_cold_start_donor_pool(
 
         _, bass_p = fit_bass_diffusion(launch_slice, eff_horizon, seasonal_indices=s_indices)
         _, weib_p = fit_weibull_lifecycle(launch_slice, eff_horizon, seasonal_indices=s_indices)
+        _, arps_p = fit_arps_decline(launch_slice, eff_horizon, seasonal_indices=s_indices)
 
         donors.append(
             DonorProfile(
@@ -1109,6 +1595,7 @@ def build_cold_start_donor_pool(
                 residual_quantiles=res_qs,
                 bass_params=bass_p,
                 weibull_params=weib_p,
+                arps_params=arps_p,
             )
         )
 
@@ -1417,9 +1904,9 @@ def forecast_cold_start_series(
     # Resolve archetype method
     if method == "auto":
         if donor_pool is not None and donor_group in donor_pool.group_archetypes:
-            resolved_arch: Literal["analog_transfer", "bass_diffusion", "weibull_lifecycle"] = (
-                donor_pool.group_archetypes[donor_group]  # type: ignore[assignment]
-            )
+            resolved_arch: Literal[
+                "analog_transfer", "bass_diffusion", "weibull_lifecycle", "arps_decline"
+            ] = donor_pool.group_archetypes[donor_group]  # type: ignore[assignment]
         elif donor_pool is not None and "__global__" in donor_pool.group_archetypes:
             resolved_arch = donor_pool.group_archetypes["__global__"]  # type: ignore[assignment]
         elif matched_donors:
@@ -1613,6 +2100,7 @@ def cold_start_transfer_df(
     matching: ColdStartMatching | None = None,
     cold_start_matching: ColdStartMatching | None = None,
     similarity_method: SimilarityMethod | None = None,
+    supersession_map: Mapping[str, str] | None = None,
     static_covariates: Sequence[str] = (),
     hierarchy_cols: Sequence[str] = (),
     text_cols: Sequence[str] | str | None = (),
@@ -1654,6 +2142,19 @@ def cold_start_transfer_df(
         if similarity_method is not None
         else (cfg.features.similarity_method if cfg is not None else "hybrid")
     )
+    eff_sup_map = (
+        supersession_map
+        if supersession_map is not None
+        else (cfg.features.supersession_map if cfg is not None else None)
+    )
+    if eff_sup_map and panel_df is not None and not panel_df.empty:
+        panel_df = apply_supersession_map(
+            panel_df,
+            eff_sup_map,
+            ts_id_col=eff_ts_col,
+            date_col=eff_date_col,
+            target_col=eff_target_col,
+        )
 
     preds_src = forecasts_df if forecasts_df is not None else predictions_df
     donor_pool = build_cold_start_donor_pool(
@@ -1696,6 +2197,11 @@ def cold_start_transfer_df(
         "bass_m",
         "weibull_k",
         "weibull_lambda",
+        "arps_qi",
+        "arps_b",
+        "arps_di",
+        "eur_total",
+        "eur_remaining",
         "pooled_q80_width",
         "yhat_mean",
         "mean_forecast",
@@ -1766,6 +2272,11 @@ def cold_start_transfer_df(
                 "bass_m": lcp.get("m", float("nan")),
                 "weibull_k": lcp.get("k", float("nan")),
                 "weibull_lambda": lcp.get("lambda", float("nan")),
+                "arps_qi": lcp.get("q_i", float("nan")),
+                "arps_b": lcp.get("b", float("nan")),
+                "arps_di": lcp.get("d_i", float("nan")),
+                "eur_total": lcp.get("eur_total", float("nan")),
+                "eur_remaining": lcp.get("eur_remaining", float("nan")),
                 "pooled_q80_width": cs_res.pooled_q80_width,
                 "yhat_mean": round(yhat_mean_val, 4),
                 "mean_forecast": round(yhat_mean_val, 4),

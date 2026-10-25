@@ -186,12 +186,19 @@ _RUN_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{12}$")
 
 GridPolicy = Literal["strict", "fill_zero", "zero_fill", "ffill", "linear"]
 OutlierPolicy = Literal["none", "winsorize", "interpolate", "flag", "stl_resid"]
-ColdStartMethod = Literal["auto", "analog_transfer", "bass_diffusion", "weibull_lifecycle"]
+ColdStartMethod = Literal[
+    "auto",
+    "analog_transfer",
+    "bass_diffusion",
+    "weibull_lifecycle",
+    "arps_decline",
+]
 COLD_START_METHODS: tuple[str, ...] = (
     "auto",
     "analog_transfer",
     "bass_diffusion",
     "weibull_lifecycle",
+    "arps_decline",
 )
 ColdStartMatching = Literal["auto", "attribute", "similarity", "hybrid"]
 COLD_START_MATCHING_MODES: tuple[str, ...] = (
@@ -248,6 +255,8 @@ VALID_VARIANT_TAGS: frozenset[str] = frozenset(
         "analog_transfer",
         "bass_diffusion",
         "weibull_lifecycle",
+        "arps_decline",
+        "cold_start_arps",
         "aci",
         "aci_norm",
         "aci_normalized",
@@ -398,6 +407,8 @@ class FeaturesConfig(BaseModel):
     cold_start_min_obs: int = Field(default=14, ge=1)
     cold_start_method: ColdStartMethod = "auto"
     cold_start_matching: ColdStartMatching = "auto"
+    supersession_map: dict[str, str] = Field(default_factory=dict)
+    degree_day_cols: dict[str, float] = Field(default_factory=dict)
     similarity_cluster_feature: bool = False
     similarity_method: SimilarityMethod = "hybrid"
     similarity_n_clusters: int | Literal["auto"] = "auto"
@@ -486,6 +497,33 @@ class FeaturesConfig(BaseModel):
                         f"features.exog_lags would build '{built}', which is already a "
                         f"declared exog column; rename one of them"
                     )
+        for name, base_temp in self.degree_day_cols.items():
+            if name not in declared:
+                raise ValueError(
+                    f"features.degree_day_cols names '{name}', which is not in features.exog / "
+                    f"future_covariates / past_covariates {sorted(declared)} — degree-day splines "
+                    f"can only be built from a declared dynamic covariate"
+                )
+            if isinstance(base_temp, bool) or not math.isfinite(float(base_temp)):
+                raise ValueError(
+                    f"features.degree_day_cols['{name}'] must be a finite balance temperature, "
+                    f"got {base_temp!r}"
+                )
+            for prefix in ("hdd", "cdd"):
+                if (built_dd := f"{prefix}_{name}") in all_declared:
+                    raise ValueError(
+                        f"features.degree_day_cols would build '{built_dd}', which is already a "
+                        f"declared covariate column; rename one of them"
+                    )
+        for succ_id, pred_id in self.supersession_map.items():
+            s_clean = str(succ_id).strip()
+            p_clean = str(pred_id).strip()
+            if not s_clean or not p_clean:
+                raise ValueError(
+                    "features.supersession_map keys and values must be non-empty series IDs"
+                )
+            if s_clean == p_clean:
+                raise ValueError(f"features.supersession_map cannot map '{s_clean}' to itself")
         if len(set(self.ablation_modes)) != len(self.ablation_modes):
             raise ValueError(f"features.ablation_modes contains duplicates: {self.ablation_modes}")
         if len(set(self.ablation_models)) != len(self.ablation_models):

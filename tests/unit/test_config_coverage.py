@@ -296,6 +296,9 @@ UNPROVEN: dict[str, str] = {
     "features.cold_start_method=analog_transfer": (
         "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
     ),
+    "features.cold_start_method=arps_decline": (
+        "tests/unit/test_track_p2_cross_industry.py::test_tier_a_dgp_arps_decline_and_eur_recovery"
+    ),
     "features.cold_start_method=bass_diffusion": (
         "tests/unit/test_cold_start.py::test_cold_start_config_and_worker_pipeline"
     ),

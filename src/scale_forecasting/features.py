@@ -78,6 +78,8 @@ VARIANT_FEATURE_META_KEYS: frozenset[str] = frozenset(
         "cold_start_min_obs",
         "cold_start_method",
         "cold_start_matching",
+        "supersession_map",
+        "degree_day_cols",
         "similarity_cluster_feature",
         "similarity_method",
         "similarity_n_clusters",
@@ -474,7 +476,11 @@ def _narrow_unsupported_features(
     new_static = list(f.static_covariates) if model_cls.supports_static_covariates else []
     kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
     new_lags = {k: list(v) for k, v in f.exog_lags.items() if k in kept_dynamic}
-    new_mono = {k: v for k, v in f.monotonic_constraints.items() if k in kept_dynamic}
+    new_degree_days = {k: float(v) for k, v in f.degree_day_cols.items() if k in kept_dynamic}
+    kept_mono_cols = (
+        kept_dynamic | {f"hdd_{k}" for k in new_degree_days} | {f"cdd_{k}" for k in new_degree_days}
+    )
+    new_mono = {k: v for k, v in f.monotonic_constraints.items() if k in kept_mono_cols}
     new_features = f.model_copy(
         update={
             "exog": new_exog,
@@ -482,6 +488,7 @@ def _narrow_unsupported_features(
             "past_covariates": new_past,
             "static_covariates": new_static,
             "exog_lags": new_lags,
+            "degree_day_cols": new_degree_days,
             "monotonic_constraints": new_mono,
         }
     )
@@ -529,7 +536,13 @@ def resolve_model_variant(
         declared = set(f.all_covariates)
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
         if inferred_scope is not None and "training_mode" not in variant_explicit:
-            raw_params["training_mode"] = inferred_scope
+            if inferred_scope == "similarity_global":
+                if "similarity_cluster_feature" not in variant_explicit:
+                    raw_params["similarity_cluster_feature"] = True
+                if "global" in model_cls.supported_training_modes():
+                    raw_params["training_mode"] = "similarity_global"
+            else:
+                raw_params["training_mode"] = inferred_scope
         if inferred_cov is not None and "covariate_mode" not in variant_explicit:
             raw_params["covariate_mode"] = inferred_cov
 
@@ -586,13 +599,24 @@ def resolve_model_variant(
                     if "transform" not in variant_explicit:
                         raw_params["transform"] = tr_norm
                     rem_tag = rem_tag.replace(multi_tr, "")
-            for cs_m in ("analog_transfer", "bass_diffusion", "weibull_lifecycle"):
+            for cs_m in (
+                "analog_transfer",
+                "bass_diffusion",
+                "weibull_lifecycle",
+                "arps_decline",
+            ):
                 if cs_m in rem_tag:
                     if "cold_start_transfer" not in variant_explicit:
                         raw_params["cold_start_transfer"] = True
                     if "cold_start_method" not in variant_explicit:
                         raw_params["cold_start_method"] = cs_m
                     rem_tag = rem_tag.replace(cs_m, "")
+            if "cold_start_arps" in rem_tag:
+                if "cold_start_transfer" not in variant_explicit:
+                    raw_params["cold_start_transfer"] = True
+                if "cold_start_method" not in variant_explicit:
+                    raw_params["cold_start_method"] = "arps_decline"
+                rem_tag = rem_tag.replace("cold_start_arps", "")
             if "similarity_cold_start" in rem_tag:
                 if "cold_start_transfer" not in variant_explicit:
                     raw_params["cold_start_transfer"] = True
@@ -604,7 +628,12 @@ def resolve_model_variant(
                     raw_params["cold_start_transfer"] = True
                 rem_tag = rem_tag.replace("cold_start", "")
             if "similarity_global" in rem_tag:
-                if "training_mode" not in variant_explicit:
+                if "similarity_cluster_feature" not in variant_explicit:
+                    raw_params["similarity_cluster_feature"] = True
+                if (
+                    "training_mode" not in variant_explicit
+                    and "global" in model_cls.supported_training_modes()
+                ):
                     raw_params["training_mode"] = "similarity_global"
                 rem_tag = rem_tag.replace("similarity_global", "")
             for aci_tok in ("aci_normalized", "aci_norm"):
@@ -664,10 +693,15 @@ def resolve_model_variant(
         raw_params["monotonic_constraints"] = {}
     elif has_monotone_tag:
         explicit_param_mono = raw_params.get("monotonic_constraints")
+        cand_mono_cols = [
+            *f.dynamic_covariates,
+            *(f"hdd_{c}" for c in f.degree_day_cols),
+            *(f"cdd_{c}" for c in f.degree_day_cols),
+        ]
         resolved_mono = resolve_monotonic_constraints(
             f.monotonic_constraints,
             explicit_param_mono if isinstance(explicit_param_mono, Mapping) else None,
-            candidate_columns=f.dynamic_covariates,
+            candidate_columns=cand_mono_cols,
             infer_if_empty=True,
         )
         raw_params["monotonic_constraints"] = resolved_mono
@@ -849,10 +883,30 @@ def resolve_model_variant(
             )
             else f.similarity_n_clusters
         )
+        new_degree_days = dict(f.degree_day_cols)
+        if "degree_day_cols" in raw_params and raw_params["degree_day_cols"] is not None:
+            raw_dd = raw_params["degree_day_cols"]
+            if not isinstance(raw_dd, Mapping):
+                raise ConfigError(f"model_params.{model_name}.degree_day_cols must be a dict")
+            new_degree_days = {str(k): float(v) for k, v in raw_dd.items()}
+        new_supersession = dict(f.supersession_map)
+        if "supersession_map" in raw_params and raw_params["supersession_map"] is not None:
+            raw_sm = raw_params["supersession_map"]
+            if not isinstance(raw_sm, Mapping):
+                raise ConfigError(f"model_params.{model_name}.supersession_map must be a dict")
+            new_supersession = {str(k): str(v) for k, v in raw_sm.items()}
 
         kept_dynamic = set(new_exog) | set(new_future) | set(new_past)
         new_lags = {k: list(v) for k, v in new_lags.items() if k in kept_dynamic}
-        new_mono_constraints = {k: v for k, v in new_mono_constraints.items() if k in kept_dynamic}
+        new_degree_days = {k: float(v) for k, v in new_degree_days.items() if k in kept_dynamic}
+        kept_mono_cols = (
+            kept_dynamic
+            | {f"hdd_{k}" for k in new_degree_days}
+            | {f"cdd_{k}" for k in new_degree_days}
+        )
+        new_mono_constraints = {
+            k: v for k, v in new_mono_constraints.items() if k in kept_mono_cols
+        }
         cand_features = f.model_copy(
             update={
                 "transform": new_transform,
@@ -862,6 +916,8 @@ def resolve_model_variant(
                 "past_covariates": new_past,
                 "static_covariates": new_static,
                 "exog_lags": new_lags,
+                "degree_day_cols": new_degree_days,
+                "supersession_map": new_supersession,
                 "holidays": new_holidays,
                 "fourier": new_fourier,
                 "level_shift": new_level_shift,
@@ -1635,6 +1691,14 @@ def build_features(
             raise ConfigError(f"exog column '{name}' not found in series")
         cols[name] = frame[name].astype(float).to_numpy()
 
+    # Piecewise degree-day splines (HDD & CDD) for declared temperature covariates.
+    for name, base_temp in f.degree_day_cols.items():
+        if name in cols:
+            t_arr = cols[name]
+            t_base = float(base_temp)
+            cols[f"hdd_{name}"] = np.maximum(0.0, t_base - t_arr)
+            cols[f"cdd_{name}"] = np.maximum(0.0, t_arr - t_base)
+
     # Holiday flag from the canonical calendar (parity with BQML).
     if f.holidays:
         hol = holiday_frame(cfg)
@@ -1744,6 +1808,18 @@ def build_future_features(
     tail_rows = np.clip(np.arange(len(X) - h, len(X)), 0, len(X) - 1)
     tail = X.iloc[tail_rows]
 
+    if f.degree_day_cols:
+        for name, base_temp in f.degree_day_cols.items():
+            if name in known:
+                t_arr = known[name]
+            elif name in tail.columns:
+                t_arr = tail[name].to_numpy(dtype=float)
+            else:
+                continue
+            t_base = float(base_temp)
+            known[f"hdd_{name}"] = np.maximum(0.0, t_base - t_arr)
+            known[f"cdd_{name}"] = np.maximum(0.0, t_arr - t_base)
+
     if f.exog_lags:
         steps = np.arange(len(X), len(X) + h)
         for name, lags in f.exog_lags.items():
@@ -1761,6 +1837,27 @@ def build_future_features(
         for name in X.columns
     }
     return pd.DataFrame(cols, index=future)
+
+
+def compute_degree_days_df(
+    df: pd.DataFrame,
+    degree_day_cols: Mapping[str, float],
+) -> pd.DataFrame:
+    """Append Heating Degree-Day (``hdd_<col>``) and Cooling Degree-Day (``cdd_<col>``) columns.
+
+    For each ``(col, base_temp)`` entry in ``degree_day_cols``:
+    - ``hdd_<col> = max(0, base_temp - df[col])``
+    - ``cdd_<col> = max(0, df[col] - base_temp)``
+    """
+    out = df.copy()
+    for name, base_temp in degree_day_cols.items():
+        if name not in out.columns:
+            raise ConfigError(f"degree_day_cols column '{name}' not found in DataFrame")
+        t_arr = pd.to_numeric(out[name], errors="coerce").to_numpy(dtype=float)
+        t_base = float(base_temp)
+        out[f"hdd_{name}"] = np.maximum(0.0, t_base - t_arr)
+        out[f"cdd_{name}"] = np.maximum(0.0, t_arr - t_base)
+    return out
 
 
 def _fourier_terms(index: pd.DatetimeIndex, freq: str, order: int) -> dict[str, np.ndarray]:
