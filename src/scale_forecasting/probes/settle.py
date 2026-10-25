@@ -42,8 +42,6 @@ from typing import TYPE_CHECKING, Any
 
 from .reconcile import ProbeReport, read_and_probe
 from .vocabulary import (
-    _EMITTED,
-    _TERMINAL,
     CAPACITY_ABANDONED,
     NATIVE_FAILED,
     NATIVE_NOT_FOUND,
@@ -55,6 +53,12 @@ from .vocabulary import (
     VERDICT_LIKELY_COMPLETED,
     VERDICT_LOST,
     VERDICT_STALE_REGISTRY,
+)
+from .vocabulary import (
+    EMITTED as _EMITTED,
+)
+from .vocabulary import (
+    TERMINAL as _TERMINAL,
 )
 
 if TYPE_CHECKING:

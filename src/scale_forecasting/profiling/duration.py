@@ -481,8 +481,10 @@ def _model_single_cell_seconds(
         try:
             if get_model(bname).gpu_capable:
                 hw_factor = 0.38
-        except Exception:  # noqa: BLE001 - ignore unknown model
-            pass
+        except Exception as exc:  # noqa: BLE001 - ignore unknown model
+            import logging
+
+            logging.getLogger(__name__).debug("Model GPU capability lookup skipped: %s", exc)
 
     mult = (
         length_factor * horizon_factor * cov_factor * direct_factor * n_folds * hpo_mult * hw_factor

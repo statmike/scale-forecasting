@@ -28,12 +28,20 @@ from typing import TYPE_CHECKING, Any
 from .reconcile import ProbeReport, read_and_probe
 from .runtimes import get_probe
 from .vocabulary import (
-    _AWAITING_CAPACITY,
-    _CANCELLED,
-    _TERMINAL,
+    AWAITING_CAPACITY as _AWAITING_CAPACITY,
+)
+from .vocabulary import (
+    CANCELLED as _CANCELLED,
+)
+from .vocabulary import (
     NATIVE_NOT_FOUND,
     ProbeHandle,
-    _parse_ts,
+)
+from .vocabulary import (
+    TERMINAL as _TERMINAL,
+)
+from .vocabulary import (
+    parse_ts as _parse_ts,
 )
 
 if TYPE_CHECKING:

@@ -58,7 +58,8 @@ from . import (  # noqa: F401
     vertex_tide,
     xgboost_model,
 )
-from .base_model import _REGISTRY, BaseModel
+from .base_model import REGISTRY as _REGISTRY
+from .base_model import BaseModel
 
 _log = get_logger(__name__)
 

@@ -106,3 +106,13 @@ def _stamp_cluster_telemetry(
         _log.info("cluster sizing stamped for run %s", run_id)
     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort, never fatal
         _log.warning("cluster sizing capture failed (non-fatal): %r", exc)
+
+
+def job_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_job_client`."""
+    return _job_client(*args, **kwargs)
+
+
+def stamp_cluster_telemetry(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_stamp_cluster_telemetry`."""
+    return _stamp_cluster_telemetry(*args, **kwargs)

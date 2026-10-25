@@ -320,3 +320,8 @@ def serverless_dep_properties(infra: BatchInfra) -> tuple[str, dict[str, str]]:
         "spark.dataproc.driverEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
         "spark.executorEnv.PYSPARK_PYTHON": _VENV_ARCHIVE_PYTHON,
     }
+
+
+DEFAULT_TTL_SECONDS = _DEFAULT_TTL_SECONDS
+
+ENV_VENV_ARCHIVE = _ENV_VENV_ARCHIVE

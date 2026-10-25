@@ -215,3 +215,6 @@ def register(metric_cls: type[BaseMetric]) -> type[BaseMetric]:
         )
     _REGISTRY[name] = metric_cls
     return metric_cls
+
+
+REGISTRY = _REGISTRY

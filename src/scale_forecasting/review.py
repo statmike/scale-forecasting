@@ -2688,3 +2688,8 @@ def plot_attributions(
     ax.set_xlabel("normalized driver importance")
     ax.set_title(title or "Tier 1 Global Feature Attributions")
     return ax
+
+
+def assemble_progress(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_assemble_progress`."""
+    return _assemble_progress(*args, **kwargs)

@@ -74,7 +74,9 @@ from . import (  # noqa: F401
     wape,
 )
 from .base_metric import (
-    _REGISTRY,
+    REGISTRY as _REGISTRY,
+)
+from .base_metric import (
     BaseMetric,
     MetricContext,
     MetricDirection,

@@ -56,7 +56,8 @@ from ..resources.slot import merge_slots, resource_slot
 # ``_MODEL_COL`` is the internal per-cell model tag ``run_group`` reads to take its
 # explode branch (one cell per ``(ts_id, model)``); a Ray chunk carries it exactly like a Spark
 # bucket does.
-from .spark_io import _MODEL_COL, aggregate_status, run_group
+from .spark_io import MODEL_COL as _MODEL_COL
+from .spark_io import aggregate_status, run_group
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -1010,3 +1011,6 @@ def make_chunk_runner(
         return status
 
     return _run
+
+
+ACCELERATOR_TYPES = _ACCELERATOR_TYPES

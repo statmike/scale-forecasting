@@ -645,8 +645,12 @@ def simulate_scenarios(
             sc = extract_static_covariates(s_clean, work_cfg)
             if sc:
                 static_map[tid] = sc
-        except Exception:  # noqa: BLE001 - static covariates optional
-            pass
+        except Exception as exc:  # noqa: BLE001 - static covariates optional
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Optional scenario static covariates skipped for %s: %s", tid, exc
+            )
 
         hist_for_cost = s_clean
         fut_for_cost = base_fut

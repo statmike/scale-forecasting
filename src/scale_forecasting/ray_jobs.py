@@ -460,3 +460,13 @@ def _fetch_job_failure_detail(
     except Exception as exc:  # noqa: BLE001 - diagnosis is best-effort, never fatal
         _log.warning("could not fetch Ray job logs for %s: %r", job_id, exc)
     return "\n".join(parts)
+
+
+def connect_job_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_connect_job_client`."""
+    return _connect_job_client(*args, **kwargs)
+
+
+def is_job_absent_error(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_is_job_absent_error`."""
+    return _is_job_absent_error(*args, **kwargs)

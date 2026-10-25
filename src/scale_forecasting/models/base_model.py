@@ -600,3 +600,6 @@ class BaseModel(ABC):
             },
             columns=list(PREDICTION_COLUMNS),
         )
+
+
+REGISTRY = _REGISTRY

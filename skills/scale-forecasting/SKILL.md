@@ -4,7 +4,7 @@ description: Configure, validate, dry-run, execute, review, and repair enterpris
 license: Apache-2.0
 metadata:
   author: statmike
-  version: 1.8.1
+  version: 1.8.2
 ---
 
 # `scale-forecasting` — Agent Skill & Workflow Guide

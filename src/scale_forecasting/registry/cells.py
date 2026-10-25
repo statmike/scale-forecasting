@@ -16,14 +16,28 @@ from typing import TYPE_CHECKING, Any
 from .rows import assemble_metadata_row, assemble_oof_rows, assemble_prediction_rows
 from .tables import resolve_settings
 from .write_api import (
-    _CELL_TABLES,
-    _META_SPEC,
-    _OOF_SPEC,
-    _PRED_SPEC,
-    _append_via_write_api,
-    _encode_rows,
-    _proto_for,
+    CELL_TABLES as _CELL_TABLES,
+)
+from .write_api import (
+    META_SPEC as _META_SPEC,
+)
+from .write_api import (
+    OOF_SPEC as _OOF_SPEC,
+)
+from .write_api import (
+    PRED_SPEC as _PRED_SPEC,
+)
+from .write_api import (
+    append_via_write_api as _append_via_write_api,
+)
+from .write_api import (
+    encode_rows as _encode_rows,
+)
+from .write_api import (
     get_write_client,
+)
+from .write_api import (
+    proto_for as _proto_for,
 )
 
 if TYPE_CHECKING:

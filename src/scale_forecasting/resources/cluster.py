@@ -19,9 +19,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .catalog import (
-    _DEFAULT_TARGET_CELLS_PER_SLOT,
-    _MIB,
-    _SPARK_JVM_MB_PER_CORE,
+    DEFAULT_TARGET_CELLS_PER_SLOT as _DEFAULT_TARGET_CELLS_PER_SLOT,
+)
+from .catalog import (
+    MIB as _MIB,
+)
+from .catalog import (
+    SPARK_JVM_MB_PER_CORE as _SPARK_JVM_MB_PER_CORE,
+)
+from .catalog import (
     intraop_env_vars,
     machine_cores,
     machine_memory_bytes,

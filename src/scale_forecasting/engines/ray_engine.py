@@ -31,11 +31,19 @@ from ..profiling.source import resolve_profile
 from ..resources.fleet import RuntimeResourcePlan, tasks_for_ceiling
 from . import ray_io
 from .spark_io import (
-    _MODEL_COL,
+    MODEL_COL as _MODEL_COL,
+)
+from .spark_io import (
     STATUS_COLUMNS,
-    _needed_columns,
-    _resolve_source_table,
-    _snapshot_millis,
+)
+from .spark_io import (
+    needed_columns as _needed_columns,
+)
+from .spark_io import (
+    resolve_source_table as _resolve_source_table,
+)
+from .spark_io import (
+    snapshot_millis as _snapshot_millis,
 )
 
 if TYPE_CHECKING:
@@ -809,3 +817,53 @@ def _pool_chunks(plan: RuntimeResourcePlan, target_cells: int) -> int:
     the empty chunks, so a pool never gets more tasks than it has cells.
     """
     return max(_chunk_count(plan.n_cells, target_cells), tasks_for_ceiling(plan))
+
+
+def assert_source_supports_folds(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_assert_source_supports_folds`."""
+    return _assert_source_supports_folds(*args, **kwargs)
+
+
+def chunk_count(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_chunk_count`."""
+    return _chunk_count(*args, **kwargs)
+
+
+def create_read_session(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_create_read_session`."""
+    return _create_read_session(*args, **kwargs)
+
+
+def failed_chunk_status(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_failed_chunk_status`."""
+    return _failed_chunk_status(*args, **kwargs)
+
+
+def limit_series(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_limit_series`."""
+    return _limit_series(*args, **kwargs)
+
+
+def needed_columns(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_needed_columns`."""
+    return _needed_columns(*args, **kwargs)
+
+
+def read_source_series(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_read_source_series`."""
+    return _read_source_series(*args, **kwargs)
+
+
+def read_streams(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_read_streams`."""
+    return _read_streams(*args, **kwargs)
+
+
+def resolve_fleetwide_hpo(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_resolve_fleetwide_hpo`."""
+    return _resolve_fleetwide_hpo(*args, **kwargs)
+
+
+def stamp_executed_sizing(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_stamp_executed_sizing`."""
+    return _stamp_executed_sizing(*args, **kwargs)

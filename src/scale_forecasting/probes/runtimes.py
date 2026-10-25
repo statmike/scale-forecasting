@@ -16,6 +16,7 @@ importing this module loads no cloud client, and only the probed runtime's path 
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -32,11 +33,15 @@ from .vocabulary import (
     ProbeHandle,
     ProbeResult,
     RuntimeProbe,
-    _parse_ts,
+)
+from .vocabulary import (
+    parse_ts as _parse_ts,
 )
 
 if TYPE_CHECKING:
     from ..settings import Settings
+
+_log = logging.getLogger(__name__)
 
 
 # A probe is advisory and must never block the reader that called it: cap every native client call
@@ -171,7 +176,8 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..batch_telemetry import _batch_client, extract_job_telemetry
+            from ..batch_telemetry import batch_client as _batch_client
+            from ..batch_telemetry import extract_job_telemetry
 
             client = _batch_client(handle.region)
             parent = f"projects/{settings.project_id}/locations/{handle.region}"
@@ -241,7 +247,7 @@ class SparkProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..batch_telemetry import _batch_client
+            from ..batch_telemetry import batch_client as _batch_client
 
             client = _batch_client(handle.region)
             parent = f"projects/{settings.project_id}/locations/{handle.region}"
@@ -337,8 +343,10 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_cluster import _get_cluster, _init_vertex
-            from ..ray_jobs import _connect_job_client, _is_job_absent_error
+            from ..ray_cluster import get_cluster as _get_cluster
+            from ..ray_cluster import init_vertex as _init_vertex
+            from ..ray_jobs import connect_job_client as _connect_job_client
+            from ..ray_jobs import is_job_absent_error as _is_job_absent_error
 
             resource_name = handle.resource_name
             if not resource_name:
@@ -373,8 +381,8 @@ class RayProbe:
                     phases = platform_phases(create_t, start_t, end_t)
                     if any(v is not None for v in phases.values()):
                         telem = phases
-            except Exception:  # noqa: BLE001 - job-info is a best-effort enrichment, not the state
-                pass
+            except Exception as exc:  # noqa: BLE001 - job-info is a best-effort enrichment, not the state
+                _log.debug("Ray job_info telemetry enrichment skipped: %s", exc)
             return ProbeResult(native, exists=True, detail=detail, telemetry=telem)
         except Exception as exc:  # noqa: BLE001 - a probe is advisory: degrade, never raise
             return ProbeResult(NATIVE_UNKNOWN, exists=True, detail=_short_detail(exc))
@@ -383,8 +391,9 @@ class RayProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..ray_cluster import _get_cluster, _init_vertex
-            from ..ray_jobs import _connect_job_client
+            from ..ray_cluster import get_cluster as _get_cluster
+            from ..ray_cluster import init_vertex as _init_vertex
+            from ..ray_jobs import connect_job_client as _connect_job_client
 
             resource_name = handle.resource_name
             if not resource_name:
@@ -534,7 +543,7 @@ class VertexProbe:
             from google.api_core.exceptions import NotFound
 
             from ..batch_telemetry import platform_phases
-            from ..vertex_submit import _job_client
+            from ..vertex_submit import job_client as _job_client
 
             region = handle.region or settings.region
             client = _job_client(region)
@@ -564,7 +573,7 @@ class VertexProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..vertex_submit import _job_client
+            from ..vertex_submit import job_client as _job_client
 
             region = handle.region or settings.region
             client = _job_client(region)
@@ -729,7 +738,7 @@ class GkeProbe:
     @staticmethod
     def _resolve_coordinates(handle: ProbeHandle, settings: Settings) -> tuple[str, str, str, str]:
         """Return ``(location, cluster_name, namespace, job_name)`` from ``handle`` (pure)."""
-        from ..gke_submit import _ephemeral_cluster_name
+        from ..gke_submit import ephemeral_cluster_name as _ephemeral_cluster_name
 
         resource = handle.resource_name or ""
         parts = resource.split("/") if resource else []
@@ -850,8 +859,8 @@ class VertexAutoMLProbe:
         with_exact_name = f"{parent}/pipelineJobs/{target}"
         try:
             return [client.get_pipeline_job(name=with_exact_name, timeout=_PROBE_TIMEOUT_S)]
-        except NotFound:
-            pass
+        except NotFound as exc:
+            _log.debug("Exact pipelineJob lookup missed (%s); falling back to prefix list", exc)
 
         matches = [
             job
@@ -870,7 +879,7 @@ class VertexAutoMLProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..automl_submit import _pipeline_client
+            from ..automl_submit import pipeline_client as _pipeline_client
 
             region = handle.region or settings.region
             client = _pipeline_client(region)
@@ -918,7 +927,7 @@ class VertexAutoMLProbe:
         try:
             from google.api_core.exceptions import NotFound
 
-            from ..automl_submit import _pipeline_client
+            from ..automl_submit import pipeline_client as _pipeline_client
 
             region = handle.region or settings.region
             client = _pipeline_client(region)

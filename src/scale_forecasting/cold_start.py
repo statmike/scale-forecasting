@@ -30,6 +30,7 @@ produce calibrated Day-1 prediction intervals even when $n_i = 0$.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,6 +43,8 @@ from scipy.optimize import least_squares, minimize
 from .calibration import CALIBRATED_COLUMNS, rearrange_monotone_quantiles
 from .models.base_model import DEFAULT_QUANTILES
 from .seasonality import seasonal_period
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .config import ColdStartMatching, ColdStartMethod, RunConfig, SimilarityMethod
@@ -1768,8 +1771,8 @@ def forecast_cold_start_series(
                 if math.isfinite(val) and val > 0.0:
                     prior_scale_col_val = val
                     break
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                _log.debug("Ignoring non-numeric cold-start scale column %r: %s", scale_col, exc)
 
     donor_sim_map: dict[str, float] | None = None
     matching_mode_used = "attribute"

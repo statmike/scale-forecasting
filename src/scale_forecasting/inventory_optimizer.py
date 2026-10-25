@@ -32,6 +32,7 @@ order quantities (`vendor_moq` / `min_order_qty`) and case-pack multiples (`orde
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -430,8 +431,10 @@ def _get_or_sample_copula_paths(
                 similarity_method=similarity_method,
                 seed=int(seed),
             )
-    except Exception:  # noqa: BLE001 - fallback when copula module is unavailable or fails
-        pass
+    except Exception as exc:  # noqa: BLE001 - fallback when copula module is unavailable or fails
+        logging.getLogger(__name__).debug(
+            "Copula trajectory sampling fell back to parametric simulation: %s", exc
+        )
 
     return _fallback_sample_trajectories(
         predictions_df,

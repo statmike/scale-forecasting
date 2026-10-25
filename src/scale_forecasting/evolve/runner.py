@@ -180,8 +180,11 @@ class EvolveResult:
         If ``output_path`` is provided, writes the DAG Python source to ``output_path`` and returns
         the rendered DAG source code string.
         """
+        import tempfile
+
         eff_dag_id = dag_id or f"scale_forecasting_evolve_{self.target}"
-        export_target = self.export_path or f"/tmp/evolved_{self.target}.py"
+        default_export = Path(tempfile.gettempdir()) / f"evolved_{self.target}.py"
+        export_target = self.export_path or str(default_export)
         dag_source = f'''"""Airflow DAG for scheduled scale_forecasting.evolve ({self.target})."""
 
 from __future__ import annotations

@@ -41,11 +41,19 @@ from .capacity import (
 )
 from .capacity import walk as capacity_walk
 from .cluster_deps import (
-    _VENV_ARCHIVE_METADATA_KEY,
-    _VENV_DIR,
-    _VENV_DIR_METADATA_KEY,
-    _resolve_cluster_deps,
-    _stage_cluster_init,
+    VENV_ARCHIVE_METADATA_KEY as _VENV_ARCHIVE_METADATA_KEY,
+)
+from .cluster_deps import (
+    VENV_DIR as _VENV_DIR,
+)
+from .cluster_deps import (
+    VENV_DIR_METADATA_KEY as _VENV_DIR_METADATA_KEY,
+)
+from .cluster_deps import (
+    resolve_cluster_deps as _resolve_cluster_deps,
+)
+from .cluster_deps import (
+    stage_cluster_init as _stage_cluster_init,
 )
 from .compute_fallback import Candidate, resolve_candidates
 from .errors import ConfigError, get_logger
@@ -867,3 +875,21 @@ def teardown_shared_cluster(
 
     settings = settings or Settings.resolve()
     _delete_cluster(_cluster_client(region), settings.project_id, region, name)
+
+
+DEFAULT_WORKER_COUNT = _DEFAULT_WORKER_COUNT
+
+
+def cluster_client(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_cluster_client`."""
+    return _cluster_client(*args, **kwargs)
+
+
+def create_cluster_across_candidates(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_create_cluster_across_candidates`."""
+    return _create_cluster_across_candidates(*args, **kwargs)
+
+
+def delete_cluster(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_delete_cluster`."""
+    return _delete_cluster(*args, **kwargs)

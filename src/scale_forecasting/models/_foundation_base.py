@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import logging
 import math
 import os
 import shutil
@@ -32,6 +33,8 @@ from .base_model import DEFAULT_QUANTILES, BaseModel, ModelContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+
+_log = logging.getLogger(__name__)
 
 DECILE_GRID: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 _LOCAL_UID = "__local__"
@@ -68,8 +71,8 @@ def _ensure_torch_runtime_ready() -> None:
         from torch._native import triton_utils
 
         triton_utils.deregister_op_overrides()
-    except Exception:  # noqa: BLE001 - optional PyTorch internal module across versions
-        pass
+    except Exception as exc:  # noqa: BLE001 - optional PyTorch internal module across versions
+        _log.debug("Triton JIT op override deregistration skipped: %s", exc)
 
 
 def _is_writable_dir(path: str) -> bool:
@@ -166,8 +169,8 @@ def _release_accelerator_memory() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001 - best-effort CUDA cache cleanup
-        pass
+    except Exception as exc:  # noqa: BLE001 - best-effort CUDA cache cleanup
+        _log.debug("Foundation model accelerator cache release skipped: %s", exc)
 
 
 def clear_foundation_cache() -> None:

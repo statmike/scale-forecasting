@@ -438,3 +438,16 @@ def measure_fit(
             error=repr(e),
             host_cpu_count=os.cpu_count(),
         )
+
+
+MIN_WALL_S = _MIN_WALL_S
+
+
+def peak_gpu_bytes(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_peak_gpu_bytes`."""
+    return _peak_gpu_bytes(*args, **kwargs)
+
+
+def rss_bytes(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_rss_bytes`."""
+    return _rss_bytes(*args, **kwargs)

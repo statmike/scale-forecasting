@@ -765,3 +765,18 @@ def teardown_shared_cluster(
     """
     _init_vertex(settings, region)
     return _delete_cluster(cluster_resource_path(settings, name, region))
+
+
+def get_cluster(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_get_cluster`."""
+    return _get_cluster(*args, **kwargs)
+
+
+def init_vertex(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_init_vertex`."""
+    return _init_vertex(*args, **kwargs)
+
+
+def resolve_regions(*args: Any, **kwargs: Any) -> Any:
+    """Shared internal helper delegating to `_resolve_regions`."""
+    return _resolve_regions(*args, **kwargs)

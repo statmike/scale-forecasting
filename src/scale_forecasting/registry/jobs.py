@@ -9,12 +9,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .params import (
-    _JOB_PARAM_TYPES,
-    _job_param,
-    _status_guard_param,
+    JOB_PARAM_TYPES as _JOB_PARAM_TYPES,
+)
+from .params import (
+    job_param as _job_param,
+)
+from .params import (
     render_status_guard,
     render_telemetry_merge,
     telemetry_merge_params,
+)
+from .params import (
+    status_guard_param as _status_guard_param,
 )
 from .tables import bigquery_client, resolve_settings
 
