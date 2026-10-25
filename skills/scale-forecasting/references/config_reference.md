@@ -76,8 +76,10 @@ Target transforms (including compositional `clr`/`ilr` simplex transforms), coun
 | `holiday_window` | `HolidayWindowConfig \| None` | `null` | — |
 | `cold_start_transfer` | `bool` | `false` | — |
 | `cold_start_min_obs` | `int` | `14` | `>= 1` |
-| `cold_start_method` | `'auto' \| 'analog_transfer' \| 'bass_diffusion' \| 'weibull_lifecycle'` | `"auto"` | — |
+| `cold_start_method` | `'auto' \| 'analog_transfer' \| 'bass_diffusion' \| 'weibull_lifecycle' \| 'arps_decline'` | `"auto"` | — |
 | `cold_start_matching` | `'auto' \| 'attribute' \| 'similarity' \| 'hybrid'` | `"auto"` | — |
+| `supersession_map` | `dict[str, str]` | `{}` | — |
+| `degree_day_cols` | `dict[str, float]` | `{}` | — |
 | `similarity_cluster_feature` | `bool` | `false` | — |
 | `similarity_method` | `'hybrid' \| 'physics_attractor' \| 'spectral_phase' \| 'elastic_dtw' \| 'minirocket' \| 'structural_signature' \| 'foundation_latent'` | `"hybrid"` | — |
 | `similarity_n_clusters` | `int \| 'auto'` | `"auto"` | — |
@@ -319,7 +321,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `<model>@direct` / `<model>@recursive` | Select direct multi-horizon step-by-step regressors (`h=1..H`) vs. recursive rollouts. |
 | `<model>@monotone` | Enforce causal covariate sign constraints (`features.monotonic_constraints`) on supported learners (`lightgbm`, `xgboost`, `catboost`, `regression_lags`). |
 | `<model>@transform_log1p` / `<model>@transform_boxcox` / `<model>@transform_clr` / `<model>@transform_ilr` / `<model>@transform_none` | Per-model target transform override (including compositional simplex `transform_clr` and `transform_ilr` isometric log-ratio transforms). |
-| `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`). |
+| `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` / `<model>@arps_decline` / `<model>@cold_start_arps` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch or depletion archetype (`analog_transfer`, `bass_diffusion`, `weibull_lifecycle`, or `arps_decline` with analytical `eur_total` / `eur_remaining`). |
 | `<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized` | Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized CQR (`aci_normalized`) interval calibration override. |
 | `<model>@similarity_global` / `<model>@similarity_cold_start` | Enable similarity-clustered global pooling (`@similarity_global`, injecting `__similarity_cluster_id__`) or similarity-driven cold-start donor transfer (`@similarity_cold_start`, `cold_start_matching = 'similarity'`). |
 

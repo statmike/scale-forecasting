@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.1] - 2026-10-25
+
+### Added
+
+- **Positive Complementary Halo ($\gamma_{ij} > 0$) & Geometric Ad-Stock Carryover ($A_{i,t} = D_{i,t} + \lambda A_{i,t-1}$) ([`elasticity.py`](./src/scale_forecasting/elasticity.py), [`sdk.py`](./src/scale_forecasting/sdk.py)):**
+  - Extended `compute_promo_elasticity_decomposition` (`promo_elasticity_df`), `summarize_promo_elasticity`, `plot_promo_elasticity`, `make_confounded_promo_dgp`, and `Forecaster.promo_elasticity_df()` with `adstock_decay: float | Literal["auto"] = 0.0` and `include_halo: bool = True`.
+  - Sign-partitions cross-SKU residual $t$-statistics ($|t| \ge 1.0$) into negative substitute cannibals ($\gamma_{ij} < 0$: `cannibalization_dip`, `top_cannibal_ts_id`, `cannibal_similarity_score`) and positive complementary halo drivers ($\gamma_{ij} > 0$: `halo_lift`, `halo_effect`, `top_halo_ts_id`, `halo_similarity_score`), plus multi-day promotional carryover (`adstock_effect`, `total_adstock_effect`, `total_halo_lift`).
+- **Piecewise Weather / Degree-Day Splines (`HDD` & `CDD`) ([`config.py`](./src/scale_forecasting/config.py), [`features.py`](./src/scale_forecasting/features.py), [`monotonicity.py`](./src/scale_forecasting/monotonicity.py), [`registry/ids.py`](./src/scale_forecasting/registry/ids.py)):**
+  - Added `FeaturesConfig.degree_day_cols: dict[str, float] = Field(default_factory=dict)` (e.g., `{"temp_f": 65.0}`) and standalone `compute_degree_days_df(df, degree_day_cols)` generating deterministic `hdd_<col> = max(0, base_temp - col)` and `cdd_<col> = max(0, col - base_temp)` across training and future horizon frames, with automatic `+1` `@monotone` sign inference (`hdd* -> +1`, `cdd* -> +1`) and zero-drift `run_id` / `model_spec_hash` default elision.
+- **Arps Decline Curve Analysis (`@arps_decline` & `EUR`) and Multi-Generation Product Supersession Chains (`supersession_map`) ([`cold_start.py`](./src/scale_forecasting/cold_start.py), [`config.py`](./src/scale_forecasting/config.py), [`features.py`](./src/scale_forecasting/features.py), [`worker.py`](./src/scale_forecasting/worker.py), [`engines/spark_io.py`](./src/scale_forecasting/engines/spark_io.py), [`auto.py`](./src/scale_forecasting/auto.py)):**
+  - Added `"arps_decline"` to `ColdStartMethod`, `COLD_START_METHODS`, and `VALID_VARIANT_TAGS` (`@arps_decline` / `@cold_start_arps`), implementing `fit_arps_decline(y, horizon, *, seasonal_indices=None, q_econ=1.0, max_eur_steps=3650.0)` for exponential ($b=0$), hyperbolic ($0 < b < 1$), and harmonic ($b=1$) decline $q(t) = q_i (1 + b D_i t)^{-1/b}$ with closed-form cumulative **Estimated Ultimate Recovery (`eur_total`, `eur_remaining`, `arps_qi`, `arps_b`, `arps_di`)**.
+  - Added `FeaturesConfig.supersession_map: dict[str, str] = Field(default_factory=dict)` and `apply_supersession_map(panel_df, supersession_map, ...)` to trace multi-generation `v1 -> v2 -> v3` replacement chains, reconcile phase-out overlap windows, and preserve full historical depth before cold-start detection across local, Spark, and Auto-Forecaster execution paths.
+- **Notebook 11 Similarity Kernel Evolution & Cross-Industry Showcase ([`notebooks/11_auto_forecaster_and_autofocus.ipynb`](./notebooks/11_auto_forecaster_and_autofocus.ipynb)) & Tier A DGP Recovery Suite ([`tests/unit/test_track_p2_cross_industry.py`](./tests/unit/test_track_p2_cross_industry.py)):**
+  - Added Act 7 to `notebooks/11_auto_forecaster_and_autofocus.ipynb` with committed outputs demonstrating Step 0 similarity profiling, `@similarity_global`, `Forecaster.evolve(target="similarity_kernel")`, positive complementary halo + geometric ad-stock, `compute_degree_days_df`, `fit_arps_decline` (`EUR`), and `apply_supersession_map`.
+
+---
+
 ## [1.8.0] - 2026-04-20
 
 ### Added

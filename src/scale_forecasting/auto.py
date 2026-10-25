@@ -3852,6 +3852,16 @@ def _execute_local_panel_pass(
     # Separate historical rows from any future covariate rows appended to panel_df
     y_num = pd.to_numeric(panel_df[target_col], errors="coerce")
     hist_only_df = panel_df[y_num.notna()].copy()
+    if cfg.features.supersession_map and not hist_only_df.empty:
+        from .cold_start import apply_supersession_map
+
+        hist_only_df = apply_supersession_map(
+            hist_only_df,
+            cfg.features.supersession_map,
+            ts_id_col=ts_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
 
     effective_models, effective_params = expand_model_variants(cfg)
     exec_cfg = (
@@ -3859,6 +3869,13 @@ def _execute_local_panel_pass(
         if (effective_models != list(cfg.models) or effective_params != cfg.model_params)
         else cfg
     )
+    if (
+        exec_cfg.features.similarity_cluster_feature
+        or any("@similarity_global" in m for m in exec_cfg.models)
+    ) and not hist_only_df.empty:
+        from .features import add_similarity_features
+
+        hist_only_df = add_similarity_features(hist_only_df, exec_cfg)
 
     hier_spec = None
     work_hist = hist_only_df

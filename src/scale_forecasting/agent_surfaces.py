@@ -465,11 +465,13 @@ _VARIANT_SYNTAX_ROWS: tuple[tuple[str, str], ...] = (
     (
         (
             "`<model>@cold_start` / `<model>@analog_transfer` / "
-            "`<model>@bass_diffusion` / `<model>@weibull_lifecycle`"
+            "`<model>@bass_diffusion` / `<model>@weibull_lifecycle` / "
+            "`<model>@arps_decline` / `<model>@cold_start_arps`"
         ),
         (
             "Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the "
-            "launch archetype (`analog_transfer`, `bass_diffusion`, or `weibull_lifecycle`)."
+            "launch or depletion archetype (`analog_transfer`, `bass_diffusion`, "
+            "`weibull_lifecycle`, or `arps_decline` with analytical `eur_total` / `eur_remaining`)."
         ),
     ),
     (
@@ -687,6 +689,7 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
                 "analog_transfer",
                 "bass_diffusion",
                 "weibull_lifecycle",
+                "arps_decline",
             ],
             "workbench_capabilities": [
                 "promo_elasticity",

@@ -30,7 +30,7 @@ substitutions:
   _REPO: scale-forecasting
   _IMAGE: spark-runtime
   _TAG: latest
-  _VERSION_TAG: "v1.8.0"
+  _VERSION_TAG: "v1.8.1"
   _CODE_BUCKET: "" # code bucket for the packed-venv archive; empty = skip the pack/upload
   _VENV_HASH: "latest" # archive object name envs/<hash>.tar.gz (Terraform passes the requirements md5)
 

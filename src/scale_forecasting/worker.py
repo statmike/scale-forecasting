@@ -870,6 +870,19 @@ def run_cell(
             cs_diag.setdefault("is_cold_start", True)
             diag["cold_start"] = cs_diag
             diag["cold_start_transfer"] = cs_diag
+            if model_cfg.features.cold_start_method == "arps_decline" and cs_res.lifecycle_params:
+                diag["arps_decline"] = dict(cs_res.lifecycle_params)
+        elif model_cfg.features.cold_start_method == "arps_decline" and n_valid_obs >= 2:
+            from .cold_start import fit_arps_decline
+
+            _, arps_p = fit_arps_decline(
+                raw_target_series.dropna().to_numpy(dtype=float),
+                model_cfg.data.horizon,
+            )
+            diag["arps_decline"] = arps_p
+
+        if raw_input_series.attrs.get("supersession_info"):
+            diag["supersession"] = dict(raw_input_series.attrs["supersession_info"])
 
         assert predictions is not None
         predictions, arm_override = apply_quantile_and_cost_rules(predictions, cfg.output)
@@ -994,6 +1007,18 @@ def run_panel(
     cell_started_at = datetime.now(UTC)
     worker_id = _worker_id()
     available, device_name = visible_device()
+    supersession_chains: dict[str, Any] = {}
+    if cfg.features.supersession_map and not panel.empty and id_col in panel.columns:
+        from .cold_start import apply_supersession_map
+
+        panel = apply_supersession_map(
+            panel,
+            cfg.features.supersession_map,
+            ts_id_col=id_col,
+            date_col=date_col,
+            target_col=target_col,
+        )
+        supersession_chains = dict(panel.attrs.get("supersession_chains") or {})
     series_frames: dict[str, pd.DataFrame] = {}
     for raw_uid, sub in panel.groupby(id_col, sort=True):
         reg_sub = regularize_series_grid(sub, cfg).sort_values(date_col).reset_index(drop=True)
@@ -1401,6 +1426,8 @@ def run_panel(
                 uid_diag["similarity_clusters"] = c_info
                 uid_diag["similarity_cluster_id"] = c_info["similarity_cluster_id"]
                 uid_diag["similarity_to_medoid"] = c_info["similarity_to_medoid"]
+            if uid in supersession_chains:
+                uid_diag["supersession"] = dict(supersession_chains[uid])
             if (
                 model_cfg.features.cold_start_transfer
                 and len(series_frames[uid]) < model_cfg.features.cold_start_min_obs

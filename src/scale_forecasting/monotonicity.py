@@ -188,7 +188,8 @@ def infer_monotonic_constraints(columns: Sequence[str]) -> dict[str, int]:
 
         if (
             lower in _PROMO_EXACT
-            or lower.startswith(("promo_", "promotion_", "discount_", "markdown_"))
+            or lower in {"hdd", "cdd"}
+            or lower.startswith(("promo_", "promotion_", "discount_", "markdown_", "hdd_", "cdd_"))
             or lower.endswith(("_promo", "_promotion", "_discount", "_markdown"))
         ):
             inferred[clean] = 1

@@ -73,7 +73,11 @@ def bucket_key_cols(cfg: RunConfig) -> list[str]:
     is active, returns ``[_MODEL_COL]`` so each model's full panel lands in one bucket for coherent
     aggregation, reconciliation, and simplex closure.
     """
-    if cfg.hierarchy.enabled or cfg.features.similarity_cluster_feature:
+    if (
+        cfg.hierarchy.enabled
+        or cfg.features.similarity_cluster_feature
+        or bool(cfg.features.supersession_map)
+    ):
         return [_MODEL_COL]
     from ..simplex import has_simplex_models
 
@@ -400,6 +404,16 @@ def run_group(
         for raw_model, model_sub in pdf.groupby(_MODEL_COL, sort=False):
             mname = str(raw_model)
             clean_panel = model_sub.drop(columns=helper_cols)
+            if cfg.features.supersession_map and not clean_panel.empty:
+                from ..cold_start import apply_supersession_map
+
+                clean_panel = apply_supersession_map(
+                    clean_panel,
+                    cfg.features.supersession_map,
+                    ts_id_col=id_col,
+                    date_col=cfg.data.date_col,
+                    target_col=cfg.data.target_col,
+                )
             if cfg.features.similarity_cluster_feature and not clean_panel.empty:
                 from ..features import add_similarity_features
 
@@ -417,6 +431,7 @@ def run_group(
                 donor_pool = build_cold_start_donor_pool(clean_panel, cfg)
                 clean_panel.attrs["cold_start_donor_pool"] = donor_pool
 
+            sup_chains = dict(clean_panel.attrs.get("supersession_chains") or {})
             model_results: list[CellResult] = []
             if is_panel_model(mname, cfg, by_model.get(mname)):
                 model_results.extend(run_panel(clean_panel, mname, cfg, by_model.get(mname)))
@@ -424,6 +439,8 @@ def run_group(
                 for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
                     if donor_pool is not None:
                         sub.attrs["cold_start_donor_pool"] = donor_pool
+                    if str(_ts_id) in sup_chains:
+                        sub.attrs["supersession_info"] = sup_chains[str(_ts_id)]
                     model_results.append(run_cell(sub, mname, cfg, by_model.get(mname)))
             from ..simplex import close_simplex_cells, has_simplex_models
 
@@ -439,6 +456,16 @@ def run_group(
         # untagged frame: run any panel models (`global`/`hybrid`) across the whole group first,
         # then run local models per series.
         clean_panel = pdf.drop(columns=helper_cols) if not pdf.empty else pdf
+        if cfg.features.supersession_map and not clean_panel.empty:
+            from ..cold_start import apply_supersession_map
+
+            clean_panel = apply_supersession_map(
+                clean_panel,
+                cfg.features.supersession_map,
+                ts_id_col=id_col,
+                date_col=cfg.data.date_col,
+                target_col=cfg.data.target_col,
+            )
         if cfg.features.similarity_cluster_feature and not clean_panel.empty:
             from ..features import add_similarity_features
 
@@ -456,6 +483,7 @@ def run_group(
             donor_pool = build_cold_start_donor_pool(clean_panel, cfg)
             clean_panel.attrs["cold_start_donor_pool"] = donor_pool
 
+        sup_chains = dict(clean_panel.attrs.get("supersession_chains") or {})
         panel_models = [m for m in executed if is_panel_model(m, cfg, by_model.get(m))]
         local_models = [m for m in executed if m not in panel_models]
         if panel_models and not clean_panel.empty:
@@ -465,6 +493,8 @@ def run_group(
             for _ts_id, sub in clean_panel.groupby(id_col, sort=False):
                 if donor_pool is not None:
                     sub.attrs["cold_start_donor_pool"] = donor_pool
+                if str(_ts_id) in sup_chains:
+                    sub.attrs["supersession_info"] = sup_chains[str(_ts_id)]
                 for model_name in local_models:
                     results.append(run_cell(sub, model_name, cfg, by_model.get(model_name)))
         if results and not clean_panel.empty:

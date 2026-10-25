@@ -587,6 +587,7 @@ class McpServer:
                                 "analog_transfer",
                                 "bass_diffusion",
                                 "weibull_lifecycle",
+                                "arps_decline",
                             ],
                             "default": "auto",
                             "description": "Cold-start NPI launch archetype.",
