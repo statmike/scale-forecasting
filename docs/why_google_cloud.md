@@ -3,28 +3,27 @@
 `scale-forecasting` is built natively on Google Cloud's serverless data and AI stack so you can move from a 10-series laptop prototype to a 100,000+ series multi-family production pipeline without changing code, exporting data, or paying for idle clusters.
 
 ```mermaid
-flowchart LR
-    subgraph BQ["1 · Data stays in BigQuery"]
-        SRC["Source tables<br/>(Native BQ or BigLake Iceberg)"]
-        REG["5 registry tables &amp;<br/>5 analytical SQL views"]
+flowchart TD
+    subgraph BQ_IN["1 · Data stays in BigQuery"]
+        SRC["Source tables (Native BigQuery or BigLake Iceberg)<br/>Streamed via Storage Read API + per-worker row_restriction"]
     end
-    subgraph ROUTE["2 · Seven runtimes, one contract"]
-        CFG["Declarative RunConfig (JSON)<br/>+ deterministic 12-hex run_id"]
-        DAG["Per-family DAG router<br/>(parallel jobs, zero-idle teardown)"]
+    subgraph ROUTE["2 · Seven runtimes, one declarative contract"]
+        CFG["Declarative RunConfig (JSON) + deterministic 12-hex run_id"]
+        DAG["Per-family DAG router (parallel jobs, zero-idle teardown)"]
+        CFG --> DAG
     end
     subgraph COMP["3 · Ephemeral per-family compute"]
-        C1["Dataproc Serverless Spark"]
-        C2["Ray on Vertex AI / GKE"]
-        C3["Vertex AI CustomJob"]
-        C4["Compute Engine VM (3-way self-delete)"]
-        C5["GKE Indexed Job"]
-        C6["Vertex AI AutoML &amp; Tabular Workflows"]
-        C7["BigQuery ML (ARIMA_PLUS · TimesFM)"]
+        direction TB
+        C_CPU["Python CPU & Distributed Fleet<br/>Dataproc Serverless Spark · Compute Engine VM (3-way self-delete)"]
+        C_GPU["Python & GPU Cluster / Pod Fleet<br/>Vertex AI CustomJob · GKE Indexed Job · Ray on Vertex AI / GKE"]
+        C_MGD["Managed Google AI & Serverless SQL<br/>Vertex AI AutoML & Tabular Workflows · BigQuery ML (ARIMA_PLUS · TimesFM)"]
+        C_CPU --> C_GPU --> C_MGD
+    end
+    subgraph BQ_OUT["4 · Unified BigQuery Registry & Views"]
+        REG["Storage Write API / load jobs -> 5 registry tables & 5 analytical SQL views<br/>(forecasts · OOF backtests · feature attributions · leaderboard)"]
     end
 
-    SRC -->|"Storage Read API<br/>per-worker row_restriction"| CFG --> DAG
-    DAG --> C1 & C2 & C3 & C4 & C5 & C6 & C7
-    C1 & C2 & C3 & C4 & C5 & C6 & C7 -->|"Storage Write API / load jobs<br/>forecasts · OOF · attributions"| REG
+    BQ_IN --> ROUTE --> COMP --> BQ_OUT
 ```
 
 ---

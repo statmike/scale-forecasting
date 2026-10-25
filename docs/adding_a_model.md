@@ -6,7 +6,7 @@ worker, not the engines, not the registry. That is the whole point of the factor
 system discovers models by name at import time.
 
 ```mermaid
-flowchart LR
+flowchart TD
     T["1. Copy docs/model_template.py<br/>→ models/my_model.py"] --> I["2. Implement BaseModel<br/>fit(y, X) & predict(horizon, X, quantiles)"]
     I --> R["3. Call register(MyModel)<br/>+ import in models/__init__.py"]
     R --> W["worker.run_cell<br/>(Spark / Ray / Vertex / GCE / GKE / Playground)"]

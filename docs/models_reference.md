@@ -6,38 +6,38 @@ When a run is submitted, the orchestrator groups the requested models by **`fami
 
 ```mermaid
 flowchart TD
-    Base["BaseModel Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles)<br/>fit_panel(panel, ...) · predict_panel(horizon, ...)<br/>feature_attributions · search_space(trial) · recondition(y, X)"]
+    Base["BaseModel Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles) · fit_panel(panel, ...) · predict_panel(horizon, ...)<br/>feature_attributions · search_space(trial) · recondition(y, X)"]
 
-    subgraph Stat["Family: statistical (18 Python Models — Spark / Ray / Vertex / GCE / GKE)"]
+    subgraph Stat["1. Family: statistical (18 Python Models — Spark · Ray · Vertex · GCE · GKE)"]
         direction TB
-        S1["Baselines, Spectral & Intermittent<br/>naive_mean · naive_seasonal · naive_drift<br/>naive_moving_average · croston · fft"]
-        S2["Exponential Smoothing & Decomposition<br/>theta · auto_theta · holtwinters · autoets<br/>auto_ces · tbats · stl_bagging"]
-        S3["ARIMA, State-Space & Additive<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+        S1["Baselines, Spectral & Intermittent (6)<br/>naive_mean · naive_seasonal · naive_drift · naive_moving_average · croston · fft"]
+        S2["Exponential Smoothing & Decomposition (7)<br/>theta · auto_theta · holtwinters · autoets · auto_ces · tbats · stl_bagging"]
+        S3["ARIMA, State-Space & Additive (5)<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+        S1 --> S2 --> S3
     end
 
-    subgraph ML["Family: ml (5 Python Models via _lag_forecaster.py — Spark / Ray / Vertex / GCE / GKE)"]
+    subgraph ML["2. Family: ml (5 Python Models via _lag_forecaster.py — Spark · Ray · Vertex · GCE · GKE)"]
         M1["Recursive & Direct Target Lags + Calendar & Exog + @monotone Sign Constraints + Two-Tier Explainability<br/>regression_lags (ridge_lags alias) · random_forest · lightgbm · xgboost · catboost"]
     end
 
-    subgraph DL["Family: deep_learning (8 Python Models — Spark / Ray / Vertex / GCE / GKE CPU or GPU)"]
+    subgraph DL["3. Family: deep_learning (8 Python Models — Spark · Ray · Vertex · GCE · GKE CPU or GPU)"]
         direction TB
-        D1["PyTorch Local, Global & Hybrid Panel Forecasters<br/>neuralprophet · tide · tft · tsmixer · patchtst"]
-        D2["Open-Weight Zero-Shot Foundation Forecasters<br/>chronos_bolt · chronos2 · timesfm_torch"]
+        D1["PyTorch Local, Global, @similarity_global & Hybrid Panel Forecasters (5)<br/>neuralprophet · tide · tft · tsmixer · patchtst"]
+        D2["Open-Weight Zero-Shot Foundation Forecasters (3)<br/>chronos_bolt · chronos2 · timesfm_torch"]
+        D1 --> D2
     end
 
-    subgraph AML["Family: automl (4 Vertex AI AutoML / Tabular Workflow Models — vertex_automl)"]
-        A1["Managed Global KFP v2 Pipelines + Reusable Stage-1 HPO + Explainability<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
+    subgraph Managed["4. Managed Cloud Families: automl (4 Vertex AI AutoML) & native (2 BigQuery SQL)"]
+        direction TB
+        A1["Family: automl (4 Global KFP v2 Pipelines on vertex_automl + Reusable Stage-1 HPO + Explainability)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
+        N1["Family: native (2 Serverless SQL Models on bigquery)<br/>arima_plus / arima_plus_xreg (ARIMA_PLUS / ARIMA_PLUS_XREG + ML.EXPLAIN_FORECAST) · timesfm / bq_timesfm (AI.FORECAST 2.0 / 2.5 / 3.0)"]
+        A1 --> N1
     end
 
-    subgraph Nat["Family: native (2 BigQuery SQL Models — BigQuery ML)"]
-        N1["Serverless SQL Execution<br/>arima_plus / arima_plus_xreg (ARIMA_PLUS / ARIMA_PLUS_XREG + ML.EXPLAIN_FORECAST + ML.ARIMA_EVALUATE)<br/>timesfm / bq_timesfm (AI.FORECAST 2.0 / 2.5 / 3.0 + Multivariate Covariates)"]
-    end
+    Rec["5. Hierarchical, Temporal & Latent Similarity Reconciliation (reconciliation.py · temporal_reconciliation.py)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg · cross_temporal_mint"]
+    Ens["6. Ensemble Blending & Stacking Engine (ensembler.py · Driver Pandas + Storage Write API)<br/>Calculated & Selection: mean · median · trimmed_mean · inverse_error · champion · horizon_specialist · Learned Stacking: nnls · ridge · xgb"]
 
-    Rec["Hierarchical Reconciliation (reconciliation.py)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg"]
-    Ens["Ensemble Engine (Driver Pandas + Storage Write API)<br/>Calculated & Selection: mean · median · trimmed_mean · inverse_error · champion · horizon_specialist<br/>Learned Stacking: nnls · ridge · xgb"]
-
-    Base --> Stat & ML & DL & AML & Nat
-    Stat & ML & DL & AML & Nat --> Rec --> Ens
+    Base --> Stat --> ML --> DL --> Managed --> Rec --> Ens
 ```
 
 ---
@@ -116,7 +116,7 @@ Any of the 37 registered models can be listed multiple times in `models` using t
   - `@no_holidays` — drops country-holiday indicator columns while keeping all other features.
   - `@no_lags` — drops engineered exogenous lag columns (`*_lag_*`) while keeping contemporaneous covariates.
   - `@similarity_global` — partitions the panel into $K$ homogeneous behavioral clusters via [`similarity.cluster_by_similarity_df()`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py) strictly within each fold cutoff (`features.similarity_method`, `features.similarity_n_clusters`) and fits a dedicated cross-series global model per cluster (`_run_similarity_global_panel_model` in [`worker.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/worker.py) and cluster-isolated Spark buckets in [`engines/spark_io.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/engines/spark_io.py)), preventing negative cross-learning transfer across incompatible regimes.
-  - `@similarity_cold_start` — routes short-history cold-start / NPI series ($n < \text{cold\_start\_min\_obs}$) through multi-lens & multi-modal digital-twin donor matching (`cold_start_matching="hybrid"` / `"similarity"` via [`similarity.match_cold_start_launch_prefix_df()`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py)) for that variant so attribute-only vs. similarity-based cold-start transfer can be compared side-by-side in a single run.
+  - `@similarity_cold_start` — routes short-history cold-start / NPI series (`n < cold_start_min_obs`) through multi-lens & multi-modal digital-twin donor matching (`cold_start_matching="hybrid"` / `"similarity"` via [`similarity.match_cold_start_launch_prefix_df()`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py)) for that variant so attribute-only vs. similarity-based cold-start transfer can be compared side-by-side in a single run.
 
 ### 1. Statistical family (`statistical`)
 
@@ -236,28 +236,30 @@ Models in the `native` family execute directly inside BigQuery via [`engines/big
 `scale-forecasting` provides two complementary explainability surfaces so forecasters can inspect both **feature-level causal attributions** (`attributions_df` / `plot_attributions`) and **structural time-series decomposition** (`explain_forecast` / `plot_forecast_explanation`):
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Models["10 Native Attribution Models (supports_explainability = True)"]
-        ML_MODS["5 Python ML Models (_lag_forecaster.py)<br/>xgboost · lightgbm · catboost<br/>regression_lags · random_forest"]
-        AML_MODS["4 Vertex AI AutoML Models (automl_engine.py)<br/>vertex_l2l · vertex_tide<br/>vertex_tft · vertex_seq2seq"]
+        direction TB
+        ML_MODS["5 Python ML Models (_lag_forecaster.py)<br/>xgboost · lightgbm · catboost · regression_lags · random_forest"]
+        AML_MODS["4 Vertex AI AutoML Models (automl_engine.py)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
         BQ_MODS["1 BigQuery ML Model (bigquery_engine.py)<br/>arima_plus (ML.EXPLAIN_FORECAST)"]
+        ML_MODS --> AML_MODS --> BQ_MODS
     end
 
-    subgraph Tier1["Tier 1: Global / Per-Series Driver Importance"]
-        T1_BQ["forecast_metadata.fit_diagnostics<br/>$.feature_attributions = {feature: importance}"]
+    subgraph Tiers["Two-Tier BigQuery Attribution Storage"]
+        direction TB
+        T1_BQ["Tier 1: Global / Per-Series Driver Importance<br/>forecast_metadata.fit_diagnostics · $.feature_attributions = {feature: importance}"]
+        T2_BQ["Tier 2: Per-Horizon-Step Local Attributions<br/>forecast_predictions.explanations · {baseline_score: float, attributions: {feature: signed_delta}}"]
+        T1_BQ --> T2_BQ
     end
 
-    subgraph Tier2["Tier 2: Per-Horizon-Step Local Attributions"]
-        T2_BQ["forecast_predictions.explanations<br/>{baseline_score: float, attributions: {feature: signed_delta}}"]
-    end
-
-    subgraph SDK["Unified SDK & Offline Helpers (sdk.py)"]
+    subgraph SDK["Unified SDK & Offline Helpers (sdk.py · review.py)"]
+        direction TB
         DF["forecaster.attributions_df(level='both' | 'global' | 'local')<br/>build_attributions_frame(meta_rows, pred_rows)"]
         PLT["forecaster.plot_attributions(ts_id, model_type)<br/>2-Panel Global Bar Chart + Horizon-Step Stacked Bar"]
+        DF --> PLT
     end
 
-    ML_MODS & AML_MODS & BQ_MODS --> T1_BQ & T2_BQ
-    T1_BQ & T2_BQ --> DF --> PLT
+    Models --> Tiers --> SDK
 ```
 
 ### Model-level attribution mechanics (`supports_explainability = True`)
@@ -266,10 +268,10 @@ All **10 models** with native explainability (`ml`, `automl`, and `arima_plus` i
 
 | Model(s) | Family | Tier 1 (Series / Global Importance) | Tier 2 (Per-Horizon-Step Local Attribution) | Additivity & Baseline Contract |
 | :--- | :--- | :--- | :--- | :--- |
-| **`xgboost`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across training / horizon (`feature_importances_` fallback) | Exact C++ TreeSHAP via `Booster.predict(DMatrix, pred_contribs=True)` at each recursive or direct step $h \in \{1,\dots,H\}$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \text{baseline\_score} + \sum_j \phi_{h,j}$ (transformed scale) |
-| **`lightgbm`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across horizon (`feature_importances_` fallback) | Exact C++ TreeSHAP via `LGBMRegressor.predict(x_step, pred_contrib=True)` at each recursive or direct step $h$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \text{baseline\_score} + \sum_j \phi_{h,j}$ |
-| **`catboost`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across horizon (`get_feature_importance()` fallback) | Exact C++ TreeSHAP via `CatBoostRegressor.get_feature_importance(Pool, type="ShapValues")` | Exact: $\hat{y}_{T+h}^{\text{raw}} = \text{baseline\_score} + \sum_j \phi_{h,j}$ |
-| **`regression_lags`** | `ml` | Normalized $\|w_j\| \cdot \sigma_{X_j}$ standardized linear weight share | Closed-form linear attribution $\phi_{h,j} = w_j (x_{h,j} - \bar{x}_j)$ around $\text{baseline\_score} = \bar{y}_{\text{train}}$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \bar{y}_{\text{train}} + \sum_j w_j (x_{h,j} - \bar{x}_j)$ |
+| **`xgboost`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across training / horizon (`feature_importances_` fallback) | Exact C++ TreeSHAP via `Booster.predict(DMatrix, pred_contribs=True)` at each recursive or direct step $h \in \{1,\dots,H\}$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \hat{y}_{\text{base}} + \sum_j \phi_{h,j}$ (`baseline_score`, transformed scale) |
+| **`lightgbm`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across horizon (`feature_importances_` fallback) | Exact C++ TreeSHAP via `LGBMRegressor.predict(x_step, pred_contrib=True)` at each recursive or direct step $h$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \hat{y}_{\text{base}} + \sum_j \phi_{h,j}$ (`baseline_score`) |
+| **`catboost`** | `ml` | Normalized mean $\|\phi_{t,j}\|$ across horizon (`get_feature_importance()` fallback) | Exact C++ TreeSHAP via `CatBoostRegressor.get_feature_importance(Pool, type="ShapValues")` | Exact: $\hat{y}_{T+h}^{\text{raw}} = \hat{y}_{\text{base}} + \sum_j \phi_{h,j}$ (`baseline_score`) |
+| **`regression_lags`** | `ml` | Normalized $\|w_j\| \cdot \sigma_{X_j}$ standardized linear weight share | Closed-form linear attribution $\phi_{h,j} = w_j (x_{h,j} - \bar{x}_j)$ around `baseline_score` $= \bar{y}_{\text{train}}$ | Exact: $\hat{y}_{T+h}^{\text{raw}} = \bar{y}_{\text{train}} + \sum_j w_j (x_{h,j} - \bar{x}_j)$ |
 | **`random_forest`** | `ml` | Impurity importance `feature_importances_` normalized to sum to $1$ | Importance-weighted directional deviation allocated across active features at step $h$ around $\bar{y}_{\text{train}}$ | Additive: $\hat{y}_{T+h}^{\text{raw}} = \bar{y}_{\text{train}} + \sum_j \phi_{h,j}$ |
 | **`vertex_l2l`**, **`vertex_tide`**, **`vertex_tft`**, **`vertex_seq2seq`** | `automl` | Mean $\|\text{attribution}\|$ per feature aggregated across each series' horizon steps (or Vertex `ModelEvaluation` feature attributions) | Vertex AI Explainable AI (`BatchPredictionJob(generate_explanation=True)` `explanation.attributions` `baseline_score` + `feature_attributions`) | Managed Vertex AI baseline-anchored Shapley / Integrated Gradients attribution per `(ts_id, forecast_date)` |
 | **`arima_plus`** | `native` | Normalized mean $\|\text{attribution}\|$ across `trend`, `seasonal`, `holiday_effect`, and each `attribution_<col>` from `ML.EXPLAIN_FORECAST` | BigQuery `ML.EXPLAIN_FORECAST` decomposition (`baseline_score = trend + seasonal`, `attributions = {trend, seasonal, holiday_effect, <xreg_cols>}`) | Additive decomposition of `ARIMA_PLUS` / `ARIMA_PLUS_XREG` components per `(ts_id, forecast_date)` |

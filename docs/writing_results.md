@@ -8,18 +8,18 @@ over the BigQuery **Storage Write API**. For the *tables* themselves (every colu
 [reading_source_data.md](./reading_source_data.md).
 
 ```mermaid
-flowchart LR
-    subgraph Writers["Engine Workers & Drivers"]
-        W1["Spark Executor<br/>(make_group_runner)"]
-        W2["Ray Worker Task<br/>(make_chunk_runner)"]
-        W5["Vertex / GCE / GKE Worker<br/>(vertex_engine)"]
-        W6["Vertex AutoML Driver<br/>(automl_engine)"]
-        W3["BigQuery-Native Driver<br/>(bigquery_engine)"]
-        W4["Ensembler<br/>(ensemble_run)"]
+flowchart TD
+    subgraph Writers["1. Engine Workers & Drivers"]
+        direction TB
+        W_PY["Python Engine Workers<br/>Spark Executor (make_group_runner) · Ray Task (make_chunk_runner) · Vertex / GCE / GKE Worker (vertex_engine)"]
+        W_DRV["Managed & Ensemble Drivers<br/>Vertex AutoML Driver (automl_engine) · BigQuery-Native Driver (bigquery_engine) · Ensembler (ensemble_run)"]
+        W_PY --> W_DRV
     end
-    W1 & W2 & W5 & W6 & W3 & W4 -->|"Batch of CellResult"| Cells["registry.cells.write_cells<br/>Proto-Encoded Default Stream"]
-    Cells -->|"Storage Write API<br/>(Append-Only + Backoff)"| Tables["BigQuery Registry Tables<br/>forecast_metadata · forecast_predictions · backtest_oof"]
-    Tables -->|"QUALIFY ROW_NUMBER() = 1<br/>(Dedupe-on-Read)"| Views["5 Analyst Views<br/>v_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
+    Cells["2. Unified Result Writer (registry.cells.write_cells)<br/>Batch of CellResult -> Proto-Encoded Default Stream"]
+    Tables["3. BigQuery Registry Tables (Storage Write API + Backoff)<br/>forecast_metadata · forecast_predictions · backtest_oof"]
+    Views["4. Five Analytical SQL Views (QUALIFY ROW_NUMBER() = 1 Dedupe-on-Read)<br/>v_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
+
+    Writers --> Cells --> Tables --> Views
 ```
 
 ---

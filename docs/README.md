@@ -5,13 +5,12 @@ the notebook tour, and the full **API reference** are also published as a search
 this repo on every push to `main`: **https://statmike.github.io/scale-forecasting/**.
 
 ```mermaid
-flowchart LR
+flowchart TD
     Start["1. Start here<br/>Overview & Getting Started"] --> Deploy["2. Deploy<br/>Terraform & GCP Setup"]
     Deploy --> Operate["3. Operate<br/>Submit, Monitor, Review"]
-    Operate --> Demo["4. Demo<br/>Workshop & Notebooks"]
-    Operate --> SDK["5. SDK & API<br/>Forecaster, Registry, Direct"]
-    Operate --> Ref["6. Reference<br/>Architecture, Config, Backtest, Quota"]
-    Ref --> Val["7. System Validation<br/>Live GCP Ledger & Smokes"]
+    Operate --> Demo["4. Demo & SDK<br/>Workshop, Notebooks & Forecaster"]
+    Demo --> Ref["5. Reference<br/>Architecture, Config, Backtest, Quota"]
+    Ref --> Val["6. System Validation<br/>Live GCP Ledger & Smokes"]
 ```
 
 ## Start here

@@ -621,3 +621,36 @@ def test_governance_and_release_kit_files_exist() -> None:
         "CONTRIBUTING.md missing Contributor License Agreement section"
     )
     assert "## Releasing" in contributing, "CONTRIBUTING.md missing ## Releasing section"
+
+
+def test_markdown_math_has_no_text_mode_underscores() -> None:
+    """Forbid underscores inside \\text{...} / \\mathrm{...} / \\operatorname{...} in Markdown math.
+
+    GitHub's CommonMark parser unescapes ``\\_`` to ``_`` inside inline ``$...$`` before handing
+    the expression to MathJax, causing ``'_' allowed only in math mode`` rendering errors on GitHub.
+    Use inline code backticks (e.g. `` `n < min_obs` ``) or math subscripts (``n_{\\min}``) instead.
+    """
+    math_pat = re.compile(r"\$\$[\s\S]*?\$\$|\$[^\$\n]+\$")
+    text_underscore_pat = re.compile(r"\\(?:text|operatorname|mathrm|mathbf)\{[^}]*_[^}]*\}")
+    offenders: list[str] = []
+
+    for md_path in _all_markdown_files():
+        raw = md_path.read_text(encoding="utf-8")
+        stripped = re.sub(r"```[\s\S]*?```", "", raw)
+        stripped = re.sub(r"`[^`\n]+`", "", stripped)
+        for match in math_pat.finditer(stripped):
+            expr = match.group(0)
+            if text_underscore_pat.search(expr):
+                rel = md_path.relative_to(_REPO_ROOT)
+                offenders.append(f"{rel}: {expr}")
+    for nb_label, nb_md in _all_notebook_markdown_sources():
+        stripped = re.sub(r"```[\s\S]*?```", "", nb_md)
+        stripped = re.sub(r"`[^`\n]+`", "", stripped)
+        for match in math_pat.finditer(stripped):
+            expr = match.group(0)
+            if text_underscore_pat.search(expr):
+                offenders.append(f"{nb_label}: {expr}")
+    assert not offenders, (
+        "Underscores inside \\text{...} break GitHub MathJax rendering "
+        f"('_' allowed only in math mode): {offenders}"
+    )
