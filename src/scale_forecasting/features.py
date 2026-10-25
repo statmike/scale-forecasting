@@ -537,10 +537,10 @@ def resolve_model_variant(
         inferred_scope, inferred_cov = _parse_mode_token(variant_tag)
         if inferred_scope is not None and "training_mode" not in variant_explicit:
             if inferred_scope == "similarity_global":
-                if "similarity_cluster_feature" not in variant_explicit:
-                    raw_params["similarity_cluster_feature"] = True
                 if "global" in model_cls.supported_training_modes():
                     raw_params["training_mode"] = "similarity_global"
+                elif "similarity_cluster_feature" not in variant_explicit:
+                    raw_params["similarity_cluster_feature"] = True
             else:
                 raw_params["training_mode"] = inferred_scope
         if inferred_cov is not None and "covariate_mode" not in variant_explicit:
@@ -628,13 +628,11 @@ def resolve_model_variant(
                     raw_params["cold_start_transfer"] = True
                 rem_tag = rem_tag.replace("cold_start", "")
             if "similarity_global" in rem_tag:
-                if "similarity_cluster_feature" not in variant_explicit:
+                if "global" in model_cls.supported_training_modes():
+                    if "training_mode" not in variant_explicit:
+                        raw_params["training_mode"] = "similarity_global"
+                elif "similarity_cluster_feature" not in variant_explicit:
                     raw_params["similarity_cluster_feature"] = True
-                if (
-                    "training_mode" not in variant_explicit
-                    and "global" in model_cls.supported_training_modes()
-                ):
-                    raw_params["training_mode"] = "similarity_global"
                 rem_tag = rem_tag.replace("similarity_global", "")
             for aci_tok in ("aci_normalized", "aci_norm"):
                 if aci_tok in rem_tag:

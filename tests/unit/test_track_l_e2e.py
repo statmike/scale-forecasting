@@ -383,6 +383,7 @@ def test_t1_f1_run_config_track_l_fields_and_digest_invariance() -> None:
         "analog_transfer",
         "bass_diffusion",
         "weibull_lifecycle",
+        "arps_decline",
     }
     assert set(CALIBRATION_METHODS) == {"conformal", "aci", "aci_normalized"}
     for req_tag in ("monotone", "transform_clr", "transform_ilr", "univariate", "global", "local"):
