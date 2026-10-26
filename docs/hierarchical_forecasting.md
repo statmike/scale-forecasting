@@ -6,28 +6,41 @@ Enterprise supply-chain, retail, and financial planning require forecasts that a
 
 ```mermaid
 flowchart TD
-    subgraph S1["1. Cross-Sectional & Latent Similarity Hierarchy (reconciliation.py · similarity.py)"]
-        CS1["Build Explicit Tree or Latent Similarity Hierarchy & Summing Matrix S_cs<br/>hierarchy.levels = [['region'], ['region', 'category']] OR hierarchy.similarity_hierarchy = true<br/>__total__ + intermediate / similarity_cluster_id nodes + bottom leaf series"]
-        CS2["Project Base & OOF Forecasts onto Coherent Subspace<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg"]
-        CS3["Verify Cross-Sectional Coherence<br/>verify_coherence(reconciled_df, spec) < 1e-6"]
+    IN["Base & Backtest OOF Forecasts + RunConfig.hierarchy<br/>(Local Playground · Python SDK · Spark · Ray · Vertex · GCE · GKE)"]
+
+    subgraph S1["1. Cross-Sectional & Similarity Hierarchy (reconciliation.py)"]
+        CS1["Build Explicit Tree or Latent Clusters<br/>hierarchy.levels OR similarity_hierarchy = true<br/>Summing Matrix S_cs (__total__ -> levels -> leaves)"]
+        CS2["Project Base & OOF onto Spatial Subspace<br/>bottom_up · top_down · middle_out · ols<br/>wls_struct · wls_var · mint_shrink · mint_nonneg"]
+        CS3["Verify Spatial Coherence<br/>verify_coherence(reconciled_df, spec) < 1e-6"]
         CS1 --> CS2 --> CS3
     end
 
-    subgraph S2["2. Temporal & Cross-Temporal Reconciliation (temporal_reconciliation.py)"]
-        TH1["Compile Non-Overlapping Temporal Hierarchy (THieF)<br/>default_temporal_aggregations(freq) -> k in {1, 7, 14, 28} / {1, 3, 6, 12}<br/>Cutoff-aligned bucket sums + temporal summing matrix S_temp"]
-        TH2["Three-Mode Routing & Spatial-Temporal Weighting<br/>Mode 1: spatial_only (alpha=1.0) · Mode 2: temporal_only (alpha=0.0 + OOF metrics)<br/>Mode 3: cross_temporal_mint (spatial_temporal_weight='auto' | float in [0, 1])"]
-        TH3["Verify Coherence & Simulate Coherent Sample Paths<br/>verify_temporal_coherence < 1e-6 · verify_cross_temporal_coherence < 1e-6<br/>sample_coherent_paths(n_paths=200, seed=42)"]
+    subgraph S2["2. Temporal & Cross-Temporal THieF (temporal_reconciliation.py)"]
+        TH1["Compile Non-Overlapping Calendar Hierarchy<br/>default_temporal_aggregations(freq)<br/>Cutoff-aligned buckets + S_temp = I_(m/k) (x) 1_k^T"]
+        TH2["3-Mode Routing & Spatial-Temporal Weighting<br/>spatial_only (alpha=1.0) · temporal_only (alpha=0.0)<br/>cross_temporal_mint (spatial_temporal_weight='auto')"]
+        TH3["Verify Coherence & Sample Paths<br/>verify_cross_temporal_coherence < 1e-6<br/>sample_coherent_paths(n_paths=200, seed=42)"]
         TH1 --> TH2 --> TH3
     end
 
     subgraph S3["3. Top-Down Goal-Seek Constrained QP (goal_seek.py)"]
-        GS1["Declare Executive Targets, Locked Nodes, Box Bounds & Smoothness<br/>targets={'__total__': 125000} · locked_nodes · bounds · smoothness_weight=10.0"]
-        GS2["Solve Precision-Weighted Convex Quadratic Program<br/>min_b 0.5*(b - b_hat)^T W^-1 (b - b_hat) + 0.5*lambda*||D(b - b_hat)||_2^2<br/>s.t. C*b = d, l <= b <= u (GoalSeekInfeasibleError precheck)"]
-        GS3["Propagate Gross Margin & Inventory Replenishment Impact<br/>allocated_yhat · adjustment_pct · gross_margin_delta · delta_reorder_point"]
-        GS1 --> GS2 --> GS3
+        GS1["Declare Targets, Locks, Bounds & Smoothness<br/>targets={'__total__': 125000} · locked_nodes<br/>[lower_bounds, upper_bounds] · smoothness_weight=10.0"]
+        GS2["Solve Precision-Weighted Convex QP<br/>min_b 0.5*(b - b_hat)^T W^-1 (b - b_hat) + roughness<br/>s.t. C*b = d, l <= b <= u (GoalSeekInfeasibleError)"]
+        GS3["Propagate Gross Margin & Inventory Impact<br/>allocated_yhat · adjustment_pct · gross_margin_delta · delta_reorder_point"]
+        GS1 & GS2 --> GS3
     end
 
-    S1 --> S2 --> S3
+    IN --> CS1 & TH1
+    CS3 --> GS1
+    TH3 --> GS2
+
+    classDef innode fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
+    classDef cs fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef th fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef gs fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    class IN innode
+    class CS1,CS2,CS3 cs
+    class TH1,TH2,TH3 th
+    class GS1,GS2,GS3 gs
 ```
 
 ---
@@ -56,8 +69,8 @@ When `hierarchy.enabled = true`, `build_hierarchy(df, cfg)` aggregates bottom-le
 | `"top_down"` | Disaggregates `"__total__"` by historical average proportions | Best when top-level signal is smooth and leaf proportions are stationary. |
 | `"middle_out"` | Anchors on `hierarchy.middle_level` (e.g., `["region"]`), sums up to root, and disaggregates down to leaves | Ideal when regional/category forecasts are most reliable. |
 | `"ols"` | Ordinary Least Squares ($\mathbf{W} = \mathbf{I}_n$) | Unweighted orthogonal projection onto the coherent subspace. |
-| `"wls_struct"` | Structural WLS ($\mathbf{W} = \operatorname{diag}(\mathbf{S}\mathbf{1}_{n_b})$) | Weights each node by the number of bottom-level series it aggregates; requires no OOF residuals. |
-| `"wls_var"` | Variance-weighted WLS ($\mathbf{W} = \operatorname{diag}(\hat{\sigma}_1^2, \dots, \hat{\sigma}_n^2)$) | Weights each node by its inverse out-of-fold residual variance. |
+| `"wls_struct"` | Structural WLS ($\mathbf{W} = \text{diag}(\mathbf{S}\mathbf{1}_{n_b})$) | Weights each node by the number of bottom-level series it aggregates; requires no OOF residuals. |
+| `"wls_var"` | Variance-weighted WLS ($\mathbf{W} = \text{diag}(\hat{\sigma}_1^2, \dots, \hat{\sigma}_n^2)$) | Weights each node by its inverse out-of-fold residual variance. |
 | `"mint_shrink"` | Minimum Trace with Schäfer–Strimmer covariance shrinkage ($\hat{\mathbf{W}}_{\text{shrink}}$) | Exploits cross-series error correlations while guaranteeing positive-definiteness when $n > T$. |
 | `"mint_nonneg"` | Active-set non-negative Minimum Trace QP ($\tilde{\mathbf{b}}_t \ge \mathbf{0}$) | Guarantees strictly non-negative bottom and upper-level forecasts while maintaining exact coherence. |
 | `"cross_temporal_mint"` | Simultaneous cross-sectional ($\mathbf{S}_{\text{cs}}$) and temporal ($\mathbf{S}_{\text{temp}}$) MinT | Guarantees $< 10^{-6}$ discrepancy across both the hierarchy tree and all temporal aggregation buckets simultaneously while keeping pure spatial methods on the leaderboard for head-to-head OOF comparison. |
@@ -66,19 +79,39 @@ When `hierarchy.enabled = true`, `build_hierarchy(df, cfg)` aggregates bottom-le
 
 ## 2. Temporal Hierarchies (`THieF`), `spatial_temporal_weight` & Coherent Sample Paths
 
-Standard single-frequency forecasts often conflict across planning horizons: daily store replenishment models fail to sum to weekly distribution-center plans or monthly financial guidance. Following Athanasopoulos et al. (2017) (*Forecasting with Temporal Hierarchies*, `THieF`) and Di Fonzo & Girolimetto (2023), `scale-forecasting` reconciles forecasts across multiple temporal aggregation factors $k \in \{k_1, \dots, k_M, 1\}$:
+Standard single-frequency forecasts often conflict across planning horizons: daily store replenishment models fail to sum to weekly distribution-center plans or monthly financial guidance. Following Athanasopoulos et al. (2017) (*Forecasting with Temporal Hierarchies*, `THieF`) and Di Fonzo & Girolimetto (2023), `scale-forecasting` reconciles forecasts across multiple temporal aggregation factors $k \in \lbrace k_1, \dots, k_M, 1 \rbrace$:
 
 ### Default Temporal Aggregation Ladders (`default_temporal_aggregations`)
 
 When `hierarchy.reconcile_temporal = true` and `hierarchy.temporal_aggregations` is omitted (`null`), canonical factors are inferred automatically from `data.freq`:
 
-| Base Frequency (`data.freq`) | Default Coarse Factors (`temporal_aggregations`) | Macro-Cycle $m = \operatorname{lcm}(k)$ | Planning Levels Reconciled |
+| Base Frequency (`data.freq`) | Default Coarse Factors (`temporal_aggregations`) | Macro-Cycle $m = \text{lcm}(k)$ | Planning Levels Reconciled |
 | :--- | :--- | :--- | :--- |
 | Daily (`"D"` / `"B"`) | `[7, 14, 28]` | `28` days | Daily ($k=1$), Weekly ($k=7$), Bi-Weekly ($k=14$), and 4-Week ($k=28$) |
 | Weekly (`"W"`) | `[4, 13, 52]` | `52` weeks | Weekly ($k=1$), 4-Week ($k=4$), Quarterly ($k=13$), and Annual ($k=52$) |
 | Monthly (`"MS"` / `"ME"`) | `[3, 6, 12]` | `12` months | Monthly ($k=1$), Quarterly ($k=3$), Semi-Annual ($k=6$), and Annual ($k=12$) |
 | Quarterly (`"QS"` / `"QE"`) | `[2, 4]` | `4` quarters | Quarterly ($k=1$), Semi-Annual ($k=2$), and Annual ($k=4$) |
 | Hourly (`"h"`) | `[6, 12, 24]` | `24` hours | Hourly ($k=1$), 6-Hour ($k=6$), 12-Hour ($k=12$), and Daily ($k=24$) |
+
+### How the Temporal Hierarchy ($\mathbf{S}_{\text{temp}}$) & Coarse Forecasts Are Built
+1. **Temporal Summing Matrix (`build_temporal_summing_matrix`):** For macro-period $m = \text{lcm}(k_1, \dots, k_M)$, each aggregation factor $k$ contributes $m / k$ rows via the Kronecker product $\mathbf{S}_{\text{temp}}^{(k)} = \mathbf{I}_{m/k} \otimes \mathbf{1}_k^\top$, stacked from coarsest $k_{\max}$ down to finest $k=1$ into $\mathbf{S}_{\text{temp}} \in \lbrace 0, 1 \rbrace^{n_{\text{temp}} \times m}$ (and extended across multi-cycle horizons $H$ via $\mathbf{I}_P \otimes \mathbf{S}_{\text{temp}}$ where $P = \lceil H / m \rceil$).
+2. **Coarse-Level Forecasts & Residuals (`reconcile_series_temporal`):** At base frequency ($k=1$), the engine uses your fitted model's base forecast $\hat{\mathbf{y}}^{(1)}$ and out-of-fold (`backtest_oof`) or in-sample residuals. At each coarse factor $k > 1$, `aggregate_temporal_series` sums historical observations into non-overlapping blocks of size $k$ aligned to the forecast cutoff date and fits a fast deseasonalized damped-trend (Theta / Holt-Winters) smoother (`_fast_coarse_forecast_and_residuals`) to produce coarse forecasts $\hat{\mathbf{y}}^{(k)}$ and coarse residuals $\mathbf{e}^{(k)}$ (or accepts caller-supplied `coarse_forecasts`).
+
+### Temporal Projection Methods (`reconcile_temporal_matrix`)
+
+Given the stacked multi-frequency forecast vector $\hat{\mathbf{y}}_{\text{cycle}}$ ordered from $k_{\max}$ down to $k=1$, `reconcile_temporal_matrix` computes the coherent temporal projection $\tilde{\mathbf{y}} = \mathbf{S}_{\text{temp}} \mathbf{G}_{\text{temp}} \hat{\mathbf{y}}_{\text{cycle}}$ across all 9 methods in `VALID_TEMPORAL_METHODS`:
+
+| Temporal Method | Mathematical Formulation ($\mathbf{G}_{\text{temp}}$ / $\mathbf{W}_{\text{temp}}$) | How It Reconciles Across Time |
+| :--- | :--- | :--- |
+| **`"bottom_up"`** | $\mathbf{G}_{\text{temp}} = [\mathbf{0}_{m \times n_{\text{agg}}},\ \mathbf{I}_m]$ | Keeps base-frequency ($k=1$) forecasts unchanged and sums them upward into weekly/monthly/quarterly buckets ($\tilde{\mathbf{y}} = \mathbf{S}_{\text{temp}} \hat{\mathbf{y}}^{(1)}$). |
+| **`"top_down"`** | $\mathbf{G}_{\text{temp}}[:, 0] = \mathbf{p}$, where $p_j = \frac{1}{C}\sum_{c=1}^{C} \frac{y_{c,j}^{(1)}}{\sum_{t=1}^m y_{c,t}^{(1)}}$ | Disaggregates the coarsest macro-period forecast ($k = m$) down to base steps using historical within-cycle seasonal proportions $\mathbf{p}$. |
+| **`"middle_out"`** | Anchors on median factor $k_{\text{mid}} \in \lbrace k > 1 \rbrace$ | Preserves the intermediate temporal level (e.g., weekly $k=7$ inside a 28-day cycle), summing upward to $k=28$ and disaggregating down to $k=1$. |
+| **`"ols"`** | $\mathbf{W}_{\text{temp}} = \mathbf{I}_{n_{\text{temp}}}$, $\mathbf{G}_{\text{temp}} = (\mathbf{S}_{\text{temp}}^\top \mathbf{S}_{\text{temp}})^{-1} \mathbf{S}_{\text{temp}}^\top$ | Unweighted Ordinary Least Squares projection across all temporal frequencies. |
+| **`"wls_struct"`** *(alias `"struc"`)* | $\mathbf{W}_{\text{temp}} = \text{diag}(\mathbf{S}_{\text{temp}} \mathbf{1}_m)$, $\mathbf{G}_{\text{temp}} = (\mathbf{S}_{\text{temp}}^\top \mathbf{W}_{\text{temp}}^{-1} \mathbf{S}_{\text{temp}})^{-1} \mathbf{S}_{\text{temp}}^\top \mathbf{W}_{\text{temp}}^{-1}$ | **Athanasopoulos et al. (2017) Structural Scaling (`THieF` standard WLS):** weights each temporal bucket inversely to the number of base steps $k$ summed into it ($w_i = k$). Requires **no residuals** and is unconditionally stable on short histories. |
+| **`"wls_var"`** | $\mathbf{W}_{\text{temp}} = \text{diag}(\hat{\sigma}_1^2, \dots, \hat{\sigma}_{n_{\text{temp}}}^2)$ | **Variance Scaling WLS:** diagonal matrix of empirical out-of-fold / in-sample residual MSEs $\hat{\sigma}_k^2 = \frac{1}{N_k}\sum (e_t^{(k)})^2$ at each temporal bucket. |
+| **`"mint_shrink"`** | $\mathbf{W}_{\text{temp}} = \hat{\lambda} \text{diag}(\hat{\boldsymbol{\Sigma}}) + (1 - \hat{\lambda}) \hat{\boldsymbol{\Sigma}}$ | **Minimum Trace (`MinT`) with Schäfer–Strimmer Shrinkage:** stacks cycle residuals across all temporal levels into $(n_{\text{cycles}} \times n_{\text{temp}})$ and shrinks cross-frequency residual covariances toward the diagonal via analytical intensity $\hat{\lambda}$. |
+| **`"mint_nonneg"`** | $\min_{\tilde{\mathbf{b}} \ge \mathbf{0}} \|\mathbf{W}_{\text{temp}}^{-1/2}(\hat{\mathbf{y}} - \mathbf{S}_{\text{temp}} \tilde{\mathbf{b}})\|_2^2$ | **Non-Negative Minimum Trace (`scipy.optimize.nnls`):** whitens via $\mathbf{W}_{\text{temp}}^{-1/2}$ eigendecomposition and solves active-set non-negative least squares whenever any base step is negative, guaranteeing $\tilde{\mathbf{b}} \ge \mathbf{0}$ and exact temporal additivity. |
+| **`"cross_temporal_mint"`** | Simultaneous Spatial ($\mathbf{S}_{\text{cs}}$) $\times$ Temporal ($\mathbf{S}_{\text{temp}}$) Projection (`reconcile_cross_temporal`) | **Di Fonzo & Girolimetto (2023) Cross-Temporal Reconciliation:** blends Temporal-then-Spatial ($\mathbf{B}_A$) and Spatial-then-Temporal ($\mathbf{B}_B$) leaf projections via learned OOF weight $\alpha^* \in [0.05, 0.95]$ and refines via alternating projections so both spatial and temporal discrepancies are $< 10^{-6}$. |
 
 ### Data-Driven Spatial–Temporal Blending (`hierarchy.spatial_temporal_weight`)
 - When `hierarchy.spatial_temporal_weight` is a float $\alpha \in [0, 1]$, `reconcile_cross_temporal()` blends the spatial-last projection ($\tilde{\mathbf{B}}_{\text{temp}\to\text{cs}}$) and the temporal-last projection ($\tilde{\mathbf{B}}_{\text{cs}\to\text{temp}}$) as $\tilde{\mathbf{B}}(\alpha) = \alpha \tilde{\mathbf{B}}_{\text{temp}\to\text{cs}} + (1 - \alpha) \tilde{\mathbf{B}}_{\text{cs}\to\text{temp}}$ and refines via alternating projections onto $\mathbf{S}_{\text{cs}}$ and $\mathbf{S}_{\text{temp}}$ (plus $\mathbb{R}_+$ when `nonneg=True`).

@@ -428,24 +428,19 @@ from its GCS URI, and dispatches to the named engine's `run()`. That's the whole
 
 ```mermaid
 flowchart TD
-    subgraph Entry["1. Entrypoints"]
-        Caller["CLI · Notebook · Airflow · SDK"] --> MainRun["main.run(cfg)"]
+    subgraph Entry["1. Entrypoints & DAG Planning"]
+        Caller["CLI · Notebook · Airflow · SDK"] --> MainRun["main.run(cfg) + dag.plan_dag() + lifecycle.run_header()"]
         Play["playground.run_model()"]
     end
 
-    subgraph Orchestration["2. DAG Planning & Dispatch"]
-        MainRun --> PlanDag["dag.plan_dag() + lifecycle.run_header()"]
-        PlanDag --> FamLaunch["job_launch.launch_family_job() · launch_native_job() · launch_ensemble_job()"]
-    end
-
-    subgraph Runtimes["3. Distributed & Managed Runtimes"]
+    subgraph Runtimes["2. Parallel Family Dispatch across 7 Runtimes"]
         direction TB
-        PySubs["Python Submitters<br/>SparkSubmitter (spark_explode) · RaySubmitter / GkeSubmitter (ray_engine)<br/>VertexSubmitter / GceSubmitter / GkeSubmitter (vertex_engine)"]
-        MgdSubs["Managed & SQL Runners<br/>VertexAutoMLSubmitter (automl_engine) · bigquery_engine.run() · ensemble.run_ensembles()"]
-        FamLaunch --> PySubs --> MgdSubs
+        PySubs["Python Submitters (job_launch.launch_family_job)<br/>SparkSubmitter (spark_explode) · RaySubmitter / GkeSubmitter (ray_engine)<br/>VertexSubmitter / GceSubmitter / GkeSubmitter (vertex_engine)"]
+        MgdSubs["Managed & SQL Runners (launch_native_job · launch_ensemble_job)<br/>VertexAutoMLSubmitter (automl_engine) · bigquery_engine.run() · ensemble.run_ensembles()"]
+        MainRun --> PySubs & MgdSubs
     end
 
-    subgraph Worker["4. Shared Unit of Work & Registry Write"]
+    subgraph Worker["3. Shared Unit of Work & Registry Write"]
         PySubs --> RunGroup["spark_io.run_group() + worker.run_panel_model()"]
         RunGroup & Play --> RunCell["worker.run_cell()<br/>1. features.build_features · 2. hpo.tune_model · 3. backtest.backtest_cell · 4. BaseModel.fit, predict & explain"]
         RunCell & MgdSubs --> WriteCells["registry.cells.write_cells() (Storage Write API)"]

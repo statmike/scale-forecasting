@@ -624,33 +624,184 @@ def test_governance_and_release_kit_files_exist() -> None:
 
 
 def test_markdown_math_has_no_text_mode_underscores() -> None:
-    """Forbid underscores inside \\text{...} / \\mathrm{...} / \\operatorname{...} in Markdown math.
+    """Enforce GitHub MathJax safe-mode & CommonMark math rendering rules across docs and notebooks.
 
-    GitHub's CommonMark parser unescapes ``\\_`` to ``_`` inside inline ``$...$`` before handing
-    the expression to MathJax, causing ``'_' allowed only in math mode`` rendering errors on GitHub.
-    Use inline code backticks (e.g. `` `n < min_obs` ``) or math subscripts (``n_{\\min}``) instead.
+    Checks every ``$...$`` and ``$$...$$`` math block in all ``.md`` files and ``.ipynb``
+    Markdown cells for:
+    1. Underscores inside ``\\text{...}``, ``\\mathrm{...}``, ``\\mathbf{...}`` (GitHub's
+       CommonMark parser unescapes ``\\_`` to ``_`` before MathJax runs, causing
+       ``'_' allowed only in math mode`` errors).
+    2. Disallowed GitHub MathJax safe-mode macros (``\\operatorname``, ``\\DeclareMathOperator``,
+       ``\\newcommand``, ``\\renewcommand``, ``\\def``, ``\\mbox``, ``\\hbox``, ``\\vbox``), which
+       render on GitHub as ``The following macros are not allowed: operatorname``. Use
+       ``\\text{...}`` instead.
+    3. Escaped curly braces ``\\{`` or ``\\}`` inside inline ``$...$`` (CommonMark strips the
+       backslash before MathJax sees it, so TeX treats ``{`` / ``}`` as invisible grouping braces
+       and set braces vanish on GitHub). Use ``\\lbrace`` and ``\\rbrace`` instead.
+    4. Unescaped pipe ``|`` inside inline ``$...$`` on Markdown table lines (the table parser
+       splits cells on ``|`` before MathJax runs). Use ``\\mid``, ``\\lvert``, ``\\rvert``,
+       or ``\\|``.
     """
-    math_pat = re.compile(r"\$\$[\s\S]*?\$\$|\$[^\$\n]+\$")
-    text_underscore_pat = re.compile(r"\\(?:text|operatorname|mathrm|mathbf)\{[^}]*_[^}]*\}")
+    math_pat = re.compile(r"\$\$[\s\S]*?\$\$|(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)")
+    inline_math_pat = re.compile(r"(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)")
+    text_underscore_pat = re.compile(
+        r"\\(?:text|operatorname|mathrm|mathbf|mathit|mathsf|mathtt)\{[^}]*_[^}]*\}"
+    )
+    disallowed_macro_pat = re.compile(
+        r"\\(operatorname|DeclareMathOperator|newcommand|renewcommand|def|mbox|hbox|vbox)\b"
+    )
+    unescaped_pipe_pat = re.compile(r"(?<!\\)\|")
     offenders: list[str] = []
 
-    for md_path in _all_markdown_files():
-        raw = md_path.read_text(encoding="utf-8")
+    def _audit_source(label: str, raw: str) -> None:
         stripped = re.sub(r"```[\s\S]*?```", "", raw)
         stripped = re.sub(r"`[^`\n]+`", "", stripped)
         for match in math_pat.finditer(stripped):
             expr = match.group(0)
             if text_underscore_pat.search(expr):
-                rel = md_path.relative_to(_REPO_ROOT)
-                offenders.append(f"{rel}: {expr}")
+                offenders.append(
+                    f"{label}: underscore inside \\text{{...}} breaks GitHub MathJax: {expr}"
+                )
+            macro_m = disallowed_macro_pat.search(expr)
+            if macro_m:
+                offenders.append(
+                    f"{label}: disallowed GitHub MathJax macro \\{macro_m.group(1)} "
+                    f"(use \\text{{...}} instead): {expr}"
+                )
+        for match in inline_math_pat.finditer(stripped):
+            inner = match.group(1)
+            if r"\{" in inner or r"\}" in inner:
+                offenders.append(
+                    f"{label}: raw \\{{ or \\}} inside inline $...$ disappears after CommonMark "
+                    f"unescaping on GitHub (use \\lbrace / \\rbrace): ${inner}$"
+                )
+        for line_no, line in enumerate(stripped.splitlines(), start=1):
+            s_line = line.strip()
+            if s_line.startswith("|") and s_line.endswith("|"):
+                for match in inline_math_pat.finditer(s_line):
+                    inner = match.group(1)
+                    if unescaped_pipe_pat.search(inner):
+                        offenders.append(
+                            f"{label}:{line_no}: unescaped '|' inside inline math on table row "
+                            f"(use \\mid or \\|): ${inner}$"
+                        )
+
+    for md_path in _all_markdown_files():
+        rel = str(md_path.relative_to(_REPO_ROOT))
+        _audit_source(rel, md_path.read_text(encoding="utf-8"))
     for nb_label, nb_md in _all_notebook_markdown_sources():
-        stripped = re.sub(r"```[\s\S]*?```", "", nb_md)
-        stripped = re.sub(r"`[^`\n]+`", "", stripped)
-        for match in math_pat.finditer(stripped):
-            expr = match.group(0)
-            if text_underscore_pat.search(expr):
-                offenders.append(f"{nb_label}: {expr}")
-    assert not offenders, (
-        "Underscores inside \\text{...} break GitHub MathJax rendering "
-        f"('_' allowed only in math mode): {offenders}"
-    )
+        _audit_source(nb_label, nb_md)
+    assert not offenders, "GitHub MathJax rendering hazards detected:\n" + "\n".join(offenders)
+
+
+def _analyze_mermaid_rank_aspect(src: str) -> tuple[str, int, int, float] | None:
+    """Return ``(direction, n_ranks, max_cols, rank_to_col_ratio)`` for a Mermaid flowchart."""
+    from collections import Counter
+
+    lines = [
+        line.strip()
+        for line in src.splitlines()
+        if line.strip() and not line.strip().startswith("%%")
+    ]
+    if not lines:
+        return None
+    m_dir = re.match(r"^(?:flowchart|graph)\s+(TD|TB|LR|RL)", lines[0])
+    if not m_dir:
+        return None
+    direction = m_dir.group(1)
+    edges: list[tuple[str, str]] = []
+    nodes: set[str] = set()
+    subgraph_nodes: dict[str, list[str]] = {}
+    current_sg: list[str] = []
+
+    for line in lines[1:]:
+        if line.startswith(("classDef ", "class ", "style ", "linkStyle ", "direction ")):
+            continue
+        if line.startswith("subgraph "):
+            sg_m = re.match(r"^subgraph\s+([A-Za-z0-9_]+)", line)
+            sg_id = sg_m.group(1) if sg_m else f"sg_{len(subgraph_nodes)}"
+            current_sg.append(sg_id)
+            subgraph_nodes.setdefault(sg_id, [])
+            continue
+        if line == "end":
+            if current_sg:
+                current_sg.pop()
+            continue
+        l_clean = re.sub(r"\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}", "", line)
+        l_clean = re.sub(r"\|[^\|]*\|", "", l_clean)
+        parts = re.split(r"\s*(?:-->|---|-\.->|==>|--[^>]*-->)\s*", l_clean)
+        if len(parts) >= 2:
+            group_list: list[list[str]] = []
+            for part in parts:
+                ids = [tok.split(":::")[0].strip() for tok in part.split("&")]
+                ids = [i for i in ids if re.match(r"^[A-Za-z0-9_]+$", i)]
+                if ids:
+                    group_list.append(ids)
+                    for i in ids:
+                        nodes.add(i)
+                        for sg in current_sg:
+                            if i not in subgraph_nodes[sg]:
+                                subgraph_nodes[sg].append(i)
+            for idx in range(len(group_list) - 1):
+                for u in group_list[idx]:
+                    for v in group_list[idx + 1]:
+                        edges.append((u, v))
+        else:
+            m_node = re.match(r"^([A-Za-z0-9_]+)", l_clean)
+            if m_node:
+                nid = m_node.group(1)
+                nodes.add(nid)
+                for sg in current_sg:
+                    if nid not in subgraph_nodes[sg]:
+                        subgraph_nodes[sg].append(nid)
+
+    expanded_edges: list[tuple[str, str]] = []
+    for u, v in edges:
+        us = subgraph_nodes.get(u) or [u]
+        vs = subgraph_nodes.get(v) or [v]
+        for uu in us:
+            for vv in vs:
+                if uu != vv:
+                    expanded_edges.append((uu, vv))
+    real_nodes = [n for n in nodes if not subgraph_nodes.get(n)] or list(nodes)
+    if not real_nodes:
+        return (direction, 1, 1, 1.0)
+    rank = dict.fromkeys(real_nodes, 0)
+    for _ in range(len(real_nodes) + 2):
+        changed = False
+        for u, v in expanded_edges:
+            if u in rank and v in rank and rank[v] < rank[u] + 1:
+                rank[v] = rank[u] + 1
+                changed = True
+        if not changed:
+            break
+    n_ranks = max(rank.values()) + 1
+    rc = Counter(rank.values())
+    max_cols = max(rc.values()) if rc else 1
+    return (direction, n_ranks, max_cols, round(n_ranks / max(max_cols, 1), 2))
+
+
+def test_mermaid_diagram_aspect_ratio_balance(markdown_files: list[Path]) -> None:
+    """Prevent tall, skinny 1-column 'skyscraper' Mermaid diagrams that shrink font on GitHub.
+
+    Any ``flowchart`` / ``graph`` block with more than 6 topological ranks must fan out across
+    multiple columns so ``n_ranks / max_cols <= 3.0``.
+    """
+    mermaid_re = re.compile(r"```mermaid\n([\s\S]*?)```")
+    offenders: list[str] = []
+    for path in markdown_files:
+        rel = path.relative_to(_REPO_ROOT)
+        text = path.read_text(encoding="utf-8")
+        for idx, match in enumerate(mermaid_re.finditer(text), start=1):
+            line_no = text[: match.start()].count("\n") + 1
+            res = _analyze_mermaid_rank_aspect(match.group(1))
+            if res is None:
+                continue
+            direction, n_ranks, max_cols, ratio = res
+            if n_ranks > 6 and ratio > 3.0:
+                offenders.append(
+                    f"{rel}:{line_no} (diagram #{idx}, {direction}): {n_ranks} ranks x "
+                    f"{max_cols} col(s) (aspect ratio {ratio} > 3.0); arrange subgraphs/nodes "
+                    f"in 2-3 parallel columns so GitHub does not shrink the diagram text"
+                )
+    assert not offenders, "Tall/skinny Mermaid diagrams detected:\n" + "\n".join(offenders)

@@ -17,13 +17,13 @@ flowchart TD
         C_CPU["Python CPU & Distributed Fleet<br/>Dataproc Serverless Spark · Compute Engine VM (3-way self-delete)"]
         C_GPU["Python & GPU Cluster / Pod Fleet<br/>Vertex AI CustomJob · GKE Indexed Job · Ray on Vertex AI / GKE"]
         C_MGD["Managed Google AI & Serverless SQL<br/>Vertex AI AutoML & Tabular Workflows · BigQuery ML (ARIMA_PLUS · TimesFM)"]
-        C_CPU --> C_GPU --> C_MGD
     end
     subgraph BQ_OUT["4 · Unified BigQuery Registry & Views"]
         REG["Storage Write API / load jobs -> 5 registry tables & 5 analytical SQL views<br/>(forecasts · OOF backtests · feature attributions · leaderboard)"]
     end
 
-    BQ_IN --> ROUTE --> COMP --> BQ_OUT
+    BQ_IN --> ROUTE
+    DAG --> C_CPU & C_GPU & C_MGD --> REG
 ```
 
 ---

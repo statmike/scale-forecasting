@@ -4,70 +4,67 @@ Beyond scaling 37 models across 7 Google Cloud runtimes, `scale-forecasting` inc
 
 ```mermaid
 flowchart TD
+    classDef g1 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
+    classDef g2 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    classDef g3 fill:#faf5ff,stroke:#9333ea,stroke-width:1.5px,color:#581c87
+
     subgraph S1["Stage 1: Pre-Fit Data Hygiene & Regime Routing (G.2)"]
-        H1["Grid Regularization & Pre-Launch Trim<br/>data.grid_policy · data.trim_leading_zeros"]
-        H2["Calendar Normalization & Outlier Winsorization<br/>features.trading_days · features.outlier_policy · censored_col"]
-        H3["SBC Demand Regime Classification<br/>compute_demand_profile (smooth · erratic · intermittent · lumpy)"]
-        H1 --> H2 --> H3
+        H1["Grid Regularization, Pre-Launch Trim & Outlier Winsorization<br/>data.grid_policy · data.trim_leading_zeros · features.trading_days · features.outlier_policy · censored_col"]:::g1
+        H2["SBC Demand Regime Classification<br/>compute_demand_profile (smooth · erratic · intermittent · lumpy)"]:::g1
+        H1 --> H2
     end
 
     subgraph S2["Stage 2: Physical Guardrails, Quantiles & Smart Blending (G.1 & G.2)"]
-        B1["Physical Bounds & Coherent Integer Rounding<br/>output.floor · output.cap · cumulative_round"]
-        B2["Monotone Multi-Percentile Fans & Newsvendor Targets<br/>output.quantiles (Chernozhukov rearrangement) · underage_cost / overage_cost"]
-        B3["Smart Ensembles & Non-Negative Hierarchies<br/>champion · horizon_specialist · top_k · mint_nonneg"]
-        B1 --> B2 --> B3
+        B1["Physical Bounds, Coherent Rounding & Monotone Fans<br/>output.floor · output.cap · cumulative_round · output.quantiles (Chernozhukov) · underage_cost / overage_cost"]:::g1
+        B2["Smart Ensembles & Non-Negative Hierarchies<br/>champion · horizon_specialist · top_k · mint_nonneg"]:::g1
+        B1 --> B2
     end
 
-    subgraph S3["Stage 3: Econometric Diagnostics, Rollups, Inventory Policies & Scenarios (G.3 + Track B)"]
-        D1["Forecast Value Added (FVA) & Diebold-Mariano p-values<br/>compute_fva · diebold_mariano_test (HLN 1997) · wilcoxon_pvalue"]
-        D2["Lead-Time Horizon Decay & Trigg Bias Audit<br/>compute_horizon_decay (crossover h*) · compute_bias_report"]
-        D3["Autocorrelation-Aware Rollup, Inventory Policies & Promo/Price Scenarios<br/>rollup_time · compute_inventory_policy (ROP / SS) · simulate_scenarios"]
-        D1 --> D2 --> D3
+    subgraph S3["Stage 3: Econometric Diagnostics, Rollups & Scenarios (G.3 + Track B)"]
+        D1["Forecast Value Added (FVA), DM p-values, Horizon Decay & Bias<br/>compute_fva · diebold_mariano_test (HLN 1997) · compute_horizon_decay (h*) · compute_bias_report"]:::g1
+        D2["Autocorrelation-Aware Rollup, Inventory Policies & Promo/Price Scenarios<br/>rollup_time · compute_inventory_policy (ROP / SS) · simulate_scenarios"]:::g1
+        D1 --> D2
     end
 
-    subgraph S4["Stage 4: Live Drift, Whipsaw Stability, Triage & Executive Report (G.4)"]
-        L1["Realized Accuracy & Live Drift Detection<br/>compute_realized_accuracy · Forecaster.score_realized"]
-        L2["Cross-Run Revision Stability ('Whipsaw')<br/>compute_revision_stability · Forecaster.revision_stability_df"]
-        L3["Top-N Exception Triage & Self-Contained HTML Report<br/>compute_exceptions_queue · export_report (python -m scale_forecasting.report)"]
-        L1 --> L2 --> L3
+    subgraph S4["Stage 4: Live Drift, Whipsaw Stability & Executive Report (G.4)"]
+        L1["Realized Accuracy, Live Drift & Revision Stability ('Whipsaw')<br/>compute_realized_accuracy · Forecaster.score_realized · compute_revision_stability"]:::g2
+        L2["Top-N Exception Triage & Self-Contained HTML Report<br/>compute_exceptions_queue · export_report (python -m scale_forecasting.report)"]:::g2
+        L1 --> L2
     end
 
-    subgraph S5["Stage 5: Model Variants, Ablation Ladders & Cross-Run Cell Borrowing (G.5)"]
-        V1["Model Variants & Orthogonal Taxonomy<br/>base_model@tag · scope_capability × training_mode × cov_profile"]
-        V2["Config-Driven Ablation Ladders & Multi-Baseline FVA<br/>ablation_modes · variant_policy · covariate_fva_pct · pooling_fva_pct"]
-        V3["Snapshot-Verified Cross-Run Cell Borrowing<br/>compute.reuse_prior_runs · model_spec_hash · borrowed_from_run_id"]
-        V1 --> V2 --> V3
+    subgraph S5["Stage 5: Model Variants, Ablation Ladders & Cell Borrowing (G.5)"]
+        V1["Model Variants, Orthogonal Taxonomy & Multi-Baseline FVA<br/>base_model@tag · ablation_modes · variant_policy · covariate_fva_pct · pooling_fva_pct"]:::g2
+        V2["Snapshot-Verified Cross-Run Cell Borrowing<br/>compute.reuse_prior_runs · model_spec_hash · borrowed_from_run_id"]:::g2
+        V1 --> V2
     end
 
-    subgraph S6["Stage 6: Causal & Structural Econometric Guardrails + Full-Chain What-If (Track J)"]
-        J1["Monotonic Sign Constraints & Moving-Holiday Windows<br/>features.monotonic_constraints (@monotone) · features.holiday_window"]
-        J2["Double/Debiased ML Promo & Price Decomposition<br/>promo_elasticity_df (baseline · lift · pull-forward dip · cannibalization)"]
-        J3["5-Stage Full-Chain Margin & Inventory What-If<br/>simulate_scenarios(unit_cost=..., reconcile=True, include_inventory_impact=True)"]
-        J1 --> J2 --> J3
+    subgraph S6["Stage 6: Causal & Structural Econometric Guardrails (Track J)"]
+        J1["Monotonic Sign Constraints & Moving-Holiday Windows<br/>features.monotonic_constraints (@monotone) · features.holiday_window"]:::g2
+        J2["Double-ML Promo Elasticity & 5-Stage Full-Chain Margin/Inventory What-If<br/>promo_elasticity_df · simulate_scenarios(unit_cost=..., reconcile=True, include_inventory_impact=True)"]:::g2
+        J1 --> J2
     end
 
-    subgraph S7["Stage 7: Cross-Temporal Reconciliation, Compositional Simplex & Top-Down Goal-Seek QP (Track K)"]
-        K1["3-Mode Reconciliation & Coherent Path Simulation (temporal_reconciliation.py)<br/>spatial_only · temporal_only · cross_temporal_mint (spatial_temporal_weight='auto') · sample_coherent_paths"]
-        K2["Compositional Simplex Log-Ratio Transforms & Evolve Closure (simplex.py)<br/>features.transform = 'clr' | 'ilr' (@transform_clr · @transform_ilr) · verify_simplex"]
-        K3["Smooth Multi-Period Top-Down Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets=..., locks=..., bounds=..., smoothness_weight=10.0)"]
-        K1 --> K2 --> K3
+    subgraph S7["Stage 7: Cross-Temporal THieF, Simplex & Goal-Seek QP (Track K)"]
+        K1["3-Mode Reconciliation & Compositional Simplex Transforms<br/>spatial_only · temporal_only · cross_temporal_mint · features.transform = 'clr' | 'ilr' (@transform_ilr)"]:::g3
+        K2["Smooth Multi-Period Top-Down Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets=..., locks=..., bounds=..., smoothness_weight=10.0)"]:::g3
+        K1 --> K2
     end
 
-    subgraph S8["Stage 8: Cold-Start Transfer, Online ACI, Copula Risk, Portfolio Inventory & Prescriptive Optimization (Track L)"]
-        M1["Cold-Start & NPI Analog Transfer (cold_start.py)<br/>features.cold_start_transfer · analog_transfer · bass_diffusion · weibull_lifecycle"]
-        M2["Online Adaptive Conformal Inference & Copula Tail Risk (aci.py · copula.py)<br/>output.calibration_method = 'aci' | 'aci_normalized' · sample_trajectories · tail_risk_df (VaR / CVaR)"]
-        M3["Portfolio Inventory & Prescriptive Price/Promo Optimization (inventory_optimizer.py · scenario_optimizer.py)<br/>optimize_inventory_df (budget/volume/fill-rate) · optimize_scenario (Double-ML + CVaR)"]
-        M1 --> M2 --> M3
+    subgraph S8["Stage 8: Cold-Start, Online ACI, Copula Risk & Optimization (Track L)"]
+        M1["Cold-Start NPI Transfer, Online ACI & Copula Tail Risk<br/>cold_start_transfer · calibration_method = 'aci' | 'aci_normalized' · sample_trajectories · tail_risk_df"]:::g3
+        M2["Portfolio Inventory & Prescriptive Price/Promo Optimization<br/>optimize_inventory_df (budget/volume/fill-rate) · optimize_scenario (Double-ML + CVaR)"]:::g3
+        M1 --> M2
     end
 
-    subgraph S9["Stage 9: Multi-Lens & Multi-Modal Similarity, Merchandising Intelligence & Similarity-Woven Decisioning (Track P)"]
-        P_SIM1["7-Lens + Multi-Modal PSD Similarity (similarity.py)<br/>hybrid · physics_attractor · spectral_phase · elastic_dtw · minirocket · structural_signature · foundation_latent · text_cols / attribute_cols / hierarchy_cols"]
-        P_SIM2["Cluster-Aware Global Pooling, Day-0 to Day-14 NPI Handoff & Latent Hierarchies<br/>@similarity_global · @similarity_cold_start (cold_start_handoff) · hierarchy.similarity_hierarchy"]
-        P_SIM3["SKU Substitutes, Emerging Trends, Copulas, Inventory Pooling & OOF Smoothing<br/>recommend_substitutes_df · detect_emerging_trends_df · similarity_shrinkage · similarity_pooling · ensemble.similarity_smoothing"]
-        P_SIM1 --> P_SIM2 --> P_SIM3
+    subgraph S9["Stage 9: Multi-Lens Similarity & Merchandising Intelligence (Track P)"]
+        P_SIM1["7-Lens + Multi-Modal PSD Similarity & Cluster-Aware Global Pooling<br/>hybrid · physics_attractor · spectral_phase · @similarity_global · @similarity_cold_start · similarity_hierarchy"]:::g3
+        P_SIM2["SKU Substitutes, Emerging Trends, Copulas, Inventory Pooling & OOF Smoothing<br/>recommend_substitutes_df · detect_emerging_trends_df · similarity_shrinkage · ensemble.similarity_smoothing"]:::g3
+        P_SIM1 --> P_SIM2
     end
 
-    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
+    S1 --> S4 --> S7
+    S2 --> S5 --> S8
+    S3 --> S6 --> S9
 ```
 
 ---
@@ -128,20 +125,24 @@ The pure offline modules [`scale_forecasting.diagnostics`](./api/review.md), [`s
 
 ```mermaid
 flowchart TD
+    classDef causal fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
+    classDef chain fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+
     subgraph Causal["1. Causal & Structural Econometric Guardrails"]
-        C1["Monotonic Sign Constraints (monotonicity.py)<br/>features.monotonic_constraints = {'price': -1, 'promo': 1}<br/>@monotone on lightgbm · xgboost · catboost · random_forest · regression_lags (ridge_lags)"]
-        C2["Moving-Holiday Lead/Lag Windows (holiday_window.py)<br/>features.holiday_window (pre_holiday_days=7, post_holiday_days=3)<br/>pre_holiday_window · post_holiday_window · holiday_offset_days"]
-        C3["Double/Debiased ML Promo & Price Decomposition (elasticity.py)<br/>Robinson (1988) / Chernozhukov (2018) cross-fitted partialing-out<br/>baseline_yhat · incremental_promo_lift · pull_forward_dip · cannibalization_effect · net_causal_elasticity"]
-        C1 --> C2 --> C3
+        C1["Monotonic Sign Constraints (monotonicity.py)<br/>features.monotonic_constraints = {'price': -1, 'promo': 1}<br/>@monotone on lightgbm · xgboost · catboost · random_forest · regression_lags (ridge_lags)"]:::causal
+        C2["Moving-Holiday Lead/Lag Windows (holiday_window.py)<br/>features.holiday_window (pre_holiday_days=7, post_holiday_days=3)<br/>pre_holiday_window · post_holiday_window · holiday_offset_days"]:::causal
+        C3["Double/Debiased ML Promo & Price Decomposition (elasticity.py)<br/>Robinson (1988) / Chernozhukov (2018) cross-fitted partialing-out<br/>baseline_yhat · incremental_promo_lift · pull_forward_dip · cannibalization_effect · net_causal_elasticity"]:::causal
+        C1 & C2 --> C3
     end
 
     subgraph Chain["2. 5-Stage Full-Chain Counterfactual Simulator (scenarios.py)"]
-        S_1["Stage 1: Shock Future Covariates<br/>apply_scenario_shocks (+ / * / = on price & promo)"]
-        S_2["Stage 2: Refit-Free Model & Ensemble Propagation<br/>Base models + winning ensemble_mean / nnls / ridge / champion"]
-        S_3["Stage 3: Coherent Hierarchy Reconciliation (reconcile=True)<br/>mint_nonneg projection (0.000000 coherence discrepancy)"]
-        S_4["Stage 4: Gross Profit & Margin Delta (unit_cost=...)<br/>gross_margin_delta = (p_scen - c)*yhat_scen - (p_0 - c)*yhat_0"]
-        S_5["Stage 5: Operational Inventory Impact (include_inventory_impact=True)<br/>delta_reorder_point (ΔROP) · delta_safety_stock (ΔSS) · delta_order_qty"]
-        S_1 --> S_2 --> S_3 --> S_4 --> S_5
+        S_1["Stage 1: Shock Future Covariates<br/>apply_scenario_shocks (+ / * / = on price & promo)"]:::chain
+        S_2["Stage 2: Refit-Free Model & Ensemble Propagation<br/>Base models + winning ensemble_mean / nnls / ridge / champion"]:::chain
+        S_3["Stage 3: Coherent Hierarchy Reconciliation (reconcile=True)<br/>mint_nonneg projection (0.000000 coherence discrepancy)"]:::chain
+        S_4["Stage 4: Gross Profit & Margin Delta (unit_cost=...)<br/>gross_margin_delta = (p_scen - c)*yhat_scen - (p_0 - c)*yhat_0"]:::chain
+        S_5["Stage 5: Operational Inventory Impact (include_inventory_impact=True)<br/>delta_reorder_point (ΔROP) · delta_safety_stock (ΔSS) · delta_order_qty"]:::chain
+        S_1 --> S_2 --> S_3
+        S_3 --> S_4 & S_5
     end
 
     Causal --> Chain
@@ -192,7 +193,7 @@ Forecasters routinely need to answer: *Did future promo calendars, `@monotone` s
 
 Enterprise S&OP and financial planning require three mathematical coherence guarantees beyond standard cross-sectional hierarchy reconciliation:
 1. **Three-Mode Reconciliation & Coherent Sample Paths (`THieF`, [`temporal_reconciliation.py`](./api/temporal_reconciliation.md)):** `HierarchyConfig` supports Mode 1 (`spatial_only`, `spatial_weight_alpha = 1.0`), Mode 2 (`temporal_only`, `levels = []` with `reconcile_temporal = true` and OOF metric recomputation), and Mode 3 (`cross_temporal = true`, `"cross_temporal_mint"` raced side-by-side on the leaderboard against pure spatial `<model>_mint_shrink` / `<model>_mint_nonneg` with `spatial_temporal_weight = "auto"` or float $\alpha \in [0, 1]$), plus `sample_coherent_paths(n_paths=200)` for cross-sectionally and temporally coherent sample trajectories.
-2. **Compositional Simplex Coherence ([`simplex.py`](./api/simplex.md)):** Market-share, category-mix, and budget-allocation panels on the simplex $\mathcal{S}^D = \{x \in (0, S)^D : \sum_{j=1}^D x_{t,j} = S\}$ ($S = 1.0$ or $100.0$) use Aitchison `clr` or Egozcue `ilr` Helmert log-ratio transforms (`features.transform = "clr" | "ilr"`, `<model>@transform_clr`, `<model>@transform_ilr`) with Martín-Fernández multiplicative zero replacement and post-blend `enforce_simplex_closure()` in `Forecaster.evolve(target="ensemble")` so forecasts stay strictly inside $(0, S)$ and sum to $S$ (`verify_simplex < 1e-6`).
+2. **Compositional Simplex Coherence ([`simplex.py`](./api/simplex.md)):** Market-share, category-mix, and budget-allocation panels on the simplex $\mathcal{S}^D = \lbrace x \in (0, S)^D : \sum_{j=1}^D x_{t,j} = S\rbrace$ ($S = 1.0$ or $100.0$) use Aitchison `clr` or Egozcue `ilr` Helmert log-ratio transforms (`features.transform = "clr" | "ilr"`, `<model>@transform_clr`, `<model>@transform_ilr`) with Martín-Fernández multiplicative zero replacement and post-blend `enforce_simplex_closure()` in `Forecaster.evolve(target="ensemble")` so forecasts stay strictly inside $(0, S)$ and sum to $S$ (`verify_simplex < 1e-6`).
 3. **Top-Down Goal-Seek & Smooth Multi-Period Target Allocation ([`goal_seek.py`](./api/goal_seek.md)):** When executives set a top-down target on `"__total__"` or a regional sub-tree (e.g., `+8%` Q4 volume or \$50M revenue) while locking contractual SKU cells and enforcing warehouse capacity bounds $[l_i, u_i]$, `forecaster.allocate_target(..., smoothness_weight=10.0)` solves the precision-weighted convex quadratic program $\min_b \frac{1}{2}(b - \hat{b})^\top W^{-1}(b - \hat{b}) + \frac{\lambda_{\text{smooth}}}{2}\|D(b - \hat{b})\|_2^2$ subject to $C b = d$ and $l \le b \le u$, propagating adjustments into reconciled nodes, gross margin (`gross_margin_delta`), and inventory policy ($\Delta\text{ROP}$, $\Delta\text{SS}$).
 
 ```mermaid
@@ -218,7 +219,7 @@ flowchart TD
         G1 --> G2 --> G3
     end
 
-    THieF --> Simplex --> GoalSeek
+    THieF & Simplex --> GoalSeek
 ```
 
 | Capability | SDK / Workbench Entrypoint | Key Parameters & Outputs |

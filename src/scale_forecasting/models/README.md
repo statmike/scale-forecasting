@@ -34,7 +34,9 @@ flowchart TB
         vaml --> bq
     end
 
-    base --> stat --> ml --> dl --> managed
+    base --> stat & dl
+    stat --> ml
+    dl --> managed
 ```
 
 ---
@@ -97,7 +99,7 @@ Every model subclasses `BaseModel` and declares:
 - **`search_space(trial)`** for Optuna hyperparameter tuning ([`hpo.py`](../hpo.py)) and **`recondition(y, X)`** / **`advance_origin(n_steps)`** for `expanding_frozen` and `expanding_stale` backtesting ([`backtest.py`](../backtest.py)).
 
 ### [`_lag_forecaster.py`](./_lag_forecaster.py)
-Shared engine behind `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, and `catboost`. It constructs a tabular feature matrix combining customizable target lags (default `1, 2, 3, 7, 14, 28`), calendar features (`dow`, `dom`, `month`, `doy`), and exogenous covariates (`X`), supports both **`strategy="recursive"`** (1-step estimator rolled forward where each step's `yhat` feeds subsequent target lags) and **`strategy="direct"`** (`fit_direct_models` / `direct_predict` / `direct_explain` fitting an independent estimator per horizon step $h \in \{1,\dots,H\}$ from fixed forecast-origin lags), computes empirical residual prediction intervals, and extracts Two-Tier feature attributions (exact TreeSHAP for `xgboost`/`lightgbm`/`catboost`, closed-form linear attributions for `regression_lags`, and importance-weighted deviations for `random_forest`).
+Shared engine behind `regression_lags`, `random_forest`, `lightgbm`, `xgboost`, and `catboost`. It constructs a tabular feature matrix combining customizable target lags (default `1, 2, 3, 7, 14, 28`), calendar features (`dow`, `dom`, `month`, `doy`), and exogenous covariates (`X`), supports both **`strategy="recursive"`** (1-step estimator rolled forward where each step's `yhat` feeds subsequent target lags) and **`strategy="direct"`** (`fit_direct_models` / `direct_predict` / `direct_explain` fitting an independent estimator per horizon step $h \in \lbrace 1,\dots,H\rbrace$ from fixed forecast-origin lags), computes empirical residual prediction intervals, and extracts Two-Tier feature attributions (exact TreeSHAP for `xgboost`/`lightgbm`/`catboost`, closed-form linear attributions for `regression_lags`, and importance-weighted deviations for `random_forest`).
 
 ### [`_neuralforecast_base.py`](./_neuralforecast_base.py)
 Shared adapter behind `tide`, `tft`, `tsmixer`, and `patchtst`. Wraps Nixtla's `neuralforecast` PyTorch Lightning architectures with `MQLoss(quantiles=[0.1, 0.5, 0.9])`, supports both per-series (`training_mode="local"`) and cross-series panel (`training_mode="global"`) execution, and routes `future_covariates` (`futr_exog_list`), `past_covariates` (`hist_exog_list`), and `static_covariates` (`stat_exog_list`).

@@ -8,13 +8,11 @@ A **smoke test** is a small, end-to-end live run (20–100 time series) that ver
 - **Live Results Record**: [System Validation Ledger](validation.md)
 
 ```mermaid
-flowchart LR
-    Cfg["configs/smokes/*.json<br/>(42 Smoke Configs)"] --> Dry["1. Plan<br/>plan_run()"]
-    Dry --> Stage["2. Stage<br/>stage_run() -> GCS"]
-    Stage --> Run["3. Execute<br/>main.run() or Composer DAG"]
-    Run --> Verify["4. Verify<br/>v_run_summary, v_run_jobs,<br/>v_model_leaderboard, cells"]
-    Verify --> Rerun["5. Idempotent Rerun<br/>Same run_id, deduplicated<br/>row counts unchanged"]
-    Rerun --> Trace["6. Reverse-Trace<br/>system_job_id -> GCP Service"]
+flowchart TD
+    Cfg["configs/smokes/*.json<br/>(42 Smoke Configs)"] --> Dry["1. Plan: plan_run()"] & Stage["2. Stage: stage_run() -> GCS"]
+    Dry & Stage --> Run["3. Execute: main.run() or Composer DAG"]
+    Run --> Verify["4. Verify: v_run_summary, v_run_jobs,<br/>v_model_leaderboard, cells"] & Rerun["5. Idempotent Rerun:<br/>Same run_id, deduplicated row counts"]
+    Verify & Rerun --> Trace["6. Reverse-Trace:<br/>system_job_id -> GCP Service"]
 ```
 
 ---
