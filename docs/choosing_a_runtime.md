@@ -11,19 +11,22 @@ This page helps you choose which runtime (or combination of runtimes) fits your 
 ```mermaid
 flowchart TD
     START["What are you running, and how does your team operate?"]
-    START --> Q_SQL{"SQL-only team or<br/>zero Python infrastructure?"}
+    START --> Q_SQL{"SQL-only team or<br/>zero Python infra?"}
+    START --> Q_AUTO{"Managed neural search<br/>with no model code?"}
+    START --> Q_PY{"Python / PyTorch<br/>model families?"}
+
     Q_SQL -->|"Yes"| R_BQ["BigQuery ML<br/>(ARIMA_PLUS · AI.FORECAST / TimesFM)"]
-    Q_SQL -->|"No"| Q_AUTO{"Managed neural architecture search<br/>with no model code?"}
     Q_AUTO -->|"Yes"| R_AUTO["Vertex AI AutoML &amp; Tabular Workflows<br/>(runtime = 'vertex_automl')"]
-    Q_AUTO -->|"No"| Q_K8S{"Standardized on Kubernetes<br/>or existing GKE cluster?"}
-    Q_K8S -->|"Yes"| R_GKE["Google Kubernetes Engine<br/>(runtime = 'gke' · job or ray mode)"]
-    Q_K8S -->|"No"| Q_INT{"Interactive notebook session<br/>attached to live cluster?"}
-    Q_INT -->|"Yes"| R_CONN["Dataproc Spark Connect or Ray Client<br/>(spark_mode = 'connect' / ray_mode)"]
-    Q_INT -->|"No"| Q_GPU{"Training PyTorch deep-learning<br/>models on GPUs?"}
-    Q_GPU -->|"Yes"| R_GPU["Vertex AI CustomJob (GPU) or<br/>Ray on Vertex AI (GPU)"]
-    Q_GPU -->|"No"| Q_SCALE{"Panel scale &amp; debugging preference"}
-    Q_SCALE -->|"Single VM, simplest debugging,<br/>small-to-medium panel"| R_GCE["Compute Engine Single VM<br/>(runtime = 'gce' · self-deleting)"]
-    Q_SCALE -->|"Serverless multi-worker CPU fan-out"| R_CPU["Dataproc Serverless Spark ('spark') or<br/>Vertex AI CustomJob ('vertex')"]
+
+    Q_PY --> Q_K8S{"Kubernetes / GKE<br/>or Live Cluster?"}
+    Q_PY --> Q_SCALE{"Serverless Batch,<br/>GPU, or Single VM?"}
+
+    Q_K8S -->|"GKE"| R_GKE["Google Kubernetes Engine<br/>(runtime = 'gke' · job or ray)"]
+    Q_K8S -->|"Interactive"| R_CONN["Spark Connect or Ray Client<br/>(spark_mode = 'connect' / ray_mode)"]
+
+    Q_SCALE -->|"GPU"| R_GPU["Vertex AI CustomJob (GPU) or<br/>Ray on Vertex AI (GPU)"]
+    Q_SCALE -->|"Single VM"| R_GCE["Compute Engine Single VM<br/>(runtime = 'gce' · self-deleting)"]
+    Q_SCALE -->|"CPU Fan-Out"| R_CPU["Dataproc Serverless Spark ('spark') or<br/>Vertex AI CustomJob ('vertex')"]
 ```
 
 ---

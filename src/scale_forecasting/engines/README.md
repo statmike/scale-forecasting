@@ -18,7 +18,6 @@ flowchart TD
         spark["Spark Engine (spark_explode.py · spark_io.py)<br/>Read via spark-bigquery connector (Arrow) · Cost-weighted bucketing + applyInPandas · Stream bucket results"]
         ray["Ray Engine (ray_engine.py · ray_io.py)<br/>Read via BigQuery Storage Read API (Arrow) · Shard into cost-weighted chunks · Dispatch @ray.remote tasks"]
         vtx["Vertex, GCE & GKE Engine (vertex_engine.py)<br/>Read via Storage Read API + contiguous shard pushdown · Dedicated per-model VMs/pods or ThreadPoolExecutor (LPT)"]
-        spark --> ray --> vtx
     end
 
     cell["2. worker.run_cell / run_panel_model<br/>Identical fit · backtest · calibrate · reconcile · predict"]
@@ -27,12 +26,13 @@ flowchart TD
         direction TB
         aml["Vertex AI AutoML Engine (automl_engine.py)<br/>Stage snapshot-pinned BQ views · Compile GCPC pipeline (L2L · TiDE · TFT · Seq2Seq+) · Score 21-metric panel"]
         bq["BigQuery SQL Engine (bigquery_engine.py · bigquery_sql.py)<br/>Rolling-origin backtest folds in SQL · CREATE OR REPLACE MODEL (ARIMA_PLUS / XREG) · ML.FORECAST / AI.FORECAST (TimesFM)"]
-        aml --> bq
     end
 
     reg[("4. BigQuery Run Registry<br/>forecast_metadata · forecast_predictions · backtest_oof")]
 
-    src --> py_engines --> cell --> managed_engines --> reg
+    src --> spark & ray & vtx --> cell
+    src --> aml & bq
+    cell & aml & bq --> reg
 ```
 
 ---

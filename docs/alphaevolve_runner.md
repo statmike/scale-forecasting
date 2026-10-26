@@ -47,42 +47,37 @@ When your organization operates a proprietary dataset with domain-specific non-l
 
 ```mermaid
 flowchart TB
-    subgraph Split["1. Strict Temporal Split (Zero Lockdown Leakage)"]
+    subgraph Split["1. Strict Temporal Split & Baseline Champion"]
         Raw["Mode A: Raw Panel (DataFrame or BigQuery Table)<br/>OR Mode B: Completed Run(s) (f.evolve / from_runs / from_run_ids)"]
-        Inner["Inner Evolution Panel / Inner OOF Window<br/>t = 1 ... T - H_lockdown<br/>(Visible to Evolution Loop)"]
-        Lock["Held-Out Lockdown Fold / Final OOF Window<br/>Last H_lockdown Steps: t = T - H_lockdown + 1 ... T<br/>(NEVER Visible During Evolution)"]
-        Raw --> Inner & Lock
-    end
-
-    subgraph Base["2. Baseline Champion & Cached / Pooled Model Bank"]
+        Inner["Inner Evolution Panel / Inner OOF Window<br/>t = 1 ... T - H_lockdown (Visible to Evolution Loop)"]
+        Lock["Held-Out Lockdown Fold / Final OOF Window<br/>Last H_lockdown Steps (NEVER Visible During Evolution)"]
         Auto["Mode A: Forecaster.auto(inner_panel) + make_model_spec_hash Borrowing<br/>Mode B: verify_oof_pool_compatibility (Pools OOF & Predictions Across Runs,<br/>Disambiguates <model>@<run_short_id>, Sets Reigning #1 Model or ensemble_* Baseline)"]
+        Raw --> Inner & Lock
         Inner --> Auto
     end
 
-    subgraph Loop["3. Dual-Backend Evolutionary Mutation Loop (# EVOLVE-BLOCK)"]
+    subgraph Loop["2. Dual-Backend Evolutionary Loop & Pre-Gate Sandbox"]
         Target["5 Evolvable Targets (EVOLVE_TARGETS)<br/>'features' · 'ensemble' · 'model' · 'policy' · 'similarity_kernel'"]
-        Primary["Primary Default: backend='alphaevolve'<br/>Gemini Enterprise Discovery Engine (v1alpha)<br/>:acquirePrograms / :submitProgramsEvaluations"]
-        Backup["Non-Default Backup: backend='vertex_gemini'<br/>Standard Vertex AI Gemini (aiplatform.googleapis.com)<br/>+ In-Process MAP-Elites Island Population"]
-        Auto --> Target --> Primary & Backup
+        Primary["Primary Default: backend='alphaevolve'<br/>Gemini Enterprise Discovery Engine (v1alpha)"]
+        Backup["Non-Default Backup: backend='vertex_gemini'<br/>Standard Vertex AI Gemini + In-Process MAP-Elites Islands"]
+        AST["Pre-Gate 0A & 0B: AST Security Sandbox + +1e6 Lookahead Probe<br/>validate_candidate_ast · verify_no_future_leakage"]
+        Target --> Primary & Backup --> AST
     end
 
-    subgraph Guard["4. AST Security Sandbox & Pre-Gate Causality Probe"]
-        AST["Pre-Gate 0A: AST Security Sandbox (validate_candidate_ast)<br/>Blocks os/sys/subprocess/socket/open/eval/exec<br/>Allows numpy · pandas · scipy · statsmodels · sklearn"]
-        Leak["Pre-Gate 0B: Temporal Lookahead Probe (verify_no_future_leakage)<br/>Perturbs y[T-H:] += 1e6 sentinel shock<br/>Requires t <= T - H outputs to remain bit-for-bit identical"]
-        Primary & Backup --> AST --> Leak
-    end
-
-    subgraph Ratchet["5. The 3-Gate Anti-Overfitting Trust Ratchet"]
+    subgraph Ratchet["3. The 3-Gate Anti-Overfitting Trust Ratchet"]
         G1["Gate 1: Inner Walk-Forward CV Lift<br/>inner_cv_score < baseline_score (Beats Reigning #1 Model / ensemble_*)"]
-        G2["Gate 2: Statistical Significance & Tail-Risk Guard<br/>Diebold-Mariano p_DM <= alpha (0.10)<br/>AND worst_decile_fva_pct >= -2.0%"]
-        G3["Gate 3: Unseen Held-Out Lockdown Fold Verification<br/>Evaluates top inner survivor ONCE on Lockdown Fold<br/>Requires lockdown_candidate_score < lockdown_baseline_score"]
+        G2["Gate 2: Statistical Significance & Tail-Risk Guard<br/>Diebold-Mariano p_DM <= alpha (0.10) AND worst_decile_fva_pct >= -2.0%"]
+        G3["Gate 3: Unseen Held-Out Lockdown Fold Verification<br/>Evaluates top inner survivor ONCE on Lockdown Fold"]
         Promote["Promoted Champion (promoted = True)<br/>Materializes result.predictions_df + Exports Python Module / Airflow DAG"]
         Fallback["Ratchet Fallback (promoted = False)<br/>Retains Reigning Champion + logs rejection_reason"]
-        Leak --> G1 --> G2
-        Lock & G2 --> G3
+        G1 & G2 --> G3
         G3 -->|"Passes all 3 gates"| Promote
         G1 & G2 & G3 -->|"Fails any gate"| Fallback
     end
+
+    Auto --> G1
+    AST --> G1 & G2
+    Lock --> G3
 ```
 
 ### 2.1. Mode A — Evolving From Raw Data on Top of `Forecaster.auto()`

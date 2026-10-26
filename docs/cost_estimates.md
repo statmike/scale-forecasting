@@ -3,16 +3,16 @@
 Every cost figure in `scale-forecasting` is an **order-of-magnitude estimate** observed during live validation runs in `us-central1`. Cloud pricing varies by region, SKU tier, commitment discounts, and over time — always check the [Google Cloud Pricing Calculator](https://cloud.google.com/products/calculator) for current rates in your target region.
 
 ```mermaid
-flowchart LR
-    subgraph IDLE["At rest (between runs)"]
+flowchart TD
+    subgraph IDLE["1. At rest (between runs)"]
         I1["Default Terraform deploy<br/>BigQuery + GCS storage only<br/>(estimated pennies/month)"]
         I2["Optional always-on toggles<br/>create_composer = true (~$300-$400/mo)<br/>create_gke = true (GKE cluster management fee)"]
     end
-    subgraph RUN["During a forecast run (ephemeral)"]
+    subgraph RUN["2. During a forecast run (ephemeral)"]
         R1["Per-family compute<br/>Dataproc DCU · Vertex/GCE/GKE vCPU &amp; GPU hours ·<br/>BigQuery bytes / slots"]
-        R2["Automatic teardown<br/>Serverless batch exit · 3-way GCE self-delete ·<br/>Ray cluster teardown"]
+        R2["Automatic teardown -> Back to zero idle compute<br/>Serverless batch exit · 3-way GCE self-delete ·<br/>Ray cluster teardown"]
     end
-    IDLE --> RUN --> IDLE
+    I1 & I2 --> R1 --> R2
 ```
 
 ---

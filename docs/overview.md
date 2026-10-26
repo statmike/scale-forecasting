@@ -242,18 +242,18 @@ Day-2 management is built into `python -m scale_forecasting.registry.ops` and `s
 ```mermaid
 flowchart TD
     subgraph DS["Data scientist & forecaster"]
-        direction LR
+        direction TB
         DS1["Local playground<br/>00_model_playground.ipynb"] --> DS2["Custom plugins<br/>09_custom_models_and_metrics.ipynb"] --> DS3["HPO & ensembles<br/>07_hpo_backtesting_and_ensembles.ipynb"]
     end
     subgraph AR["Cloud & data architect"]
-        direction LR
+        direction TB
         AR1["Storage format<br/>BigQuery native vs BigLake Iceberg"] --> AR2["Runtime placement<br/>Spark · Ray · Vertex · GCE · GKE · AutoML · BQ"] --> AR3["Private networking & IAM<br/>VPC · PSC-I · least-privilege SAs"]
     end
     subgraph OP["MLOps & platform engineer"]
-        direction LR
+        direction TB
         OP1["Two-stage Terraform<br/>terraform/README.md"] --> OP2["Scheduled DAGs<br/>Cloud Composer 3 (--emit-airflow)"] --> OP3["Resilience & repair<br/>regional fallback · probes · retry_run"]
     end
-    DS --> AR --> OP
+    DS3 & AR3 --> OP1
 ```
 
 - **12 interactive notebooks across 4 tracks:** From zero-GCP local exploration and glass-box auto-forecasting (`00`, `11`, `09`) to cloud runtimes (`01`–`04`), covariates/hierarchy/HPO/ensembles (`05`–`07`), and the multi-family master DAG & registry operations (`08`, `10`). Browse the [Notebook tour](./notebooks/README.md) or the guided [Hands-on workshop](./workshop.md).

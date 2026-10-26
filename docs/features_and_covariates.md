@@ -4,29 +4,35 @@
 
 ```mermaid
 flowchart TD
+    classDef s1 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
+    classDef s2 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
+    classDef s3 fill:#faf5ff,stroke:#9333ea,stroke-width:1.5px,color:#581c87
+
     subgraph S1["1. Fold-Safe Pre-Fit Hygiene & Target Transforms"]
-        T1["Timestamp Regularization & Pre-Launch Trim<br/>data.grid_policy · data.trim_leading_zeros · features.censored_col"]
-        T2["Promo/Holiday-Aware Outlier Winsorization<br/>features.outlier_policy = 'winsorize' | 'interpolate' | 'stl_resid'"]
-        T3["Univariate & Compositional Simplex Target Transforms<br/>features.transform = 'none' | 'log1p' | 'boxcox' | 'clr' | 'ilr'<br/>features.simplex_sum = 1.0 | 100.0 (@transform_clr · @transform_ilr)"]
+        direction TB
+        T1["Timestamp Regularization & Pre-Launch Trim<br/>data.grid_policy · data.trim_leading_zeros · features.censored_col"]:::s1
+        T2["Promo/Holiday-Aware Outlier Winsorization<br/>features.outlier_policy = 'winsorize' | 'interpolate' | 'stl_resid'"]:::s1
+        T3["Univariate & Compositional Simplex Target Transforms<br/>features.transform = 'none' | 'log1p' | 'boxcox' | 'clr' | 'ilr'<br/>features.simplex_sum = 1.0 | 100.0 (@transform_clr · @transform_ilr)"]:::s1
         T1 --> T2 --> T3
     end
 
     subgraph S2["2. Three-Tier Exogenous Covariate Architecture"]
-        C1["Static Covariates (features.static_covariates)<br/>Time-invariant series attributes (region, category, store_format)"]
-        C2["Known-Future Covariates (features.future_covariates)<br/>Planned price, promo_flag, holidays, holiday_window, fourier, trading_days"]
-        C3["Historical-Only Past Covariates (features.past_covariates)<br/>Observed temperature, foot_traffic, macro indices — strictly masked > cutoff_date"]
+        direction TB
+        C1["Static Covariates (features.static_covariates)<br/>Time-invariant series attributes (region, category, store_format)"]:::s2
+        C2["Known-Future Covariates (features.future_covariates)<br/>Planned price, promo_flag, holidays, holiday_window, fourier, trading_days"]:::s2
+        C3["Historical-Only Past Covariates (features.past_covariates)<br/>Observed temperature, foot_traffic, macro indices — strictly masked > cutoff_date"]:::s2
         C1 --> C2 --> C3
     end
 
     subgraph S3["3. Model Variants, Guardrails, Similarity Clustering & Cold-Start Transfer"]
-        V1["Capability-Aware Routing & Fallback<br/>features.on_unsupported_covariates = 'fallback' | 'error'"]
-        V2["Monotonic Economic Sign Constraints<br/>features.monotonic_constraints = {'price_index': -1, 'promo_flag': 1} (@monotone)"]
-        V3["Orthogonal Variant Taxonomy & Cluster-Aware Global Pooling<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @similarity_global · @local"]
-        V4["7-Lens & Multi-Modal Time-Series Similarity & Cold-Start Transfer (similarity.py · cold_start.py)<br/>@similarity_cold_start · cold_start_matching = 'auto' | 'attribute' | 'similarity' | 'hybrid' · similarity_cluster_feature"]
-        V1 --> V2 --> V3 --> V4
+        direction TB
+        V1["Capability-Aware Routing & Monotonic Sign Guardrails<br/>features.on_unsupported_covariates = 'fallback' | 'error'<br/>features.monotonic_constraints = {'price_index': -1, 'promo_flag': 1} (@monotone)"]:::s3
+        V2["Orthogonal Variant Taxonomy & Cluster-Aware Global Pooling<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @similarity_global · @local"]:::s3
+        V3["7-Lens & Multi-Modal Time-Series Similarity & Cold-Start Transfer (similarity.py · cold_start.py)<br/>@similarity_cold_start · cold_start_matching = 'auto' | 'attribute' | 'similarity' | 'hybrid' · similarity_cluster_feature"]:::s3
+        V1 & V2 --> V3
     end
 
-    S1 --> S2 --> S3
+    S1 & S2 --> S3
 ```
 
 ---
@@ -59,7 +65,7 @@ Forecasting each share independently in raw space produces predictions that drif
 | Transform Mode | Forward Mapping ($\mathcal{S}^D \to \mathbb{R}^K$) | Inverse Closure ($\mathbb{R}^K \to \mathcal{S}^D$) | Key Properties |
 | :--- | :--- | :--- | :--- |
 | **Centered Log-Ratio (`"clr"` / `@transform_clr`)** | $z_{i,t} = \ln y_{i,t}^* - \frac{1}{D}\sum_{j=1}^D \ln y_{j,t}^*$ | $\hat{y}_{i,t} = S \cdot \frac{\exp(\hat{z}_{i,t})}{\sum_{j=1}^D \exp(\hat{z}_{j,t})}$ | Symmetric 1-to-1 series mapping; works seamlessly with per-series (`local`), panel (`global`), and ensemble models followed by softmax simplex closure. |
-| **Isometric Log-Ratio (`"ilr"` / `@transform_ilr`)** | $\mathbf{z}_t = \operatorname{clr}(\mathbf{y}_t^*) \cdot \mathbf{V}$ using the $D \times (D-1)$ orthonormal **Helmert contrast matrix** $\mathbf{V}$ | $\hat{\mathbf{y}}_t = \operatorname{clr}^{-1}(\hat{\mathbf{z}}_t \mathbf{V}^\top, S)$ | Full-rank isometric coordinate representation in $\mathbb{R}^{D-1}$ (`ilr_transform` / `ilr_inverse`, `forecast_simplex_panel`) and per-series log-odds closure across all 37 models and 9 ensemble strategies. |
+| **Isometric Log-Ratio (`"ilr"` / `@transform_ilr`)** | $\mathbf{z}_t = \text{clr}(\mathbf{y}_t^*) \cdot \mathbf{V}$ using the $D \times (D-1)$ orthonormal **Helmert contrast matrix** $\mathbf{V}$ | $\hat{\mathbf{y}}_t = \text{clr}^{-1}(\hat{\mathbf{z}}_t \mathbf{V}^\top, S)$ | Full-rank isometric coordinate representation in $\mathbb{R}^{D-1}$ (`ilr_transform` / `ilr_inverse`, `forecast_simplex_panel`) and per-series log-odds closure across all 37 models and 9 ensemble strategies. |
 
 ### Zero Replacement, Post-Blend Evolution & Simplex Coherence Verification
 1. **Martín-Fernández Multiplicative Zero Replacement (`multiplicative_replacement`):** Structural or transient zeros ($y_{i,t} = 0$) are replaced prior to log-transformation using $y_{i,t}^* = \delta$ for zero parts and $y_{i,t}^* = y_{i,t} \cdot (1 - c \cdot \delta / S)$ for positive parts, preserving exact cross-series sums $\sum_i y_{i,t}^* = S$ with zero NaNs or infinities.
@@ -92,7 +98,7 @@ When launching **new SKUs, newly opened stores, or short-history products** with
 | **`"physics_attractor"`** | Takens delay-coordinate state-space reconstruction, kinematic phase portraits $(y_t, \dot{y}_t, \ddot{y}_t)$, Sliced Wasserstein attractor cloud distance, Rosenstein maximal Lyapunov exponent $\lambda_{\max}$, Permutation Entropy $H_{\text{perm}}$, Sample Entropy, and Ornstein–Uhlenbeck damping rate $\kappa_{\text{OU}}$. | Separating chaotic, mean-reverting ($H < 0.5$), persistent ($H > 0.5$), and limit-cycle dynamical regimes; matching early launch-prefix velocity/acceleration. |
 | **`"spectral_phase"`** | FFT Hilbert analytic signal $z_t = y_t + i\mathcal{H}(y_t) = A_t e^{i\theta_t}$, pairwise Kuramoto phase-locking order parameter $R_{i,j}$, Welch PSD Jensen–Shannon divergence, and directed cross-correlation lead-lag shift $\tau_{i \to j}^*$. | Discovering shared dominant periodicities, phase coherence, and bellwether lead-lag relationships across series. |
 | **`"elastic_dtw"`** | Scale-normalized Sakoe–Chiba banded Dynamic Time Warping / Time-Warp Edit Distance (`TWED`) with physical elastic spring stiffness penalty $\nu > 0$. | Shape-based matching under phase shifts, launch timing offsets, and local time warping. |
-| **`"minirocket"`** | Deterministic pure-NumPy bank of `84` ternary dilated convolutional kernels ($\mathbf{w} \in \{-1, 2\}^9, \sum w_k = 0$) across exponential dilations `(1, 2, 4, 8)` with Proportion of Positive Values (`PPV`) pooling. | Fast $O(N \cdot T)$ multiscale local motif, promo-spike, and morphological shape matching. |
+| **`"minirocket"`** | Deterministic pure-NumPy bank of `84` ternary dilated convolutional kernels ($\mathbf{w} \in \lbrace -1, 2\rbrace^9, \sum w_k = 0$) across exponential dilations `(1, 2, 4, 8)` with Proportion of Positive Values (`PPV`) pooling. | Fast $O(N \cdot T)$ multiscale local motif, promo-spike, and morphological shape matching. |
 | **`"structural_signature"`** | `24`-dimensional standardized econometric vector: STL trend/seasonal strength, peak phase, Hurst exponent $H$ ($R/S$), ACF lags `1..7`, PACF lags `1..3`, spectral entropy, Syntetos–Boylan $(\log \text{ADI}, \log \text{CV}^2)$, skewness, kurtosis, ARCH(1), level-shift, zero-inflation, velocity, and curvature ratios. | Interpretable econometric regime grouping across smooth, erratic, intermittent, and lumpy demand. |
 | **`"foundation_latent"`** | Pooled context encoder embeddings from pretrained time-series foundation models (`chronos_bolt`, `chronos2`, `timesfm_torch`, `sundial` via `extract_foundation_embeddings`) with deterministic L2-normalized `"minirocket"` + `"structural_signature"` fallback on pure core. | Zero-shot neural representation clustering and foundation-space analog retrieval. |
 
