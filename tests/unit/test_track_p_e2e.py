@@ -1426,8 +1426,8 @@ def test_t1_f12_mcp_12th_tool_compute_time_series_similarity_and_agent_surfaces(
     server = McpServer()
     tools = {t["name"]: t for t in server.list_tools()}
 
-    # Case 1: Exactly 12 MCP tools including compute_time_series_similarity
-    assert len(tools) == 12
+    # Case 1: Exactly 13 MCP tools including compute_time_series_similarity
+    assert len(tools) == 13
     assert "compute_time_series_similarity" in tools
 
     # Case 2: Call compute_time_series_similarity across full_history, launch_prefix & query_ts_id
