@@ -432,6 +432,8 @@ After reviewing which model won and how its intervals calibrated, you can inspec
    Works universally across all **37 models** and ensembles, decomposing historical actuals and future predictions into trend, regime level shift, seasonal cycle, and exogenous covariate ridge attribution.
 3. **Promo & Price Elasticity Decomposition & 5-Stage What-If (`Forecaster.promo_elasticity_df()`, `Forecaster.plot_promo_elasticity()`, & `Forecaster.simulate_scenarios()`):**
    Partitions Tier 2 per-step SHAP/linear attributions into `baseline_demand`, `promo_lift_units`, `price_elasticity_units`, `other_covariate_units`, and `autoregressive_calendar_units` (`total_forecast_units == sum of 5 buckets`), flags causality violations (`causality_violation_flag`), and runs 5-stage counterfactual what-if scenarios (`price_col`, `unit_cost_col`, `holding_cost_rate`, `stockout_penalty_rate`, `lead_time_periods`, `safety_stock_quantile`).
+4. **Lifecycle Markdown Clearance & Vendor Contract Volume MILP (`Forecaster.optimize_clearance_df()`, `Forecaster.plot_clearance_schedule()`, & `Forecaster.optimize_contract_volume_df()`):**
+   Translates reconciled / ensemble forecasts, Frisch–Waugh–Lovell covariate-adjusted or Double-ML price elasticities, and Track P digital-twin similarity priors into a monotone markdown ladder with perishable expiry deadlines, warehouse space reclamation targets (`target_space_freed`), and all-units vendor rebate / Take-or-Pay contract volume plans (with bottom-up `hierarchy_rollup_df` and Copula / Online ACI `CVaR` downside buffers).
 
 These views read from the underlying registry tables (`run_registry`, `run_jobs`, `forecast_metadata`,
 `forecast_predictions`, `backtest_oof`). To query the raw values — the forecast points themselves, or

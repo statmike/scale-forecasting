@@ -235,9 +235,18 @@ goal_df = f.allocate_target(
     include_inventory_impact=True,
 )
 print(sf.summarize_goal_seek(goal_df))
+# 5. Lifecycle Markdown Clearance & Vendor Contract Optimization on Reconciled Leaves
+#    (Automatically filters out __total__ / parent nodes and builds a coherent bottom-up hierarchy_rollup_df)
+clearance_res = f.optimize_clearance(
+    forecasts_df=rec_df,
+    initial_inventory=180.0,
+    expiry_step=14,
+    reconciliation_method="cross_temporal_mint",
+)
+print(clearance_res.hierarchy_rollup_df)
 ```
 
 See also:
 - [Notebook 06: Hierarchical Reconciliation, THieF & Top-Down Goal-Seek](./notebooks/06_hierarchical_reconciliation.ipynb)
 - [Forecaster Workbench Guide](./forecaster_workbench.md)
-- [API Reference: `reconciliation`](./api/reconciliation.md), [`temporal_reconciliation`](./api/temporal_reconciliation.md), [`goal_seek`](./api/goal_seek.md)
+- [API Reference: `reconciliation`](./api/reconciliation.md), [`temporal_reconciliation`](./api/temporal_reconciliation.md), [`goal_seek`](./api/goal_seek.md), [`clearance_optimizer`](./api/clearance_optimizer.md)

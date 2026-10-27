@@ -524,6 +524,19 @@ def test_case_11_contradictory_goal_seek_and_zero_budget_inventory() -> None:
     assert np.all(np.isfinite(inv_df["recommended_order_qty"].to_numpy(dtype=float)))
     assert np.allclose(inv_df["recommended_order_qty"].to_numpy(dtype=float), 0.0)
 
+    # Clearance space-reclamation optimization under physically unreachable target_space_freed
+    from scale_forecasting import optimize_clearance
+
+    cl_infeas = optimize_clearance(
+        bottom_df,
+        initial_inventory=50.0,
+        unit_volume=1.0,
+        target_space_freed=1000.0,
+    )
+    assert cl_infeas.status == "infeasible"
+    assert not cl_infeas.is_feasible
+    assert cl_infeas.relaxation_hint is not None
+
 
 # ---------------------------------------------------------------------------
 # Case 12: 100k-Series Canopy Similarity Scaling (< 30s, < 250 MB Peak Memory)

@@ -177,6 +177,8 @@ def test_skill_md_and_extension_manifests() -> None:
         "sample_trajectories",
         "tail_risk_df",
         "optimize_inventory_df",
+        "optimize_clearance_df",
+        "optimize_contract_volume_df",
         "optimize_scenario",
     ):
         assert auto_token in text
@@ -189,6 +191,8 @@ def test_skill_md_and_extension_manifests() -> None:
         "time-series similarity",
         "copula",
         "VaR/CVaR",
+        "optimize_clearance_df",
+        "optimize_contract_volume_df",
     ):
         assert fm_token in frontmatter
 
@@ -299,8 +303,20 @@ def test_variant_tags_and_track_l_enums_have_zero_drift() -> None:
     probe = agent_surfaces.probe_environment()
     assert tuple(probe["auto_forecaster"]["cold_start_archetypes"]) == config.COLD_START_METHODS
     assert tuple(probe["auto_forecaster"]["calibration_methods"]) == config.CALIBRATION_METHODS
+    assert "foundation_latent" in probe["auto_forecaster"]["similarity_methods"]
+    assert "similarity_kernel" in probe["auto_forecaster"]["evolve_targets"]
+    for wb_cap in (
+        "time_series_similarity",
+        "sku_substitutes",
+        "emerging_trends",
+        "clearance_optimizer",
+        "contract_volume_optimizer",
+    ):
+        assert wb_cap in probe["auto_forecaster"]["workbench_capabilities"]
 
     norm_text = " ".join(agent_surfaces._NORMALIZATION_RULES)
     assert "output.include_trajectories" not in norm_text
+    assert "optimize_clearance_df" in norm_text
+    assert "optimize_contract_volume_df" in norm_text
     for cop_t in COPULA_TYPES:
         assert f'"{cop_t}"' in norm_text

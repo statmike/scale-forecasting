@@ -291,6 +291,41 @@ flowchart TD
 
 ---
 
+## 9. Lifecycle Markdown, Perishable Expiry, Warehouse Space Reclamation & Vendor Contract Volume Optimization (Track Q.1 / R.1)
+
+When managing seasonal apparel, consumer electronics transitions, perishable grocery inventory, or vendor purchase/off-take agreements, planners need to solve **state-dependent depletion and threshold-commitment problems** where prices cannot rebound and physical inventory or shelf capacity is finite. [`clearance_optimizer.py`](./api/clearance_optimizer.md) formulates these problems as fast `scipy.optimize.milp` (`HiGHS`) Mixed-Integer Linear Programs coupled with `Track P` digital-twin elasticity borrowing:
+
+```mermaid
+flowchart TD
+    subgraph Inputs["1. Forecasts, Inventory & Digital-Twin Elasticity"]
+        direction TB
+        I1["Forward Demand & Finite Stock<br/>predictions_df · initial_inventory · expiry_step · unit_volume"]
+        I2["Price Elasticity & Digital Twins<br/>Own-History DML OR Digital-Twin Borrowed Elasticity"]
+    end
+    subgraph MILP["2. HiGHS Mixed-Integer Linear Solvers (clearance_optimizer.py)"]
+        direction TB
+        M1["Lifecycle Markdown & Space Reclamation<br/>Monotone Ladder d_{i,t} <= d_{i,t+1} · target_space_freed by reclaim_by_step"]
+        M2["Vendor Contract Rebate & Take-or-Pay<br/>All-Units Rebate Tiers (tau_m, R_m) · min_contract_volume · Copula CVaR"]
+    end
+    subgraph Outputs["3. Actionable Schedules & Infeasibility Guidance"]
+        direction TB
+        O1["ClearanceOptimizationResult<br/>schedule_df · summary_df · plot_clearance_schedule · relaxation_hint"]
+        O2["ContractVolumeOptimizationResult<br/>rebate_earned · shortfall_penalty · net_value_lift"]
+    end
+    I1 & I2 --> M1 & M2
+    M1 --> O1
+    M2 --> O2
+```
+
+| Optimization Capability | SDK / Workbench Entrypoint | Mathematical & Operational Behavior |
+| :--- | :--- | :--- |
+| **Lifecycle Markdown & Perishable Expiry MILP** | `forecaster.optimize_clearance_df(initial_inventory=..., expiry_step=..., discount_ladder=(0.0, 0.10, 0.20, 0.30, 0.50), salvage_value=2.0, spoilage_cost=4.0)`<br/>`sf.optimize_clearance(preds_df, history_df=...)`<br/>`forecaster.plot_clearance_schedule()` | Selects a discount rung $d_{i,t}$ from `discount_ladder` at each horizon step $t = 1 \dots H$ subject to non-decreasing markdowns ($d_{i,t} \le d_{i,t+1}$ when `monotone_markdown=True`), finite starting stock $\sum_{t=1}^{T_{\text{expiry},i}} q_{i,t} \le I_{i,0}$, zero post-expiry sales ($t > T_{\text{expiry},i}$), terminal salvage value minus spoilage cost, and cross-SKU substitute cannibalization penalties. |
+| **Digital-Twin Deep-Discount Elasticity Borrowing** | `use_digital_twin_elasticity=True` (default in `optimize_clearance` & `optimize_contract_volume`) | When a seasonal or newly launched SKU has never been discounted before ($p_{i,t} \equiv p_{i,0}$), automatically borrows a similarity-weighted price elasticity $\epsilon_i < 0$ from its top-$K$ `Track P` digital-twin neighbors that have measured markdown history, stamping `elasticity_source` in `\lbrace "own_history", "digital_twin_borrowed", "prior_default" \rbrace`. |
+| **Warehouse & Shelf Space Reclamation** | `forecaster.optimize_clearance_df(target_space_freed=500.0, unit_volume={"coat": 4.0, "hat": 0.5}, reclaim_by_step=7)` | Enforces $\sum_i v_i \sum_{t=1}^{T_{\text{reclaim}}} q_{i,t}(d_{i,t}) \ge V_{\text{target}}$ so the solver identifies the minimum-margin-erosion clearance schedule that frees target cubic feet, pallet positions, or shelf facings by `reclaim_by_step`. If `target_space_freed` exceeds physical stock or maximum-discount demand, returns `status="infeasible"`, `is_feasible=False`, and an actionable `relaxation_hint`. |
+| **Vendor Contract Volume, Tiered Rebate & Take-or-Pay Solver** | `forecaster.optimize_contract_volume_df(contract_tiers=[(500.0, 1500.0), (650.0, 3200.0)], min_contract_volume=450.0, shortfall_penalty_per_unit=10.0)`<br/>`sf.optimize_contract_volume(preds_df, ...)` | Jointly allocates promotional discounts across a vendor SKU portfolio (or energy Take-or-Pay / Cloud FinOps commitment lines) to cross cumulative all-units rebate tiers $(\tau_m, R_m)$ or avoid Take-or-Pay shortfall penalties when the unlocked rebate exceeds the promotional margin cost, with optional Copula $\text{CVaR}_{\alpha}$ tail-shortfall buffering (`risk_aversion_lambda > 0`). |
+
+---
+
 ## Complete Declarative Example (`RunConfig`)
 
 ```json
@@ -389,11 +424,13 @@ sim_df = bo.simulate_scenarios(
 print(sf.summarize_scenarios(sim_df)[["scenario", "model_type", "delta_pct", "gross_margin_delta", "delta_reorder_point", "delta_safety_stock"]])
 print(sf.audit_scenario_monotonicity(sim_df))
 
-# 4. Online ACI intervals, joint Copula VaR/CVaR tail risk, portfolio inventory & prescriptive scenario optimization
+# 4. Online ACI intervals, joint Copula VaR/CVaR tail risk, portfolio inventory, scenario & clearance/contract optimization
 aci_df = bo.aci_df(gamma=0.05, normalized=True)
 risk_df = bo.tail_risk_df(n_paths=200, copula_type="auto")
 port_inv_df = bo.optimize_inventory_df(max_budget=25000.0, service_level=0.95, uncertainty_source="copula")
 scen_opt = bo.optimize_scenario(objective="gross_profit", price_bounds=(-0.10, 0.10), max_promo_days=3)
+clear_df = bo.optimize_clearance_df(summary=True, initial_inventory=180.0, expiry_step=10, target_space_freed=60.0)
+contract_df = bo.optimize_contract_volume_df(summary=True, min_contract_volume=150.0)
 
 # 5. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
 weekly_df = bo.rollup_time(freq="W")

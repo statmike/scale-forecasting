@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.8.2"
+    __version__ = "1.9.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -359,6 +359,40 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ScenarioOptimizationResult": (".scenario_optimizer", "ScenarioOptimizationResult"),
     "optimize_scenario": (".scenario_optimizer", "optimize_scenario"),
     "plot_optimal_scenario": (".scenario_optimizer", "plot_optimal_scenario"),
+    # Lifecycle markdown, shelf-space reclamation & vendor contract volume MILP (Track Q.1 / R.1).
+    "CLEARANCE_SCHEDULE_COLUMNS": (
+        ".clearance_optimizer",
+        "CLEARANCE_SCHEDULE_COLUMNS",
+    ),
+    "CLEARANCE_SUMMARY_COLUMNS": (
+        ".clearance_optimizer",
+        "CLEARANCE_SUMMARY_COLUMNS",
+    ),
+    "CONTRACT_VOLUME_COLUMNS": (
+        ".clearance_optimizer",
+        "CONTRACT_VOLUME_COLUMNS",
+    ),
+    "CONTRACT_VOLUME_SUMMARY_COLUMNS": (
+        ".clearance_optimizer",
+        "CONTRACT_VOLUME_SUMMARY_COLUMNS",
+    ),
+    "DEFAULT_DISCOUNT_LADDER": (".clearance_optimizer", "DEFAULT_DISCOUNT_LADDER"),
+    "ClearanceOptimizationResult": (
+        ".clearance_optimizer",
+        "ClearanceOptimizationResult",
+    ),
+    "ContractVolumeOptimizationResult": (
+        ".clearance_optimizer",
+        "ContractVolumeOptimizationResult",
+    ),
+    "optimize_clearance": (".clearance_optimizer", "optimize_clearance"),
+    "optimize_clearance_df": (".clearance_optimizer", "optimize_clearance_df"),
+    "optimize_contract_volume": (".clearance_optimizer", "optimize_contract_volume"),
+    "optimize_contract_volume_df": (
+        ".clearance_optimizer",
+        "optimize_contract_volume_df",
+    ),
+    "plot_clearance_schedule": (".clearance_optimizer", "plot_clearance_schedule"),
     # Time-series similarity, dynamical embeddings & similarity-regularized pipelines (Track P).
     "SIMILARITY_METHODS": (".similarity", "SIMILARITY_METHODS"),
     "VALID_SIMILARITY_METHODS": (".similarity", "VALID_SIMILARITY_METHODS"),
@@ -448,6 +482,20 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         list_public_benchmarks,
         load_benchmark,
         public_benchmark_catalog,
+    )
+    from .clearance_optimizer import (  # noqa: F401
+        CLEARANCE_SCHEDULE_COLUMNS,
+        CLEARANCE_SUMMARY_COLUMNS,
+        CONTRACT_VOLUME_COLUMNS,
+        CONTRACT_VOLUME_SUMMARY_COLUMNS,
+        DEFAULT_DISCOUNT_LADDER,
+        ClearanceOptimizationResult,
+        ContractVolumeOptimizationResult,
+        optimize_clearance,
+        optimize_clearance_df,
+        optimize_contract_volume,
+        optimize_contract_volume_df,
+        plot_clearance_schedule,
     )
     from .cold_start import (  # noqa: F401
         ColdStartDonorCatalog,

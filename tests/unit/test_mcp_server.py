@@ -130,6 +130,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         "build_auto_config",
         "run_auto_forecast",
         "compute_time_series_similarity",
+        "optimize_inventory_clearance",
     ]
 
     # 1. probe_environment
@@ -636,8 +637,47 @@ def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
             "horizon": 7,
             "include_substitutes": True,
             "include_emerging_trends": True,
+            "include_clearance": True,
+            "include_contract_volume": True,
         },
     )
     assert not is_err_pg, pg_res
     assert "substitutes" in pg_res
     assert "emerging_trends" in pg_res
+    assert "clearance_optimization" in pg_res
+    assert "contract_volume_optimization" in pg_res
+
+    is_err_cl, cl_res = _call_tool(
+        server,
+        "optimize_inventory_clearance",
+        {
+            "mode": "clearance",
+            "initial_inventory": 150.0,
+            "expiry_step": 10,
+            "target_space_freed": 50.0,
+            "covariate_cols": ["promo_flag"],
+            "horizon": 12,
+        },
+    )
+    assert not is_err_cl, cl_res
+    assert cl_res["mode"] == "clearance"
+    assert cl_res["status"] == "optimal"
+    assert len(cl_res["summary"]) >= 1
+    assert "hierarchy_rollup" in cl_res
+
+    is_err_cv, cv_res = _call_tool(
+        server,
+        "optimize_inventory_clearance",
+        {
+            "mode": "contract_volume",
+            "min_contract_volume": 200.0,
+            "shortfall_penalty_per_unit": 8.0,
+            "risk_aversion_lambda": 0.4,
+            "cvar_alpha": 0.90,
+            "horizon": 10,
+        },
+    )
+    assert not is_err_cv, cv_res
+    assert cv_res["mode"] == "contract_volume"
+    assert len(cv_res["summary"]) >= 1
+    assert "hierarchy_rollup" in cv_res
