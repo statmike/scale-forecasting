@@ -34,13 +34,14 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-from scipy.optimize import Bounds, LinearConstraint, milp, root_scalar
+from scipy.optimize import Bounds, LinearConstraint, linprog, milp, root_scalar
 
 from .diagnostics import (
     INVENTORY_POLICY_COLUMNS,
@@ -51,9 +52,20 @@ from .errors import ConfigError, GoalSeekInfeasibleError, require_extra
 __all__ = [
     "INVENTORY_OPTIMIZER_COLUMNS",
     "INVENTORY_POLICY_COLUMNS",
+    "PREPACK_ALLOCATION_COLUMNS",
+    "PREPACK_ORDER_COLUMNS",
+    "REBALANCING_NODE_COLUMNS",
+    "REBALANCING_TRANSFER_COLUMNS",
+    "PrepackOptimizationResult",
+    "RebalancingOptimizationResult",
     "compute_inventory_frontier",
+    "estimate_simplex_size_curves",
     "optimize_inventory_df",
     "optimize_inventory_portfolio",
+    "optimize_prepacks",
+    "optimize_prepacks_df",
+    "optimize_rebalancing",
+    "optimize_rebalancing_df",
     "plot_inventory_frontier",
 ]
 
@@ -1740,3 +1752,1617 @@ def plot_inventory_frontier(
         **kwargs,
     )
     return plot_inventory_frontier(frontier_df, ax=ax, title=title)
+
+
+# ---------------------------------------------------------------------------
+# Track Q.2 / R.2 — Simplex Size-Curve & Integer Pre-Pack Allocation MILP
+# and Lateral Store-to-Store / Depot Rebalancing LP
+# ---------------------------------------------------------------------------
+
+PREPACK_ALLOCATION_COLUMNS: tuple[str, ...] = (
+    "store_id",
+    "size_id",
+    "ts_id",
+    "simplex_size_share",
+    "target_demand_units",
+    "initial_inventory",
+    "allocated_pack_units",
+    "final_inventory_units",
+    "under_allocated_units",
+    "over_allocated_units",
+    "allocated_size_share",
+    "underage_cost",
+    "overage_cost",
+    "imbalance_cost",
+    "status",
+)
+
+PREPACK_ORDER_COLUMNS: tuple[str, ...] = (
+    "store_id",
+    "pack_id",
+    "packs_ordered",
+    "units_per_pack",
+    "total_pack_units",
+    "pack_cost",
+    "total_pack_spend",
+    "pack_composition",
+)
+
+REBALANCING_TRANSFER_COLUMNS: tuple[str, ...] = (
+    "item_id",
+    "origin_id",
+    "destination_id",
+    "transfer_units",
+    "unit_transfer_cost",
+    "total_transfer_cost",
+    "transfer_lead_time",
+    "origin_excess_before",
+    "destination_shortfall_before",
+    "net_economic_benefit",
+)
+
+REBALANCING_NODE_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "item_id",
+    "location_id",
+    "initial_inventory",
+    "target_position",
+    "protection_demand",
+    "safety_stock",
+    "outbound_transfer_units",
+    "inbound_transfer_units",
+    "final_inventory",
+    "unbalanced_shortfall_units",
+    "post_transfer_shortfall_units",
+    "unbalanced_excess_units",
+    "post_transfer_excess_units",
+    "underage_cost",
+    "overage_cost",
+    "baseline_node_cost",
+    "post_transfer_node_cost",
+    "status",
+)
+
+DEFAULT_PREPACK_BUNDLES: dict[str, dict[str, int]] = {
+    "pack_core": {"S": 1, "M": 2, "L": 2, "XL": 1},
+    "pack_small": {"S": 2, "M": 2, "L": 1, "XL": 0},
+    "pack_large": {"S": 0, "M": 1, "L": 2, "XL": 2},
+}
+
+
+@dataclass(frozen=True)
+class PrepackOptimizationResult:
+    r"""Structured output of :func:`optimize_prepacks`.
+
+    Attributes:
+        allocation_df: Store x size allocation vs. simplex demand target
+            (`PREPACK_ALLOCATION_COLUMNS`).
+        pack_orders_df: Integer pre-pack bundle counts ordered per store (`PREPACK_ORDER_COLUMNS`).
+        size_curves_df: Compositional simplex size-share curves ($\sum_k p_{s,k} = 1.0$,
+            $p_{s,k} > 0$) per store.
+        status: Solver status (`"optimal"`, `"feasible"`, or `"infeasible"`).
+        is_feasible: True when all budget, unit, pack-cap, and fill-rate constraints are met.
+        total_demand_units: Total target demand across all stores and sizes.
+        total_allocated_units: Total new units delivered via integer pre-packs.
+        total_under_units: Total size-level under-allocation (stockout shortfall) units.
+        total_over_units: Total size-level over-allocation (leftover broken-size) units.
+        fill_rate: Achieved size-level demand fill rate (`1 - under_units / demand_units`).
+        size_curve_l1_error: Demand-weighted $L_1$ discrepancy between target and allocated
+            size shares.
+        total_cost: Total objective cost (underage + overage + pack procurement cost).
+        relaxation_hint: Actionable diagnostic message when constraints are infeasible.
+    """
+
+    allocation_df: pd.DataFrame
+    pack_orders_df: pd.DataFrame
+    size_curves_df: pd.DataFrame
+    status: str
+    is_feasible: bool
+    total_demand_units: float
+    total_allocated_units: float
+    total_under_units: float
+    total_over_units: float
+    fill_rate: float
+    size_curve_l1_error: float
+    total_cost: float
+    relaxation_hint: str | None = None
+
+    @property
+    def fill_rate_pct(self) -> float:
+        """Alias for ``fill_rate`` (`[0, 1]`) matching `AssortmentOptimizationResult`."""
+        return self.fill_rate
+
+    @property
+    def total_overstock_units(self) -> float:
+        """Alias for ``total_over_units``."""
+        return self.total_over_units
+
+    @property
+    def total_shortfall_units(self) -> float:
+        """Alias for ``total_under_units``."""
+        return self.total_under_units
+
+
+@dataclass(frozen=True)
+class RebalancingOptimizationResult:
+    """Structured output of :func:`optimize_rebalancing`.
+
+    Attributes:
+        transfers_df: Optimal origin-to-destination lateral inventory transfers
+            (`REBALANCING_TRANSFER_COLUMNS`).
+        node_summary_df: Per-node inventory position before and after lateral rebalancing
+            (`REBALANCING_NODE_COLUMNS`).
+        status: Solver status (`"optimal"`, `"feasible"`, or `"infeasible"`).
+        is_feasible: True when all transfer budget, unit, capacity, and fill-rate constraints hold.
+        total_transferred_units: Total units laterally transferred across all lanes.
+        total_transfer_cost: Total freight/transshipment cost incurred.
+        stockout_units_avoided: Reduction in network-wide shortfall units achieved by rebalancing.
+        baseline_network_cost: Total stockout + excess holding cost with zero lateral transfers.
+        optimal_network_cost: Total stockout + excess holding + transfer cost after rebalancing.
+        net_cost_savings: ``baseline_network_cost - optimal_network_cost``.
+        relaxation_hint: Actionable diagnostic message when constraints are infeasible.
+    """
+
+    transfers_df: pd.DataFrame
+    node_summary_df: pd.DataFrame
+    status: str
+    is_feasible: bool
+    total_transferred_units: float
+    total_transfer_cost: float
+    stockout_units_avoided: float
+    baseline_network_cost: float
+    optimal_network_cost: float
+    net_cost_savings: float
+    relaxation_hint: str | None = None
+
+
+def estimate_simplex_size_curves(
+    df: pd.DataFrame,
+    *,
+    sizes: Sequence[str] | None = None,
+    store_col: str = "store_id",
+    size_col: str = "size_id",
+    value_col: str | None = None,
+    shrinkage_strength: float = 20.0,
+    zero_replacement: float = 1e-4,
+) -> pd.DataFrame:
+    """Estimate Aitchison CLR/ILR compositional simplex size-share curves per store.
+
+    Applies multiplicative zero replacement followed by Empirical-Bayes shrinkage in Centered
+    Log-Ratio (CLR) coordinates toward the pooled global size curve so every store's size shares
+    are strictly positive ($p_{s,k} > 0$) and sum to unity ($\\sum_k p_{s,k} = 1.0$).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=["store_id", "size_id", "raw_units", "raw_share", "simplex_size_share"]
+        )
+
+    work = df.copy()
+    v_col = value_col
+    if v_col is None:
+        for cand in ("yhat", "y", "target_demand_units", "units", "demand"):
+            if cand in work.columns:
+                v_col = cand
+                break
+
+    if store_col not in work.columns or size_col not in work.columns:
+        # Attempt to split `ts_id` into `<store>_<size>` using known sizes or last token.
+        known_sizes = [str(s) for s in sizes] if sizes else ["XS", "S", "M", "L", "XL", "XXL"]
+        known_sorted = sorted(known_sizes, key=len, reverse=True)
+        stores_parsed: list[str] = []
+        sizes_parsed: list[str] = []
+        for raw_ts in work.get("ts_id", pd.Series(dtype=str)).astype(str):
+            matched_s: str | None = None
+            matched_store: str = raw_ts
+            for sep in ("_", "::", "-", "/"):
+                for sz in known_sorted:
+                    suffix = f"{sep}{sz}"
+                    if raw_ts.endswith(suffix) and len(raw_ts) > len(suffix):
+                        matched_s = sz
+                        matched_store = raw_ts[: -len(suffix)]
+                        break
+                if matched_s is not None:
+                    break
+            if matched_s is None:
+                matched_s = known_sizes[0] if known_sizes else "M"
+            stores_parsed.append(matched_store)
+            sizes_parsed.append(matched_s)
+        if store_col not in work.columns:
+            work[store_col] = stores_parsed
+        if size_col not in work.columns:
+            work[size_col] = sizes_parsed
+
+    if v_col is None or v_col not in work.columns:
+        work["_val"] = 1.0
+        v_col = "_val"
+    else:
+        work["_val"] = pd.to_numeric(work[v_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    all_stores = sorted(work[store_col].astype(str).unique().tolist())
+    all_sizes = (
+        [str(s) for s in sizes] if sizes else sorted(work[size_col].astype(str).unique().tolist())
+    )
+    if not all_sizes:
+        all_sizes = ["S", "M", "L", "XL"]
+    n_sizes = len(all_sizes)
+
+    grouped = (
+        work.groupby([work[store_col].astype(str), work[size_col].astype(str)])["_val"]
+        .sum()
+        .to_dict()
+    )
+
+    eps = float(max(zero_replacement, 1e-8))
+    kappa = float(max(0.0, shrinkage_strength))
+
+    # Global pooled size distribution in CLR coordinates.
+    global_totals = np.array(
+        [sum(grouped.get((st, sz), 0.0) for st in all_stores) for sz in all_sizes],
+        dtype=float,
+    )
+    if float(np.sum(global_totals)) <= 1e-12:
+        global_shares = np.full(n_sizes, 1.0 / n_sizes, dtype=float)
+    else:
+        global_shares = global_totals / float(np.sum(global_totals))
+    global_comp = np.maximum(global_shares, eps)
+    global_comp = global_comp / float(np.sum(global_comp))
+    log_global = np.log(global_comp)
+    clr_global = log_global - float(np.mean(log_global))
+
+    rows: list[dict[str, Any]] = []
+    for st in all_stores:
+        raw_vec = np.array([max(0.0, float(grouped.get((st, sz), 0.0))) for sz in all_sizes])
+        st_total = float(np.sum(raw_vec))
+        raw_sh = raw_vec / st_total if st_total > 1e-12 else global_shares.copy()
+        comp = np.maximum(raw_sh, eps)
+        comp = comp / float(np.sum(comp))
+        log_comp = np.log(comp)
+        clr_store = log_comp - float(np.mean(log_comp))
+
+        w_emp = st_total / (st_total + kappa) if (st_total + kappa) > 1e-12 else 0.0
+        clr_shrunk = w_emp * clr_store + (1.0 - w_emp) * clr_global
+        # Inverse CLR -> strictly positive simplex shares summing to 1.0.
+        shifted = clr_shrunk - float(np.max(clr_shrunk))
+        exp_vec = np.exp(shifted)
+        simplex_sh = exp_vec / float(np.sum(exp_vec))
+
+        for k_idx, sz in enumerate(all_sizes):
+            rows.append(
+                {
+                    "store_id": st,
+                    "size_id": sz,
+                    "raw_units": float(raw_vec[k_idx]),
+                    "raw_share": float(raw_sh[k_idx]),
+                    "simplex_size_share": float(simplex_sh[k_idx]),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+_RECONCILED_SUFFIXES: tuple[str, ...] = (
+    "_mint_nonneg",
+    "_cross_temporal_mint",
+    "_mint_shrink",
+    "_wls_struct",
+    "_wls_var",
+    "_ols",
+    "_bottom_up",
+    "_top_down",
+    "_middle_out",
+)
+
+
+def _is_aggregate_hierarchy_node(ts_val: str) -> bool:
+    s = str(ts_val)
+    return s == "__total__" or "=" in s or s.startswith(("__sim_cluster_", "__hier_"))
+
+
+def _filter_leaf_and_select_model(
+    work: pd.DataFrame,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    model_type: str | None = None,
+    reconciliation_method: str | None = None,
+    prefer_reconciled: bool = True,
+) -> pd.DataFrame:
+    """Strip hierarchical aggregate nodes and select the target/reconciled/champion model cohort."""
+    if work.empty or "ts_id" not in work.columns:
+        return work
+
+    # 1. Strip aggregate hierarchy nodes when leaf nodes are present.
+    non_agg_mask = ~work["ts_id"].astype(str).map(_is_aggregate_hierarchy_node)
+    if bool(non_agg_mask.any()) and not bool(non_agg_mask.all()):
+        work = work[non_agg_mask].copy()
+
+    if "model_type" not in work.columns or work["model_type"].dropna().nunique() <= 1:
+        return work
+
+    avail_models = sorted(work["model_type"].dropna().astype(str).unique().tolist())
+    avail_set = set(avail_models)
+
+    # 2. Explicit model_type + optional reconciliation_method.
+    if model_type is not None:
+        m_str = str(model_type)
+        if reconciliation_method:
+            rec_cand = f"{m_str}_{reconciliation_method}"
+            if rec_cand in avail_set:
+                return work[work["model_type"].astype(str) == rec_cand].copy()
+        if m_str in avail_set:
+            return work[work["model_type"].astype(str) == m_str].copy()
+        if prefer_reconciled:
+            for suf in _RECONCILED_SUFFIXES:
+                if f"{m_str}{suf}" in avail_set:
+                    return work[work["model_type"].astype(str) == f"{m_str}{suf}"].copy()
+
+    # 3. Explicit reconciliation_method filter.
+    candidates = avail_models
+    if reconciliation_method:
+        suf_target = f"_{reconciliation_method}"
+        rec_matches = [m for m in avail_models if m.endswith(suf_target)]
+        if rec_matches:
+            candidates = rec_matches
+    elif prefer_reconciled:
+        rec_matches = [
+            m for m in avail_models if any(m.endswith(suf) for suf in _RECONCILED_SUFFIXES)
+        ]
+        if rec_matches:
+            candidates = rec_matches
+
+    cand_set = set(candidates)
+    # 4. Prefer ensemble champion / NNLS / mean within candidate pool.
+    for base_pref in (
+        "ensemble_champion",
+        "champion",
+        "ensemble_nnls",
+        "ensemble_inverse_error",
+        "ensemble_mean",
+    ):
+        for suf in ("", *_RECONCILED_SUFFIXES):
+            cand_name = f"{base_pref}{suf}"
+            if cand_name in cand_set:
+                return work[work["model_type"].astype(str) == cand_name].copy()
+
+    # 5. If oof_df is provided, rank candidates by lowest pooled WAPE.
+    if (
+        oof_df is not None
+        and not oof_df.empty
+        and {"model_type", "y", "yhat"}.issubset(oof_df.columns)
+    ):
+        best_m: str | None = None
+        best_wape = float("inf")
+        for m in candidates:
+            base_m = m
+            for suf in _RECONCILED_SUFFIXES:
+                if m.endswith(suf):
+                    base_m = m[: -len(suf)]
+                    break
+            sub_oof = oof_df[oof_df["model_type"].astype(str).isin([m, base_m])]
+            if not sub_oof.empty:
+                y_arr = (
+                    pd.to_numeric(sub_oof["y"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                )
+                yh_arr = (
+                    pd.to_numeric(sub_oof["yhat"], errors="coerce")
+                    .fillna(0.0)
+                    .to_numpy(dtype=float)
+                )
+                denom = max(float(np.sum(np.abs(y_arr))), 1e-9)
+                wape = float(np.sum(np.abs(y_arr - yh_arr))) / denom
+                if wape < best_wape:
+                    best_wape = wape
+                    best_m = m
+        if best_m is not None:
+            return work[work["model_type"].astype(str) == best_m].copy()
+
+    chosen = candidates[0]
+    return work[work["model_type"].astype(str) == chosen].copy()
+
+
+def optimize_prepacks(
+    predictions_df: pd.DataFrame,
+    *,
+    history_df: pd.DataFrame | None = None,
+    oof_df: pd.DataFrame | None = None,
+    prepacks: Mapping[str, Mapping[str, int | float]] | None = None,
+    sizes: Sequence[str] | None = None,
+    pack_size: int | None = None,
+    size_curves: Mapping[str, Mapping[str, float]] | pd.DataFrame | None = None,
+    initial_inventory: float | Mapping[str, float] | str | None = 0.0,
+    current_inventory: float | Mapping[str, float] | str | None = None,
+    underage_cost: float | Mapping[str, float] | str = 18.0,
+    overage_cost: float | Mapping[str, float] | str = 6.0,
+    pack_cost: float | Mapping[str, float] | None = None,
+    unit_cost: float = 1.0,
+    allow_eaches: bool = False,
+    eaches_cost_premium: float = 1.25,
+    max_total_units: float | None = None,
+    max_budget: float | None = None,
+    max_packs_per_type: Mapping[str, int] | int | None = None,
+    min_fill_rate: float | None = None,
+    shrinkage_strength: float = 20.0,
+    model_type: str | None = None,
+    reconciliation_method: str | None = None,
+    prefer_reconciled: bool = True,
+    store_col: str = "store_id",
+    size_col: str = "size_id",
+    ts_id_col: str = "ts_id",
+) -> PrepackOptimizationResult:
+    """Solve the Simplex Size-Curve & Integer Pre-Pack Allocation MILP (`HiGHS`).
+
+    Decomposes store demand across compositional simplex size shares ($\\sum_k p_{s,k} = 1.0$,
+    $p_{s,k} > 0$) and solves for integer pre-pack bundle counts $n_{s,b} \\in \\mathbb{Z}_{\\ge 0}$
+    minimizing size-level stockout shortfall ($u_{s,k}$) plus leftover broken-size overstock
+    ($o_{s,k}$) and pack procurement cost.
+    """
+    pack_specs: dict[str, dict[str, int]] = {}
+    if prepacks:
+        raw_packs: Mapping[str, Mapping[str, int | float]] = prepacks
+    elif sizes is not None or pack_size is not None:
+        sz_list = [str(s) for s in sizes] if sizes else ["XS", "S", "M", "L", "XL"]
+        k_len = max(1, len(sz_list))
+        target_p = max(k_len, int(pack_size)) if pack_size is not None else max(6, k_len * 2)
+        # Build bell-shaped core pack + small-tilted + large-tilted packs summing to `target_p`.
+        mid = (k_len - 1) / 2.0
+        w_core = np.array([math.exp(-0.45 * ((i - mid) ** 2)) for i in range(k_len)], dtype=float)
+        w_sm = np.array([math.exp(-0.35 * i) for i in range(k_len)], dtype=float)
+        w_lg = np.array([math.exp(-0.35 * (k_len - 1 - i)) for i in range(k_len)], dtype=float)
+
+        def _alloc_pack(weights: np.ndarray) -> dict[str, int]:
+            w_norm = weights / float(np.sum(weights))
+            counts = np.maximum(1, np.floor(w_norm * target_p).astype(int))
+            while int(np.sum(counts)) < target_p:
+                frac = w_norm * target_p - counts
+                counts[int(np.argmax(frac))] += 1
+            while int(np.sum(counts)) > target_p and int(np.max(counts)) > 1:
+                idx_hi = int(np.argmax(counts))
+                counts[idx_hi] -= 1
+            return {sz_list[i]: int(counts[i]) for i in range(k_len) if int(counts[i]) > 0}
+
+        raw_packs = {
+            "pack_core": _alloc_pack(w_core),
+            "pack_small_heavy": _alloc_pack(w_sm),
+            "pack_large_heavy": _alloc_pack(w_lg),
+        }
+    else:
+        raw_packs = DEFAULT_PREPACK_BUNDLES
+    all_sizes_set: set[str] = set()
+    for p_id, comp in raw_packs.items():
+        clean_comp = {str(k): max(0, round(float(v))) for k, v in comp.items() if float(v) > 0}
+        if clean_comp:
+            pack_specs[str(p_id)] = clean_comp
+            all_sizes_set.update(clean_comp.keys())
+
+    if not pack_specs:
+        pack_specs = {k: dict(v) for k, v in DEFAULT_PREPACK_BUNDLES.items()}
+        for comp in pack_specs.values():
+            all_sizes_set.update(comp.keys())
+
+    if current_inventory is not None and (initial_inventory is None or initial_inventory == 0.0):
+        initial_inventory = current_inventory
+    if initial_inventory is None:
+        initial_inventory = 0.0
+    if predictions_df is None or predictions_df.empty:
+        return PrepackOptimizationResult(
+            allocation_df=pd.DataFrame(columns=PREPACK_ALLOCATION_COLUMNS),
+            pack_orders_df=pd.DataFrame(columns=PREPACK_ORDER_COLUMNS),
+            size_curves_df=pd.DataFrame(
+                columns=["store_id", "size_id", "raw_units", "raw_share", "simplex_size_share"]
+            ),
+            status="optimal",
+            is_feasible=True,
+            total_demand_units=0.0,
+            total_allocated_units=0.0,
+            total_under_units=0.0,
+            total_over_units=0.0,
+            fill_rate=1.0,
+            size_curve_l1_error=0.0,
+            total_cost=0.0,
+        )
+
+    work = predictions_df.copy()
+    if ts_id_col != "ts_id" and ts_id_col in work.columns and "ts_id" not in work.columns:
+        work = work.rename(columns={ts_id_col: "ts_id"})
+    if "ts_id" not in work.columns:
+        work["ts_id"] = "store_0"
+    work["ts_id"] = work["ts_id"].astype(str)
+
+    if "segment" in work.columns and (work["segment"] == "forecast").any():
+        if history_df is None and (work["segment"] == "history").any():
+            history_df = work[work["segment"] == "history"].copy()
+        work = work[work["segment"] == "forecast"].copy()
+
+    val_col = "yhat" if "yhat" in work.columns else ("y" if "y" in work.columns else None)
+    if val_col is None:
+        return PrepackOptimizationResult(
+            allocation_df=pd.DataFrame(columns=PREPACK_ALLOCATION_COLUMNS),
+            pack_orders_df=pd.DataFrame(columns=PREPACK_ORDER_COLUMNS),
+            size_curves_df=pd.DataFrame(
+                columns=["store_id", "size_id", "raw_units", "raw_share", "simplex_size_share"]
+            ),
+            status="optimal",
+            is_feasible=True,
+            total_demand_units=0.0,
+            total_allocated_units=0.0,
+            total_under_units=0.0,
+            total_over_units=0.0,
+            fill_rate=1.0,
+            size_curve_l1_error=0.0,
+            total_cost=0.0,
+        )
+    work[val_col] = pd.to_numeric(work[val_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    # Strip aggregate hierarchy nodes and select reconciled/champion model cohort.
+    work = _filter_leaf_and_select_model(
+        work,
+        oof_df=oof_df,
+        model_type=model_type,
+        reconciliation_method=reconciliation_method,
+        prefer_reconciled=prefer_reconciled,
+    )
+    if history_df is not None and not history_df.empty and "ts_id" in history_df.columns:
+        non_agg_h = ~history_df["ts_id"].astype(str).map(_is_aggregate_hierarchy_node)
+        if bool(non_agg_h.any()) and not bool(non_agg_h.all()):
+            history_df = history_df[non_agg_h].copy()
+
+    # Determine canonical ordered size list.
+    size_order_pref = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]
+    ordered_sizes = [s for s in size_order_pref if s in all_sizes_set] + sorted(
+        s for s in all_sizes_set if s not in size_order_pref
+    )
+
+    if allow_eaches:
+        for sz in ordered_sizes:
+            each_name = f"each_{sz}"
+            if each_name not in pack_specs:
+                pack_specs[each_name] = {sz: 1}
+
+    pack_ids = list(pack_specs.keys())
+
+    # Check whether input is already at (store, size) grain or at store grain.
+    has_explicit_cols = store_col in work.columns and size_col in work.columns
+    has_size_suffix = False
+    if not has_explicit_cols:
+        known_sorted = sorted(ordered_sizes, key=len, reverse=True)
+        matched_count = 0
+        for raw_ts in work["ts_id"].unique():
+            if any(
+                str(raw_ts).endswith(f"{sep}{sz}") and len(str(raw_ts)) > len(f"{sep}{sz}")
+                for sep in ("_", "::", "-", "/")
+                for sz in known_sorted
+            ):
+                matched_count += 1
+        has_size_suffix = matched_count > 0
+
+    if has_explicit_cols or has_size_suffix:
+        curve_source = history_df if (history_df is not None and not history_df.empty) else work
+        size_curves_df = estimate_simplex_size_curves(
+            curve_source,
+            sizes=ordered_sizes,
+            store_col=store_col,
+            size_col=size_col,
+            shrinkage_strength=shrinkage_strength,
+        )
+        work_curves = estimate_simplex_size_curves(
+            work,
+            sizes=ordered_sizes,
+            store_col=store_col,
+            size_col=size_col,
+            shrinkage_strength=shrinkage_strength,
+        )
+        stores = sorted(work_curves["store_id"].astype(str).unique().tolist())
+        store_totals = work_curves.groupby("store_id")["raw_units"].sum().to_dict()
+        share_lookup = size_curves_df.set_index(["store_id", "size_id"])[
+            "simplex_size_share"
+        ].to_dict()
+        raw_cell_units = work_curves.set_index(["store_id", "size_id"])["raw_units"].to_dict()
+
+        # Cold-start store donor transfer: if any store in `work_curves` is absent from
+        # `size_curves_df` (e.g. a new store with 0 historical rows), inherit the Empirical-Bayes
+        # global simplex size curve across mature donor stores.
+        known_curve_stores = set(size_curves_df["store_id"].astype(str).unique())
+        missing_stores = [st for st in stores if st not in known_curve_stores]
+        if missing_stores:
+            if not size_curves_df.empty:
+                donor_mean = (
+                    size_curves_df.groupby("size_id")["simplex_size_share"].mean().to_dict()
+                )
+                donor_vec = np.array(
+                    [
+                        max(1e-6, float(donor_mean.get(sz, 1.0 / len(ordered_sizes))))
+                        for sz in ordered_sizes
+                    ],
+                    dtype=float,
+                )
+            else:
+                donor_vec = np.ones(len(ordered_sizes), dtype=float)
+            donor_vec = donor_vec / float(np.sum(donor_vec))
+            extra_rows: list[dict[str, Any]] = []
+            for st in missing_stores:
+                tot_u = float(store_totals.get(st, 0.0))
+                for k_idx, sz in enumerate(ordered_sizes):
+                    sh = float(donor_vec[k_idx])
+                    share_lookup[(st, sz)] = sh
+                    extra_rows.append(
+                        {
+                            "store_id": st,
+                            "size_id": sz,
+                            "raw_units": float(raw_cell_units.get((st, sz), tot_u * sh)),
+                            "raw_share": sh,
+                            "simplex_size_share": sh,
+                        }
+                    )
+            if extra_rows:
+                size_curves_df = pd.concat(
+                    [size_curves_df, pd.DataFrame(extra_rows)], ignore_index=True
+                )
+    else:
+        # Each `ts_id` is a store/style; decompose total store demand using `size_curves` or uniform
+        # pack-weighted simplex shares.
+        stores = sorted(work["ts_id"].astype(str).unique().tolist())
+        store_totals = work.groupby("ts_id")[val_col].sum().to_dict()
+        share_lookup = {}
+        raw_cell_units = {}
+        default_vec = np.array(
+            [max(1.0, sum(pack_specs[p].get(sz, 0) for p in pack_ids)) for sz in ordered_sizes],
+            dtype=float,
+        )
+        default_vec = default_vec / float(np.sum(default_vec))
+
+        if isinstance(size_curves, pd.DataFrame) and {
+            "store_id",
+            "size_id",
+            "simplex_size_share",
+        }.issubset(size_curves.columns):
+            share_lookup = size_curves.set_index(["store_id", "size_id"])[
+                "simplex_size_share"
+            ].to_dict()
+        elif isinstance(size_curves, Mapping):
+            for st in stores:
+                st_map = size_curves.get(st, size_curves.get("__default__", {}))
+                if isinstance(st_map, Mapping) and st_map:
+                    vec = np.array(
+                        [max(1e-6, float(st_map.get(sz, 1e-6))) for sz in ordered_sizes],
+                        dtype=float,
+                    )
+                    vec = vec / float(np.sum(vec))
+                    for k_idx, sz in enumerate(ordered_sizes):
+                        share_lookup[(st, sz)] = float(vec[k_idx])
+
+        curve_rows: list[dict[str, Any]] = []
+        for st in stores:
+            tot_u = float(store_totals.get(st, 0.0))
+            st_shares = np.array(
+                [
+                    float(share_lookup.get((st, sz), default_vec[k_idx]))
+                    for k_idx, sz in enumerate(ordered_sizes)
+                ],
+                dtype=float,
+            )
+            st_shares = np.maximum(st_shares, 1e-6)
+            st_shares = st_shares / float(np.sum(st_shares))
+            for k_idx, sz in enumerate(ordered_sizes):
+                sh = float(st_shares[k_idx])
+                share_lookup[(st, sz)] = sh
+                raw_cell_units[(st, sz)] = tot_u * sh
+                curve_rows.append(
+                    {
+                        "store_id": st,
+                        "size_id": sz,
+                        "raw_units": float(tot_u * sh),
+                        "raw_share": sh,
+                        "simplex_size_share": sh,
+                    }
+                )
+        size_curves_df = pd.DataFrame(curve_rows)
+
+    n_stores = len(stores)
+    n_sizes = len(ordered_sizes)
+    n_packs = len(pack_ids)
+
+    # Target demand D_{s, k} and initial inventory I_{s, k, 0}.
+    demand_mat = np.zeros((n_stores, n_sizes), dtype=float)
+    init_mat = np.zeros((n_stores, n_sizes), dtype=float)
+    under_mat = np.zeros((n_stores, n_sizes), dtype=float)
+    over_mat = np.zeros((n_stores, n_sizes), dtype=float)
+    share_mat = np.zeros((n_stores, n_sizes), dtype=float)
+
+    def _lookup_cell_param(
+        spec: float | Mapping[str, float] | str,
+        st: str,
+        sz: str,
+        default_val: float,
+    ) -> float:
+        if isinstance(spec, (int, float)):
+            return float(spec) if np.isfinite(float(spec)) else default_val
+        if isinstance(spec, Mapping):
+            for key in (f"{st}_{sz}", f"{st}::{sz}", st, sz):
+                if key in spec and spec[key] is not None and np.isfinite(float(spec[key])):
+                    return float(spec[key])
+        return default_val
+
+    for s_idx, st in enumerate(stores):
+        tot_st = float(store_totals.get(st, 0.0))
+        sh_vec = np.array(
+            [max(1e-6, float(share_lookup.get((st, sz), 1.0 / n_sizes))) for sz in ordered_sizes],
+            dtype=float,
+        )
+        sh_vec = sh_vec / float(np.sum(sh_vec))
+        share_mat[s_idx, :] = sh_vec
+        for k_idx, sz in enumerate(ordered_sizes):
+            # Blend observed cell forecast with simplex size share when store total > 0.
+            cell_u = float(raw_cell_units.get((st, sz), tot_st * sh_vec[k_idx]))
+            d_sk = (
+                0.5 * cell_u + 0.5 * (tot_st * sh_vec[k_idx])
+                if has_explicit_cols or has_size_suffix
+                else tot_st * sh_vec[k_idx]
+            )
+            demand_mat[s_idx, k_idx] = max(0.0, d_sk)
+            init_mat[s_idx, k_idx] = max(0.0, _lookup_cell_param(initial_inventory, st, sz, 0.0))
+            under_mat[s_idx, k_idx] = max(0.01, _lookup_cell_param(underage_cost, st, sz, 18.0))
+            over_mat[s_idx, k_idx] = max(0.01, _lookup_cell_param(overage_cost, st, sz, 6.0))
+
+    # Pack composition matrix R_{b, k} and pack costs c_b.
+    r_mat = np.zeros((n_packs, n_sizes), dtype=float)
+    pack_units_vec = np.zeros(n_packs, dtype=float)
+    pack_cost_vec = np.zeros(n_packs, dtype=float)
+    for b_idx, p_id in enumerate(pack_ids):
+        comp = pack_specs[p_id]
+        for k_idx, sz in enumerate(ordered_sizes):
+            r_mat[b_idx, k_idx] = float(comp.get(sz, 0))
+        u_cnt = float(np.sum(r_mat[b_idx, :]))
+        pack_units_vec[b_idx] = max(1.0, u_cnt)
+        if isinstance(pack_cost, (int, float)) and np.isfinite(float(pack_cost)):
+            pack_cost_vec[b_idx] = max(0.0, float(pack_cost))
+        elif isinstance(pack_cost, Mapping) and p_id in pack_cost:
+            pack_cost_vec[b_idx] = max(0.0, float(pack_cost[p_id]))
+        else:
+            prem = float(eaches_cost_premium) if p_id.startswith("each_") else 1.0
+            pack_cost_vec[b_idx] = max(0.0, float(unit_cost) * u_cnt * prem)
+
+    # Decision variables:
+    # 1. Integer pack counts n_{s, b} (n_stores * n_packs)
+    # 2. Continuous shortfall u_{s, k} >= 0 (n_stores * n_sizes)
+    # 3. Continuous overstock o_{s, k} >= 0 (n_stores * n_sizes)
+    n_pack_vars = n_stores * n_packs
+    n_cell_vars = n_stores * n_sizes
+    n_vars = n_pack_vars + 2 * n_cell_vars
+
+    c_vec = np.zeros(n_vars, dtype=float)
+    lb_vars = np.zeros(n_vars, dtype=float)
+    ub_vars = np.full(n_vars, np.inf, dtype=float)
+    integrality = np.zeros(n_vars, dtype=int)
+    integrality[:n_pack_vars] = 1  # integer pre-packs
+
+    max_net_demand = float(np.sum(np.maximum(0.0, demand_mat - init_mat)))
+    pack_ub_default = max(50.0, math.ceil(max_net_demand + 20.0))
+
+    for s_idx in range(n_stores):
+        for b_idx, p_id in enumerate(pack_ids):
+            v_idx = s_idx * n_packs + b_idx
+            c_vec[v_idx] = pack_cost_vec[b_idx]
+            ub_vars[v_idx] = pack_ub_default
+            if isinstance(max_packs_per_type, int):
+                ub_vars[v_idx] = float(max(0, max_packs_per_type))
+            elif isinstance(max_packs_per_type, Mapping) and p_id in max_packs_per_type:
+                ub_vars[v_idx] = float(max(0, int(max_packs_per_type[p_id])))
+        for k_idx in range(n_sizes):
+            cell_offset = s_idx * n_sizes + k_idx
+            c_vec[n_pack_vars + cell_offset] = under_mat[s_idx, k_idx]
+            c_vec[n_pack_vars + n_cell_vars + cell_offset] = over_mat[s_idx, k_idx]
+
+    rows_a: list[np.ndarray] = []
+    rows_lb: list[float] = []
+    rows_ub: list[float] = []
+
+    # 1. Exact store x size balance:
+    #    sum_b R_{b,k} n_{s,b} + u_{s,k} - o_{s,k} = D_{s,k} - I_{s,k,0}
+    for s_idx in range(n_stores):
+        for k_idx in range(n_sizes):
+            row = np.zeros(n_vars, dtype=float)
+            for b_idx in range(n_packs):
+                if r_mat[b_idx, k_idx] > 0.0:
+                    row[s_idx * n_packs + b_idx] = r_mat[b_idx, k_idx]
+            cell_offset = s_idx * n_sizes + k_idx
+            row[n_pack_vars + cell_offset] = 1.0
+            row[n_pack_vars + n_cell_vars + cell_offset] = -1.0
+            rhs = float(demand_mat[s_idx, k_idx] - init_mat[s_idx, k_idx])
+            rows_a.append(row)
+            rows_lb.append(rhs)
+            rows_ub.append(rhs)
+
+    # 2. Optional pack type cap across all stores: sum_s n_{s,b} <= max_packs_per_type[b]
+    if isinstance(max_packs_per_type, int):
+        for b_idx in range(n_packs):
+            row = np.zeros(n_vars, dtype=float)
+            for s_idx in range(n_stores):
+                row[s_idx * n_packs + b_idx] = 1.0
+            rows_a.append(row)
+            rows_lb.append(-np.inf)
+            rows_ub.append(float(max(0, max_packs_per_type)))
+    elif isinstance(max_packs_per_type, Mapping):
+        for b_idx, p_id in enumerate(pack_ids):
+            if p_id in max_packs_per_type and max_packs_per_type[p_id] is not None:
+                row = np.zeros(n_vars, dtype=float)
+                for s_idx in range(n_stores):
+                    row[s_idx * n_packs + b_idx] = 1.0
+                rows_a.append(row)
+                rows_lb.append(-np.inf)
+                rows_ub.append(float(max(0, int(max_packs_per_type[p_id]))))
+
+    # 3. Optional total allocated unit cap: sum_{s,b} units_b * n_{s,b} <= max_total_units
+    if max_total_units is not None and np.isfinite(float(max_total_units)):
+        row_u = np.zeros(n_vars, dtype=float)
+        for s_idx in range(n_stores):
+            for b_idx in range(n_packs):
+                row_u[s_idx * n_packs + b_idx] = pack_units_vec[b_idx]
+        rows_a.append(row_u)
+        rows_lb.append(-np.inf)
+        rows_ub.append(float(max(0.0, float(max_total_units))))
+
+    # 4. Optional pack procurement budget cap: sum_{s,b} c_b * n_{s,b} <= max_budget
+    if max_budget is not None and np.isfinite(float(max_budget)):
+        row_b = np.zeros(n_vars, dtype=float)
+        for s_idx in range(n_stores):
+            for b_idx in range(n_packs):
+                row_b[s_idx * n_packs + b_idx] = pack_cost_vec[b_idx]
+        rows_a.append(row_b)
+        rows_lb.append(-np.inf)
+        rows_ub.append(float(max(0.0, float(max_budget))))
+
+    # 5. Optional minimum fill-rate constraint: sum_{s,k} u_{s,k} <= (1 - min_fill_rate) * D
+    total_demand = float(np.sum(demand_mat))
+    if min_fill_rate is not None and total_demand > 1e-9:
+        beta = float(np.clip(min_fill_rate, 0.0, 1.0))
+        max_allowed_under = (1.0 - beta) * total_demand
+        row_f = np.zeros(n_vars, dtype=float)
+        row_f[n_pack_vars : n_pack_vars + n_cell_vars] = 1.0
+        rows_a.append(row_f)
+        rows_lb.append(-np.inf)
+        rows_ub.append(max_allowed_under)
+
+    is_feasible = True
+    relaxation_hint: str | None = None
+    n_sol = np.zeros((n_stores, n_packs), dtype=int)
+
+    # Pre-check conflict between min_fill_rate and max_total_units / max_budget.
+    if min_fill_rate is not None and total_demand > 1e-9:
+        beta = float(np.clip(min_fill_rate, 0.0, 1.0))
+        required_new_units = max(
+            0.0, beta * total_demand - float(np.sum(np.minimum(demand_mat, init_mat)))
+        )
+        if max_total_units is not None and float(max_total_units) + 1e-9 < required_new_units:
+            is_feasible = False
+            relaxation_hint = (
+                f"min_fill_rate={beta:.2f} requires at least {required_new_units:.1f} allocated "
+                f"units, which exceeds max_total_units={float(max_total_units):.1f}. "
+                f"Increase max_total_units to >= {required_new_units:.1f} or lower min_fill_rate."
+            )
+        min_unit_pack_cost = float(np.min(pack_cost_vec / np.maximum(pack_units_vec, 1.0)))
+        if (
+            is_feasible
+            and max_budget is not None
+            and float(max_budget) + 1e-9 < required_new_units * min_unit_pack_cost
+        ):
+            is_feasible = False
+            min_b = required_new_units * min_unit_pack_cost
+            relaxation_hint = (
+                f"min_fill_rate={beta:.2f} requires at least ${min_b:.2f} in pack spend, "
+                f"exceeding max_budget=${float(max_budget):.2f}. "
+                f"Increase max_budget to >= ${min_b:.2f}."
+            )
+
+    solver_ok = False
+    if is_feasible:
+        res = milp(
+            c=c_vec,
+            integrality=integrality,
+            bounds=Bounds(lb_vars, ub_vars),
+            constraints=LinearConstraint(np.vstack(rows_a), rows_lb, rows_ub),
+        )
+        if res.success and res.x is not None:
+            solver_ok = True
+            n_sol = (
+                np.round(np.clip(res.x[:n_pack_vars], 0.0, None))
+                .astype(int)
+                .reshape((n_stores, n_packs))
+            )
+        else:
+            is_feasible = False
+            relaxation_hint = (
+                "Pre-pack MILP constraints are mutually infeasible (check min_fill_rate against "
+                "max_packs_per_type, max_total_units, and pack size coverage)."
+            )
+
+    status_str = "infeasible" if not is_feasible else ("optimal" if solver_ok else "feasible")
+    alloc_mat = n_sol.astype(float) @ r_mat  # (n_stores, n_sizes)
+    final_mat = init_mat + alloc_mat
+    under_sol = np.maximum(0.0, demand_mat - final_mat)
+    over_sol = np.maximum(0.0, final_mat - demand_mat)
+
+    alloc_rows: list[dict[str, Any]] = []
+    l1_num = 0.0
+    for s_idx, st in enumerate(stores):
+        st_alloc_total = float(np.sum(final_mat[s_idx, :]))
+        st_dem_total = float(np.sum(demand_mat[s_idx, :]))
+        for k_idx, sz in enumerate(ordered_sizes):
+            alloc_sh = (
+                float(final_mat[s_idx, k_idx] / st_alloc_total)
+                if st_alloc_total > 1e-9
+                else float(share_mat[s_idx, k_idx])
+            )
+            l1_num += (
+                st_dem_total * abs(alloc_sh - float(share_mat[s_idx, k_idx])) / max(n_sizes, 1)
+            )
+            u_val = float(under_sol[s_idx, k_idx])
+            o_val = float(over_sol[s_idx, k_idx])
+            u_cost = float(under_mat[s_idx, k_idx])
+            o_cost = float(over_mat[s_idx, k_idx])
+            alloc_rows.append(
+                {
+                    "store_id": st,
+                    "size_id": sz,
+                    "ts_id": f"{st}_{sz}",
+                    "simplex_size_share": float(share_mat[s_idx, k_idx]),
+                    "target_demand_units": float(demand_mat[s_idx, k_idx]),
+                    "initial_inventory": float(init_mat[s_idx, k_idx]),
+                    "allocated_pack_units": float(alloc_mat[s_idx, k_idx]),
+                    "final_inventory_units": float(final_mat[s_idx, k_idx]),
+                    "under_allocated_units": u_val,
+                    "over_allocated_units": o_val,
+                    "allocated_size_share": alloc_sh,
+                    "underage_cost": u_cost,
+                    "overage_cost": o_cost,
+                    "imbalance_cost": float(u_val * u_cost + o_val * o_cost),
+                    "status": status_str,
+                }
+            )
+
+    order_rows: list[dict[str, Any]] = []
+    total_pack_spend = 0.0
+    for s_idx, st in enumerate(stores):
+        for b_idx, p_id in enumerate(pack_ids):
+            cnt = int(n_sol[s_idx, b_idx])
+            u_per = float(pack_units_vec[b_idx])
+            c_per = float(pack_cost_vec[b_idx])
+            spend = float(cnt * c_per)
+            total_pack_spend += spend
+            comp_str = ", ".join(
+                f"{sz}:{int(r_mat[b_idx, k_idx])}"
+                for k_idx, sz in enumerate(ordered_sizes)
+                if r_mat[b_idx, k_idx] > 0
+            )
+            order_rows.append(
+                {
+                    "store_id": st,
+                    "pack_id": p_id,
+                    "packs_ordered": cnt,
+                    "units_per_pack": u_per,
+                    "total_pack_units": float(cnt * u_per),
+                    "pack_cost": c_per,
+                    "total_pack_spend": spend,
+                    "pack_composition": comp_str,
+                }
+            )
+
+    tot_under = float(np.sum(under_sol))
+    tot_over = float(np.sum(over_sol))
+    tot_alloc = float(np.sum(alloc_mat))
+    achieved_fill = (
+        float(np.clip(1.0 - tot_under / total_demand, 0.0, 1.0)) if total_demand > 1e-9 else 1.0
+    )
+    l1_err = float(l1_num / total_demand) if total_demand > 1e-9 else 0.0
+    tot_imbalance_cost = float(np.sum(under_sol * under_mat + over_sol * over_mat))
+
+    return PrepackOptimizationResult(
+        allocation_df=pd.DataFrame(alloc_rows, columns=PREPACK_ALLOCATION_COLUMNS),
+        pack_orders_df=pd.DataFrame(order_rows, columns=PREPACK_ORDER_COLUMNS),
+        size_curves_df=size_curves_df,
+        status=status_str,
+        is_feasible=is_feasible,
+        total_demand_units=total_demand,
+        total_allocated_units=tot_alloc,
+        total_under_units=tot_under,
+        total_over_units=tot_over,
+        fill_rate=achieved_fill,
+        size_curve_l1_error=l1_err,
+        total_cost=float(tot_imbalance_cost + total_pack_spend),
+        relaxation_hint=relaxation_hint,
+    )
+
+
+def optimize_prepacks_df(
+    predictions_df: pd.DataFrame,
+    *,
+    summary: bool = False,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Convenience wrapper around :func:`optimize_prepacks` returning a tidy DataFrame.
+
+    Returns ``result.pack_orders_df`` when ``summary=True`` and ``result.allocation_df`` otherwise,
+    with the full :class:`PrepackOptimizationResult` attached to ``df.attrs["prepack_result"]``.
+    """
+    res = optimize_prepacks(predictions_df, **kwargs)
+    out = res.pack_orders_df.copy() if summary else res.allocation_df.copy()
+    out.attrs["prepack_result"] = res
+    out.attrs["status"] = res.status
+    out.attrs["is_feasible"] = res.is_feasible
+    out.attrs["relaxation_hint"] = res.relaxation_hint
+    out.attrs["size_curves_df"] = res.size_curves_df
+    return out
+
+
+def optimize_rebalancing(
+    predictions_df: pd.DataFrame,
+    *,
+    oof_df: pd.DataFrame | None = None,
+    initial_inventory: float | Mapping[str, float] | str | None = None,
+    current_inventory: float | Mapping[str, float] | str | None = None,
+    target_position: float | Mapping[str, float] | str | None = None,
+    safety_stock: float | Mapping[str, float] | str | None = 0.0,
+    underage_cost: float | Mapping[str, float] | str = 20.0,
+    overage_cost: float | Mapping[str, float] | str = 5.0,
+    transfer_cost: float | Mapping[tuple[str, str], float] | pd.DataFrame = 2.5,
+    transfer_lead_time: float | Mapping[tuple[str, str], float] | pd.DataFrame = 2.0,
+    max_transfer_lead_time: float = 5.0,
+    max_transfer_budget: float | None = None,
+    max_transfer_units: float | None = None,
+    max_lane_capacity: float | None = None,
+    min_transfer_qty: float = 0.0,
+    min_network_fill_rate: float | None = None,
+    protection_steps: int | None = None,
+    protect_origin_demand: bool = True,
+    integer_transfers: bool = False,
+    model_type: str | None = None,
+    reconciliation_method: str | None = None,
+    prefer_reconciled: bool = True,
+    item_col: str | None = None,
+    location_col: str | None = None,
+    ts_id_col: str = "ts_id",
+) -> RebalancingOptimizationResult:
+    """Solve the Hitchcock–Koopmans Lateral Store-to-Store / Depot Inventory Rebalancing LP/MILP.
+
+    Finds the minimum-cost transshipment plan $x_{k, o \\to d} \\ge 0$ moving excess inventory from
+    over-stocked origins ($I_{o,0} > S_o^{\\text{target}}$) to stockout-risk destinations
+    ($I_{d,0} < S_d^{\\text{target}}$) whenever unit transfer cost $c_{o \\to d}^{\\text{trans}}$ is
+    strictly lower than the combined stockout-avoidance plus holding-cost savings
+    ($p_d + h_o$) and transit lead time $L_{o \\to d} \\le L_{\\max}^{\\text{transfer}}$.
+    """
+    if initial_inventory is None and current_inventory is not None:
+        initial_inventory = current_inventory
+    if predictions_df is None or predictions_df.empty:
+        return RebalancingOptimizationResult(
+            transfers_df=pd.DataFrame(columns=REBALANCING_TRANSFER_COLUMNS),
+            node_summary_df=pd.DataFrame(columns=REBALANCING_NODE_COLUMNS),
+            status="optimal",
+            is_feasible=True,
+            total_transferred_units=0.0,
+            total_transfer_cost=0.0,
+            stockout_units_avoided=0.0,
+            baseline_network_cost=0.0,
+            optimal_network_cost=0.0,
+            net_cost_savings=0.0,
+        )
+
+    work = predictions_df.copy()
+    if ts_id_col != "ts_id" and ts_id_col in work.columns and "ts_id" not in work.columns:
+        work = work.rename(columns={ts_id_col: "ts_id"})
+    if "ts_id" not in work.columns:
+        work["ts_id"] = "node_0"
+    work["ts_id"] = work["ts_id"].astype(str)
+
+    if "segment" in work.columns and (work["segment"] == "forecast").any():
+        work = work[work["segment"] == "forecast"].copy()
+    work = _filter_leaf_and_select_model(
+        work,
+        oof_df=oof_df,
+        model_type=model_type,
+        reconciliation_method=reconciliation_method,
+        prefer_reconciled=prefer_reconciled,
+    )
+
+    val_col = (
+        "yhat"
+        if "yhat" in work.columns
+        else (
+            "protection_demand"
+            if "protection_demand" in work.columns
+            else ("y" if "y" in work.columns else None)
+        )
+    )
+    if val_col is None:
+        return RebalancingOptimizationResult(
+            transfers_df=pd.DataFrame(columns=REBALANCING_TRANSFER_COLUMNS),
+            node_summary_df=pd.DataFrame(columns=REBALANCING_NODE_COLUMNS),
+            status="optimal",
+            is_feasible=True,
+            total_transferred_units=0.0,
+            total_transfer_cost=0.0,
+            stockout_units_avoided=0.0,
+            baseline_network_cost=0.0,
+            optimal_network_cost=0.0,
+            net_cost_savings=0.0,
+        )
+    work[val_col] = pd.to_numeric(work[val_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    # Resolve item_id and location_id per ts_id.
+    node_records: list[dict[str, Any]] = []
+    ts_ids = sorted(work["ts_id"].unique().tolist())
+
+    def _resolve_node_param(
+        spec: float | Mapping[str, float] | str | None,
+        ts: str,
+        loc: str,
+        default_val: float,
+    ) -> float:
+        if spec is None:
+            return default_val
+        if isinstance(spec, (int, float)):
+            return float(spec) if np.isfinite(float(spec)) else default_val
+        if isinstance(spec, str) and spec in work.columns:
+            sub_s = pd.to_numeric(work.loc[work["ts_id"] == ts, spec], errors="coerce").dropna()
+            if not sub_s.empty:
+                return float(sub_s.iloc[-1])
+            return default_val
+        if isinstance(spec, Mapping):
+            for k in (ts, loc):
+                if k in spec and spec[k] is not None and np.isfinite(float(spec[k])):
+                    return float(spec[k])
+        return default_val
+
+    for idx, ts in enumerate(ts_ids):
+        sub = work[work["ts_id"] == ts]
+        if protection_steps is not None and int(protection_steps) > 0:
+            for d_col in ("ds", "forecast_date", "horizon_step"):
+                if d_col in sub.columns:
+                    sub = sub.sort_values(d_col)
+                    break
+            sub = sub.head(int(protection_steps))
+        if item_col and item_col in sub.columns:
+            it_id = (
+                str(sub[item_col].dropna().iloc[0])
+                if not sub[item_col].dropna().empty
+                else "ITEM_ALL"
+            )
+        else:
+            it_id = "ITEM_ALL"
+        if location_col and location_col in sub.columns:
+            loc_id = (
+                str(sub[location_col].dropna().iloc[0])
+                if not sub[location_col].dropna().empty
+                else ts
+            )
+        else:
+            loc_id = ts
+
+        dem_u = float(sub[val_col].sum())
+        if isinstance(safety_stock, str) and safety_stock == "auto":
+            # Estimate node safety stock from conformal intervals (yhat_hi - yhat_lo) or OOF RMSE.
+            auto_ss = 0.0
+            if "yhat_hi" in sub.columns and val_col in sub.columns:
+                hi_s = pd.to_numeric(sub["yhat_hi"], errors="coerce").fillna(sub[val_col])
+                half_w = np.maximum(
+                    0.0, hi_s.to_numpy(dtype=float) - sub[val_col].to_numpy(dtype=float)
+                )
+                auto_ss = float(np.sqrt(np.sum(half_w**2)))
+            elif (
+                oof_df is not None
+                and not oof_df.empty
+                and {"ts_id", "y", "yhat"}.issubset(oof_df.columns)
+            ):
+                sub_oof = oof_df[oof_df["ts_id"].astype(str) == ts]
+                if not sub_oof.empty:
+                    err = pd.to_numeric(sub_oof["y"], errors="coerce").fillna(0.0).to_numpy(
+                        dtype=float
+                    ) - pd.to_numeric(sub_oof["yhat"], errors="coerce").fillna(0.0).to_numpy(
+                        dtype=float
+                    )
+                    rmse = float(np.sqrt(np.mean(err**2)))
+                    n_steps = max(1, len(sub))
+                    auto_ss = float(1.645 * rmse * np.sqrt(n_steps))
+            ss_u = max(0.0, auto_ss)
+        else:
+            ss_u = max(0.0, _resolve_node_param(safety_stock, ts, loc_id, 0.0))
+        default_tgt = dem_u + ss_u
+        tgt_u = max(0.0, _resolve_node_param(target_position, ts, loc_id, default_tgt))
+        # Default initial inventory when not specified: alternate surplus and deficit around target.
+        default_init = tgt_u * (1.45 if idx % 2 == 0 else 0.55)
+        init_u = max(0.0, _resolve_node_param(initial_inventory, ts, loc_id, default_init))
+        u_cost = max(0.01, _resolve_node_param(underage_cost, ts, loc_id, 20.0))
+        o_cost = max(0.0, _resolve_node_param(overage_cost, ts, loc_id, 5.0))
+
+        node_records.append(
+            {
+                "ts_id": ts,
+                "item_id": it_id,
+                "location_id": loc_id,
+                "protection_demand": dem_u,
+                "safety_stock": ss_u,
+                "target_position": tgt_u,
+                "initial_inventory": init_u,
+                "underage_cost": u_cost,
+                "overage_cost": o_cost,
+            }
+        )
+
+    nodes_df = pd.DataFrame(node_records)
+
+    # Helper to look up pairwise (origin, dest) transfer cost and lead time.
+    def _lane_lookup(
+        spec: float | Mapping[tuple[str, str], float] | pd.DataFrame,
+        orig_ts: str,
+        orig_loc: str,
+        dest_ts: str,
+        dest_loc: str,
+        default_val: float,
+    ) -> float:
+        if isinstance(spec, (int, float)):
+            return float(spec) if np.isfinite(float(spec)) else default_val
+        if isinstance(spec, pd.DataFrame) and not spec.empty:
+            o_col = "origin_id" if "origin_id" in spec.columns else spec.columns[0]
+            d_col = "destination_id" if "destination_id" in spec.columns else spec.columns[1]
+            v_c = spec.columns[2]
+            m = spec[
+                spec[o_col].astype(str).isin({orig_ts, orig_loc})
+                & spec[d_col].astype(str).isin({dest_ts, dest_loc})
+            ]
+            if not m.empty:
+                val = float(pd.to_numeric(m[v_c], errors="coerce").dropna().iloc[0])
+                if np.isfinite(val):
+                    return val
+            return default_val
+        if isinstance(spec, Mapping):
+            for k in (
+                (orig_ts, dest_ts),
+                (orig_loc, dest_loc),
+                f"{orig_ts}->{dest_ts}",
+                f"{orig_loc}->{dest_loc}",
+            ):
+                if k in spec and spec[k] is not None and np.isfinite(float(spec[k])):  # type: ignore[index]
+                    return float(spec[k])  # type: ignore[index]
+        return default_val
+
+    # Build lane list grouped by item_id.
+    lanes: list[dict[str, Any]] = []
+    max_lt = float(max_transfer_lead_time)
+    for it_id_val, grp in nodes_df.groupby("item_id", sort=False):
+        it_id_str = str(it_id_val)
+        idxs = [int(i) for i in grp.index.tolist()]
+        for i_orig in idxs:
+            for i_dest in idxs:
+                if i_orig == i_dest:
+                    continue
+                r_o = node_records[i_orig]
+                r_d = node_records[i_dest]
+                lt = max(
+                    0.0,
+                    _lane_lookup(
+                        transfer_lead_time,
+                        str(r_o["ts_id"]),
+                        str(r_o["location_id"]),
+                        str(r_d["ts_id"]),
+                        str(r_d["location_id"]),
+                        2.0,
+                    ),
+                )
+                if lt > max_lt + 1e-9:
+                    continue
+                t_cost = max(
+                    0.0,
+                    _lane_lookup(
+                        transfer_cost,
+                        str(r_o["ts_id"]),
+                        str(r_o["location_id"]),
+                        str(r_d["ts_id"]),
+                        str(r_d["location_id"]),
+                        2.5,
+                    ),
+                )
+                lanes.append(
+                    {
+                        "item_id": it_id_str,
+                        "orig_idx": int(i_orig),
+                        "dest_idx": int(i_dest),
+                        "origin_id": str(r_o["location_id"]),
+                        "destination_id": str(r_d["location_id"]),
+                        "unit_transfer_cost": t_cost,
+                        "transfer_lead_time": lt,
+                    }
+                )
+
+    n_nodes = len(node_records)
+    n_lanes = len(lanes)
+    # Variables:
+    # 0 .. n_lanes-1: x_l >= 0 (transfer units on lane l)
+    # n_lanes .. n_lanes+n_nodes-1: u_i >= 0 (post-transfer shortfall at node i)
+    # n_lanes+n_nodes .. n_lanes+2*n_nodes-1: e_i >= 0 (post-transfer excess at node i)
+    n_vars = n_lanes + 2 * n_nodes
+    c_vec = np.zeros(n_vars, dtype=float)
+    lb_vars = np.zeros(n_vars, dtype=float)
+    ub_vars = np.full(n_vars, np.inf, dtype=float)
+
+    lane_cap = (
+        float(max(0.0, float(max_lane_capacity)))
+        if max_lane_capacity is not None and np.isfinite(float(max_lane_capacity))
+        else np.inf
+    )
+    for l_idx, lane in enumerate(lanes):
+        c_vec[l_idx] = float(lane["unit_transfer_cost"])
+        ub_vars[l_idx] = lane_cap
+
+    for i_idx in range(n_nodes):
+        c_vec[n_lanes + i_idx] = float(node_records[i_idx]["underage_cost"])
+        c_vec[n_lanes + n_nodes + i_idx] = float(node_records[i_idx]["overage_cost"])
+
+    rows_a: list[np.ndarray] = []
+    rows_lb: list[float] = []
+    rows_ub: list[float] = []
+
+    # 1. Node inventory balance:
+    #    (init_i - out_i + in_i) + u_i - e_i = target_i
+    #    => -out_i + in_i + u_i - e_i = target_i - init_i
+    for i_idx in range(n_nodes):
+        row = np.zeros(n_vars, dtype=float)
+        for l_idx, lane in enumerate(lanes):
+            if lane["orig_idx"] == i_idx:
+                row[l_idx] = -1.0
+            elif lane["dest_idx"] == i_idx:
+                row[l_idx] = 1.0
+        row[n_lanes + i_idx] = 1.0
+        row[n_lanes + n_nodes + i_idx] = -1.0
+        rhs = float(
+            node_records[i_idx]["target_position"] - node_records[i_idx]["initial_inventory"]
+        )
+        rows_a.append(row)
+        rows_lb.append(rhs)
+        rows_ub.append(rhs)
+
+    # 2. Outbound transfer cap at origin i:
+    #    If protect_origin_demand=True, origin only exports surplus above target_position;
+    #    otherwise origin can export up to initial_inventory.
+    for i_idx in range(n_nodes):
+        out_lanes = [l_idx for l_idx, lane in enumerate(lanes) if lane["orig_idx"] == i_idx]
+        if not out_lanes:
+            continue
+        row = np.zeros(n_vars, dtype=float)
+        for l_idx in out_lanes:
+            row[l_idx] = 1.0
+        init_i = float(node_records[i_idx]["initial_inventory"])
+        tgt_i = float(node_records[i_idx]["target_position"])
+        max_export = max(0.0, init_i - tgt_i) if protect_origin_demand else init_i
+        rows_a.append(row)
+        rows_lb.append(-np.inf)
+        rows_ub.append(max_export)
+
+    # 3. Optional max_transfer_budget: sum_l c_l x_l <= max_transfer_budget
+    if max_transfer_budget is not None and np.isfinite(float(max_transfer_budget)) and n_lanes > 0:
+        row_b = np.zeros(n_vars, dtype=float)
+        for l_idx, lane in enumerate(lanes):
+            row_b[l_idx] = float(lane["unit_transfer_cost"])
+        rows_a.append(row_b)
+        rows_lb.append(-np.inf)
+        rows_ub.append(float(max(0.0, float(max_transfer_budget))))
+
+    # 4. Optional max_transfer_units: sum_l x_l <= max_transfer_units
+    if max_transfer_units is not None and np.isfinite(float(max_transfer_units)) and n_lanes > 0:
+        row_u = np.zeros(n_vars, dtype=float)
+        row_u[:n_lanes] = 1.0
+        rows_a.append(row_u)
+        rows_lb.append(-np.inf)
+        rows_ub.append(float(max(0.0, float(max_transfer_units))))
+
+    # 5. Optional min_network_fill_rate: sum_i u_i <= (1 - beta) * sum_i target_i
+    total_target = float(nodes_df["target_position"].sum())
+    if min_network_fill_rate is not None and total_target > 1e-9:
+        beta = float(np.clip(min_network_fill_rate, 0.0, 1.0))
+        row_f = np.zeros(n_vars, dtype=float)
+        row_f[n_lanes : n_lanes + n_nodes] = 1.0
+        rows_a.append(row_f)
+        rows_lb.append(-np.inf)
+        rows_ub.append((1.0 - beta) * total_target)
+
+    # Pre-check whether min_network_fill_rate is physically achievable given total network stock.
+    is_feasible = True
+    relaxation_hint: str | None = None
+    total_init = float(nodes_df["initial_inventory"].sum())
+    if min_network_fill_rate is not None and total_target > 1e-9:
+        beta = float(np.clip(min_network_fill_rate, 0.0, 1.0))
+        max_possible_fill = min(1.0, total_init / total_target)
+        if beta > max_possible_fill + 1e-6:
+            is_feasible = False
+            relaxation_hint = (
+                f"min_network_fill_rate={beta:.2f} exceeds maximum physically achievable "
+                f"network fill rate {max_possible_fill:.2f} "
+                f"(total initial inventory={total_init:.1f} "
+                f"vs total target position={total_target:.1f}). Lower min_network_fill_rate to "
+                f"<= {max_possible_fill:.2f} or replenish external stock via optimize_inventory_df."
+            )
+
+    x_sol = np.zeros(n_lanes, dtype=float)
+    solver_ok = False
+
+    if is_feasible:
+        a_mat = np.vstack(rows_a)
+        if integer_transfers:
+            integrality = np.zeros(n_vars, dtype=int)
+            integrality[:n_lanes] = 1
+            res = milp(
+                c=c_vec,
+                integrality=integrality,
+                bounds=Bounds(lb_vars, ub_vars),
+                constraints=LinearConstraint(a_mat, rows_lb, rows_ub),
+            )
+        else:
+            # Solve via HiGHS LP wrapper in scipy.optimize.milp (handles two-sided bounds cleanly).
+            res = milp(
+                c=c_vec,
+                integrality=np.zeros(n_vars, dtype=int),
+                bounds=Bounds(lb_vars, ub_vars),
+                constraints=LinearConstraint(a_mat, rows_lb, rows_ub),
+            )
+            if not res.success:
+                # Fallback to linprog if needed.
+                eq_mask = np.isclose(rows_lb, rows_ub)
+                ub_mask = ~eq_mask & np.isfinite(rows_ub)
+                lp_res = linprog(
+                    c=c_vec,
+                    A_ub=a_mat[ub_mask] if np.any(ub_mask) else None,
+                    b_ub=np.asarray(rows_ub)[ub_mask] if np.any(ub_mask) else None,
+                    A_eq=a_mat[eq_mask] if np.any(eq_mask) else None,
+                    b_eq=np.asarray(rows_lb)[eq_mask] if np.any(eq_mask) else None,
+                    bounds=list(zip(lb_vars, ub_vars, strict=True)),
+                    method="highs",
+                )
+                res = lp_res
+
+        if res.success and res.x is not None:
+            solver_ok = True
+            x_sol = np.clip(res.x[:n_lanes], 0.0, None)
+            if integer_transfers:
+                x_sol = np.round(x_sol)
+            if float(min_transfer_qty) > 0.0:
+                x_sol = np.where(x_sol + 1e-9 >= float(min_transfer_qty), x_sol, 0.0)
+        else:
+            is_feasible = False
+            relaxation_hint = (
+                "Rebalancing LP/MILP constraints are infeasible (check min_network_fill_rate "
+                "against max_transfer_budget, max_transfer_units, and max_transfer_lead_time)."
+            )
+
+    status_str = "infeasible" if not is_feasible else ("optimal" if solver_ok else "feasible")
+
+    # Compute node inventories and costs before and after transfers.
+    outbound_vec = np.zeros(n_nodes, dtype=float)
+    inbound_vec = np.zeros(n_nodes, dtype=float)
+    transfer_rows: list[dict[str, Any]] = []
+
+    for l_idx, lane in enumerate(lanes):
+        qty = float(x_sol[l_idx])
+        if qty > 1e-6:
+            o_i = int(lane["orig_idx"])
+            d_i = int(lane["dest_idx"])
+            outbound_vec[o_i] += qty
+            inbound_vec[d_i] += qty
+            u_tcost = float(lane["unit_transfer_cost"])
+            orig_ex = max(
+                0.0,
+                float(
+                    node_records[o_i]["initial_inventory"] - node_records[o_i]["target_position"]
+                ),
+            )
+            dest_sh = max(
+                0.0,
+                float(
+                    node_records[d_i]["target_position"] - node_records[d_i]["initial_inventory"]
+                ),
+            )
+            unit_saving = (
+                float(node_records[d_i]["underage_cost"])
+                + float(node_records[o_i]["overage_cost"])
+                - u_tcost
+            )
+            transfer_rows.append(
+                {
+                    "item_id": str(lane["item_id"]),
+                    "origin_id": str(lane["origin_id"]),
+                    "destination_id": str(lane["destination_id"]),
+                    "transfer_units": qty,
+                    "unit_transfer_cost": u_tcost,
+                    "total_transfer_cost": float(qty * u_tcost),
+                    "transfer_lead_time": float(lane["transfer_lead_time"]),
+                    "origin_excess_before": orig_ex,
+                    "destination_shortfall_before": dest_sh,
+                    "net_economic_benefit": float(qty * unit_saving),
+                }
+            )
+
+    node_rows: list[dict[str, Any]] = []
+    base_net_cost = 0.0
+    post_node_cost_sum = 0.0
+    base_shortfall_sum = 0.0
+    post_shortfall_sum = 0.0
+
+    for i_idx in range(n_nodes):
+        r = node_records[i_idx]
+        init_i = float(r["initial_inventory"])
+        tgt_i = float(r["target_position"])
+        out_i = float(outbound_vec[i_idx])
+        in_i = float(inbound_vec[i_idx])
+        fin_i = init_i - out_i + in_i
+        u_cost = float(r["underage_cost"])
+        o_cost = float(r["overage_cost"])
+
+        unbal_short = max(0.0, tgt_i - init_i)
+        post_short = max(0.0, tgt_i - fin_i)
+        unbal_ex = max(0.0, init_i - tgt_i)
+        post_ex = max(0.0, fin_i - tgt_i)
+
+        b_cost = unbal_short * u_cost + unbal_ex * o_cost
+        p_cost = post_short * u_cost + post_ex * o_cost
+        base_net_cost += b_cost
+        post_node_cost_sum += p_cost
+        base_shortfall_sum += unbal_short
+        post_shortfall_sum += post_short
+
+        node_rows.append(
+            {
+                "ts_id": str(r["ts_id"]),
+                "item_id": str(r["item_id"]),
+                "location_id": str(r["location_id"]),
+                "initial_inventory": init_i,
+                "target_position": tgt_i,
+                "protection_demand": float(r["protection_demand"]),
+                "safety_stock": float(r["safety_stock"]),
+                "outbound_transfer_units": out_i,
+                "inbound_transfer_units": in_i,
+                "final_inventory": fin_i,
+                "unbalanced_shortfall_units": unbal_short,
+                "post_transfer_shortfall_units": post_short,
+                "unbalanced_excess_units": unbal_ex,
+                "post_transfer_excess_units": post_ex,
+                "underage_cost": u_cost,
+                "overage_cost": o_cost,
+                "baseline_node_cost": b_cost,
+                "post_transfer_node_cost": p_cost,
+                "status": status_str,
+            }
+        )
+
+    tot_trans_u = float(sum(r["transfer_units"] for r in transfer_rows))
+    tot_trans_c = float(sum(r["total_transfer_cost"] for r in transfer_rows))
+    opt_net_cost = float(post_node_cost_sum + tot_trans_c)
+
+    return RebalancingOptimizationResult(
+        transfers_df=pd.DataFrame(transfer_rows, columns=REBALANCING_TRANSFER_COLUMNS),
+        node_summary_df=pd.DataFrame(node_rows, columns=REBALANCING_NODE_COLUMNS),
+        status=status_str,
+        is_feasible=is_feasible,
+        total_transferred_units=tot_trans_u,
+        total_transfer_cost=tot_trans_c,
+        stockout_units_avoided=float(max(0.0, base_shortfall_sum - post_shortfall_sum)),
+        baseline_network_cost=float(base_net_cost),
+        optimal_network_cost=opt_net_cost,
+        net_cost_savings=float(base_net_cost - opt_net_cost),
+        relaxation_hint=relaxation_hint,
+    )
+
+
+def optimize_rebalancing_df(
+    predictions_df: pd.DataFrame,
+    *,
+    summary: bool = False,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Convenience wrapper around :func:`optimize_rebalancing` returning a tidy DataFrame.
+
+    Returns ``result.node_summary_df`` when ``summary=True`` and ``result.transfers_df`` otherwise,
+    with the full :class:`RebalancingOptimizationResult` attached to
+    ``df.attrs["rebalancing_result"]``.
+    """
+    res = optimize_rebalancing(predictions_df, **kwargs)
+    out = res.node_summary_df.copy() if summary else res.transfers_df.copy()
+    out.attrs["rebalancing_result"] = res
+    out.attrs["status"] = res.status
+    out.attrs["is_feasible"] = res.is_feasible
+    out.attrs["relaxation_hint"] = res.relaxation_hint
+    return out

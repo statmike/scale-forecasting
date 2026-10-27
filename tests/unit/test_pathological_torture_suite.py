@@ -525,7 +525,12 @@ def test_case_11_contradictory_goal_seek_and_zero_budget_inventory() -> None:
     assert np.allclose(inv_df["recommended_order_qty"].to_numpy(dtype=float), 0.0)
 
     # Clearance space-reclamation optimization under physically unreachable target_space_freed
-    from scale_forecasting import optimize_clearance
+    from scale_forecasting import (
+        optimize_assortment,
+        optimize_clearance,
+        optimize_prepacks,
+        optimize_rebalancing,
+    )
 
     cl_infeas = optimize_clearance(
         bottom_df,
@@ -536,6 +541,24 @@ def test_case_11_contradictory_goal_seek_and_zero_budget_inventory() -> None:
     assert cl_infeas.status == "infeasible"
     assert not cl_infeas.is_feasible
     assert cl_infeas.relaxation_hint is not None
+
+    # Assortment delisting under contradictory min_skus > max_skus
+    assort_infeas = optimize_assortment(bottom_df, min_skus=4, max_skus=1)
+    assert assort_infeas.status == "infeasible"
+    assert not assort_infeas.is_feasible
+    assert assort_infeas.relaxation_hint is not None
+
+    # Pre-pack allocation under unreachable min_fill_rate with zero budget
+    pp_infeas = optimize_prepacks(bottom_df, max_budget=0.0, min_fill_rate=0.90)
+    assert pp_infeas.status == "infeasible"
+    assert not pp_infeas.is_feasible
+    assert pp_infeas.relaxation_hint is not None
+
+    # Lateral rebalancing under unreachable min_network_fill_rate with zero network inventory
+    reb_infeas = optimize_rebalancing(bottom_df, initial_inventory=0.0, min_network_fill_rate=0.90)
+    assert reb_infeas.status == "infeasible"
+    assert not reb_infeas.is_feasible
+    assert reb_infeas.relaxation_hint is not None
 
 
 # ---------------------------------------------------------------------------

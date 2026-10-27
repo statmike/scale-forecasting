@@ -837,6 +837,194 @@ class PlaygroundWorkbenchMixin:
         out.attrs["hierarchy_rollup_df"] = res.hierarchy_rollup_df
         return out
 
+    def optimize_assortment(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Solve the assortment rationalization & delisting demand-transference MILP
+        (`clearance_optimizer.optimize_assortment`).
+        """
+        from .clearance_optimizer import optimize_assortment as _optimize_assortment
+
+        preds, eff_oof, hist = self._resolve_clearance_inputs(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        self._default_clearance_covariate_and_hierarchy_cols(kwargs)
+        return _optimize_assortment(
+            preds,
+            history_df=kwargs.pop("history_df", hist),
+            oof_df=eff_oof,
+            model_type=model_type,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            horizon=self._config.data.horizon,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def optimize_assortment_df(
+        self,
+        *,
+        transference: bool = False,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Solve the assortment rationalization & delisting demand-transference MILP and return a
+        tidy SKU decision or pairwise transference DataFrame
+        (`clearance_optimizer.optimize_assortment_df`).
+        """
+        res = self.optimize_assortment(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            **kwargs,
+        )
+        out = res.transference_df.copy() if transference else res.assortment_df.copy()
+        out.attrs["assortment_result"] = res
+        out.attrs["status"] = res.status
+        out.attrs["is_feasible"] = res.is_feasible
+        out.attrs["relaxation_hint"] = res.relaxation_hint
+        out.attrs["hierarchy_rollup_df"] = res.hierarchy_rollup_df
+        return out
+
+    def optimize_prepacks(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Solve the Simplex Size-Curve & Integer Pre-Pack Allocation MILP
+        (`inventory_optimizer.optimize_prepacks`).
+        """
+        from .inventory_optimizer import optimize_prepacks as _optimize_prepacks
+
+        preds, eff_oof, hist = self._resolve_clearance_inputs(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        return _optimize_prepacks(
+            preds,
+            history_df=kwargs.pop("history_df", hist),
+            oof_df=eff_oof,
+            model_type=model_type,
+            ts_id_col=self._config.data.ts_id_col,
+            **kwargs,
+        )
+
+    def optimize_prepacks_df(
+        self,
+        *,
+        summary: bool = False,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Solve the Simplex Size-Curve & Integer Pre-Pack Allocation MILP and return a tidy
+        allocation or pack-order DataFrame (`inventory_optimizer.optimize_prepacks_df`).
+        """
+        res = self.optimize_prepacks(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            **kwargs,
+        )
+        out = res.pack_orders_df.copy() if summary else res.allocation_df.copy()
+        out.attrs["prepack_result"] = res
+        out.attrs["status"] = res.status
+        out.attrs["is_feasible"] = res.is_feasible
+        out.attrs["relaxation_hint"] = res.relaxation_hint
+        out.attrs["size_curves_df"] = res.size_curves_df
+        return out
+
+    def optimize_rebalancing(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Solve the Hitchcock–Koopmans Lateral Store-to-Store / Depot Inventory Rebalancing LP
+        (`inventory_optimizer.optimize_rebalancing`).
+        """
+        from .inventory_optimizer import optimize_rebalancing as _optimize_rebalancing
+
+        preds, eff_oof, _hist = self._resolve_clearance_inputs(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        return _optimize_rebalancing(
+            preds,
+            oof_df=eff_oof,
+            model_type=model_type,
+            ts_id_col=self._config.data.ts_id_col,
+            **kwargs,
+        )
+
+    def optimize_rebalancing_df(
+        self,
+        *,
+        summary: bool = False,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Solve the Hitchcock–Koopmans Lateral Store-to-Store / Depot Inventory Rebalancing LP and
+        return a tidy lane transfer or node summary DataFrame
+        (`inventory_optimizer.optimize_rebalancing_df`).
+        """
+        res = self.optimize_rebalancing(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            **kwargs,
+        )
+        out = res.node_summary_df.copy() if summary else res.transfers_df.copy()
+        out.attrs["rebalancing_result"] = res
+        out.attrs["status"] = res.status
+        out.attrs["is_feasible"] = res.is_feasible
+        out.attrs["relaxation_hint"] = res.relaxation_hint
+        return out
+
 
 class WorkbenchMixin(PlaygroundWorkbenchMixin):
     """Post-run diagnostic, causal, hierarchical, and prescriptive optimization workbench methods

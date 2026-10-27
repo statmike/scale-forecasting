@@ -22,16 +22,32 @@ import pytest
 matplotlib.use("Agg")
 
 from scale_forecasting import (
+    ASSORTMENT_OPTIMIZER_COLUMNS,
+    ASSORTMENT_TRANSFERENCE_COLUMNS,
     CLEARANCE_SCHEDULE_COLUMNS,
     CLEARANCE_SUMMARY_COLUMNS,
     CONTRACT_VOLUME_COLUMNS,
     CONTRACT_VOLUME_SUMMARY_COLUMNS,
+    PREPACK_ALLOCATION_COLUMNS,
+    PREPACK_ORDER_COLUMNS,
+    REBALANCING_NODE_COLUMNS,
+    REBALANCING_TRANSFER_COLUMNS,
+    AssortmentOptimizationResult,
     ClearanceOptimizationResult,
     ContractVolumeOptimizationResult,
     Forecaster,
+    PrepackOptimizationResult,
+    RebalancingOptimizationResult,
+    estimate_simplex_size_curves,
+    optimize_assortment,
+    optimize_assortment_df,
     optimize_clearance,
     optimize_clearance_df,
     optimize_contract_volume,
+    optimize_prepacks,
+    optimize_prepacks_df,
+    optimize_rebalancing,
+    optimize_rebalancing_df,
     playground,
     plot_clearance_schedule,
 )
@@ -782,7 +798,498 @@ def test_tier_e_calibrated_intervals_aci_oof_cvar_and_all_7_runtimes(
         )
         cl_df = fc.optimize_clearance_df(summary=True, initial_inventory=120.0)
         cv_df = fc.optimize_contract_volume_df(summary=True, risk_aversion_lambda=0.5)
+        as_df = fc.optimize_assortment_df(max_skus=1)
+        pp_df = fc.optimize_prepacks_df(sizes=["S", "M", "L"], pack_size=6)
+        rb_df = fc.optimize_rebalancing_df(
+            summary=True,
+            current_inventory={ts_list[0]: 240.0, ts_list[1]: 20.0},
+            safety_stock="auto",
+        )
         assert len(cl_df) == 2
         assert len(cv_df) == 2
+        assert len(as_df) == 2
+        assert len(pp_df) == 6
+        assert len(rb_df) == 2
         assert cl_df.attrs["hierarchy_rollup_df"] is not None
         assert cv_df.attrs["hierarchy_rollup_df"] is not None
+        assert as_df.attrs["hierarchy_rollup_df"] is not None
+
+
+def test_track_q2_assortment_delisting_transference_and_walk_rate_milp() -> None:
+    """Tier A/B/C for `optimize_assortment` and `optimize_assortment_df` (`Track Q.2`):
+    - Delisting a low-margin or redundant clone SKU transfers demand to high-similarity retained
+      substitutes ($t_{ij} \\ge 0$, $\\sum_{j \\ne i} t_{ij} \\le 1 - w_i^{\\text{walk}}$).
+    - Exact demand conservation (`transferred_out_units + lost_walk_units == baseline_units`) for
+      every delisted SKU.
+    - Mandatory `must_keep_skus` and shelf space / SKU count constraints (`max_skus`,
+      `max_shelf_space`).
+    - Infeasible constraints return `is_feasible=False` with an actionable `relaxation_hint`.
+    """
+    dates = pd.date_range("2025-11-01", periods=5, freq="D")
+    preds = pd.DataFrame(
+        {
+            "ts_id": ["sku_hero"] * 5 + ["sku_clone"] * 5 + ["sku_niche"] * 5,
+            "ds": list(dates) * 3,
+            "yhat": [40.0] * 5 + [16.0] * 5 + [24.0] * 5,
+        }
+    )
+    sim_df = pd.DataFrame(
+        {
+            "query_id": ["sku_clone", "sku_hero", "sku_clone", "sku_niche"],
+            "candidate_id": ["sku_hero", "sku_clone", "sku_niche", "sku_clone"],
+            "similarity_score": [0.92, 0.92, 0.15, 0.15],
+        }
+    )
+
+    res = optimize_assortment(
+        preds,
+        similarity_df=sim_df,
+        base_price={"sku_hero": 25.0, "sku_clone": 14.0, "sku_niche": 22.0},
+        unit_cost={"sku_hero": 9.0, "sku_clone": 11.0, "sku_niche": 9.0},
+        shelf_space={"sku_hero": 1.0, "sku_clone": 1.5, "sku_niche": 1.0},
+        fixed_slot_cost={"sku_hero": 10.0, "sku_clone": 250.0, "sku_niche": 10.0},
+        walk_rate={"sku_hero": 0.25, "sku_clone": 0.15, "sku_niche": 0.40},
+        max_skus=2,
+        must_keep_skus=["sku_hero"],
+    )
+    assert isinstance(res, AssortmentOptimizationResult)
+    assert res.is_feasible
+    assert res.status == "optimal"
+    assert tuple(res.assortment_df.columns) == tuple(ASSORTMENT_OPTIMIZER_COLUMNS)
+    assert tuple(res.transference_df.columns) == tuple(ASSORTMENT_TRANSFERENCE_COLUMNS)
+    assert res.retained_skus == 2
+    assert res.delisted_skus == 1
+
+    # sku_clone has low margin + high fixed cost + high similarity to sku_hero -> delisted:
+    row_clone = res.assortment_df[res.assortment_df["ts_id"] == "sku_clone"].iloc[0]
+    row_hero = res.assortment_df[res.assortment_df["ts_id"] == "sku_hero"].iloc[0]
+    assert not bool(row_clone["is_retained"])
+    assert row_clone["action"] == "DELIST"
+    assert bool(row_hero["is_retained"])
+    assert row_hero["action"] == "KEEP"
+
+    # Conservation law on delisted sku_clone: transferred_out + lost_walk == baseline_units (80.0):
+    base_clone = float(row_clone["baseline_units"])
+    trans_out = float(row_clone["transferred_out_units"])
+    walk_loss = float(row_clone["lost_walk_units"])
+    assert base_clone == pytest.approx(80.0, abs=1e-6)
+    assert trans_out + walk_loss == pytest.approx(base_clone, abs=1e-5)
+    assert trans_out > 0.0
+    assert float(row_hero["transferred_in_units"]) > 0.0
+    assert float(row_hero["post_assortment_units"]) > float(row_hero["baseline_units"])
+
+    # Convenience DataFrame wrapper:
+    df_assort = optimize_assortment_df(preds, similarity_df=sim_df, max_skus=2)
+    df_trans = optimize_assortment_df(preds, similarity_df=sim_df, max_skus=2, transference=True)
+    assert tuple(df_assort.columns) == tuple(ASSORTMENT_OPTIMIZER_COLUMNS)
+    assert tuple(df_trans.columns) == tuple(ASSORTMENT_TRANSFERENCE_COLUMNS)
+    assert df_assort.attrs["is_feasible"] is True
+
+    # Tier C: Infeasible min_skus > max_skus and must_keep_skus exceeding max_shelf_space:
+    res_infeas = optimize_assortment(
+        preds,
+        similarity_df=sim_df,
+        min_skus=3,
+        max_skus=1,
+        max_shelf_space=0.5,
+        must_keep_skus=["sku_hero", "sku_niche"],
+    )
+    assert not res_infeas.is_feasible
+    assert res_infeas.status == "infeasible"
+    assert res_infeas.relaxation_hint is not None
+
+
+def test_track_q2_r2_simplex_size_curves_and_integer_prepack_milp() -> None:
+    """Tier A/B/C for `estimate_simplex_size_curves`, `optimize_prepacks`, and
+    `optimize_prepacks_df` (`Track Q.2 / R.2`):
+    - Compositional simplex size shares are strictly positive ($p_{s,k} > 0$) and sum to 1.0 per
+      store ($\\sum_k p_{s,k} = 1.0$) even when raw cells contain zeros.
+    - Integer pre-pack MILP returns exact integer bundle counts $n_{s,b} \\in \\mathbb{Z}_{\\ge 0}$
+      and satisfies store x size inventory mass balance.
+    - Supports both `(store_id, size_id)` panels and store-level panels decomposed via size curves.
+    """
+    # 1. Compositional simplex size curves with boundary zero in raw sales:
+    raw_df = pd.DataFrame(
+        {
+            "ts_id": [
+                "Store_A_S",
+                "Store_A_M",
+                "Store_A_L",
+                "Store_A_XL",
+                "Store_B_S",
+                "Store_B_M",
+                "Store_B_L",
+                "Store_B_XL",
+            ],
+            "yhat": [10.0, 20.0, 20.0, 10.0, 0.0, 15.0, 15.0, 5.0],
+        }
+    )
+    curves_df = estimate_simplex_size_curves(raw_df, sizes=["S", "M", "L", "XL"])
+    assert set(curves_df["store_id"]) == {"Store_A", "Store_B"}
+    assert (curves_df["simplex_size_share"] > 0.0).all()
+    for _, grp in curves_df.groupby("store_id"):
+        assert float(grp["simplex_size_share"].sum()) == pytest.approx(1.0, abs=1e-6)
+
+    # 2. Exact integer pre-pack recovery when Store_A demand is 2x pack_core ({S:1,M:2,L:2,XL:1}):
+    exact_df = pd.DataFrame(
+        {
+            "store_id": ["Store_A"] * 4 + ["Store_B"] * 4,
+            "size_id": ["S", "M", "L", "XL"] * 2,
+            "yhat": [20.0, 40.0, 40.0, 20.0, 10.0, 20.0, 20.0, 10.0],
+        }
+    )
+    res_pp = optimize_prepacks(
+        exact_df,
+        prepacks={"pack_core": {"S": 1, "M": 2, "L": 2, "XL": 1}},
+        shrinkage_strength=0.0,
+    )
+    assert isinstance(res_pp, PrepackOptimizationResult)
+    assert res_pp.is_feasible
+    assert res_pp.status == "optimal"
+    assert tuple(res_pp.allocation_df.columns) == tuple(PREPACK_ALLOCATION_COLUMNS)
+    assert tuple(res_pp.pack_orders_df.columns) == tuple(PREPACK_ORDER_COLUMNS)
+
+    # Store_A orders 20 packs of pack_core (120 units), Store_B orders 10 packs (60 units):
+    orders_a = res_pp.pack_orders_df[res_pp.pack_orders_df["store_id"] == "Store_A"].iloc[0]
+    orders_b = res_pp.pack_orders_df[res_pp.pack_orders_df["store_id"] == "Store_B"].iloc[0]
+    assert int(orders_a["packs_ordered"]) == 20
+    assert int(orders_b["packs_ordered"]) == 10
+    assert res_pp.total_under_units == pytest.approx(0.0, abs=1e-5)
+    assert res_pp.total_over_units == pytest.approx(0.0, abs=1e-5)
+    assert res_pp.fill_rate == pytest.approx(1.0, abs=1e-6)
+
+    # 3. Store-level forecasts decomposed automatically via size_curves + allow_eaches=True:
+    store_fc = pd.DataFrame(
+        {
+            "ts_id": ["Store_1", "Store_2"],
+            "ds": [pd.Timestamp("2025-12-01"), pd.Timestamp("2025-12-01")],
+            "yhat": [65.0, 43.0],
+        }
+    )
+    df_alloc = optimize_prepacks_df(
+        store_fc,
+        size_curves={"__default__": {"S": 0.15, "M": 0.35, "L": 0.35, "XL": 0.15}},
+        allow_eaches=True,
+    )
+    df_orders = optimize_prepacks_df(
+        store_fc,
+        size_curves={"__default__": {"S": 0.15, "M": 0.35, "L": 0.35, "XL": 0.15}},
+        allow_eaches=True,
+        summary=True,
+    )
+    assert tuple(df_alloc.columns) == tuple(PREPACK_ALLOCATION_COLUMNS)
+    assert tuple(df_orders.columns) == tuple(PREPACK_ORDER_COLUMNS)
+    assert df_alloc.attrs["is_feasible"] is True
+    for _, row in df_alloc.iterrows():
+        fin = float(row["initial_inventory"]) + float(row["allocated_pack_units"])
+        assert float(row["final_inventory_units"]) == pytest.approx(fin, abs=1e-6)
+
+    # 4. Tier C: Infeasible min_fill_rate under tight max_budget:
+    res_pp_infeas = optimize_prepacks(
+        exact_df,
+        max_budget=5.0,
+        unit_cost=10.0,
+        min_fill_rate=0.95,
+    )
+    assert not res_pp_infeas.is_feasible
+    assert res_pp_infeas.status == "infeasible"
+    assert res_pp_infeas.relaxation_hint is not None
+
+
+def test_track_r2_lateral_store_to_store_rebalancing_lp_and_milp() -> None:
+    """Tier A/B/C for `optimize_rebalancing` and `optimize_rebalancing_df` (`Track R.2`):
+    - Hitchcock-Koopmans lateral transshipment ships excess inventory from overstocked stores/depots
+      to stockout-prone stores when `transfer_cost < underage_cost + overage_cost`.
+    - Exact network flow conservation (`sum(outbound_transfer_units) == sum(inbound)`)
+      and node mass balance (`final_inventory == initial_inventory - outbound + inbound`).
+    - Supports `min_transfer_qty`, `integer_transfers=True`, and infeasibility diagnostics.
+    """
+    dates = pd.date_range("2025-12-01", periods=5, freq="D")
+    # 3 stores for SKU_Jacket:
+    # - Store_Over has 120 initial inventory, 5*6 = 30 demand (90 excess units)
+    # - Store_ShortA has 10 initial inventory, 5*12 = 60 demand (50 deficit units)
+    # - Store_ShortB has 15 initial inventory, 5*10 = 50 demand (35 deficit units)
+    rebal_fc = pd.DataFrame(
+        {
+            "ts_id": ["Store_Over"] * 5 + ["Store_ShortA"] * 5 + ["Store_ShortB"] * 5,
+            "store_id": ["Store_Over"] * 5 + ["Store_ShortA"] * 5 + ["Store_ShortB"] * 5,
+            "sku_id": ["SKU_Jacket"] * 15,
+            "ds": list(dates) * 3,
+            "yhat": [6.0] * 5 + [12.0] * 5 + [10.0] * 5,
+        }
+    )
+    init_inv = {
+        "Store_Over": 120.0,
+        "Store_ShortA": 10.0,
+        "Store_ShortB": 15.0,
+    }
+    res_reb = optimize_rebalancing(
+        rebal_fc,
+        initial_inventory=init_inv,
+        underage_cost=25.0,
+        overage_cost=2.0,
+        transfer_cost=1.5,
+        safety_stock=5.0,
+        min_transfer_qty=5.0,
+        integer_transfers=True,
+    )
+    assert isinstance(res_reb, RebalancingOptimizationResult)
+    assert res_reb.is_feasible
+    assert res_reb.status == "optimal"
+    assert tuple(res_reb.transfers_df.columns) == tuple(REBALANCING_TRANSFER_COLUMNS)
+    assert tuple(res_reb.node_summary_df.columns) == tuple(REBALANCING_NODE_COLUMNS)
+
+    # Store_Over has 120 - (30 + 5 safety) = 85 sendable excess units, shipped laterally to
+    # ShortA and ShortB!
+    assert res_reb.total_transferred_units == pytest.approx(85.0, abs=1e-5)
+    assert res_reb.stockout_units_avoided == pytest.approx(85.0, abs=1e-5)
+    assert res_reb.net_cost_savings > 1500.0
+
+    # Flow conservation across nodes:
+    nodes_df = res_reb.node_summary_df
+    assert float(nodes_df["outbound_transfer_units"].sum()) == pytest.approx(
+        float(nodes_df["inbound_transfer_units"].sum()), abs=1e-6
+    )
+    for _, nrow in nodes_df.iterrows():
+        expected_final = (
+            float(nrow["initial_inventory"])
+            - float(nrow["outbound_transfer_units"])
+            + float(nrow["inbound_transfer_units"])
+        )
+        assert float(nrow["final_inventory"]) == pytest.approx(expected_final, abs=1e-6)
+
+    # Convenience DataFrame wrapper:
+    df_lanes = optimize_rebalancing_df(rebal_fc, initial_inventory=init_inv)
+    df_nodes = optimize_rebalancing_df(rebal_fc, initial_inventory=init_inv, summary=True)
+    assert tuple(df_lanes.columns) == tuple(REBALANCING_TRANSFER_COLUMNS)
+    assert tuple(df_nodes.columns) == tuple(REBALANCING_NODE_COLUMNS)
+
+    # Tier C: Infeasible min_network_fill_rate when network-wide inventory is insufficient:
+    res_reb_infeas = optimize_rebalancing(
+        rebal_fc,
+        initial_inventory={"Store_Over": 5.0, "Store_ShortA": 5.0, "Store_ShortB": 5.0},
+        min_network_fill_rate=0.95,
+    )
+    assert not res_reb_infeas.is_feasible
+    assert res_reb_infeas.status == "infeasible"
+    assert res_reb_infeas.relaxation_hint is not None
+
+
+def test_track_q2_r2_workbench_and_mcp_e2e_integration() -> None:
+    """Verify `PlaygroundRun`, `Forecaster`, and MCP `optimize_inventory_clearance` modes
+    (`"assortment"`, `"prepacks"`, `"rebalancing"`) work end-to-end.
+    """
+    import json
+
+    from scale_forecasting.mcp import McpServer
+
+    panel = playground.sample_data(n_series=3, with_exog=True)
+    run = playground.run_model("theta", data=panel, horizon=6)
+
+    # 1. PlaygroundRun workbench methods:
+    assort_df = run.optimize_assortment_df(max_skus=2)
+    prepack_df = run.optimize_prepacks_df(allow_eaches=True)
+    rebal_df = run.optimize_rebalancing_df(
+        initial_inventory={
+            str(ts): (150.0 if idx == 0 else 5.0) for idx, ts in enumerate(panel["ts_id"].unique())
+        },
+        summary=True,
+    )
+    assert tuple(assort_df.columns) == tuple(ASSORTMENT_OPTIMIZER_COLUMNS)
+    assert tuple(prepack_df.columns) == tuple(PREPACK_ALLOCATION_COLUMNS)
+    assert tuple(rebal_df.columns) == tuple(REBALANCING_NODE_COLUMNS)
+
+    # 2. MCP server tool dispatch across all 5 Track Q/R modes:
+    server = McpServer()
+    tools_resp = server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert len(tools_resp["result"]["tools"]) == 13
+    fc_records = [
+        {"ts_id": f"sku_{i}", "ds": f"2025-12-0{d}", "yhat": float(20 + 5 * i)}
+        for i in range(3)
+        for d in range(1, 5)
+    ]
+
+    def _call(args: dict[str, object]) -> dict[str, object]:
+        resp = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "optimize_inventory_clearance", "arguments": args},
+            }
+        )
+        assert not resp["result"].get("isError", False), resp
+        return json.loads(resp["result"]["content"][0]["text"])
+
+    mcp_assort = _call({"predictions": fc_records, "mode": "assortment", "max_skus": 2})
+    assert mcp_assort["mode"] == "assortment"
+    assert mcp_assort["retained_skus"] == 2
+
+    mcp_prepacks = _call({"predictions": fc_records, "mode": "prepacks", "allow_eaches": True})
+    assert mcp_prepacks["mode"] == "prepacks"
+    assert float(mcp_prepacks["total_allocated_units"]) > 0.0
+
+    mcp_rebal = _call(
+        {
+            "predictions": fc_records,
+            "mode": "rebalancing",
+            "initial_inventory": {str(fc_records[0]["ts_id"]): 250.0},
+        }
+    )
+    assert mcp_rebal["mode"] == "rebalancing"
+    assert mcp_rebal["is_feasible"] is True
+
+
+def test_track_q2_r2_cross_feature_intersections() -> None:
+    """Verify Track Q.2 / R.2 intersections with hierarchy reconciliation (`__total__`,
+    `region=...`, `__sim_cluster_0__`, `cross_temporal_mint`), backtest `oof_df` WAPE model
+    selection across all 5 model families & variants (`theta@transform_ilr`,
+    `lightgbm@monotone`, `tide@similarity_global`, `vertex_tide`, `arima_plus`), cold-start
+    store donor size-curve inheritance, conformal/OOF `safety_stock="auto"`, and Double-ML
+    Positive Halo (`elasticity_df`) protection in `optimize_assortment`.
+    """
+    dates = pd.date_range("2025-11-01", periods=6, freq="D")
+
+    # 1. Multi-family + reconciled + aggregate hierarchy nodes panel:
+    #    Leaf stores: store_A_S, store_A_M, store_A_L, store_A_XL, store_B_S..XL, and cold-start
+    #    store_cold_S..XL, plus aggregate nodes `__total__`, `region=North`, `__sim_cluster_0__`.
+    sizes = ("S", "M", "L", "XL")
+    true_shares = {"S": 0.10, "M": 0.40, "L": 0.35, "XL": 0.15}
+    hist_rows: list[dict[str, object]] = []
+    pred_rows: list[dict[str, object]] = []
+    oof_rows: list[dict[str, object]] = []
+
+    # Mature history for store_A and store_B only (store_cold has 0 history rows).
+    for st in ("store_A", "store_B"):
+        for d in pd.date_range("2025-09-01", periods=20, freq="D"):
+            for sz in sizes:
+                hist_rows.append(
+                    {
+                        "ts_id": f"{st}_{sz}",
+                        "store_id": st,
+                        "size_id": sz,
+                        "ds": d,
+                        "y": 100.0 * true_shares[sz],
+                    }
+                )
+
+    models_all_families = (
+        "theta@transform_ilr",
+        "lightgbm@monotone",
+        "tide@similarity_global",
+        "vertex_tide",
+        "arima_plus",
+        "lightgbm@monotone_cross_temporal_mint",
+    )
+    for m_name in models_all_families:
+        # Reconciled model has accurate demand (120 units/store); unreconciled has inflated 999.
+        is_target_rec = m_name == "lightgbm@monotone_cross_temporal_mint"
+        mult = 1.0 if is_target_rec else 5.0
+        for st in ("store_A", "store_B", "store_cold"):
+            for d in dates:
+                for sz in sizes:
+                    yh = 20.0 * true_shares[sz] * mult
+                    pred_rows.append(
+                        {
+                            "ts_id": f"{st}_{sz}",
+                            "ds": d,
+                            "model_type": m_name,
+                            "yhat": yh,
+                            "yhat_lo": yh * 0.8,
+                            "yhat_hi": yh * 1.25,
+                        }
+                    )
+        # Add aggregate hierarchy nodes that MUST be stripped automatically:
+        for agg_id in ("__total__", "region=North", "__sim_cluster_0__"):
+            for d in dates:
+                pred_rows.append(
+                    {
+                        "ts_id": agg_id,
+                        "ds": d,
+                        "model_type": m_name,
+                        "yhat": 50000.0,
+                        "yhat_lo": 40000.0,
+                        "yhat_hi": 60000.0,
+                    }
+                )
+        # OOF rows: `lightgbm@monotone` has lowest WAPE.
+        err = 1.0 if "lightgbm@monotone" in m_name else 25.0
+        for st in ("store_A", "store_B"):
+            oof_rows.append(
+                {
+                    "ts_id": f"{st}_M",
+                    "ds": dates[0],
+                    "model_type": m_name,
+                    "y": 50.0,
+                    "yhat": 50.0 + err,
+                }
+            )
+
+    hist_df = pd.DataFrame(hist_rows)
+    preds_df = pd.DataFrame(pred_rows)
+    oof_df = pd.DataFrame(oof_rows)
+
+    # A. Pre-Packs with hierarchy stripping, `reconciliation_method="cross_temporal_mint"`,
+    #    and cold-start store donor size-curve inheritance:
+    prepack_res = optimize_prepacks(
+        preds_df,
+        history_df=hist_df,
+        oof_df=oof_df,
+        reconciliation_method="cross_temporal_mint",
+    )
+    assert prepack_res.is_feasible is True
+    alloc_stores = set(prepack_res.allocation_df["store_id"].unique())
+    assert alloc_stores == {"store_A", "store_B", "store_cold"}
+    # Aggregate nodes (`__total__`, `region=North`, `__sim_cluster_0__`) were stripped:
+    assert abs(prepack_res.total_demand_units - 360.0) < 1e-4
+    # Cold-start `store_cold` inherited the mature donor simplex size curve (`M` > `S`):
+    cold_curves = prepack_res.size_curves_df[
+        prepack_res.size_curves_df["store_id"] == "store_cold"
+    ].set_index("size_id")["simplex_size_share"]
+    assert float(cold_curves["M"]) > float(cold_curves["S"]) + 0.15
+
+    # B. Rebalancing with hierarchy stripping, `safety_stock="auto"`, and `protection_steps=3`:
+    rebal_res = optimize_rebalancing(
+        preds_df,
+        oof_df=oof_df,
+        reconciliation_method="cross_temporal_mint",
+        safety_stock="auto",
+        protection_steps=3,
+    )
+    assert rebal_res.is_feasible is True
+    assert "__total__" not in set(rebal_res.node_summary_df["ts_id"])
+    assert "region=North" not in set(rebal_res.node_summary_df["ts_id"])
+    assert (rebal_res.node_summary_df["safety_stock"] > 0.0).all()
+    # Protection demand over 3 steps (half of 6-step horizon) is 180.0 total across 12 store-sizes:
+    assert abs(float(rebal_res.node_summary_df["protection_demand"].sum()) - 180.0) < 1e-4
+
+    # C. Assortment Rationalization with Double-ML Positive Halo (`elasticity_df`):
+    #    Suppose SKU_halo and SKU_plain both have standalone demand = 50 units, margin = $10,
+    #    and low similarity to SKU_anchor (100 units), and we must keep max_skus=2.
+    #    Without Halo, SKU_halo and SKU_plain are tied; with `total_halo_units=45.0` on SKU_halo,
+    #    SKU_halo is strictly retained over SKU_plain.
+    assort_preds = pd.DataFrame(
+        [
+            {"ts_id": "SKU_anchor", "ds": dates[0], "yhat": 100.0},
+            {"ts_id": "SKU_plain", "ds": dates[0], "yhat": 55.0},
+            {"ts_id": "SKU_halo", "ds": dates[0], "yhat": 50.0},
+        ]
+    )
+    elast_df = pd.DataFrame(
+        [
+            {"ts_id": "SKU_halo", "total_halo_units": 45.0, "top_halo_ts_id": "SKU_anchor"},
+            {"ts_id": "SKU_plain", "total_halo_units": 0.0, "top_cannibalized_ts_id": "SKU_anchor"},
+        ]
+    )
+    assort_res = optimize_assortment(
+        assort_preds,
+        elasticity_df=elast_df,
+        max_skus=2,
+        base_price=20.0,
+        unit_cost=10.0,
+        walk_rate=0.50,
+    )
+    kept_map = assort_res.assortment_df.set_index("ts_id")["is_retained"].to_dict()
+    assert kept_map["SKU_anchor"] is True
+    assert kept_map["SKU_halo"] is True
+    assert kept_map["SKU_plain"] is False

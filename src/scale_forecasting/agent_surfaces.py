@@ -564,7 +564,11 @@ _NORMALIZATION_RULES: tuple[str, ...] = (
         "temporal (`THieF`), and cross-temporal aggregate nodes (`__agg__`) to prevent "
         "double-counting, partial out exogenous `covariate_cols` via Frisch–Waugh–Lovell (FWL) "
         "with Double-ML `promo_elasticity_df` priority, select per-SKU OOF champion models, "
-        "and return bottom-up `hierarchy_rollup_df`."
+        "and return bottom-up `hierarchy_rollup_df`. `optimize_assortment_df` solves SKU "
+        "retention vs. delisting with similarity-driven demand transference and `walk_rate`; "
+        "`optimize_prepacks_df` (`estimate_simplex_size_curves`) solves Aitchison CLR simplex "
+        "size-curve and integer pre-pack bundle allocation; and `optimize_rebalancing_df` solves "
+        "Hitchcock–Koopmans lateral store-to-store/depot inventory rebalancing."
     ),
 )
 
@@ -1520,7 +1524,9 @@ def render_skill_execution_paths_reference() -> str:
                 "`Forecaster(cfg).cold_start_transfer_df()` / `.aci_df()` / "
                 "`.sample_trajectories()` / `.tail_risk_df()` / "
                 "`.optimize_inventory_df()` / `.optimize_scenario()` / "
-                "`.optimize_clearance_df()` / `.optimize_contract_volume_df()` |"
+                "`.optimize_clearance_df()` / `.optimize_contract_volume_df()` / "
+                "`.optimize_assortment_df()` / `.optimize_prepacks_df()` / "
+                "`.optimize_rebalancing_df()` |"
             ),
             (
                 "| **Time-Series Similarity, Donor Matching, Substitutes & Emerging Trends** | — | "
@@ -1714,6 +1720,9 @@ def render_llms_txt() -> str:
                 "`compute_time_series_similarity`), portfolio inventory optimization "
                 "(`optimize_inventory_df`), lifecycle markdown, space reclamation & vendor "
                 "contract volume MILP (`optimize_clearance_df`, `optimize_contract_volume_df`), "
+                "assortment delisting transference (`optimize_assortment_df`), simplex size-curve "
+                "& integer pre-pack allocation (`optimize_prepacks_df`), lateral store-to-store "
+                "rebalancing (`optimize_rebalancing_df`), "
                 "prescriptive price & promo optimization (`optimize_scenario`), scenarios, and "
                 "executive HTML/JSON reports."
             ),
