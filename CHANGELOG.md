@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.0] - 2026-10-26
+
+### Added
+
+- **Lifecycle Markdown, Perishable Expiry & Warehouse/Shelf Space Reclamation MILP (`Track Q.1` — [`clearance_optimizer.py`](./src/scale_forecasting/clearance_optimizer.py), [`workbench.py`](./src/scale_forecasting/workbench.py)):**
+  - Added [`src/scale_forecasting/clearance_optimizer.py`](./src/scale_forecasting/clearance_optimizer.py) (`optimize_clearance`, `optimize_clearance_df`, `ClearanceOptimizationResult`, `plot_clearance_schedule`, `CLEARANCE_SCHEDULE_COLUMNS`, `CLEARANCE_SUMMARY_COLUMNS`, `DEFAULT_DISCOUNT_LADDER`) solving a monotone markdown discount ladder ($d_{i,t} \le d_{i,t+1}$) via `scipy.optimize.milp` (`HiGHS`) subject to finite starting inventory $I_{i,0}$, per-SKU shelf-life / end-of-season expiry deadlines $T_{\text{expiry},i}$, terminal salvage value minus spoilage/disposal cost, and cross-SKU cannibalization penalty.
+  - Added **`Track P` Digital-Twin Deep-Discount Elasticity Borrowing:** When an end-of-season or perishable SKU has never been marked down deeply (`price` range $< 5\%$ or insufficient observations), `optimize_clearance` automatically borrows deep-discount price elasticity from its top-$k$ historical clearance digital twins via `similarity.py` (`elasticity_source` in `{"own_history", "digital_twin_borrowed", "prior_default"}`, `donor_ts_id`, `donor_similarity_score`).
+  - Added **Warehouse & Shelf Space Reclamation Constraint:** Enforces $\sum_i v_i \sum_{t=1}^{T_{\text{reclaim}}} q_{i,t}(d_{i,t}) \ge V_{\text{target}}$ (`unit_volume`, `target_space_freed`, `reclaim_by_step`) to guarantee a minimum physical volume (cubic feet / pallet positions / shelf linear feet) is cleared by the target deadline for incoming seasonal assortments, returning `status="infeasible"`, `is_feasible=False`, and an actionable `relaxation_hint` when `target_space_freed` or `target_sell_through_pct` exceeds physical inventory or maximum discount lift.
+- **Vendor Contract Volume, Tiered Rebate & Take-or-Pay Solver (`Track R.1` — [`clearance_optimizer.py`](./src/scale_forecasting/clearance_optimizer.py)):**
+  - Added `optimize_contract_volume`, `optimize_contract_volume_df`, `ContractVolumeOptimizationResult`, `CONTRACT_VOLUME_COLUMNS`, and `CONTRACT_VOLUME_SUMMARY_COLUMNS` to allocate promotional discounts across a multi-SKU vendor portfolio to cross cumulative all-units retroactive rebate tiers $(\tau_m, R_m)$ (`rebate_tiers`) or satisfy Take-or-Pay minimum volume commitments $Q_{\min}$ (`take_or_pay_volume`, `shortfall_penalty_per_unit`), with Copula $\text{CVaR}_{\alpha}$ tail shortfall risk buffering (`cvar_shortfall_buffer=True`).
+- **Workbench, SDK, Playground & 13th MCP Tool Integration ([`workbench.py`](./src/scale_forecasting/workbench.py), [`mcp.py`](./src/scale_forecasting/mcp.py), [`__init__.py`](./src/scale_forecasting/__init__.py)):**
+  - Wired `optimize_clearance`, `optimize_clearance_df`, `plot_clearance_schedule`, `optimize_contract_volume`, and `optimize_contract_volume_df` onto `PlaygroundWorkbenchMixin` (`Forecaster`, `BakeOff`, and `PlaygroundRun`) and top-level `scale_forecasting` lazy exports.
+  - Added the 13th MCP tool `optimize_inventory_clearance` (`mode="clearance" | "contract_volume"`) and optional `include_clearance` / `optimize_clearance_params` flags on `run_playground` and `review_run`.
+
+---
+
 ## [1.8.2] - 2026-10-25
 
 ### Changed

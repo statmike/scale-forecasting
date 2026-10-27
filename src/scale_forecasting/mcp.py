@@ -313,7 +313,7 @@ class McpServer:
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
-        """Return the 12 MCP tools exposed by this server."""
+        """Return the 13 MCP tools exposed by this server."""
         from .benchmarks import list_benchmarks
 
         return [
@@ -713,6 +713,39 @@ class McpServer:
                                 "Optional inventory records for recommend_substitutes_df."
                             ),
                         },
+                        "include_clearance": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve lifecycle markdown & perishable clearance MILP "
+                                "(optimize_clearance_df)."
+                            ),
+                        },
+                        "optimize_clearance_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for optimize_clearance "
+                                "(initial_inventory, expiry_step, target_space_freed, "
+                                "reclaim_by_step, salvage_value, target_sell_through_pct, "
+                                "covariate_cols, hierarchy_cols)."
+                            ),
+                        },
+                        "include_contract_volume": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve vendor contract volume & tiered rebate / "
+                                "Take-or-Pay MILP (optimize_contract_volume_df)."
+                            ),
+                        },
+                        "optimize_contract_volume_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for optimize_contract_volume "
+                                "(contract_tiers, min_contract_volume, shortfall_penalty_per_unit, "
+                                "risk_aversion_lambda, cvar_alpha, covariate_cols, hierarchy_cols)."
+                            ),
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -1037,6 +1070,39 @@ class McpServer:
                             "items": {"type": "object"},
                             "description": (
                                 "Optional inventory records for recommend_substitutes_df."
+                            ),
+                        },
+                        "include_clearance": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve lifecycle markdown & perishable clearance MILP "
+                                "(optimize_clearance_df)."
+                            ),
+                        },
+                        "optimize_clearance_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for optimize_clearance "
+                                "(initial_inventory, expiry_step, target_space_freed, "
+                                "reclaim_by_step, salvage_value, target_sell_through_pct, "
+                                "covariate_cols, hierarchy_cols)."
+                            ),
+                        },
+                        "include_contract_volume": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "When true, solve vendor contract volume & tiered rebate / "
+                                "Take-or-Pay MILP (optimize_contract_volume_df)."
+                            ),
+                        },
+                        "optimize_contract_volume_params": {
+                            "type": "object",
+                            "description": (
+                                "Optional keyword arguments for optimize_contract_volume "
+                                "(contract_tiers, min_contract_volume, shortfall_penalty_per_unit, "
+                                "risk_aversion_lambda, cvar_alpha, covariate_cols, hierarchy_cols)."
                             ),
                         },
                     },
@@ -1627,6 +1693,230 @@ class McpServer:
                     "additionalProperties": False,
                 },
             },
+            {
+                "name": "optimize_inventory_clearance",
+                "description": (
+                    "Solve lifecycle markdown & perishable expiry clearance MILP "
+                    "(`mode='clearance'`, `clearance_optimizer.optimize_clearance`), warehouse & "
+                    "shelf space reclamation (`target_space_freed`, `unit_volume`, "
+                    "`reclaim_by_step`), or multi-SKU vendor contract volume & tiered rebate / "
+                    "Take-or-Pay commitment optimization (`mode='contract_volume'`, "
+                    "`clearance_optimizer.optimize_contract_volume`). Automatically borrows deep-"
+                    "discount price elasticity from Track P digital-twin neighbors when a SKU "
+                    "lacks markdown history."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["clearance", "contract_volume"],
+                            "default": "clearance",
+                            "description": (
+                                "'clearance' for lifecycle markdown & space reclamation MILP; "
+                                "'contract_volume' for vendor tiered rebate / Take-or-Pay MILP."
+                            ),
+                        },
+                        "records": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional forecast or historical panel rows "
+                                "(ts_id, ds, yhat or y). "
+                                "When omitted, runs offline on sample playground data."
+                            ),
+                        },
+                        "history": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional historical panel rows for own-price elasticity and "
+                                "digital-twin similarity estimation."
+                            ),
+                        },
+                        "initial_inventory": {
+                            "description": (
+                                "Starting on-hand inventory (scalar float or {ts_id: units} map)."
+                            ),
+                        },
+                        "expiry_step": {
+                            "description": (
+                                "Perishable shelf-life or end-of-season deadline step (int or "
+                                "{ts_id: step} map)."
+                            ),
+                        },
+                        "discount_ladder": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "description": (
+                                "Allowed markdown discount rungs in [0, 0.95], e.g. "
+                                "[0.0, 0.10, 0.20, 0.30, 0.50]."
+                            ),
+                        },
+                        "monotone_markdown": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Enforce non-decreasing markdowns over time (d_{i,t} <= d_{i,t+1})."
+                            ),
+                        },
+                        "base_price": {
+                            "description": "Baseline unit selling price (float or {ts_id: price}).",
+                        },
+                        "unit_cost": {
+                            "description": "Unit cost of goods sold (float or {ts_id: cost}).",
+                        },
+                        "salvage_value": {
+                            "description": "Terminal salvage value per unsold unit at expiry.",
+                        },
+                        "spoilage_cost": {
+                            "description": "Terminal disposal/spoilage cost per unsold unit.",
+                        },
+                        "target_sell_through_pct": {
+                            "description": (
+                                "Optional minimum sell-through fraction in [0, 1] by expiry_step."
+                            ),
+                        },
+                        "unit_volume": {
+                            "description": (
+                                "Cubic volume / pallet / shelf-facing footprint per unit."
+                            ),
+                        },
+                        "target_space_freed": {
+                            "type": "number",
+                            "description": (
+                                "Minimum total warehouse/shelf space to free by reclaim_by_step."
+                            ),
+                        },
+                        "reclaim_by_step": {
+                            "type": "integer",
+                            "description": (
+                                "Horizon step by which target_space_freed must be reclaimed."
+                            ),
+                        },
+                        "contract_tiers": {
+                            "description": (
+                                "For mode='contract_volume': array of [target_units, rebate_usd] "
+                                "pairs or {target_units: rebate_usd} map."
+                            ),
+                        },
+                        "min_contract_volume": {
+                            "type": "number",
+                            "description": (
+                                "For mode='contract_volume': minimum Take-or-Pay portfolio volume."
+                            ),
+                        },
+                        "shortfall_penalty_per_unit": {
+                            "type": "number",
+                            "default": 5.0,
+                            "description": (
+                                "Per-unit penalty for shortfall below min_contract_volume."
+                            ),
+                        },
+                        "price_elasticity": {
+                            "description": (
+                                "Optional explicit own-price elasticity (float or {ts_id: float})."
+                            ),
+                        },
+                        "use_digital_twin_elasticity": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Borrow deep-discount price elasticity from Track P digital-twin "
+                                "neighbors when a SKU lacks markdown history."
+                            ),
+                        },
+                        "cannibalization_penalty": {
+                            "type": "number",
+                            "default": 0.15,
+                            "description": "Cross-SKU substitute cannibalization penalty weight.",
+                        },
+                        "oof": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional out-of-fold backtest rows (ts_id, y_true, yhat, "
+                                "model_type) for per-SKU OOF champion selection and empirical "
+                                "CVaR shortfall."
+                            ),
+                        },
+                        "trajectories": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional joint copula trajectory rows (ts_id, trajectory_id, "
+                                "yhat_traj) for mode='contract_volume' CVaR shortfall."
+                            ),
+                        },
+                        "covariate_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional exogenous covariate columns (e.g. promo_flag, holiday, "
+                                "temperature) to partial out via Frisch-Waugh-Lovell (FWL) when "
+                                "estimating own-price elasticity."
+                            ),
+                        },
+                        "elasticity_records": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Optional precomputed Double-ML promo_elasticity_df rows."
+                            ),
+                        },
+                        "model_type": {
+                            "type": "string",
+                            "description": "Optional model_type filter when records spans models.",
+                        },
+                        "reconciliation_method": {
+                            "type": "string",
+                            "description": (
+                                "Optional spatial/temporal reconciliation_method filter."
+                            ),
+                        },
+                        "prefer_reconciled": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "When true, prefer reconciled leaf forecasts over base forecasts."
+                            ),
+                        },
+                        "hierarchy_cols": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional hierarchy columns (e.g. ['category', 'store']) for "
+                                "bottom-up hierarchy_rollup aggregation."
+                            ),
+                        },
+                        "risk_aversion_lambda": {
+                            "type": "number",
+                            "default": 0.25,
+                            "description": (
+                                "For mode='contract_volume': weight in [0, 1] blending expected "
+                                "shortfall and CVaR tail shortfall."
+                            ),
+                        },
+                        "cvar_alpha": {
+                            "type": "number",
+                            "default": 0.90,
+                            "description": (
+                                "For mode='contract_volume': tail confidence level in (0.5, 0.999) "
+                                "for CVaR volume shortfall."
+                            ),
+                        },
+                        "horizon": {
+                            "type": "integer",
+                            "default": 14,
+                        },
+                        "n_series": {
+                            "type": "integer",
+                            "default": 3,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1813,8 +2103,17 @@ class McpServer:
             inc_inv_impact = bool(args.get("include_inventory_impact", False))
             inc_promo_elast = bool(args.get("include_promo_elasticity", False))
             opt_scen_params = args.get("optimize_scenario_params")
+            opt_clear_pg = args.get("optimize_clearance_params")
+            opt_cv_pg = args.get("optimize_contract_volume_params")
             with_exog = bool(
-                scenarios_arg or price_col or inc_promo_elast or isinstance(opt_scen_params, dict)
+                scenarios_arg
+                or price_col
+                or inc_promo_elast
+                or isinstance(opt_scen_params, dict)
+                or bool(args.get("include_clearance", False))
+                or isinstance(opt_clear_pg, dict)
+                or bool(args.get("include_contract_volume", False))
+                or isinstance(opt_cv_pg, dict)
             )
             panel = playground.sample_data(n_series=n_series, with_exog=with_exog)
             run = playground.run_model(
@@ -1996,6 +2295,47 @@ class McpServer:
                     hierarchy_cols=args.get("hierarchy_cols"),
                 )
                 out_pg["emerging_trends"] = trends_df_pg.to_dict(orient="records")
+            if bool(args.get("include_clearance", False)) or isinstance(opt_clear_pg, dict):
+                clear_kw_pg = dict(opt_clear_pg) if isinstance(opt_clear_pg, dict) else {}
+                clear_res_pg = run.optimize_clearance(**clear_kw_pg)
+                out_pg["clearance_optimization"] = {
+                    "status": clear_res_pg.status,
+                    "is_feasible": clear_res_pg.is_feasible,
+                    "total_profit_lift": clear_res_pg.total_profit_lift,
+                    "total_space_freed": clear_res_pg.total_space_freed,
+                    "overall_sell_through_pct": clear_res_pg.overall_sell_through_pct,
+                    "relaxation_hint": clear_res_pg.relaxation_hint,
+                    "summary": clear_res_pg.summary_df.to_dict(orient="records"),
+                    "schedule": clear_res_pg.schedule_df.head(15).to_dict(orient="records"),
+                    "hierarchy_rollup": (
+                        clear_res_pg.hierarchy_rollup_df.to_dict(orient="records")
+                        if clear_res_pg.hierarchy_rollup_df is not None
+                        else None
+                    ),
+                }
+            if bool(args.get("include_contract_volume", False)) or isinstance(opt_cv_pg, dict):
+                cv_kw_pg = dict(opt_cv_pg) if isinstance(opt_cv_pg, dict) else {}
+                cv_res_pg = run.optimize_contract_volume(**cv_kw_pg)
+                out_pg["contract_volume_optimization"] = {
+                    "status": cv_res_pg.status,
+                    "is_feasible": cv_res_pg.is_feasible,
+                    "baseline_portfolio_units": cv_res_pg.baseline_portfolio_units,
+                    "optimal_portfolio_units": cv_res_pg.optimal_portfolio_units,
+                    "target_contract_units": cv_res_pg.target_contract_units,
+                    "achieved_tier_units": cv_res_pg.achieved_tier_units,
+                    "rebate_earned": cv_res_pg.rebate_earned,
+                    "shortfall_units": cv_res_pg.shortfall_units,
+                    "cvar_shortfall_units": cv_res_pg.cvar_shortfall_units,
+                    "net_value_lift": cv_res_pg.net_value_lift,
+                    "relaxation_hint": cv_res_pg.relaxation_hint,
+                    "summary": cv_res_pg.summary_df.to_dict(orient="records"),
+                    "schedule": cv_res_pg.schedule_df.head(15).to_dict(orient="records"),
+                    "hierarchy_rollup": (
+                        cv_res_pg.hierarchy_rollup_df.to_dict(orient="records")
+                        if cv_res_pg.hierarchy_rollup_df is not None
+                        else None
+                    ),
+                }
             rep_path = args.get("export_report_path")
             if rep_path:
                 written = run.export_report(
@@ -2217,6 +2557,14 @@ class McpServer:
             want_trends = bool(args.get("include_emerging_trends", False))
             opt_inv_rev = args.get("optimize_inventory_params")
             opt_scen_rev = args.get("optimize_scenario_params")
+            opt_clear_rev = args.get("optimize_clearance_params")
+            want_clear = bool(args.get("include_clearance", False)) or isinstance(
+                opt_clear_rev, dict
+            )
+            opt_cv_rev = args.get("optimize_contract_volume_params")
+            want_cv = bool(args.get("include_contract_volume", False)) or isinstance(
+                opt_cv_rev, dict
+            )
             rep_path_rev = args.get("export_report_path")
             if (
                 want_fva
@@ -2234,6 +2582,8 @@ class McpServer:
                 or want_sim
                 or want_subs
                 or want_trends
+                or want_clear
+                or want_cv
                 or isinstance(opt_inv_rev, dict)
                 or isinstance(opt_scen_rev, dict)
                 or rep_path_rev
@@ -2241,6 +2591,7 @@ class McpServer:
                 import pandas as pd
 
                 from .aci import compute_aci_df
+                from .clearance_optimizer import optimize_clearance, optimize_contract_volume
                 from .cold_start import cold_start_transfer_df
                 from .copula import compute_tail_risk, sample_trajectories
                 from .diagnostics import (
@@ -2304,12 +2655,63 @@ class McpServer:
                     or want_sim
                     or want_subs
                     or want_trends
+                    or want_clear
+                    or want_cv
                     or isinstance(opt_inv_rev, dict)
                     or isinstance(opt_scen_rev, dict)
                     or rep_path_rev
                 ):
                     pred_rows = read_predictions(run_id, limit=20000, settings=settings)
                     pred_df = pd.DataFrame.from_records(pred_rows) if pred_rows else pd.DataFrame()
+                if want_clear and pred_df is not None and not pred_df.empty:
+                    clear_kw_rev = dict(opt_clear_rev) if isinstance(opt_clear_rev, dict) else {}
+                    clear_res_rev = optimize_clearance(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        **clear_kw_rev,
+                    )
+                    out["clearance_optimization"] = {
+                        "status": clear_res_rev.status,
+                        "is_feasible": clear_res_rev.is_feasible,
+                        "total_profit_lift": clear_res_rev.total_profit_lift,
+                        "total_space_freed": clear_res_rev.total_space_freed,
+                        "overall_sell_through_pct": clear_res_rev.overall_sell_through_pct,
+                        "relaxation_hint": clear_res_rev.relaxation_hint,
+                        "summary": clear_res_rev.summary_df.to_dict(orient="records"),
+                        "schedule": clear_res_rev.schedule_df.head(20).to_dict(orient="records"),
+                        "hierarchy_rollup": (
+                            clear_res_rev.hierarchy_rollup_df.to_dict(orient="records")
+                            if clear_res_rev.hierarchy_rollup_df is not None
+                            else None
+                        ),
+                    }
+                if want_cv and pred_df is not None and not pred_df.empty:
+                    cv_kw_rev = dict(opt_cv_rev) if isinstance(opt_cv_rev, dict) else {}
+                    cv_res_rev = optimize_contract_volume(
+                        pred_df,
+                        oof_df=oof_df if not oof_df.empty else None,
+                        **cv_kw_rev,
+                    )
+                    out["contract_volume_optimization"] = {
+                        "status": cv_res_rev.status,
+                        "is_feasible": cv_res_rev.is_feasible,
+                        "baseline_portfolio_units": cv_res_rev.baseline_portfolio_units,
+                        "optimal_portfolio_units": cv_res_rev.optimal_portfolio_units,
+                        "target_contract_units": cv_res_rev.target_contract_units,
+                        "achieved_tier_units": cv_res_rev.achieved_tier_units,
+                        "rebate_earned": cv_res_rev.rebate_earned,
+                        "shortfall_units": cv_res_rev.shortfall_units,
+                        "cvar_shortfall_units": cv_res_rev.cvar_shortfall_units,
+                        "net_value_lift": cv_res_rev.net_value_lift,
+                        "relaxation_hint": cv_res_rev.relaxation_hint,
+                        "summary": cv_res_rev.summary_df.to_dict(orient="records"),
+                        "schedule": cv_res_rev.schedule_df.head(20).to_dict(orient="records"),
+                        "hierarchy_rollup": (
+                            cv_res_rev.hierarchy_rollup_df.to_dict(orient="records")
+                            if cv_res_rev.hierarchy_rollup_df is not None
+                            else None
+                        ),
+                    }
                 if want_sim or want_subs or want_trends:
                     sim_m_rev = str(args.get("similarity_method", "hybrid"))
                     sim_src = (
@@ -3138,6 +3540,166 @@ class McpServer:
                 n_series=int(args.get("n_series", 4)),
                 repo_root=self.repo_root,
             )
+
+        if name in (
+            "optimize_inventory_clearance",
+            "sf_optimize_inventory_clearance",
+            "optimize_clearance_and_contracts",
+            "optimize_clearance",
+            "optimize_contract_volume",
+        ):
+            import pandas as pd
+
+            from . import playground
+            from .clearance_optimizer import optimize_clearance, optimize_contract_volume
+
+            eff_mode = (
+                "contract_volume"
+                if name == "optimize_contract_volume"
+                else str(args.get("mode", "clearance"))
+            )
+            records_cl = args.get("records") or args.get("predictions")
+            hist_cl_raw = args.get("history")
+            hist_cl = (
+                pd.DataFrame.from_records(hist_cl_raw)
+                if isinstance(hist_cl_raw, list) and hist_cl_raw
+                else None
+            )
+            oof_cl_raw = args.get("oof")
+            oof_cl = (
+                pd.DataFrame.from_records(oof_cl_raw)
+                if isinstance(oof_cl_raw, list) and oof_cl_raw
+                else None
+            )
+            traj_cl_raw = args.get("trajectories")
+            traj_cl = (
+                pd.DataFrame.from_records(traj_cl_raw)
+                if isinstance(traj_cl_raw, list) and traj_cl_raw
+                else None
+            )
+            elast_cl_raw = args.get("elasticity_records")
+            elast_cl = (
+                pd.DataFrame.from_records(elast_cl_raw)
+                if isinstance(elast_cl_raw, list) and elast_cl_raw
+                else None
+            )
+            if isinstance(records_cl, list) and records_cl:
+                input_df = pd.DataFrame.from_records(records_cl)
+            else:
+                input_df = playground.sample_data(
+                    n_series=int(args.get("n_series", 3)),
+                    with_exog=True,
+                )
+                if hist_cl is None:
+                    hist_cl = input_df
+
+            common_kw: dict[str, Any] = {
+                "history_df": hist_cl,
+                "oof_df": oof_cl,
+                "elasticity_df": elast_cl,
+                "covariate_cols": args.get("covariate_cols"),
+                "model_type": args.get("model_type"),
+                "reconciliation_method": args.get("reconciliation_method"),
+                "prefer_reconciled": bool(args.get("prefer_reconciled", True)),
+                "hierarchy_cols": args.get("hierarchy_cols"),
+                "base_price": args.get("base_price", 20.0),
+                "unit_cost": args.get("unit_cost", 8.0),
+                "initial_inventory": args.get("initial_inventory"),
+                "price_elasticity": args.get("price_elasticity"),
+                "use_digital_twin_elasticity": bool(args.get("use_digital_twin_elasticity", True)),
+                "horizon": int(args.get("horizon", 14)),
+            }
+            if args.get("discount_ladder") is not None:
+                common_kw["discount_ladder"] = list(args["discount_ladder"])
+
+            if eff_mode == "contract_volume":
+                raw_tiers = args.get("contract_tiers")
+                tiers_arg: Any = None
+                if isinstance(raw_tiers, list):
+                    tiers_arg = [
+                        (float(pair[0]), float(pair[1])) for pair in raw_tiers if len(pair) >= 2
+                    ]
+                elif isinstance(raw_tiers, dict):
+                    tiers_arg = {float(k): float(v) for k, v in raw_tiers.items()}
+                cv_res = optimize_contract_volume(
+                    input_df,
+                    trajectories_df=traj_cl,
+                    contract_tiers=tiers_arg,
+                    min_contract_volume=(
+                        float(args["min_contract_volume"])
+                        if args.get("min_contract_volume") is not None
+                        else None
+                    ),
+                    shortfall_penalty_per_unit=float(args.get("shortfall_penalty_per_unit", 5.0)),
+                    risk_aversion_lambda=float(args.get("risk_aversion_lambda", 0.25)),
+                    cvar_alpha=float(args.get("cvar_alpha", 0.90)),
+                    **common_kw,
+                )
+                return {
+                    "mode": "contract_volume",
+                    "status": cv_res.status,
+                    "is_feasible": cv_res.is_feasible,
+                    "baseline_portfolio_units": cv_res.baseline_portfolio_units,
+                    "optimal_portfolio_units": cv_res.optimal_portfolio_units,
+                    "target_contract_units": cv_res.target_contract_units,
+                    "achieved_tier_units": cv_res.achieved_tier_units,
+                    "rebate_earned": cv_res.rebate_earned,
+                    "shortfall_units": cv_res.shortfall_units,
+                    "shortfall_penalty": cv_res.shortfall_penalty,
+                    "cvar_shortfall_units": cv_res.cvar_shortfall_units,
+                    "baseline_net_value": cv_res.baseline_net_value,
+                    "optimal_net_value": cv_res.optimal_net_value,
+                    "net_value_lift": cv_res.net_value_lift,
+                    "relaxation_hint": cv_res.relaxation_hint,
+                    "summary": cv_res.summary_df.to_dict(orient="records"),
+                    "schedule": cv_res.schedule_df.head(30).to_dict(orient="records"),
+                    "hierarchy_rollup": (
+                        cv_res.hierarchy_rollup_df.to_dict(orient="records")
+                        if cv_res.hierarchy_rollup_df is not None
+                        else None
+                    ),
+                }
+
+            cl_res = optimize_clearance(
+                input_df,
+                expiry_step=args.get("expiry_step"),
+                monotone_markdown=bool(args.get("monotone_markdown", True)),
+                salvage_value=args.get("salvage_value", 2.0),
+                spoilage_cost=args.get("spoilage_cost", 0.0),
+                target_sell_through_pct=args.get("target_sell_through_pct"),
+                unit_volume=args.get("unit_volume", 1.0),
+                target_space_freed=(
+                    float(args["target_space_freed"])
+                    if args.get("target_space_freed") is not None
+                    else None
+                ),
+                reclaim_by_step=(
+                    int(args["reclaim_by_step"])
+                    if args.get("reclaim_by_step") is not None
+                    else None
+                ),
+                cannibalization_penalty=float(args.get("cannibalization_penalty", 0.15)),
+                **common_kw,
+            )
+            return {
+                "mode": "clearance",
+                "status": cl_res.status,
+                "is_feasible": cl_res.is_feasible,
+                "total_baseline_profit": cl_res.total_baseline_profit,
+                "total_optimal_profit": cl_res.total_optimal_profit,
+                "total_profit_lift": cl_res.total_profit_lift,
+                "total_space_freed": cl_res.total_space_freed,
+                "target_space_freed": cl_res.target_space_freed,
+                "overall_sell_through_pct": cl_res.overall_sell_through_pct,
+                "relaxation_hint": cl_res.relaxation_hint,
+                "summary": cl_res.summary_df.to_dict(orient="records"),
+                "schedule": cl_res.schedule_df.head(30).to_dict(orient="records"),
+                "hierarchy_rollup": (
+                    cl_res.hierarchy_rollup_df.to_dict(orient="records")
+                    if cl_res.hierarchy_rollup_df is not None
+                    else None
+                ),
+            }
 
         raise ValueError(f"Unknown tool: {name!r}")
 

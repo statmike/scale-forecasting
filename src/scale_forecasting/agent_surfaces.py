@@ -553,6 +553,19 @@ _NORMALIZATION_RULES: tuple[str, ...] = (
         "per-series stacker weights, and `recommend_substitutes_df` / `detect_emerging_trends_df` "
         "provide inventory-aware SKU substitution and emerging trend breakout intelligence."
     ),
+    (
+        "10. **Cross-Industry Physics/Econometrics & Prescriptive Clearance/Contract MILP "
+        "(`features`, `clearance_optimizer`):** "
+        "`features.degree_day_cols` synthesizes Heating/Cooling Degree Days (`HDD`/`CDD`), "
+        "`features.adstock_rate` applies geometric marketing adstock decay, "
+        "`features.supersession_map` chains successor/predecessor SKU histories, and "
+        "`<model>@arps_decline` fits hyperbolic/harmonic/exponential production decline curves. "
+        "`optimize_clearance_df` and `optimize_contract_volume_df` automatically filter spatial, "
+        "temporal (`THieF`), and cross-temporal aggregate nodes (`__agg__`) to prevent "
+        "double-counting, partial out exogenous `covariate_cols` via Frisch–Waugh–Lovell (FWL) "
+        "with Double-ML `promo_elasticity_df` priority, select per-SKU OOF champion models, "
+        "and return bottom-up `hierarchy_rollup_df`."
+    ),
 )
 
 
@@ -691,6 +704,22 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
                 "weibull_lifecycle",
                 "arps_decline",
             ],
+            "similarity_methods": [
+                "hybrid",
+                "physics_attractor",
+                "spectral_phase",
+                "elastic_dtw",
+                "minirocket",
+                "structural_signature",
+                "foundation_latent",
+            ],
+            "evolve_targets": [
+                "features",
+                "ensemble",
+                "model",
+                "policy",
+                "similarity_kernel",
+            ],
             "workbench_capabilities": [
                 "promo_elasticity",
                 "scenarios",
@@ -702,6 +731,11 @@ def probe_environment(repo_root: Path | None = None) -> dict[str, Any]:
                 "trajectory_copula",
                 "inventory_optimizer",
                 "scenario_optimizer",
+                "time_series_similarity",
+                "sku_substitutes",
+                "emerging_trends",
+                "clearance_optimizer",
+                "contract_volume_optimizer",
             ],
         },
         "recommended_actions": recommendations,
@@ -1485,7 +1519,8 @@ def render_skill_execution_paths_reference() -> str:
                 "— | "
                 "`Forecaster(cfg).cold_start_transfer_df()` / `.aci_df()` / "
                 "`.sample_trajectories()` / `.tail_risk_df()` / "
-                "`.optimize_inventory_df()` / `.optimize_scenario()` |"
+                "`.optimize_inventory_df()` / `.optimize_scenario()` / "
+                "`.optimize_clearance_df()` / `.optimize_contract_volume_df()` |"
             ),
             (
                 "| **Time-Series Similarity, Donor Matching, Substitutes & Emerging Trends** | — | "
@@ -1677,8 +1712,26 @@ def render_llms_txt() -> str:
                 "trends (`similarity_df`, `find_similar_series_df`, `cluster_by_similarity_df`, "
                 "`recommend_substitutes_df`, `detect_emerging_trends_df`, "
                 "`compute_time_series_similarity`), portfolio inventory optimization "
-                "(`optimize_inventory_df`), prescriptive price & promo optimization "
-                "(`optimize_scenario`), scenarios, and executive HTML/JSON reports."
+                "(`optimize_inventory_df`), lifecycle markdown, space reclamation & vendor "
+                "contract volume MILP (`optimize_clearance_df`, `optimize_contract_volume_df`), "
+                "prescriptive price & promo optimization (`optimize_scenario`), scenarios, and "
+                "executive HTML/JSON reports."
+            ),
+            (
+                f"- [Time-Series Similarity & Merchandising]"
+                f"({_SITE_BASE}/time_series_similarity/): "
+                "7-lens mathematical similarity (`hybrid`, `physics_attractor`, `spectral_phase`, "
+                "`elastic_dtw`, `minirocket`, `structural_signature`, `foundation_latent`), "
+                "multi-modal text/attribute/hierarchy fusion, Day-0 to Day-14 cold-start donor "
+                "transfer, inventory-aware SKU substitutes (`recommend_substitutes_df`), and "
+                "emerging trend breakouts (`detect_emerging_trends_df`)."
+            ),
+            (
+                f"- [Temporal & Cross-Temporal Reconciliation]"
+                f"({_SITE_BASE}/temporal_reconciliation_reference/): Mode 1 spatial (`BottomUp`, "
+                "`WLS-Struct`, `MinT-Shrink`, `MinT-NonNeg`), Mode 2 temporal (`THieF`), and Mode "
+                "3 cross-temporal (`cross_temporal_mint`) coherence plus compositional simplex "
+                "(`@transform_clr`, `@transform_ilr`)."
             ),
             (
                 f"- [Auto-Forecaster & Bounded `autofocus`]({_SITE_BASE}/auto_forecaster/): "

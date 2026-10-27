@@ -595,6 +595,248 @@ class PlaygroundWorkbenchMixin:
             title=title,
         )
 
+    def _resolve_clearance_inputs(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
+        """Resolve `(predictions_df, oof_df, history_df)` across `Forecaster`, `BakeOff`, and
+        `PlaygroundRun`.
+        """
+        if hasattr(self, "_resolve_track_k_frames"):
+            preds, eff_oof, hist = self._resolve_track_k_frames(
+                forecasts_df=forecasts_df,
+                data=data,
+                oof_df=oof_df,
+                run_id=run_id,
+                model_type=model_type,
+            )
+            panel = (
+                hist
+                if hist is not None
+                else self._resolve_similarity_panel(data=data, run_id=run_id)
+            )
+            return (preds if not preds.empty else panel), eff_oof, panel
+
+        panel = data
+        if panel is None:
+            panel = getattr(self, "panel_df", None)
+        if panel is None:
+            panel = getattr(self, "series", None)
+
+        preds = forecasts_df
+        eff_oof = oof_df
+        if preds is None and hasattr(self, "predictions"):
+            raw_preds = getattr(self, "predictions", None)
+            if raw_preds is not None and not raw_preds.empty:
+                preds = raw_preds.copy()
+                champ_fn = getattr(self, "_champion_model", None)
+                eff_m = champ_fn(model_type) if callable(champ_fn) else model_type
+                if eff_m is not None and "model_type" in preds.columns:
+                    sub = preds[preds["model_type"].astype(str) == str(eff_m)]
+                    if not sub.empty:
+                        preds = sub.copy()
+            if eff_oof is None:
+                eff_oof = getattr(self, "oof", None)
+        elif preds is None and hasattr(self, "result"):
+            res_cell = getattr(self, "result", None)
+            if res_cell is not None and not res_cell.predictions.empty:
+                preds = res_cell.predictions.assign(
+                    ts_id=res_cell.ts_id, model_type=res_cell.model_type
+                )
+                if eff_oof is None and res_cell.oof is not None and not res_cell.oof.empty:
+                    eff_oof = res_cell.oof.assign(
+                        ts_id=res_cell.ts_id, model_type=res_cell.model_type
+                    )
+
+        if panel is None:
+            panel = self._resolve_similarity_panel(data=data, run_id=run_id)
+        return (preds if preds is not None and not preds.empty else panel), eff_oof, panel
+
+    def _default_clearance_covariate_and_hierarchy_cols(
+        self,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Populate default `covariate_cols` and `hierarchy_cols` from `self._config` when unset."""
+        if "covariate_cols" not in kwargs:
+            covs = list(
+                dict.fromkeys(
+                    [
+                        *getattr(self._config.features, "future_covariates", ()),
+                        *getattr(self._config.features, "past_covariates", ()),
+                    ]
+                )
+            )
+            if covs:
+                kwargs["covariate_cols"] = covs
+        if (
+            "hierarchy_cols" not in kwargs
+            and getattr(self._config, "hierarchy", None) is not None
+            and getattr(self._config.hierarchy, "enabled", False)
+            and getattr(self._config.hierarchy, "levels", None)
+        ):
+            kwargs["hierarchy_cols"] = list(self._config.hierarchy.levels)
+
+    def optimize_clearance(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Solve the lifecycle markdown, perishable expiry, and shelf-space reclamation MILP
+        (`clearance_optimizer.optimize_clearance`).
+        """
+        from .clearance_optimizer import optimize_clearance as _optimize_clearance
+
+        preds, eff_oof, hist = self._resolve_clearance_inputs(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        self._default_clearance_covariate_and_hierarchy_cols(kwargs)
+        return _optimize_clearance(
+            preds,
+            history_df=kwargs.pop("history_df", hist),
+            oof_df=eff_oof,
+            model_type=model_type,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            horizon=self._config.data.horizon,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def optimize_clearance_df(
+        self,
+        *,
+        summary: bool = False,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Solve the lifecycle markdown, perishable expiry, and shelf-space reclamation MILP and
+        return a tidy schedule or per-SKU summary DataFrame
+        (`clearance_optimizer.optimize_clearance_df`).
+        """
+        res = self.optimize_clearance(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            **kwargs,
+        )
+        out = res.summary_df.copy() if summary else res.schedule_df.copy()
+        out.attrs["clearance_result"] = res
+        out.attrs["status"] = res.status
+        out.attrs["is_feasible"] = res.is_feasible
+        out.attrs["relaxation_hint"] = res.relaxation_hint
+        out.attrs["hierarchy_rollup_df"] = res.hierarchy_rollup_df
+        return out
+
+    def plot_clearance_schedule(
+        self,
+        result_or_df: Any = None,
+        *,
+        ts_id: str | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot the optimal markdown discount ladder, inventory depletion trajectory, and SKU
+        profit summary (`clearance_optimizer.plot_clearance_schedule`).
+        """
+        from .clearance_optimizer import plot_clearance_schedule as _plot_clearance_schedule
+
+        target = result_or_df if result_or_df is not None else self.optimize_clearance(**kwargs)
+        return _plot_clearance_schedule(
+            target,
+            ts_id=ts_id or self._wb_default_ts_id(),
+            ax=ax,
+            title=title,
+        )
+
+    def optimize_contract_volume(
+        self,
+        *,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Solve multi-SKU vendor contract volume, tiered rebate, and Take-or-Pay optimization
+        (`clearance_optimizer.optimize_contract_volume`).
+        """
+        from .clearance_optimizer import optimize_contract_volume as _optimize_contract_volume
+
+        preds, eff_oof, hist = self._resolve_clearance_inputs(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+        )
+        self._default_clearance_covariate_and_hierarchy_cols(kwargs)
+        return _optimize_contract_volume(
+            preds,
+            history_df=kwargs.pop("history_df", hist),
+            oof_df=eff_oof,
+            model_type=model_type,
+            ts_id_col=self._config.data.ts_id_col,
+            date_col=self._config.data.date_col,
+            target_col=self._config.data.target_col,
+            horizon=self._config.data.horizon,
+            freq=self._config.data.freq,
+            **kwargs,
+        )
+
+    def optimize_contract_volume_df(
+        self,
+        *,
+        summary: bool = False,
+        forecasts_df: pd.DataFrame | None = None,
+        data: pd.DataFrame | None = None,
+        oof_df: pd.DataFrame | None = None,
+        run_id: str | None = None,
+        model_type: str | None = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Solve multi-SKU vendor contract volume, tiered rebate, and Take-or-Pay optimization and
+        return a tidy schedule or per-SKU summary DataFrame
+        (`clearance_optimizer.optimize_contract_volume_df`).
+        """
+        res = self.optimize_contract_volume(
+            forecasts_df=forecasts_df,
+            data=data,
+            oof_df=oof_df,
+            run_id=run_id,
+            model_type=model_type,
+            **kwargs,
+        )
+        out = res.summary_df.copy() if summary else res.schedule_df.copy()
+        out.attrs["contract_result"] = res
+        out.attrs["status"] = res.status
+        out.attrs["is_feasible"] = res.is_feasible
+        out.attrs["relaxation_hint"] = res.relaxation_hint
+        out.attrs["hierarchy_rollup_df"] = res.hierarchy_rollup_df
+        return out
+
 
 class WorkbenchMixin(PlaygroundWorkbenchMixin):
     """Post-run diagnostic, causal, hierarchical, and prescriptive optimization workbench methods

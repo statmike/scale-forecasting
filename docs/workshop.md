@@ -205,7 +205,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 
 #### Key Highlights
 - Inspect `model_catalog()` (37 models) and `metric_catalog()` (21 metrics) across statistical, ML, deep learning, Vertex AI AutoML, and native SQL families.
-- Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky) and run single-series and panel bake-offs (`compare_models`, `compare_panel`).
+- Generate synthetic multi-archetype series (trending, seasonal, intermittent, promo-spiky) and run single-series and panel bake-offs (`compare_models`, `compare_panel`), plus lifecycle markdown clearance (`optimize_clearance_df`, `plot_clearance_schedule`) and vendor contract volume / Take-or-Pay MILP optimization (`optimize_contract_volume_df`) in Act 12.
 - Author custom `BaseModel` and `BaseMetric` plugins in [`notebooks/09_custom_models_and_metrics.ipynb`](notebooks/09_custom_models_and_metrics.ipynb) and verify them through the exact production worker contract (`run_cell`, `run_panel_model`).
 
 ---
@@ -253,7 +253,7 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 #### Key Highlights
 - Run Optuna hyperparameter search and inspect tuned parameters per series via `Forecaster.best_params_df()`.
 - Train meta-learners (`nnls`, `ridge`, `xgb`) over out-of-fold validation predictions and re-run ensemble strategies on completed runs via `Forecaster.reensemble()` without re-fitting base models.
-- Combine completed runs from different engines (including `vertex_automl` Tabular Workflows and AutoML Training Jobs) into a single unified ensemble run via `Registry.ensemble_runs()`.
+- Combine completed runs from different engines (including `vertex_automl` Tabular Workflows and AutoML Training Jobs) into a single unified ensemble run via `Registry.ensemble_runs()`, and run the post-run prescriptive optimization suite (`optimize_inventory_df`, `optimize_scenario`, `optimize_clearance_df`, `optimize_contract_volume_df`) in [`notebooks/08_multi_engine_master_workflow.ipynb`](notebooks/08_multi_engine_master_workflow.ipynb) Act 5 & Act 6.
 
 ---
 

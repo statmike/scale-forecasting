@@ -182,6 +182,7 @@ nav:
       - Joint trajectory copulas: api/copula.md
       - Portfolio inventory optimizer: api/inventory_optimizer.md
       - Prescriptive scenario optimizer: api/scenario_optimizer.md
+      - Clearance, space & contract optimizer: api/clearance_optimizer.md
       - Backtest: api/backtest.md
       - Metrics: api/metrics.md
       - BaseMetric: api/metrics_base_metric.md
