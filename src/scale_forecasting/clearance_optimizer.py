@@ -33,13 +33,18 @@ import pandas as pd
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 __all__ = [
+    "ASSORTMENT_OPTIMIZER_COLUMNS",
+    "ASSORTMENT_TRANSFERENCE_COLUMNS",
     "CLEARANCE_SCHEDULE_COLUMNS",
     "CLEARANCE_SUMMARY_COLUMNS",
     "CONTRACT_VOLUME_COLUMNS",
     "CONTRACT_VOLUME_SUMMARY_COLUMNS",
     "DEFAULT_DISCOUNT_LADDER",
+    "AssortmentOptimizationResult",
     "ClearanceOptimizationResult",
     "ContractVolumeOptimizationResult",
+    "optimize_assortment",
+    "optimize_assortment_df",
     "optimize_clearance",
     "optimize_clearance_df",
     "optimize_contract_volume",
@@ -213,6 +218,90 @@ class ContractVolumeOptimizationResult:
     baseline_net_value: float
     optimal_net_value: float
     net_value_lift: float
+    relaxation_hint: str | None = None
+    hierarchy_rollup_df: pd.DataFrame | None = None
+
+
+ASSORTMENT_OPTIMIZER_COLUMNS: tuple[str, ...] = (
+    "ts_id",
+    "action",
+    "is_retained",
+    "baseline_units",
+    "walk_rate",
+    "transferable_share",
+    "transferred_out_units",
+    "transferred_in_units",
+    "lost_walk_units",
+    "post_assortment_units",
+    "unit_price",
+    "unit_cost",
+    "unit_margin",
+    "fixed_slot_cost",
+    "shelf_space",
+    "baseline_profit",
+    "post_assortment_profit",
+    "net_profit_contribution",
+    "primary_substitute_ts_id",
+    "max_peer_similarity",
+    "status",
+)
+
+ASSORTMENT_TRANSFERENCE_COLUMNS: tuple[str, ...] = (
+    "delisted_ts_id",
+    "recipient_ts_id",
+    "similarity",
+    "transfer_share",
+    "transferred_units",
+    "transferred_margin",
+)
+
+
+@dataclass(frozen=True)
+class AssortmentOptimizationResult:
+    """Structured output of :func:`optimize_assortment`.
+
+    Attributes:
+        assortment_df: Per-SKU assortment decision (`"KEEP"` vs. `"DELIST"`), walk rate,
+            transferred demand, and profit contribution (`ASSORTMENT_OPTIMIZER_COLUMNS`).
+        transference_df: Pairwise demand transference flows from delisted SKUs to retained
+            substitute SKUs (`ASSORTMENT_TRANSFERENCE_COLUMNS`).
+        status: Solver status (`"optimal"`, `"feasible"`, or `"infeasible"`).
+        is_feasible: True when all SKU count, shelf space, and category retention constraints
+            are satisfied.
+        total_candidate_skus: Total candidate SKUs evaluated.
+        retained_skus: Count of SKUs kept (`action == "KEEP"`).
+        delisted_skus: Count of SKUs delisted (`action == "DELIST"`).
+        baseline_category_units: Total baseline demand across all candidate SKUs.
+        post_assortment_units: Total retained + transferred demand after assortment rationalization.
+        transferred_units: Total demand transferred from delisted SKUs to retained substitutes.
+        lost_walk_units: Total category demand lost to shopper walk-away (`walk_rate`).
+        category_retention_pct: Fraction of baseline category demand retained (`[0, 1]`).
+        mean_walk_rate: Mean intrinsic walk rate across candidate SKUs.
+        baseline_net_profit: Net profit of keeping all candidate SKUs (margin minus slot costs).
+        optimal_net_profit: Net profit of the optimized assortment including demand transference.
+        net_profit_lift: ``optimal_net_profit - baseline_net_profit``.
+        shelf_space_used: Total shelf space / facings consumed by retained SKUs.
+        relaxation_hint: Actionable diagnostic message when constraints are infeasible.
+        hierarchy_rollup_df: Optional bottom-up hierarchy rollup of assortment metrics.
+    """
+
+    assortment_df: pd.DataFrame
+    transference_df: pd.DataFrame
+    status: str
+    is_feasible: bool
+    total_candidate_skus: int
+    retained_skus: int
+    delisted_skus: int
+    baseline_category_units: float
+    post_assortment_units: float
+    transferred_units: float
+    lost_walk_units: float
+    category_retention_pct: float
+    mean_walk_rate: float
+    baseline_net_profit: float
+    optimal_net_profit: float
+    net_profit_lift: float
+    shelf_space_used: float
     relaxation_hint: str | None = None
     hierarchy_rollup_df: pd.DataFrame | None = None
 
@@ -828,6 +917,15 @@ _ADDITIVE_ROLLUP_CANDIDATES: tuple[str, ...] = (
     "rebate_allocated",
     "shortfall_penalty_allocated",
     "net_contract_value",
+    "transferred_out_units",
+    "transferred_in_units",
+    "lost_walk_units",
+    "post_assortment_units",
+    "fixed_slot_cost",
+    "shelf_space",
+    "baseline_profit",
+    "post_assortment_profit",
+    "net_profit_contribution",
 )
 
 
@@ -2114,3 +2212,617 @@ def plot_clearance_schedule(
         ax_right.grid(True, axis="y", linestyle="--", alpha=0.35)
 
     return ax_left
+
+
+def _build_pairwise_similarity_map(
+    ts_ids: Sequence[str],
+    *,
+    similarity_df: pd.DataFrame | None,
+    history_df: pd.DataFrame | None,
+    preds_df: pd.DataFrame,
+    similarity_method: str = "hybrid",
+    text_cols: Sequence[str] | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    covariate_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | str | None = "auto",
+) -> dict[tuple[str, str], float]:
+    """Return symmetric pairwise similarity ``{(sku_i, sku_j): sim}`` in ``[0, 1]``."""
+    pair_map: dict[tuple[str, str], float] = {}
+    ts_set = {str(t) for t in ts_ids}
+    if len(ts_set) < 2:
+        return pair_map
+
+    pairs_df = similarity_df
+    if pairs_df is None or pairs_df.empty:
+        ref = history_df if (history_df is not None and not history_df.empty) else preds_df
+        val_col = "y" if "y" in ref.columns else ("yhat" if "yhat" in ref.columns else None)
+        if val_col is not None and "ts_id" in ref.columns and ref["ts_id"].nunique() >= 2:
+            from .similarity import compute_similarity_matrix
+
+            eff_hcols: list[str] | None = None
+            if isinstance(hierarchy_cols, str):
+                if hierarchy_cols != "auto" and hierarchy_cols in ref.columns:
+                    eff_hcols = [hierarchy_cols]
+            elif isinstance(hierarchy_cols, Sequence):
+                eff_hcols = [str(c) for c in hierarchy_cols if str(c) in ref.columns]
+            eff_acols = (
+                list(attribute_cols)
+                if attribute_cols
+                else (
+                    [str(c) for c in covariate_cols if str(c) in ref.columns]
+                    if covariate_cols
+                    else None
+                )
+            )
+            sim_res = compute_similarity_matrix(
+                ref,
+                method=similarity_method,
+                ts_id_col="ts_id",
+                date_col="ds" if "ds" in ref.columns else "forecast_date",
+                target_col=val_col,
+                text_cols=list(text_cols) if text_cols else None,
+                attribute_cols=eff_acols,
+                hierarchy_cols=eff_hcols,
+            )
+            pairs_df = sim_res.pairs_df
+
+    if pairs_df is not None and not pairs_df.empty:
+        col_a = (
+            "ts_id"
+            if "ts_id" in pairs_df.columns
+            else ("query_ts_id" if "query_ts_id" in pairs_df.columns else str(pairs_df.columns[0]))
+        )
+        col_b = (
+            "neighbor_ts_id"
+            if "neighbor_ts_id" in pairs_df.columns
+            else (
+                "peer_ts_id"
+                if "peer_ts_id" in pairs_df.columns
+                else (
+                    "substitute_ts_id"
+                    if "substitute_ts_id" in pairs_df.columns
+                    else str(pairs_df.columns[1])
+                )
+            )
+        )
+        score_col = next(
+            (
+                c
+                for c in (
+                    "similarity",
+                    "similarity_score",
+                    "composite_similarity",
+                    "substitute_score",
+                    "trajectory_sim",
+                )
+                if c in pairs_df.columns
+            ),
+            None,
+        )
+        if score_col is not None:
+            for row in pairs_df.itertuples(index=False):
+                a = str(getattr(row, col_a))
+                b = str(getattr(row, col_b))
+                s = float(getattr(row, score_col))
+                if a != b and a in ts_set and b in ts_set and np.isfinite(s):
+                    val = float(np.clip(s, 0.0, 1.0))
+                    pair_map[(a, b)] = max(pair_map.get((a, b), 0.0), val)
+                    pair_map[(b, a)] = max(pair_map.get((b, a), 0.0), val)
+
+    # Fallback: if no similarity pairs were resolved, assign moderate 0.35 within-panel affinity.
+    if not pair_map and len(ts_ids) >= 2:
+        for i, a in enumerate(ts_ids):
+            for b in ts_ids[i + 1 :]:
+                pair_map[(a, b)] = 0.35
+                pair_map[(b, a)] = 0.35
+
+    return pair_map
+
+
+def optimize_assortment(
+    predictions_df: pd.DataFrame,
+    *,
+    history_df: pd.DataFrame | None = None,
+    oof_df: pd.DataFrame | None = None,
+    similarity_df: pd.DataFrame | None = None,
+    elasticity_df: pd.DataFrame | None = None,
+    similarity_method: str = "hybrid",
+    max_skus: int | None = None,
+    min_skus: int = 1,
+    max_shelf_space: float | None = None,
+    shelf_space: float | Mapping[str, float] | str = 1.0,
+    base_price: float | Mapping[str, float] | str = 20.0,
+    unit_cost: float | Mapping[str, float] | str = 10.0,
+    fixed_slot_cost: float | Mapping[str, float] | str = 0.0,
+    walk_rate: float | Mapping[str, float] | str | None = None,
+    retention_scale: float = 0.85,
+    min_walk_rate: float = 0.05,
+    max_walk_rate: float = 0.95,
+    min_similarity: float = 0.10,
+    top_k_substitutes: int = 5,
+    walk_penalty_weight: float = 0.0,
+    min_category_retention: float | None = None,
+    must_keep_skus: Sequence[str] | None = None,
+    must_delist_skus: Sequence[str] | None = None,
+    text_cols: Sequence[str] | None = None,
+    attribute_cols: Sequence[str] | None = None,
+    covariate_cols: Sequence[str] | None = None,
+    hierarchy_cols: Sequence[str] | str | None = "auto",
+    model_type: str | None = None,
+    reconciliation_method: str | None = None,
+    prefer_reconciled: bool = True,
+    ts_id_col: str = "ts_id",
+    date_col: str = "ds",
+    target_col: str = "y",
+    horizon: int = 14,
+    freq: str = "D",
+) -> AssortmentOptimizationResult:
+    """Solve the assortment rationalization & delisting demand-transference MILP (`HiGHS`).
+
+    Given $N$ candidate SKUs with horizon demand $D_i$, unit margin $m_i = p_i - c_i$, fixed slot
+    cost $F_i$, and shelf space $s_i$, selects which SKUs to retain ($z_i = 1$) vs. delist
+    ($z_i = 0$). When SKU $i$ is delisted, a fraction $t_{ij}$ of its demand transfers to retained
+    substitute SKUs $j$ based on the multi-modal similarity matrix $\\mathbf{S}_{ij}$, while the
+    remaining fraction $w_i^{\\text{walk}} = 1 - \\sum_{j \\text{ kept}} t_{ij}$ walks away from the
+    category (`lost_walk_units`).
+    """
+    preds, eff_hist = _prepare_forecast_frame(
+        predictions_df,
+        history_df=history_df,
+        oof_df=oof_df,
+        model_type=model_type,
+        reconciliation_method=reconciliation_method,
+        prefer_reconciled=prefer_reconciled,
+        ts_id_col=ts_id_col,
+        date_col=date_col,
+        target_col=target_col,
+        horizon=horizon,
+        freq=freq,
+    )
+    if preds.empty:
+        return AssortmentOptimizationResult(
+            assortment_df=pd.DataFrame(columns=ASSORTMENT_OPTIMIZER_COLUMNS),
+            transference_df=pd.DataFrame(columns=ASSORTMENT_TRANSFERENCE_COLUMNS),
+            status="optimal",
+            is_feasible=True,
+            total_candidate_skus=0,
+            retained_skus=0,
+            delisted_skus=0,
+            baseline_category_units=0.0,
+            post_assortment_units=0.0,
+            transferred_units=0.0,
+            lost_walk_units=0.0,
+            category_retention_pct=1.0,
+            mean_walk_rate=0.0,
+            baseline_net_profit=0.0,
+            optimal_net_profit=0.0,
+            net_profit_lift=0.0,
+            shelf_space_used=0.0,
+        )
+
+    ts_ids = sorted(preds["ts_id"].astype(str).unique().tolist())
+    n_skus = len(ts_ids)
+    sku_to_idx = {ts: idx for idx, ts in enumerate(ts_ids)}
+    ref_df = eff_hist if (eff_hist is not None and not eff_hist.empty) else preds
+
+    demand_series = preds.groupby("ts_id")["yhat"].sum()
+    base_demand = {ts: float(max(0.0, demand_series.get(ts, 0.0))) for ts in ts_ids}
+    price_map = _resolve_sku_param(base_price, ts_ids, 20.0, df=ref_df, ts_id_col="ts_id")
+    cost_map = _resolve_sku_param(unit_cost, ts_ids, 10.0, df=ref_df, ts_id_col="ts_id")
+    slot_map = _resolve_sku_param(fixed_slot_cost, ts_ids, 0.0, df=ref_df, ts_id_col="ts_id")
+    space_map = _resolve_sku_param(shelf_space, ts_ids, 1.0, df=ref_df, ts_id_col="ts_id")
+    for ts in ts_ids:
+        price_map[ts] = max(0.01, price_map[ts])
+        cost_map[ts] = max(0.0, min(cost_map[ts], price_map[ts] * 0.98))
+        space_map[ts] = max(1e-6, space_map[ts])
+
+    pair_sim = _build_pairwise_similarity_map(
+        ts_ids,
+        similarity_df=similarity_df,
+        history_df=eff_hist,
+        preds_df=preds,
+        similarity_method=similarity_method,
+        text_cols=text_cols,
+        attribute_cols=attribute_cols,
+        covariate_cols=covariate_cols,
+        hierarchy_cols=hierarchy_cols,
+    )
+
+    # Integrate Double-ML cross-SKU cannibalization (gamma < 0) and positive Halo lift (gamma > 0)
+    # when `elasticity_df` is supplied.
+    halo_units_map: dict[str, float] = dict.fromkeys(ts_ids, 0.0)
+    if elasticity_df is not None and not elasticity_df.empty and "ts_id" in elasticity_df.columns:
+        ts_set = set(ts_ids)
+        for _, erow in elasticity_df.iterrows():
+            ts_e = str(erow["ts_id"])
+            if ts_e not in ts_set:
+                continue
+            # Positive complementary Halo units driven by SKU `ts_e` across the category.
+            for h_col in ("total_halo_units", "halo_lift", "halo_units"):
+                if h_col in erow.index and pd.notna(erow[h_col]):
+                    val_h = float(erow[h_col])
+                    if np.isfinite(val_h) and val_h > 0.0:
+                        halo_units_map[ts_e] = max(halo_units_map[ts_e], val_h)
+            # Substitute cannibalization target boosts transference similarity when delisted.
+            for c_col in ("top_cannibalized_ts_id", "substitute_ts_id"):
+                if c_col in erow.index and pd.notna(erow[c_col]):
+                    peer_c = str(erow[c_col])
+                    if peer_c in ts_set and peer_c != ts_e:
+                        boosted = min(1.0, pair_sim.get((ts_e, peer_c), 0.35) + 0.20)
+                        pair_sim[(ts_e, peer_c)] = max(pair_sim.get((ts_e, peer_c), 0.0), boosted)
+                        pair_sim[(peer_c, ts_e)] = max(pair_sim.get((peer_c, ts_e), 0.0), boosted)
+
+    # Resolve intrinsic walk_rate and candidate substitute transference edges.
+    explicit_walk: dict[str, float] | None = None
+    if walk_rate is not None:
+        explicit_walk = _resolve_sku_param(walk_rate, ts_ids, 0.30, df=ref_df, ts_id_col="ts_id")
+
+    ret_scale = float(np.clip(retention_scale, 0.0, 1.0))
+    w_lo = float(np.clip(min_walk_rate, 0.0, 1.0))
+    w_hi = float(np.clip(max_walk_rate, w_lo, 1.0))
+    sim_floor = float(np.clip(min_similarity, 0.0, 1.0))
+    top_k = max(1, int(top_k_substitutes))
+
+    walk_map: dict[str, float] = {}
+    max_sim_map: dict[str, float] = {}
+    primary_sub_map: dict[str, str] = {}
+    # Directed edges: (i_idx, j_idx, similarity, transfer_share_t_ij)
+    edges: list[tuple[int, int, float, float]] = []
+
+    for i_idx, ts_i in enumerate(ts_ids):
+        peers = [
+            (ts_j, pair_sim.get((ts_i, ts_j), 0.0))
+            for ts_j in ts_ids
+            if ts_j != ts_i and pair_sim.get((ts_i, ts_j), 0.0) >= sim_floor
+        ]
+        peers.sort(key=lambda item: (-item[1], item[0]))
+        top_peers = peers[:top_k]
+        max_s = float(top_peers[0][1]) if top_peers else 0.0
+        max_sim_map[ts_i] = max_s
+        primary_sub_map[ts_i] = str(top_peers[0][0]) if top_peers else ""
+
+        if explicit_walk is not None and ts_i in explicit_walk:
+            w_i = float(np.clip(explicit_walk[ts_i], 0.0, 1.0))
+        elif not top_peers:
+            w_i = 1.0
+        else:
+            w_i = float(np.clip(1.0 - ret_scale * max_s, w_lo, w_hi))
+        walk_map[ts_i] = w_i
+
+        transfer_budget = max(0.0, 1.0 - w_i)
+        if top_peers and transfer_budget > 0.0:
+            weights = np.array([max(s, 1e-6) ** 1.5 for _, s in top_peers], dtype=float)
+            w_sum = float(np.sum(weights))
+            for (ts_j, s_val), w_raw in zip(top_peers, weights, strict=True):
+                t_ij = float(transfer_budget * (w_raw / max(w_sum, 1e-9)))
+                edges.append((i_idx, sku_to_idx[ts_j], float(s_val), t_ij))
+
+    n_edges = len(edges)
+    n_vars = n_skus + n_edges  # z_0..z_{N-1} in {0,1}, y_0..y_{E-1} in [0,1]
+
+    keep_set = {str(s) for s in (must_keep_skus or []) if str(s) in sku_to_idx}
+    delist_set = {str(s) for s in (must_delist_skus or []) if str(s) in sku_to_idx}
+    conflict_set = keep_set & delist_set
+
+    eff_min_skus = max(0, int(min_skus)) if n_skus > 0 else 0
+    eff_max_skus = int(max_skus) if max_skus is not None else n_skus
+    total_base_units = float(sum(base_demand.values()))
+
+    # Feasibility pre-checks and relaxation hints.
+    is_feasible = True
+    relaxation_hint: str | None = None
+    if conflict_set:
+        is_feasible = False
+        relaxation_hint = (
+            f"Conflicting must_keep_skus and must_delist_skus on {sorted(conflict_set)}."
+        )
+    elif eff_max_skus < len(keep_set):
+        is_feasible = False
+        relaxation_hint = (
+            f"max_skus={eff_max_skus} is smaller than len(must_keep_skus)={len(keep_set)}. "
+            f"Increase max_skus to at least {len(keep_set)}."
+        )
+    elif eff_min_skus > n_skus - len(delist_set):
+        is_feasible = False
+        relaxation_hint = (
+            f"min_skus={eff_min_skus} exceeds available non-delisted SKUs "
+            f"({n_skus - len(delist_set)}). Lower min_skus to <= {n_skus - len(delist_set)}."
+        )
+    elif eff_max_skus < eff_min_skus:
+        is_feasible = False
+        relaxation_hint = (
+            f"max_skus={eff_max_skus} < min_skus={eff_min_skus}. Set max_skus >= {eff_min_skus}."
+        )
+    elif max_shelf_space is not None:
+        keep_space = sum(space_map[s] for s in keep_set)
+        sorted_spaces = sorted(
+            space_map[s] for s in ts_ids if s not in keep_set and s not in delist_set
+        )
+        need_more = max(0, eff_min_skus - len(keep_set))
+        min_possible_space = keep_space + sum(sorted_spaces[:need_more])
+        if float(max_shelf_space) + 1e-9 < min_possible_space:
+            is_feasible = False
+            relaxation_hint = (
+                f"max_shelf_space={float(max_shelf_space):.2f} is below the minimum required "
+                f"shelf space {min_possible_space:.2f} for min_skus={eff_min_skus} and "
+                f"must_keep_skus. Increase max_shelf_space to >= {min_possible_space:.2f}."
+            )
+
+    # Build MILP objective (scipy.optimize.milp minimizes c^T x).
+    c_vec = np.zeros(n_vars, dtype=float)
+    lb_vars = np.zeros(n_vars, dtype=float)
+    ub_vars = np.ones(n_vars, dtype=float)
+    integrality = np.zeros(n_vars, dtype=int)
+    integrality[:n_skus] = 1  # z_i binary
+
+    for i_idx, ts_i in enumerate(ts_ids):
+        m_i = price_map[ts_i] - cost_map[ts_i]
+        d_i = base_demand[ts_i]
+        f_i = slot_map[ts_i]
+        halo_bonus = m_i * halo_units_map.get(ts_i, 0.0)
+        walk_pen = float(walk_penalty_weight) * m_i * d_i
+        # Retaining SKU i yields (m_i * d_i + halo_bonus - f_i) and avoids walk_pen.
+        c_vec[i_idx] = -(m_i * d_i + halo_bonus - f_i + walk_pen)
+        if ts_i in keep_set:
+            lb_vars[i_idx] = 1.0
+            ub_vars[i_idx] = 1.0
+        elif ts_i in delist_set and ts_i not in keep_set:
+            lb_vars[i_idx] = 0.0
+            ub_vars[i_idx] = 0.0
+
+    for e_idx, (i_idx, j_idx, _sim, t_ij) in enumerate(edges):
+        ts_i = ts_ids[i_idx]
+        ts_j = ts_ids[j_idx]
+        d_i = base_demand[ts_i]
+        m_i = price_map[ts_i] - cost_map[ts_i]
+        m_j = price_map[ts_j] - cost_map[ts_j]
+        walk_saved = float(walk_penalty_weight) * m_i * d_i * t_ij
+        c_vec[n_skus + e_idx] = -(m_j * d_i * t_ij + walk_saved)
+
+    rows_a: list[np.ndarray] = []
+    rows_lb: list[float] = []
+    rows_ub: list[float] = []
+
+    # 1. Edge coupling constraints:
+    #    y_{i->j} + z_i <= 1  (only transfers if i is delisted)
+    #    y_{i->j} - z_j <= 0  (only transfers to j if j is kept)
+    for e_idx, (i_idx, j_idx, _sim, _t_ij) in enumerate(edges):
+        row1 = np.zeros(n_vars, dtype=float)
+        row1[i_idx] = 1.0
+        row1[n_skus + e_idx] = 1.0
+        rows_a.append(row1)
+        rows_lb.append(-np.inf)
+        rows_ub.append(1.0)
+
+        row2 = np.zeros(n_vars, dtype=float)
+        row2[j_idx] = -1.0
+        row2[n_skus + e_idx] = 1.0
+        rows_a.append(row2)
+        rows_lb.append(-np.inf)
+        rows_ub.append(0.0)
+
+    # 2. SKU count bounds: min_skus <= sum_i z_i <= max_skus
+    if is_feasible:
+        row_cnt = np.zeros(n_vars, dtype=float)
+        row_cnt[:n_skus] = 1.0
+        rows_a.append(row_cnt)
+        rows_lb.append(float(eff_min_skus))
+        rows_ub.append(float(eff_max_skus))
+
+    # 3. Shelf space cap: sum_i s_i z_i <= max_shelf_space
+    if is_feasible and max_shelf_space is not None:
+        row_sp = np.zeros(n_vars, dtype=float)
+        for i_idx, ts_i in enumerate(ts_ids):
+            row_sp[i_idx] = space_map[ts_i]
+        rows_a.append(row_sp)
+        rows_lb.append(-np.inf)
+        rows_ub.append(float(max_shelf_space))
+
+    # 4. Category retention floor: sum_i D_i z_i + sum_e D_i t_ij y_e >= rho_min * sum_i D_i
+    if is_feasible and min_category_retention is not None and total_base_units > 0.0:
+        rho = float(np.clip(min_category_retention, 0.0, 1.0))
+        row_ret = np.zeros(n_vars, dtype=float)
+        for i_idx, ts_i in enumerate(ts_ids):
+            row_ret[i_idx] = base_demand[ts_i]
+        for e_idx, (i_idx, _j_idx, _sim, t_ij) in enumerate(edges):
+            row_ret[n_skus + e_idx] = base_demand[ts_ids[i_idx]] * t_ij
+        rows_a.append(row_ret)
+        rows_lb.append(rho * total_base_units)
+        rows_ub.append(np.inf)
+
+    z_sol = np.ones(n_skus, dtype=float)
+    y_sol = np.zeros(n_edges, dtype=float)
+    solver_ok = False
+
+    if is_feasible:
+        constraints = LinearConstraint(np.vstack(rows_a), rows_lb, rows_ub) if rows_a else None
+        res = milp(
+            c=c_vec,
+            integrality=integrality,
+            bounds=Bounds(lb_vars, ub_vars),
+            constraints=constraints,
+        )
+        if res.success and res.x is not None:
+            solver_ok = True
+            z_sol = np.round(np.clip(res.x[:n_skus], 0.0, 1.0))
+            y_sol = np.clip(res.x[n_skus:], 0.0, 1.0)
+        elif min_category_retention is not None:
+            is_feasible = False
+            relaxation_hint = (
+                f"min_category_retention={float(min_category_retention):.2f} is infeasible under "
+                f"max_skus={eff_max_skus} / max_shelf_space={max_shelf_space} because delisted "
+                f"SKUs incur walk_rate losses. Lower min_category_retention or increase max_skus."
+            )
+
+    if not solver_ok:
+        # Deterministic greedy fallback ranking by net standalone profit per unit of shelf space.
+        scores = []
+        for i_idx, ts_i in enumerate(ts_ids):
+            m_i = price_map[ts_i] - cost_map[ts_i]
+            prof = m_i * base_demand[ts_i] - slot_map[ts_i]
+            scores.append((prof / max(space_map[ts_i], 1e-6), i_idx))
+        scores.sort(key=lambda item: (-item[0], item[1]))
+        z_sol = np.zeros(n_skus, dtype=float)
+        used_sp = 0.0
+        kept_cnt = 0
+        for ts_k in keep_set:
+            idx_k = sku_to_idx[ts_k]
+            z_sol[idx_k] = 1.0
+            used_sp += space_map[ts_k]
+            kept_cnt += 1
+        for _sc, idx_cand in scores:
+            ts_c = ts_ids[idx_cand]
+            if z_sol[idx_cand] > 0.5 or ts_c in delist_set:
+                continue
+            if kept_cnt >= eff_max_skus:
+                break
+            if (
+                max_shelf_space is not None
+                and used_sp + space_map[ts_c] > float(max_shelf_space) + 1e-9
+            ):
+                continue
+            if (_sc > 0.0) or (kept_cnt < eff_min_skus):
+                z_sol[idx_cand] = 1.0
+                used_sp += space_map[ts_c]
+                kept_cnt += 1
+        for e_idx, (i_idx, j_idx, _sim, _t_ij) in enumerate(edges):
+            y_sol[e_idx] = 1.0 if (z_sol[i_idx] < 0.5 and z_sol[j_idx] > 0.5) else 0.0
+
+    # Assemble transference_df and assortment_df.
+    trans_out_units = dict.fromkeys(ts_ids, 0.0)
+    trans_in_units = dict.fromkeys(ts_ids, 0.0)
+    trans_rows: list[dict[str, Any]] = []
+
+    for e_idx, (i_idx, j_idx, s_val, t_ij) in enumerate(edges):
+        act = float(y_sol[e_idx])
+        if act > 1e-6 and z_sol[i_idx] < 0.5 and z_sol[j_idx] > 0.5:
+            ts_i = ts_ids[i_idx]
+            ts_j = ts_ids[j_idx]
+            u_flow = float(base_demand[ts_i] * t_ij * act)
+            m_j = price_map[ts_j] - cost_map[ts_j]
+            trans_out_units[ts_i] += u_flow
+            trans_in_units[ts_j] += u_flow
+            trans_rows.append(
+                {
+                    "delisted_ts_id": ts_i,
+                    "recipient_ts_id": ts_j,
+                    "similarity": float(s_val),
+                    "transfer_share": float(t_ij * act),
+                    "transferred_units": u_flow,
+                    "transferred_margin": float(u_flow * m_j),
+                }
+            )
+
+    status_str = "infeasible" if not is_feasible else ("optimal" if solver_ok else "feasible")
+    assort_rows: list[dict[str, Any]] = []
+    base_net_profit = 0.0
+    opt_net_profit = 0.0
+    total_post_units = 0.0
+    total_lost_walk = 0.0
+    total_space_used = 0.0
+
+    for i_idx, ts_i in enumerate(ts_ids):
+        kept = bool(z_sol[i_idx] >= 0.5)
+        d_i = base_demand[ts_i]
+        p_i = price_map[ts_i]
+        c_i = cost_map[ts_i]
+        m_i = p_i - c_i
+        f_i = slot_map[ts_i]
+        sp_i = space_map[ts_i]
+        w_i = walk_map[ts_i]
+
+        t_out = 0.0 if kept else float(min(d_i, trans_out_units[ts_i]))
+        t_in = float(trans_in_units[ts_i]) if kept else 0.0
+        lost_u = 0.0 if kept else float(max(0.0, d_i - t_out))
+        post_u = float(d_i + t_in) if kept else 0.0
+
+        base_prof_i = float(m_i * d_i - f_i)
+        post_prof_i = float(m_i * post_u - f_i) if kept else 0.0
+        base_net_profit += base_prof_i
+        opt_net_profit += post_prof_i
+        total_post_units += post_u
+        total_lost_walk += lost_u
+        if kept:
+            total_space_used += sp_i
+
+        assort_rows.append(
+            {
+                "ts_id": ts_i,
+                "action": "KEEP" if kept else "DELIST",
+                "is_retained": kept,
+                "baseline_units": float(d_i),
+                "walk_rate": float(w_i),
+                "transferable_share": float(1.0 - w_i),
+                "transferred_out_units": float(t_out),
+                "transferred_in_units": float(t_in),
+                "lost_walk_units": float(lost_u),
+                "post_assortment_units": float(post_u),
+                "unit_price": float(p_i),
+                "unit_cost": float(c_i),
+                "unit_margin": float(m_i),
+                "fixed_slot_cost": float(f_i),
+                "shelf_space": float(sp_i),
+                "baseline_profit": float(base_prof_i),
+                "post_assortment_profit": float(post_prof_i),
+                "net_profit_contribution": float(post_prof_i - base_prof_i),
+                "primary_substitute_ts_id": primary_sub_map[ts_i],
+                "max_peer_similarity": float(max_sim_map[ts_i]),
+                "status": status_str,
+            }
+        )
+
+    assort_df = pd.DataFrame(assort_rows, columns=ASSORTMENT_OPTIMIZER_COLUMNS)
+    trans_df = pd.DataFrame(trans_rows, columns=ASSORTMENT_TRANSFERENCE_COLUMNS)
+    retained_cnt = int(sum(1 for r in assort_rows if r["is_retained"]))
+    delisted_cnt = int(n_skus - retained_cnt)
+    cat_ret_pct = float(total_post_units / total_base_units) if total_base_units > 1e-9 else 1.0
+    rollup_df = _build_hierarchy_rollup_df(
+        assort_df,
+        source_df=ref_df,
+        hierarchy_cols=hierarchy_cols,
+        ts_id_col="ts_id",
+    )
+
+    return AssortmentOptimizationResult(
+        assortment_df=assort_df,
+        transference_df=trans_df,
+        status=status_str,
+        is_feasible=is_feasible,
+        total_candidate_skus=n_skus,
+        retained_skus=retained_cnt,
+        delisted_skus=delisted_cnt,
+        baseline_category_units=float(total_base_units),
+        post_assortment_units=float(total_post_units),
+        transferred_units=float(sum(trans_in_units.values())),
+        lost_walk_units=float(total_lost_walk),
+        category_retention_pct=float(np.clip(cat_ret_pct, 0.0, 1.0)),
+        mean_walk_rate=float(np.mean(list(walk_map.values()))) if walk_map else 0.0,
+        baseline_net_profit=float(base_net_profit),
+        optimal_net_profit=float(opt_net_profit),
+        net_profit_lift=float(opt_net_profit - base_net_profit),
+        shelf_space_used=float(total_space_used),
+        relaxation_hint=relaxation_hint,
+        hierarchy_rollup_df=rollup_df,
+    )
+
+
+def optimize_assortment_df(
+    predictions_df: pd.DataFrame,
+    *,
+    transference: bool = False,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Convenience wrapper around :func:`optimize_assortment` returning a tidy DataFrame.
+
+    Returns ``result.transference_df`` when ``transference=True`` and ``result.assortment_df``
+    otherwise, with the full :class:`AssortmentOptimizationResult` attached to
+    ``df.attrs["assortment_result"]``.
+    """
+    res = optimize_assortment(predictions_df, **kwargs)
+    out = res.transference_df.copy() if transference else res.assortment_df.copy()
+    out.attrs["assortment_result"] = res
+    out.attrs["status"] = res.status
+    out.attrs["is_feasible"] = res.is_feasible
+    out.attrs["relaxation_hint"] = res.relaxation_hint
+    out.attrs["hierarchy_rollup_df"] = res.hierarchy_rollup_df
+    return out

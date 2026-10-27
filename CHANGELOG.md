@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.1] - 2026-10-27
+
+### Added
+
+- **Assortment Rationalization, Delisting Demand Transference & Shopper Walk-Rate MILP (`Track Q.2` — [`clearance_optimizer.py`](./src/scale_forecasting/clearance_optimizer.py), [`workbench.py`](./src/scale_forecasting/workbench.py)):**
+  - Added `optimize_assortment`, `optimize_assortment_df`, `AssortmentOptimizationResult`, `ASSORTMENT_OPTIMIZER_COLUMNS`, and `ASSORTMENT_TRANSFERENCE_COLUMNS` in [`src/scale_forecasting/clearance_optimizer.py`](./src/scale_forecasting/clearance_optimizer.py), solving a `scipy.optimize.milp` (`HiGHS`) binary SKU retention ($z_i \in \lbrace 0, 1 \rbrace$) and demand-transference ($t_{ij} \ge 0$) program under SKU count (`min_skus`, `max_skus`), shelf-space (`max_shelf_space`, `shelf_space`), and category-retention (`min_category_retention`) constraints.
+  - Enforces exact delisting demand conservation ($\sum_{j \ne i} t_{ij} \le 1 - w_i^{\text{walk}}$, `transferred_out_units + lost_walk_units == baseline_units`) weighted by multi-modal pairwise similarity $S_{ij}$, with mandatory `must_keep_skus` / `must_delist_skus` locks and bottom-up `hierarchy_rollup_df`.
+- **Compositional Simplex Size-Curve Estimation & Integer Pre-Pack Bundle Allocation MILP (`Track Q.2 / R.2` — [`inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py), [`workbench.py`](./src/scale_forecasting/workbench.py)):**
+  - Added `estimate_simplex_size_curves`, `optimize_prepacks`, `optimize_prepacks_df`, `PrepackOptimizationResult`, `PREPACK_ALLOCATION_COLUMNS`, `PREPACK_ORDER_COLUMNS`, and `DEFAULT_PREPACK_BUNDLES` in [`src/scale_forecasting/inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py).
+  - Estimates strictly positive store-level size shares ($p_{s,k} > 0, \sum_k p_{s,k} = 1.0$) via Aitchison Centered Log-Ratio (`CLR`) Empirical-Bayes shrinkage toward the pooled global size curve and solves for integer pre-pack bundle counts $n_{s,b} \in \mathbb{Z}_{\ge 0}$ (plus optional open-stock `allow_eaches=True`) minimizing size-level stockout underage, broken-size overstock, and pack procurement cost.
+- **Hitchcock–Koopmans Lateral Store-to-Store / Depot Inventory Rebalancing LP & MILP (`Track R.2` — [`inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py), [`workbench.py`](./src/scale_forecasting/workbench.py)):**
+  - Added `optimize_rebalancing`, `optimize_rebalancing_df`, `RebalancingOptimizationResult`, `REBALANCING_TRANSFER_COLUMNS`, and `REBALANCING_NODE_COLUMNS` in [`src/scale_forecasting/inventory_optimizer.py`](./src/scale_forecasting/inventory_optimizer.py).
+  - Solves minimum-cost lateral transshipment $x_{k, o \to d} \ge 0$ across stores and depots within the replenishment lead-time window (`transfer_lead_time <= max_transfer_lead_time`), shipping excess stock above `target_position` from overstocked origins to deficit destinations whenever unit freight cost is strictly smaller than avoided stockout plus holding cost ($c_{o \to d}^{\text{trans}} < p_d + h_o$), with support for `integer_transfers=True`, `min_transfer_qty`, and `min_network_fill_rate`.
+- **Workbench, SDK, Playground & MCP Tool Integration ([`workbench.py`](./src/scale_forecasting/workbench.py), [`mcp.py`](./src/scale_forecasting/mcp.py), [`__init__.py`](./src/scale_forecasting/__init__.py)):**
+  - Wired `optimize_assortment`, `optimize_assortment_df`, `optimize_prepacks`, `optimize_prepacks_df`, `optimize_rebalancing`, and `optimize_rebalancing_df` onto `PlaygroundWorkbenchMixin` (`Forecaster`, `BakeOff`, and `PlaygroundRun`) and top-level `scale_forecasting` lazy exports, and extended the 13th MCP tool `optimize_inventory_clearance` to support `mode` in `["clearance", "contract_volume", "assortment", "prepacks", "rebalancing"]`.
+
+---
+
 ## [1.9.0] - 2026-10-26
 
 ### Added

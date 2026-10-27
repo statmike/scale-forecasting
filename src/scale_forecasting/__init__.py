@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.9.0"
+    __version__ = "1.9.1"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -344,9 +344,20 @@ _LAZY: dict[str, tuple[str, str]] = {
     "plot_trajectories": (".copula", "plot_trajectories"),
     "INVENTORY_OPTIMIZER_COLUMNS": (".inventory_optimizer", "INVENTORY_OPTIMIZER_COLUMNS"),
     "INVENTORY_POLICY_COLUMNS": (".inventory_optimizer", "INVENTORY_POLICY_COLUMNS"),
+    "PREPACK_ALLOCATION_COLUMNS": (".inventory_optimizer", "PREPACK_ALLOCATION_COLUMNS"),
+    "PREPACK_ORDER_COLUMNS": (".inventory_optimizer", "PREPACK_ORDER_COLUMNS"),
+    "REBALANCING_NODE_COLUMNS": (".inventory_optimizer", "REBALANCING_NODE_COLUMNS"),
+    "REBALANCING_TRANSFER_COLUMNS": (".inventory_optimizer", "REBALANCING_TRANSFER_COLUMNS"),
+    "PrepackOptimizationResult": (".inventory_optimizer", "PrepackOptimizationResult"),
+    "RebalancingOptimizationResult": (".inventory_optimizer", "RebalancingOptimizationResult"),
     "compute_inventory_frontier": (".inventory_optimizer", "compute_inventory_frontier"),
+    "estimate_simplex_size_curves": (".inventory_optimizer", "estimate_simplex_size_curves"),
     "optimize_inventory_df": (".inventory_optimizer", "optimize_inventory_df"),
     "optimize_inventory_portfolio": (".inventory_optimizer", "optimize_inventory_portfolio"),
+    "optimize_prepacks": (".inventory_optimizer", "optimize_prepacks"),
+    "optimize_prepacks_df": (".inventory_optimizer", "optimize_prepacks_df"),
+    "optimize_rebalancing": (".inventory_optimizer", "optimize_rebalancing"),
+    "optimize_rebalancing_df": (".inventory_optimizer", "optimize_rebalancing_df"),
     "plot_inventory_frontier": (".inventory_optimizer", "plot_inventory_frontier"),
     "SCENARIO_OPTIMIZATION_COLUMNS": (
         ".scenario_optimizer",
@@ -359,7 +370,15 @@ _LAZY: dict[str, tuple[str, str]] = {
     "ScenarioOptimizationResult": (".scenario_optimizer", "ScenarioOptimizationResult"),
     "optimize_scenario": (".scenario_optimizer", "optimize_scenario"),
     "plot_optimal_scenario": (".scenario_optimizer", "plot_optimal_scenario"),
-    # Lifecycle markdown, shelf-space reclamation & vendor contract volume MILP (Track Q.1 / R.1).
+    # Lifecycle markdown, space reclamation & assortment/contract/pre-pack MILP (Tracks Q & R).
+    "ASSORTMENT_OPTIMIZER_COLUMNS": (
+        ".clearance_optimizer",
+        "ASSORTMENT_OPTIMIZER_COLUMNS",
+    ),
+    "ASSORTMENT_TRANSFERENCE_COLUMNS": (
+        ".clearance_optimizer",
+        "ASSORTMENT_TRANSFERENCE_COLUMNS",
+    ),
     "CLEARANCE_SCHEDULE_COLUMNS": (
         ".clearance_optimizer",
         "CLEARANCE_SCHEDULE_COLUMNS",
@@ -377,6 +396,10 @@ _LAZY: dict[str, tuple[str, str]] = {
         "CONTRACT_VOLUME_SUMMARY_COLUMNS",
     ),
     "DEFAULT_DISCOUNT_LADDER": (".clearance_optimizer", "DEFAULT_DISCOUNT_LADDER"),
+    "AssortmentOptimizationResult": (
+        ".clearance_optimizer",
+        "AssortmentOptimizationResult",
+    ),
     "ClearanceOptimizationResult": (
         ".clearance_optimizer",
         "ClearanceOptimizationResult",
@@ -385,6 +408,8 @@ _LAZY: dict[str, tuple[str, str]] = {
         ".clearance_optimizer",
         "ContractVolumeOptimizationResult",
     ),
+    "optimize_assortment": (".clearance_optimizer", "optimize_assortment"),
+    "optimize_assortment_df": (".clearance_optimizer", "optimize_assortment_df"),
     "optimize_clearance": (".clearance_optimizer", "optimize_clearance"),
     "optimize_clearance_df": (".clearance_optimizer", "optimize_clearance_df"),
     "optimize_contract_volume": (".clearance_optimizer", "optimize_contract_volume"),
@@ -484,13 +509,18 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         public_benchmark_catalog,
     )
     from .clearance_optimizer import (  # noqa: F401
+        ASSORTMENT_OPTIMIZER_COLUMNS,
+        ASSORTMENT_TRANSFERENCE_COLUMNS,
         CLEARANCE_SCHEDULE_COLUMNS,
         CLEARANCE_SUMMARY_COLUMNS,
         CONTRACT_VOLUME_COLUMNS,
         CONTRACT_VOLUME_SUMMARY_COLUMNS,
         DEFAULT_DISCOUNT_LADDER,
+        AssortmentOptimizationResult,
         ClearanceOptimizationResult,
         ContractVolumeOptimizationResult,
+        optimize_assortment,
+        optimize_assortment_df,
         optimize_clearance,
         optimize_clearance_df,
         optimize_contract_volume,
@@ -590,9 +620,20 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
     from .inventory_optimizer import (  # noqa: F401
         INVENTORY_OPTIMIZER_COLUMNS,
         INVENTORY_POLICY_COLUMNS,
+        PREPACK_ALLOCATION_COLUMNS,
+        PREPACK_ORDER_COLUMNS,
+        REBALANCING_NODE_COLUMNS,
+        REBALANCING_TRANSFER_COLUMNS,
+        PrepackOptimizationResult,
+        RebalancingOptimizationResult,
         compute_inventory_frontier,
+        estimate_simplex_size_curves,
         optimize_inventory_df,
         optimize_inventory_portfolio,
+        optimize_prepacks,
+        optimize_prepacks_df,
+        optimize_rebalancing,
+        optimize_rebalancing_df,
         plot_inventory_frontier,
     )
     from .main import run  # noqa: F401

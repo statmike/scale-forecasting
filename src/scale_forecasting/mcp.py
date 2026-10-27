@@ -1699,22 +1699,35 @@ class McpServer:
                     "Solve lifecycle markdown & perishable expiry clearance MILP "
                     "(`mode='clearance'`, `clearance_optimizer.optimize_clearance`), warehouse & "
                     "shelf space reclamation (`target_space_freed`, `unit_volume`, "
-                    "`reclaim_by_step`), or multi-SKU vendor contract volume & tiered rebate / "
+                    "`reclaim_by_step`), multi-SKU vendor contract volume & tiered rebate / "
                     "Take-or-Pay commitment optimization (`mode='contract_volume'`, "
-                    "`clearance_optimizer.optimize_contract_volume`). Automatically borrows deep-"
-                    "discount price elasticity from Track P digital-twin neighbors when a SKU "
-                    "lacks markdown history."
+                    "`clearance_optimizer.optimize_contract_volume`), assortment rationalization "
+                    "& delisting demand transference (`mode='assortment'`, "
+                    "`clearance_optimizer.optimize_assortment`), simplex size-curve & integer "
+                    "pre-pack allocation (`mode='prepacks'`, "
+                    "`inventory_optimizer.optimize_prepacks`), or lateral store-to-store / depot "
+                    "rebalancing LP (`mode='rebalancing'`, "
+                    "`inventory_optimizer.optimize_rebalancing`)."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["clearance", "contract_volume"],
+                            "enum": [
+                                "clearance",
+                                "contract_volume",
+                                "assortment",
+                                "prepacks",
+                                "rebalancing",
+                            ],
                             "default": "clearance",
                             "description": (
                                 "'clearance' for lifecycle markdown & space reclamation MILP; "
-                                "'contract_volume' for vendor tiered rebate / Take-or-Pay MILP."
+                                "'contract_volume' for vendor tiered rebate / Take-or-Pay MILP; "
+                                "'assortment' for assortment rationalization & delisting "
+                                "walk_rate; 'prepacks' for simplex size-curve & integer pre-packs; "
+                                "'rebalancing' for lateral store-to-store transshipment LP."
                             ),
                         },
                         "records": {
@@ -1912,6 +1925,39 @@ class McpServer:
                         "n_series": {
                             "type": "integer",
                             "default": 3,
+                        },
+                        "max_skus": {
+                            "type": "integer",
+                            "description": (
+                                "For mode='assortment': maximum retained SKUs after delisting."
+                            ),
+                        },
+                        "max_shelf_space": {
+                            "type": "number",
+                            "description": "For mode='assortment': maximum shelf space / facings.",
+                        },
+                        "walk_rate": {
+                            "description": (
+                                "For mode='assortment': optional explicit shopper walk-away rate."
+                            ),
+                        },
+                        "prepacks": {
+                            "type": "object",
+                            "description": (
+                                "For mode='prepacks': map of {pack_id: {size_id: units}} bundles."
+                            ),
+                        },
+                        "transfer_cost": {
+                            "description": (
+                                "For mode='rebalancing': unit lateral transfer cost between nodes."
+                            ),
+                        },
+                        "max_transfer_lead_time": {
+                            "type": "number",
+                            "default": 5.0,
+                            "description": (
+                                "For mode='rebalancing': maximum eligible transfer transit time."
+                            ),
                         },
                     },
                     "additionalProperties": False,
@@ -3547,17 +3593,30 @@ class McpServer:
             "optimize_clearance_and_contracts",
             "optimize_clearance",
             "optimize_contract_volume",
+            "optimize_assortment",
+            "optimize_prepacks",
+            "optimize_rebalancing",
         ):
             import pandas as pd
 
             from . import playground
-            from .clearance_optimizer import optimize_clearance, optimize_contract_volume
-
-            eff_mode = (
-                "contract_volume"
-                if name == "optimize_contract_volume"
-                else str(args.get("mode", "clearance"))
+            from .clearance_optimizer import (
+                optimize_assortment,
+                optimize_clearance,
+                optimize_contract_volume,
             )
+            from .inventory_optimizer import optimize_prepacks, optimize_rebalancing
+
+            if name == "optimize_contract_volume":
+                eff_mode = "contract_volume"
+            elif name == "optimize_assortment":
+                eff_mode = "assortment"
+            elif name == "optimize_prepacks":
+                eff_mode = "prepacks"
+            elif name == "optimize_rebalancing":
+                eff_mode = "rebalancing"
+            else:
+                eff_mode = str(args.get("mode", "clearance"))
             records_cl = args.get("records") or args.get("predictions")
             hist_cl_raw = args.get("history")
             hist_cl = (
@@ -3611,6 +3670,96 @@ class McpServer:
             }
             if args.get("discount_ladder") is not None:
                 common_kw["discount_ladder"] = list(args["discount_ladder"])
+
+            if eff_mode == "assortment":
+                as_res = optimize_assortment(
+                    input_df,
+                    history_df=hist_cl,
+                    oof_df=oof_cl,
+                    max_skus=(int(args["max_skus"]) if args.get("max_skus") is not None else None),
+                    max_shelf_space=(
+                        float(args["max_shelf_space"])
+                        if args.get("max_shelf_space") is not None
+                        else None
+                    ),
+                    base_price=args.get("base_price", 20.0),
+                    unit_cost=args.get("unit_cost", 8.0),
+                    walk_rate=args.get("walk_rate"),
+                    hierarchy_cols=args.get("hierarchy_cols"),
+                    model_type=args.get("model_type"),
+                    reconciliation_method=args.get("reconciliation_method"),
+                    prefer_reconciled=bool(args.get("prefer_reconciled", True)),
+                    horizon=int(args.get("horizon", 14)),
+                )
+                return {
+                    "mode": "assortment",
+                    "status": as_res.status,
+                    "is_feasible": as_res.is_feasible,
+                    "total_candidate_skus": as_res.total_candidate_skus,
+                    "retained_skus": as_res.retained_skus,
+                    "delisted_skus": as_res.delisted_skus,
+                    "baseline_category_units": as_res.baseline_category_units,
+                    "post_assortment_units": as_res.post_assortment_units,
+                    "transferred_units": as_res.transferred_units,
+                    "lost_walk_units": as_res.lost_walk_units,
+                    "category_retention_pct": as_res.category_retention_pct,
+                    "mean_walk_rate": as_res.mean_walk_rate,
+                    "baseline_net_profit": as_res.baseline_net_profit,
+                    "optimal_net_profit": as_res.optimal_net_profit,
+                    "net_profit_lift": as_res.net_profit_lift,
+                    "shelf_space_used": as_res.shelf_space_used,
+                    "relaxation_hint": as_res.relaxation_hint,
+                    "assortment": as_res.assortment_df.to_dict(orient="records"),
+                    "transference": as_res.transference_df.to_dict(orient="records"),
+                }
+
+            if eff_mode == "prepacks":
+                pp_res = optimize_prepacks(
+                    input_df,
+                    history_df=hist_cl,
+                    prepacks=args.get("prepacks"),
+                    initial_inventory=args.get("initial_inventory", 0.0) or 0.0,
+                    unit_cost=float(args.get("unit_cost", 1.0) or 1.0),
+                )
+                return {
+                    "mode": "prepacks",
+                    "status": pp_res.status,
+                    "is_feasible": pp_res.is_feasible,
+                    "total_demand_units": pp_res.total_demand_units,
+                    "total_allocated_units": pp_res.total_allocated_units,
+                    "total_under_units": pp_res.total_under_units,
+                    "total_over_units": pp_res.total_over_units,
+                    "fill_rate": pp_res.fill_rate,
+                    "size_curve_l1_error": pp_res.size_curve_l1_error,
+                    "total_cost": pp_res.total_cost,
+                    "relaxation_hint": pp_res.relaxation_hint,
+                    "allocation": pp_res.allocation_df.to_dict(orient="records"),
+                    "pack_orders": pp_res.pack_orders_df.to_dict(orient="records"),
+                    "size_curves": pp_res.size_curves_df.to_dict(orient="records"),
+                }
+
+            if eff_mode == "rebalancing":
+                rb_res = optimize_rebalancing(
+                    input_df,
+                    oof_df=oof_cl,
+                    initial_inventory=args.get("initial_inventory"),
+                    transfer_cost=args.get("transfer_cost", 2.5),
+                    max_transfer_lead_time=float(args.get("max_transfer_lead_time", 5.0)),
+                )
+                return {
+                    "mode": "rebalancing",
+                    "status": rb_res.status,
+                    "is_feasible": rb_res.is_feasible,
+                    "total_transferred_units": rb_res.total_transferred_units,
+                    "total_transfer_cost": rb_res.total_transfer_cost,
+                    "stockout_units_avoided": rb_res.stockout_units_avoided,
+                    "baseline_network_cost": rb_res.baseline_network_cost,
+                    "optimal_network_cost": rb_res.optimal_network_cost,
+                    "net_cost_savings": rb_res.net_cost_savings,
+                    "relaxation_hint": rb_res.relaxation_hint,
+                    "transfers": rb_res.transfers_df.to_dict(orient="records"),
+                    "node_summary": rb_res.node_summary_df.to_dict(orient="records"),
+                }
 
             if eff_mode == "contract_volume":
                 raw_tiers = args.get("contract_tiers")
