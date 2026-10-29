@@ -1102,7 +1102,7 @@ def test_track_q2_r2_workbench_and_mcp_e2e_integration() -> None:
     # 2. MCP server tool dispatch across all 5 Track Q/R modes:
     server = McpServer()
     tools_resp = server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    assert len(tools_resp["result"]["tools"]) == 13
+    assert len(tools_resp["result"]["tools"]) == 14
     fc_records = [
         {"ts_id": f"sku_{i}", "ds": f"2025-12-0{d}", "yhat": float(20 + 5 * i)}
         for i in range(3)

@@ -26,7 +26,7 @@ family** present in the config — `statistical`, `ml`, `deep_learning`, `automl
 under one run header**, so a run's wall-clock is the *slowest* family, not the sum. Whichever runtime
 a family lands on, it fans out that family's cells and calls the **same** `worker.run_cell` for each,
 then writes results to BigQuery via the Storage Write API. When every family job has landed its base
-predictions, the `ensemble` node blends them. Five analyst views read the tables back. That's the
+predictions, the `ensemble` node blends them. Eleven analytical SQL views and an opt-in stateful BigQuery Conversational Analytics Agent (`bq_agent`) read the self-documenting tables back. That's the
 whole system.
 
 ```mermaid
@@ -49,7 +49,8 @@ flowchart TD
     Write --> Tables[("5 Registry Tables<br/>run_registry · run_jobs · forecast_metadata<br/>forecast_predictions · backtest_oof")]
 
     Tables --> Ens["ensemble_run()<br/>Blends member families (barrier or microbatch)"]
-    Ens --> Views[("5 Semantic Views<br/>v_run_summary · v_run_jobs · v_model_leaderboard<br/>v_backtest_coverage · v_model_leaderboard_comparable")]
+    Ens --> Views[("11 Analytical SQL Views<br/>5 Core Leaderboard/Summary Views +<br/>6 Diagnostic & Executive S&OP Views")]
+    Views --> Agent["bq_agent · Knowledge Catalog<br/>Stateful BigQuery DataAgent + 44 Glossary Terms"]
 ```
 
 ---
@@ -352,9 +353,7 @@ The files:
   and the header, `run_job`, and `write_cells` lifecycles. **The reusable seam**: `write_cells` is
   called executor-side by *both* the Spark group-runner and the Ray chunk-runner (as well as `vertex_engine`, `automl_engine`, and `bigquery_engine`), so results stream to
   BigQuery in bulk from the workers — parallelism is bounded by compute, not a tracking server's QPS.
-- [`ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py) — the table definitions (single source of truth
-  for the schema), rendered and executed by `tables.ensure_tables` at run time. Terraform owns the
-  *containers*; the app owns the *tables*.
+- [`metadata.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/metadata.py) & [`ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py) — the single source of truth for schema definitions and 100% table, view, and column `OPTIONS(description='...')` metadata, rendered and executed by `tables.ensure_tables` at run time (which also backfills missing or outdated descriptions onto pre-existing registries via `sync_existing_descriptions`). Terraform owns the *containers*; the app owns the *tables*.
 - [`ids.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ids.py) — `make_run_id(cfg)` = `<run-name-slug>-<12-hex
   digest of the canonical config>` and `make_job_key(run_id, family, attempt)` = the canonical
   per-family job id. Deterministic: the same config always yields the same `run_id`, so re-runs and
@@ -362,16 +361,9 @@ The files:
 - [`artifacts.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/artifacts.py) — the GCS artifact layout
   `<artifact_root>/<run_id>/<basename>`, in both directions: upload for serialized models (lineage),
   and reading the layout back — which run owns a blob, which prefixes the registry has no row for,
-  and deleting them. `registry/ops.py`'s destructive verbs run on that second half.
-- [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the five analyst views: `v_run_summary`
-  (per-run scaling and efficiency — a time ledger rolled up from the run's job rows, plus the
-  Serverless telemetry unpacked from the header), `v_run_jobs` (the per-family-job trace —
-  latest attempt per family, its runtime/hardware/system job id/status/bracket/telemetry),
-  `v_model_leaderboard` (per-model roll-up: cell counts, fit time, mean `wape` / `mae`),
-  `v_model_leaderboard_comparable` (the same ranking restricted to the holdout fold and pooled over
-  the panel, so rows are comparable), and `v_backtest_coverage` (the achieved-fold histogram per
-  run and model). The first three are what notebook 07
-  reads.
+  and deleting them. `registry.ops.py`'s destructive verbs run on that second half.
+- [`views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py) — the eleven analytical SQL views: five core operational views (`v_run_summary`, `v_run_jobs`, `v_model_leaderboard`, `v_model_leaderboard_comparable`, `v_backtest_coverage`) plus six server-side diagnostic and S&OP views (`v_fva_waterfall`, `v_horizon_decay`, `v_bias_and_exceptions`, `v_anomalies`, `v_feature_attributions`, `v_executive_sop_summary`), all created with column-level `OPTIONS(description='...')`.
+- [`bq_agent/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/bq_agent) — the opt-in Knowledge Catalog & stateful BigQuery Conversational Analytics Agent subpackage: syncs 44 forecasting Business Glossary terms and `DataProfile` scans to **Knowledge Catalog**, discovers strictly scoped registry tables/views plus verified `$.data.source_table` inputs, registers a stateful `DataAgent` (`sf-registry-<dataset>`) with 32 verified Golden SQL queries defaulting to the latest `COMPLETED` run, and exposes multi-turn natural-language Q&A via `Registry.ask()`, `Forecaster.ask()`, `python -m scale_forecasting.bq_agent`, and the `ask_forecast_registry` MCP tool.
 
 ---
 

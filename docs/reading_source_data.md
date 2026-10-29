@@ -130,6 +130,10 @@ the feasibility report describes the series the run would actually forecast. And
 an unreachable environment produces a line saying so rather than an exception, so a plan never fails
 because the preflight could not reach BigQuery.
 
+### Source-table lineage discovery for the BigQuery Registry `DataAgent`
+
+When you provision a stateful BigQuery Conversational Analytics Agent via `Registry.ensure_bq_agent()` (or `output.ensure_bq_agent = true`), `bq_agent.discover_registry_scope` inspects `SELECT DISTINCT JSON_VALUE(raw_config, '$.data.source_table') FROM run_registry` and attaches only verified source tables alongside the 5 registry tables and 11 analytical SQL views — strictly excluding ephemeral `_sf_automl_*` staging tables and any unrelated tables in the same dataset. Its system instruction teaches the `DataAgent` to evaluate historical backtest accuracy on snapshot-locked `backtest_oof.y_true` (`snapshot_millis`) and join `forecast_predictions` to discovered source tables only when computing post-run realized accuracy on fresh actuals or rolling up by source business attributes.
+
 ---
 
 ## Bounding read parallelism — `read_max_streams`

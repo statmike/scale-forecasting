@@ -1,6 +1,6 @@
 # Platform overview
 
-`scale-forecasting` is a declarative, multi-engine time-series forecasting platform for Google Cloud. You describe *what* to forecast in one JSON configuration — the BigQuery source table, the horizon, the models, the evaluation metrics, and the ensemble strategies — and the platform uses BigQuery as the single data surface (with zero data replication) while compiling your declaration into a parallel per-family execution DAG across **7 Google Cloud runtimes**, evaluating **37 models** across **21 evaluation metrics**, extracting two-tier feature attributions, reconciling spatial and temporal hierarchies, and streaming governed results back into BigQuery tables and **5 Analytical SQL Views**.
+`scale-forecasting` is a declarative, multi-engine time-series forecasting platform for Google Cloud. You describe *what* to forecast in one JSON configuration — the BigQuery source table, the horizon, the models, the evaluation metrics, and the ensemble strategies — and the platform uses BigQuery as the single data surface (with zero data replication) while compiling your declaration into a parallel per-family execution DAG across **7 Google Cloud runtimes**, evaluating **37 models** across **21 evaluation metrics**, extracting two-tier feature attributions, reconciling spatial and temporal hierarchies, and streaming governed results back into self-documenting BigQuery tables, **11 Analytical SQL Views**, **Knowledge Catalog** Business Glossaries, and a stateful **BigQuery Conversational Analytics `DataAgent`**.
 
 ```mermaid
 flowchart LR
@@ -25,8 +25,8 @@ flowchart LR
     subgraph OUT["3. Governed Results & Trust in BigQuery"]
         direction TB
         REG["5 BigQuery Registry Tables<br/>forecasts · backtests · metadata<br/>runs · jobs"]
-        VIEWS["5 Analytical SQL Views<br/>Leaderboards · Backtest Coverage<br/>Run & Job Summaries"]
-        USE["Practitioner Trust & Consumption<br/>7-Question Assessment · FVA Ladder<br/>Attributions · SDK · Looker"]
+        VIEWS["11 Analytical SQL Views<br/>Leaderboards · FVA · Exceptions<br/>Anomalies · S&OP Scorecard"]
+        USE["Practitioner Trust & Consumption<br/>BigQuery DataAgent · Knowledge Catalog<br/>7-Question Assessment · SDK · Looker"]
         REG --> VIEWS --> USE
     end
 
@@ -57,7 +57,7 @@ Traditional forecasting workflows break down when scaled to tens or hundreds of 
 | **Infrastructure lock-in** | Forced choice between pure Spark, pure Ray, or pure SQL. | **Multi-engine DAG:** Run Spark, Ray, Vertex AI CustomJob, Compute Engine, GKE, Vertex AI AutoML, and BigQuery ML concurrently under one `run_id`, bounded by the slowest family rather than their sum. | [architecture.md](./architecture.md) |
 | **Uncertainty calibration** | Gaussian assumptions that fail on skewed real-world distributions. | **Conformal residual intervals:** Empirical, distribution-free prediction intervals calibrated against rolling out-of-fold backtest errors. | [backtesting.md](./backtesting.md) |
 | **Hierarchical & temporal incoherence** | Bottom-level, upper-level, and multi-frequency (Daily/Weekly/Monthly) forecasts do not add up, or market shares fail to sum to 100%. | **3-mode coherent reconciliation & compositional simplex:** Built-in spatial (`mint_nonneg`, `mint_shrink`, `wls_var`, `wls_struct`, `ols`, `bottom_up`, `top_down`, `middle_out`), temporal (`THieF`), and joint cross-temporal (`cross_temporal_mint`) reconciliation plus `@transform_ilr` / `@transform_clr` simplex closure and top-down Goal-Seek QP (`allocate_target`). | [hierarchical_forecasting.md](./hierarchical_forecasting.md) · [features_and_covariates.md](./features_and_covariates.md) |
-| **Operational opacity** | Disconnected log files and ad-hoc evaluation tables. | **BigQuery registry & explainability:** Streaming ingestion via the Storage Write API, two-tier feature attributions (`attributions_df` / `plot_attributions`), and 5 analytical SQL views. | [output_schemas.md](./output_schemas.md) |
+| **Operational opacity** | Disconnected log files and ad-hoc evaluation tables. | **Self-documenting BigQuery registry, Knowledge Catalog & DataAgent:** Streaming ingestion via the Storage Write API, two-tier feature attributions (`attributions_df` / `plot_attributions`), 11 analytical SQL views, Knowledge Catalog Business Glossary + DataProfile scans, and stateful conversational queries (`Registry.ask()`). | [output_schemas.md](./output_schemas.md) · [agent_and_mcp_guide.md](./agent_and_mcp_guide.md) |
 | **Brittle batch failures** | One failed series aborts an entire multi-hour distributed job. | **Surgical cell repair & live probes:** Re-runs only failed cells without recomputing successful ones and reconciles platform job state automatically. | [operations.md](./operations.md) |
 | **Manual trial-and-error vs. black-box AutoML** | Days of hand-tuning configs or an opaque black box that hides why models were picked. | **Glass-box auto-forecaster, `autofocus` & opt-in `Forecaster.evolve`:** `Forecaster.build_config()` and `Forecaster.auto()` (evolved with **AlphaEvolve on Gemini Enterprise** into pure Python) explain every choice, honor user pins, and borrow finished models across passes; `Forecaster.evolve()` adds opt-in runtime `# EVOLVE-BLOCK` evolution under a 3-Gate Anti-Overfitting Ratchet. | [auto_forecaster.md](./auto_forecaster.md) · [alphaevolve_runner.md](./alphaevolve_runner.md) |
 
@@ -69,7 +69,8 @@ Every capability maps cleanly to managed Google Cloud data and AI services:
 
 | Layer | Google Cloud service | Role in `scale-forecasting` | Reference |
 | :--- | :--- | :--- | :--- |
-| **Data warehouse & lakehouse** | BigQuery & BigLake Apache Iceberg | Stores source panels (`source_series_native`, `source_series_iceberg`), the 5 registry tables, and the 5 analytical SQL views. | [reading_source_data.md](./reading_source_data.md) · [output_schemas.md](./output_schemas.md) |
+| **Data warehouse & lakehouse** | BigQuery & BigLake Apache Iceberg | Stores source panels (`source_series_native`, `source_series_iceberg`), the 5 self-documenting registry tables, and the 11 analytical SQL views. | [reading_source_data.md](./reading_source_data.md) · [output_schemas.md](./output_schemas.md) |
+| **Catalog & conversational analytics** | Knowledge Catalog & BigQuery Conversational Analytics | Syncs a 44-term forecasting Business Glossary, DataProfile scans, 32 Golden SQL queries, and a stateful `DataAgent` (`sf-registry-<dataset>`) scoped strictly to registry tables, 11 views, and discovered source tables. | [agent_and_mcp_guide.md](./agent_and_mcp_guide.md) · [api/bq_agent.md](./api/bq_agent.md) |
 | **SQL-native forecasting** | BigQuery ML | Executes `ARIMA_PLUS`, `ARIMA_PLUS_XREG`, and zero-shot foundation models via `AI.FORECAST` (`TimesFM`) directly in SQL. | [runtimes_reference.md](./runtimes_reference.md) |
 | **Managed AutoML & pipelines** | Vertex AI AutoML & Tabular Workflows (`vertex_automl`) | Runs managed Tabular Workflow pipelines and AutoML training jobs (`vertex_l2l`, `vertex_tide`, `vertex_tft`, `vertex_seq2seq`) with Stage-1 HPO reuse and baseline attributions. | [models_reference.md](./models_reference.md) |
 | **Serverless & cluster Spark** | Dataproc Serverless & Dataproc on GCE (`spark`) | Runs Arrow-backed `applyInPandas` fan-out across serverless batches, managed clusters, or interactive Spark Connect sessions. | [runtimes_reference.md](./runtimes_reference.md) |
@@ -121,6 +122,7 @@ A single JSON file (or Python dictionary validated by `RunConfig`) defines an ex
 | `hpo` | Optuna trial budget, search spaces, and fleet-wide vs. per-series tuning. |
 | `ensemble` | Consensus (`mean`, `median`, `inverse_error`, `champion`, `horizon_specialist`), digital-twin OOF loss smoothing (`similarity_smoothing`), and learned stackers (`nnls`, `ridge`, `xgb`), plus `barrier` or `microbatch` execution. |
 | `hierarchy` | Aggregation levels (`levels`), latent similarity cluster hierarchy discovery (`similarity_hierarchy`, `similarity_n_clusters`), and coherent reconciliation methods (`reconciliation_methods`). |
+| `output` | Registry dataset routing (`registry_dataset`), quantiles, conformal / online ACI intervals (`calibration_method`), physical bounds, Newsvendor costs, and opt-in BigQuery `DataAgent` sync (`ensure_bq_agent`). |
 
 Full field-by-field specification: [Configuration reference](./configuration_reference.md).
 
@@ -146,7 +148,7 @@ flowchart TD
 4. **Cloud Composer 3 DAG generation (`--emit-airflow`):** Compiles a `RunConfig` into a self-contained Apache Airflow DAG with parallel per-family tasks.
 5. **Direct cluster embedding:** Embed `make_group_runner` (PySpark `applyInPandas`) or `make_chunk_runner` (Ray) inside an existing pipeline.
 
-**AI coding agents & MCP clients:** Every execution surface above is also exposed through the built-in Model Context Protocol server (`python -m scale_forecasting.mcp`, 12 tools including `compute_time_series_similarity`), the portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md), and the [`RunConfig` JSON Schema](./schemas/run_config.schema.json) — see [AI Agents, Portable Skills & Built-in MCP Server](./agent_and_mcp_guide.md).
+**AI coding agents, BigQuery Studio & MCP clients:** Every execution and review surface above is also exposed through the built-in Model Context Protocol server (`python -m scale_forecasting.mcp`, 14 tools including `ask_forecast_registry`, `compute_time_series_similarity`, and `optimize_inventory_clearance`), the stateful BigQuery Conversational Analytics `DataAgent` (`Forecaster.ensure_bq_agent()`, `Registry.ask()`), the portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md), and the [`RunConfig` JSON Schema](./schemas/run_config.schema.json) — see [AI Agents, Portable Skills & Built-in MCP Server](./agent_and_mcp_guide.md).
 
 Details: [Using the SDK](./using_the_sdk.md) and [Running and reviewing](./running_and_reviewing.md).
 
@@ -223,17 +225,23 @@ The deterministic generator ([`scale_forecasting.data_gen`](https://github.com/s
 
 ---
 
-## BigQuery registry, views, and operations
+## BigQuery registry, 11 analytical views, Knowledge Catalog & `DataAgent`
 
-Workers stream Arrow batches through the BigQuery Storage Write API into five append-only tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), exposed through **5 Analytical SQL Views**:
+Workers stream Arrow batches through the BigQuery Storage Write API into five self-documenting append-only tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), exposed through **11 Analytical SQL Views** (`5` core operational + `6` server-side diagnostic & S&OP views):
 
 - `v_model_leaderboard` — per-run model and ensemble ranking across accuracy, fit duration, and error rate.
 - `v_model_leaderboard_comparable` — holdout-fold pooled WAPE and MAE (`SUM(|y - yhat|) / SUM(|y|)`) so models are compared on identical series and fold windows.
 - `v_backtest_coverage` — achieved fold histogram and backtest status (`full`, `reduced`, `unscored`, `failed`) per model.
 - `v_run_summary` — one row per run with scaling knobs, the job-row time ledger (`n_jobs`, `longest_job_seconds`, `jobs_seconds`, `jobs_span_seconds`, `overhead_seconds`, `overhead_fraction`), and sizing/capacity telemetry.
 - `v_run_jobs` — deduplicated per-family execution trace with runtime, hardware, platform job ID, wall-clock bracket, and GPU `device_verdict`.
+- `v_fva_waterfall` — 6-stage Forecast Value Added (`1_naive` -> `6_reconciled`) lift over seasonal naive (`fva_relative_lift_pct`).
+- `v_horizon_decay` — per-step `horizon_step` pooled WAPE, MAE, bias, and empirical 80% interval coverage.
+- `v_bias_and_exceptions` — planner exception queue with Trigg's `tracking_signal`, Syntetos–Boylan (`sbc_class`), and `is_exception` triage reason.
+- `v_anomalies` — historical out-of-fold demand spikes and stockout dips (`|residual_zscore| >= 2.5`).
+- `v_feature_attributions` — unnested Tier 1 global (`fit_diagnostics.feature_attributions`) and Tier 2 horizon-local (`explanations`) driver importances.
+- `v_executive_sop_summary` — single-row executive S&OP scorecard per run (`champion_model`, `champion_pooled_wape`, `fva_relative_lift_pct`, `total_forecast_units`, `exception_rate`, `n_gpu_waste_jobs`).
 
-Day-2 management is built into `python -m scale_forecasting.registry.ops` and `sf.Registry`: `doctor` (health and quota audit), `close-runs` (reconcile stale headers), `retry_run` / `Forecaster.retry()` (surgical cell repair), `drop-run`, `sweep-orphans`, `reap-clusters`, `snapshot`, and `export`. Schemas and runbooks: [Output schemas](./output_schemas.md) and [Operations guide](./operations.md).
+Day-2 management and conversational analytics are built into `python -m scale_forecasting.registry.ops`, `python -m scale_forecasting.bq_agent`, and `sf.Registry`: `init()` (idempotently creates/migrates tables, deploys all 11 views, and backfills missing descriptions on pre-existing registries), `ensure_bq_agent()` (syncs **Knowledge Catalog** Business Glossary + DataProfile scans and registers a stateful BigQuery `DataAgent` scoped strictly to registry tables, 11 views, and discovered source tables), `ask()` (stateful multi-turn natural-language SQL + Vega-Lite queries defaulting to the latest `COMPLETED` run), `sop_summary_df()`, `doctor`, `close-runs`, `retry_run` / `Forecaster.retry()`, `drop-run`, `sweep-orphans`, `reap-clusters`, `snapshot`, and `export`. Schemas and runbooks: [Output schemas](./output_schemas.md), [Operations guide](./operations.md), and [AI Agents & MCP guide](./agent_and_mcp_guide.md).
 
 ---
 
@@ -256,6 +264,6 @@ flowchart TD
     DS3 & AR3 --> OP1
 ```
 
-- **12 interactive notebooks across 4 tracks:** From zero-GCP local exploration and glass-box auto-forecasting (`00`, `11`, `09`) to cloud runtimes (`01`–`04`), covariates/hierarchy/HPO/ensembles (`05`–`07`), and the multi-family master DAG & registry operations (`08`, `10`). Browse the [Notebook tour](./notebooks/README.md) or the guided [Hands-on workshop](./workshop.md).
+- **13 interactive notebooks across 4 tracks:** From zero-GCP local exploration and glass-box auto-forecasting (`00`, `11`, `09`) to cloud runtimes (`01`–`04`), covariates/hierarchy/HPO/ensembles (`05`–`07`), and the multi-family master DAG, registry operations, & conversational analytics (`08`, `10`, `12`). Browse the [Notebook tour](./notebooks/README.md) or the guided [Hands-on workshop](./workshop.md).
 - **Two-stage Terraform deployment (~15 minutes):** Stage 1 (`terraform/bootstrap`) provisions the remote state bucket; Stage 2 (`terraform/main`) provisions the VPC, service accounts, buckets, BigQuery dataset, container image (Cloud Build + Artifact Registry), Colab Enterprise runtime template, and the 100,000-series seed batch on Dataproc Serverless.
 - **Estimated deployment and runtime cost:** The one-time image build and 100,000-series seed batch typically cost an estimated **~\$0.25–\$1.00** in Cloud Build, Dataproc Serverless, and BigQuery Storage Write API usage. At rest, buckets, datasets, VPC networks, and service accounts have no compute charge (only standard Cloud Storage and BigQuery storage rates for stored bytes). Forecast runs bill per job for the duration of the batch, VM, pod, or query. **Ongoing cost disclosure:** Cloud Composer 3 (`create_composer = false` by default) and standing GKE clusters (`create_gke = false` by default) run continuously while provisioned and incur ongoing environment/cluster charges until disabled (and deleting a Composer environment leaves behind its Cloud Storage bucket until removed manually). See [Cost estimates & controls](./cost_estimates.md), [Choosing a runtime](./choosing_a_runtime.md), [Why Google Cloud](./why_google_cloud.md), [FAQ](./faq.md), [Glossary](./glossary.md), and [Deploying on GCP](./deploying_on_gcp.md).

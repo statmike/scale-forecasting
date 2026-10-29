@@ -116,9 +116,10 @@ uv sync                                                          # core + dev gr
 uv run python -m ipykernel install --user --name scale-forecasting --display-name "scale-forecasting (uv)"
 ```
 
-Three notebooks need **no** cluster and run locally or read-only: `00_model_playground.ipynb` (pure
-`worker.run_cell` / `run_panel_model`), `09_custom_models_and_metrics.ipynb` (custom 1-file plugins), and
-`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and a cross-platform review of every completed run in the registry, needing only the `SF_*` env + ADC). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, GKE, Vertex AI AutoML, Spark, and Ray.
+Five notebooks need **no** cluster and run locally or read-only: `00_model_playground.ipynb` (pure
+`worker.run_cell` / `run_panel_model` + offline `.sop_summary_df()` / `.ask()`), `09_custom_models_and_metrics.ipynb` (custom 1-file plugins),
+`11_auto_forecaster_and_autofocus.ipynb` (Glass-Box Auto-Forecaster, `autofocus`, and evolutionary search),
+`10_registry_operations_and_scale.ipynb` (registry doctor, live probes, and a cross-platform review of every completed run in the registry, needing only the `SF_*` env + ADC), and `12_conversational_analytics_and_knowledge_catalog.ipynb` (the 11 self-documenting SQL views, **Knowledge Catalog** Business Glossary & DataProfile scans, and stateful multi-turn BigQuery `DataAgent` Q&A with safe `probe_bq_agent()` check-and-run). The workflow notebooks `01`–`08` configure, explain, submit, live-monitor (`forecaster.run_live()`), and review runs across BigQuery, GCE, Vertex AI, GKE, Vertex AI AutoML, Spark, and Ray.
 
 **Python-version note.** The project pins Python **3.11** on every surface (why: Vertex Ray
 client↔cluster parity and the Dataproc packed-venv — see [version_matrix.md](./version_matrix.md)).
@@ -491,7 +492,7 @@ reg.drop_run("abc123", yes=True)
 
 | Verb | What it does |
 |------|--------------|
-| `init` | Create this registry's five tables + five views (idempotent). Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
+| `init` | Create this registry's five tables + eleven analytical SQL views (idempotent) and backfill any missing or outdated table, view, and column `OPTIONS(description='...')` onto pre-existing registries. Point `SF_REGISTRY_DATASET_ID` at a fresh dataset and this stands up a second registry. Does **not** touch the source panel. |
 | `doctor` | Read-only report: per-table row counts, runs still marked `RUNNING`, and artifact prefixes with no `run_registry` row. Touches nothing. |
 | `close-runs` | Finalize abandoned `RUNNING` headers to the status their own job rows already imply. Deletes nothing. Names no runs = every stuck header. |
 | `drop-run` | Delete named run(s) from every tier — GCS artifacts, BQML `sf_model_*` objects, then registry rows. Takes as many ids as you like. |
@@ -601,3 +602,4 @@ Two things you won't find here:
 | `python -m scale_forecasting.ensemble_run --config C [--run-id R] [--strategies …]` | Re-ensemble a completed run. |
 | `python -m scale_forecasting.playground --model M [--backtest]` | Run one model on sample data, offline (no GCP). |
 | `python -m scale_forecasting.registry.ops <verb>` | Manage the registry — `init` / `doctor` / `close-runs` / `drop-run` / `sweep-orphans` / `reap-clusters` / `snapshot` / `export`. |
+| `python -m scale_forecasting.bq_agent [--probe] [--ensure-agent] [--ask "..."]` | Check readiness (`--probe`), provision/refresh **Knowledge Catalog** Business Glossary terms, DataProfile scans, and the stateful BigQuery Conversational Analytics Agent (`sf-registry-<dataset>`), or ask multi-turn natural-language forecasting questions over the registry. See [Agent, MCP & BigQuery DataAgent guide](./agent_and_mcp_guide.md#51-live-verified-multi-turn--domain-qa-gallery). |

@@ -379,7 +379,8 @@ flowchart TD
     "underage_cost": 4.0,
     "overage_cost": 1.0,
     "calibration_method": "aci_normalized",
-    "aci_gamma": 0.05
+    "aci_gamma": 0.05,
+    "ensure_bq_agent": true
   },
   "ensemble": {
     "enabled": true,
@@ -439,9 +440,11 @@ assort_df = bo.optimize_assortment_df(max_skus=2)
 prepack_df = bo.optimize_prepacks_df(allow_eaches=True)
 rebal_df = bo.optimize_rebalancing_df(summary=True)
 
-# 5. Roll daily forecasts up to weekly replenishment buckets and export an interactive HTML + JSON report
+# 5. Roll daily forecasts up to weekly replenishment buckets, ask a natural-language question, and export HTML + JSON
 weekly_df = bo.rollup_time(freq="W")
 inv_df = bo.inventory_policy_df(lead_time=7.0, lead_time_std=1.0, service_level=0.95, on_hand=150.0, order_multiple=10.0)
+qa = bo.ask("Which model won on WAPE and what was the FVA lift over baseline?")
+print(qa.answer)
 bo.export_report("workbench_report.html", write_json=True)
 ```
 

@@ -55,7 +55,7 @@ from .settings import Settings
 try:
     __version__: str = _pkg_version("scale-forecasting")
 except PackageNotFoundError:  # pragma: no cover - zip-staged cloud worker without .dist-info
-    __version__ = "1.9.1"
+    __version__ = "1.10.0"
 
 # Lazy (heavy): name -> (module, attribute). Resolved on first access by ``__getattr__`` (PEP 562)
 # so the model modules (statsmodels et al., ~5s) load only when a caller actually reaches for the
@@ -442,6 +442,20 @@ _LAZY: dict[str, tuple[str, str]] = {
         ".ensembler",
         "smooth_oof_losses_by_similarity",
     ),
+    # Stateful BigQuery Conversational Analytics Agent & Knowledge Catalog (Track D.1).
+    "BQAgentProbeResult": (".bq_agent", "BQAgentProbeResult"),
+    "BQAgentRegistration": (".bq_agent", "BQAgentRegistration"),
+    "BQAgentResponse": (".bq_agent", "BQAgentResponse"),
+    "BQAgentScope": (".bq_agent", "BQAgentScope"),
+    "GLOSSARY_TERMS": (".bq_agent", "GLOSSARY_TERMS"),
+    "build_golden_queries": (".bq_agent", "build_golden_queries"),
+    "ensure_registry_agent": (".bq_agent", "ensure_registry_agent"),
+    "ask_registry": (".bq_agent", "ask_registry"),
+    "get_registry_agent": (".bq_agent", "get_registry_agent"),
+    "delete_registry_agent": (".bq_agent", "delete_registry_agent"),
+    "probe_bq_agent_access": (".bq_agent", "probe_bq_agent_access"),
+    "sync_knowledge_catalog_glossary": (".bq_agent", "sync_knowledge_catalog_glossary"),
+    "ensure_knowledge_catalog_scans": (".bq_agent", "ensure_knowledge_catalog_scans"),
 }
 
 __all__ = [
@@ -507,6 +521,21 @@ if TYPE_CHECKING:  # so IDEs / type-checkers see the lazy names as real imports 
         list_public_benchmarks,
         load_benchmark,
         public_benchmark_catalog,
+    )
+    from .bq_agent import (  # noqa: F401
+        GLOSSARY_TERMS,
+        BQAgentProbeResult,
+        BQAgentRegistration,
+        BQAgentResponse,
+        BQAgentScope,
+        ask_registry,
+        build_golden_queries,
+        delete_registry_agent,
+        ensure_knowledge_catalog_scans,
+        ensure_registry_agent,
+        get_registry_agent,
+        probe_bq_agent_access,
+        sync_knowledge_catalog_glossary,
     )
     from .clearance_optimizer import (  # noqa: F401
         ASSORTMENT_OPTIMIZER_COLUMNS,

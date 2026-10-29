@@ -1,10 +1,11 @@
 """Built-in Model Context Protocol (MCP) server for `scale-forecasting` over `stdio`.
 
 Exposes the platform's configuration schema, canonical catalogs (37 models, 21 metrics, 7 runtimes,
-4 GPU types, 13 extras, 5 views, 62 shipped configs), environment readiness probe, offline model
+4 GPU types, 13 extras, 11 views, 62 shipped configs), environment readiness probe, offline model
 playground, `RunConfig` validator and DAG planner, Airflow DAG emitter, and live BigQuery registry
-inspection/review/repair tools to any MCP-compatible AI coding agent (Google Antigravity `agy` CLI
-& IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI Codex CLI).
+inspection/review/repair/conversational analytics tools to any MCP-compatible AI coding agent
+(Google Antigravity `agy` CLI & IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI
+Codex CLI).
 
 Zero extra dependencies are required: the server runs on a bare ``pip install scale-forecasting``
 core installation using the Python standard library and Pydantic. Tools that query or mutate Google
@@ -56,8 +57,9 @@ from .metrics import METRIC_NAMES, get_metric
 from .models import get_model, list_models
 from .registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NAMES
 from .registry.ids import make_run_id
+from .registry.metadata import TABLE_DESCRIPTIONS, VIEW_DESCRIPTIONS
 from .registry.reads import RECENT_RUNS_COLUMNS
-from .registry.views import VIEW_NAMES
+from .registry.views import CORE_VIEW_NAMES, DIAGNOSTIC_VIEW_NAMES, VIEW_NAMES
 
 __all__ = [
     "MCP_PROTOCOL_VERSION",
@@ -203,6 +205,10 @@ def _build_views_catalog() -> dict[str, Any]:
         ],
         "registry_tables": list(REGISTRY_TABLE_NAMES),
         "analytical_views": list(VIEW_NAMES),
+        "core_views": list(CORE_VIEW_NAMES),
+        "diagnostic_views": list(DIAGNOSTIC_VIEW_NAMES),
+        "table_descriptions": dict(TABLE_DESCRIPTIONS),
+        "view_descriptions": dict(VIEW_DESCRIPTIONS),
         "recent_runs_columns": list(RECENT_RUNS_COLUMNS),
     }
 
@@ -270,7 +276,7 @@ class McpServer:
                 "uri": "forecast://catalog/views",
                 "name": "BigQuery Source Tables, Registry Tables & Views",
                 "description": (
-                    "The 4 source tables, 5 registry tables, and 5 analytical SQL views."
+                    "The 4 source tables, 5 registry tables, and 11 analytical SQL views."
                 ),
                 "mimeType": "application/json",
             },
@@ -313,7 +319,7 @@ class McpServer:
         }
 
     def list_tools(self) -> list[dict[str, Any]]:
-        """Return the 13 MCP tools exposed by this server."""
+        """Return the 14 MCP tools exposed by this server."""
         from .benchmarks import list_benchmarks
 
         return [
@@ -335,7 +341,7 @@ class McpServer:
                 "name": "list_catalog",
                 "description": (
                     "Query the canonical catalogs of models (37), metrics (21), runtimes (7), "
-                    "GPUs (4), dependency extras (13), BigQuery views (5), shipped configs (62), "
+                    "GPUs (4), dependency extras (13), BigQuery views (11), shipped configs (62), "
                     "synthetic DGP benchmarks (20), or Auto-Forecaster exposure tiers & scale "
                     "regimes."
                 ),
@@ -1958,6 +1964,84 @@ class McpServer:
                             "description": (
                                 "For mode='rebalancing': maximum eligible transfer transit time."
                             ),
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "ask_forecast_registry",
+                "description": (
+                    "Ask a natural-language forecasting, diagnostic, FVA, horizon-decay, "
+                    "anomaly, feature-attribution, or S&OP rollup question against either a "
+                    "stateful BigQuery Conversational Analytics DataAgent (backed by Knowledge "
+                    "Catalog glossary & the 11 registry SQL views) or an offline Playground run."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "Natural-language question about forecast runs.",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "bigquery_agent", "offline_playground", "probe"],
+                            "default": "auto",
+                            "description": (
+                                "'bigquery_agent' queries the stateful BigQuery DataAgent; "
+                                "'offline_playground' runs offline on synthetic panel data; "
+                                "'probe' checks Conversational Analytics & Knowledge Catalog API "
+                                "readiness without raising; 'auto' selects BigQuery when ready, "
+                                "else offline_playground."
+                            ),
+                        },
+                        "run_id": {
+                            "type": "string",
+                            "default": "latest",
+                            "description": (
+                                "Target run_id ('latest' for newest COMPLETED run, 'all' for "
+                                "cross-run queries, or an exact/prefix run_id)."
+                            ),
+                        },
+                        "project_id": {
+                            "type": "string",
+                            "description": "Optional GCP project ID override.",
+                        },
+                        "dataset_id": {
+                            "type": "string",
+                            "description": "Optional BigQuery registry dataset ID override.",
+                        },
+                        "conversation_id": {
+                            "type": "string",
+                            "description": "Optional conversation_id for stateful follow-up turns.",
+                        },
+                        "stateful": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Persist multi-turn conversation state in BigQuery.",
+                        },
+                        "auto_ensure_agent": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Provision the BigQuery DataAgent automatically if not yet created."
+                            ),
+                        },
+                        "model": {
+                            "type": "string",
+                            "default": "holtwinters",
+                            "description": "Model name when mode='offline_playground'.",
+                        },
+                        "horizon": {
+                            "type": "integer",
+                            "default": 14,
+                            "description": "Forecast horizon when mode='offline_playground'.",
+                        },
+                        "n_series": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Series count when mode='offline_playground'.",
                         },
                     },
                     "additionalProperties": False,
@@ -3849,6 +3933,83 @@ class McpServer:
                     else None
                 ),
             }
+
+        if name == "ask_forecast_registry":
+            import os
+
+            req_mode = str(args.get("mode", "auto")).strip().lower()
+            proj_arg = args.get("project_id") or os.environ.get("SF_PROJECT_ID")
+            ds_arg = (
+                args.get("dataset_id")
+                or os.environ.get("SF_REGISTRY_DATASET_ID")
+                or os.environ.get("SF_DATASET_ID")
+            )
+            if req_mode == "probe":
+                from .bq_agent.probe import probe_bq_agent_access
+
+                return probe_bq_agent_access(
+                    project_id=str(proj_arg) if proj_arg else None,
+                    dataset_id=str(ds_arg) if ds_arg else None,
+                ).to_dict()
+
+            question = str(args.get("question", "")).strip()
+            if not question:
+                raise ValueError("question must be a non-empty string")
+            conv_id = args.get("conversation_id")
+
+            eff_mode = req_mode
+            if eff_mode == "auto":
+                if proj_arg and probe_environment(self.repo_root)["extras"]["gcp"]["installed"]:
+                    from .bq_agent.probe import probe_bq_agent_access
+
+                    eff_mode = (
+                        "bigquery_agent"
+                        if probe_bq_agent_access(
+                            project_id=str(proj_arg),
+                            dataset_id=str(ds_arg) if ds_arg else None,
+                        ).ready
+                        else "offline_playground"
+                    )
+                else:
+                    eff_mode = "offline_playground"
+
+            if eff_mode == "offline_playground":
+                from . import playground
+                from .bq_agent.offline import ask_offline
+
+                model_name = str(args.get("model", "holtwinters"))
+                horizon = int(args.get("horizon", 14))
+                n_series = int(args.get("n_series", 3))
+                panel = playground.sample_data(n_series=max(1, n_series), with_exog=True)
+                bakeoff_models: list[str] = (
+                    ["naive_seasonal", model_name]
+                    if model_name != "naive_seasonal"
+                    else ["naive_seasonal", "holtwinters"]
+                )
+                bo = playground.bakeoff(data=panel, models=bakeoff_models, horizon=horizon)
+                resp = ask_offline(bo, question, conversation_id=conv_id)
+                return resp.to_dict()
+
+            if eff_mode == "bigquery_agent":
+                from .bq_agent.client import ask_registry
+                from .errors import require_extra
+
+                require_extra("gcp", purpose="BigQuery Conversational Analytics Agent")
+                resp = ask_registry(
+                    question,
+                    run_id=str(args.get("run_id", "latest")),
+                    conversation_id=conv_id,
+                    stateful=bool(args.get("stateful", True)),
+                    auto_ensure_agent=bool(args.get("auto_ensure_agent", True)),
+                    project_id=str(proj_arg) if proj_arg else None,
+                    dataset_id=str(ds_arg) if ds_arg else None,
+                )
+                return resp.to_dict()
+
+            raise ValueError(
+                f"Unknown ask_forecast_registry mode {req_mode!r}; expected "
+                "'auto', 'probe', 'bigquery_agent', or 'offline_playground'."
+            )
 
         raise ValueError(f"Unknown tool: {name!r}")
 

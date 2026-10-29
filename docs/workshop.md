@@ -46,7 +46,7 @@ In this hands-on workshop, you will deploy and operate **`scale-forecasting`** �
 2. **Unified Modeling Contract:** Train, backtest, and evaluate 37 statistical, machine learning, deep learning, foundation, Vertex AI AutoML, and BigQuery SQL models with zero code changes.
 3. **Multi-Engine Hybrid Execution:** Run Spark, Ray, Vertex `CustomJob`, GCE Single-VM, GKE, Vertex AI AutoML (`vertex_automl`), and BigQuery ML concurrently under a single declarative configuration and deterministic `run_id`.
 4. **Stacked Ensembling:** Train meta-learners (Non-Negative Least Squares, Ridge, XGBoost) over out-of-fold predictions to outperform any single model.
-5. **Operational Observability:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, and inspect 5 analytical SQL views.
+5. **Operational Observability & Conversational Analytics:** Stream real-time cell telemetry into BigQuery via the Storage Write API, track live progress bars, inspect 11 self-documenting analytical SQL views, and query runs in natural language via **Knowledge Catalog** and the stateful BigQuery `DataAgent` (`sf-registry-<dataset>`).
 6. **Enterprise Scale & Parity:** Benchmark 100,000 time series across distributed engines and verify cross-platform numerical parity.
 
 ---
@@ -260,10 +260,11 @@ Every notebook includes a direct **Run in Colab Enterprise** badge in its header
 ### Lab 6: Registry Operations, Live Monitoring & Cross-Platform Run Review
 **Notebook:** [`notebooks/10_registry_operations_and_scale.ipynb`](notebooks/10_registry_operations_and_scale.ipynb)  
 **Duration:** 20 minutes  
-**Goal:** Operate the platform day-to-day — audit the registry and its 5 analytical SQL views, reattach to historical runs, compare completed runs across every runtime, and export production Airflow DAGs.
+**Goal:** Operate the platform day-to-day — audit the registry and its 11 self-documenting analytical SQL views, sync **Knowledge Catalog** Business Glossary terms and `DataProfile` scans, converse with the stateful BigQuery `DataAgent`, compare completed runs across every runtime, and export production Airflow DAGs.
 
 #### Key Highlights
 - Run pre-flight health checks (`Registry.doctor()`), live cloud resource probes (`Registry.probe()`), and `Forecaster.run_live()`.
+- Inspect executive S&OP scorecards (`Registry.sop_summary_df()`), register `sf-registry-<dataset>` (`Registry.ensure_bq_agent()`), and ask multi-turn stateful questions (`Registry.ask(..., conversation_id=...)`) in Act 6.
 - Compare 100,000-series benchmark runs across Dataproc Spark, Vertex AI Ray, and BigQuery ML (`Registry.compare()`).
 - Export standalone Cloud Composer 3 / Airflow DAG Python files via `Forecaster.emit_airflow()`.
 

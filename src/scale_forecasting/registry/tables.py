@@ -81,6 +81,7 @@ def ensure_tables(
         render_deployment_ddl,
         render_migrations,
     )
+    from .metadata import sync_existing_descriptions
 
     resolved = resolve_settings(settings)
     # Registry tables land in the registry dataset, source tables in the source dataset. These are
@@ -113,8 +114,21 @@ def ensure_tables(
         except Exception as exc:  # re-raised with table context
             raise RegistryError(f"ensure_tables failed migrating {name}: {exc}") from exc
 
+    # Backfill or refresh table and column descriptions on pre-existing registries created by
+    # earlier releases (CREATE TABLE IF NOT EXISTS is a no-op when the table already exists).
+    sync_existing_descriptions(client, resolved.registry_dataset_ref, REGISTRY_TABLE_NAMES)
+    sync_existing_descriptions(
+        client,
+        resolved.dataset_ref,
+        (
+            *SOURCE_TABLE_NAMES,
+            "source_series_covariates_iceberg",
+            "source_series_covariates_native",
+        ),
+    )
+
     # Curated analyst views sit on top of the tables — create them in the same setup pass so the
-    # reviewable read surface (v_run_summary / v_model_leaderboard) exists after any run.
+    # reviewable read surface (v_run_summary / v_model_leaderboard / diagnostic views) exists.
     ensure_views(settings=resolved)
 
 
@@ -130,7 +144,8 @@ def ensure_views(
     from google.cloud import bigquery
 
     from ..errors import RegistryError
-    from .views import render_create_views
+    from .metadata import sync_existing_descriptions
+    from .views import VIEW_NAMES, render_create_views
 
     resolved = resolve_settings(settings)
     views = render_create_views(resolved.registry_dataset_ref)
@@ -140,6 +155,7 @@ def ensure_views(
             client.query(statement).result()
         except Exception as exc:  # re-raised with view context
             raise RegistryError(f"ensure_views failed creating {name}: {exc}") from exc
+    sync_existing_descriptions(client, resolved.registry_dataset_ref, VIEW_NAMES)
 
 
 # There is deliberately no `drop_all` here, and no CLI that calls one. Dropping a registry

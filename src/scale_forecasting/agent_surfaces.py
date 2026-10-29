@@ -291,7 +291,7 @@ _ENV_VARS_DOC: tuple[tuple[str, bool, str, str], ...] = (
         "SF_REGISTRY_DATASET_ID",
         False,
         "<SF_DATASET_ID>",
-        "Optional separate BigQuery dataset for the 5 registry tables and 5 views.",
+        "Optional separate BigQuery dataset for the 5 registry tables and 11 views.",
     ),
     (
         "SF_REGION",
@@ -1133,8 +1133,9 @@ def render_skill_catalog_reference(repo_root: Path | None = None) -> str:
             ),
             (
                 f"| **Analytical SQL Views ({len(VIEW_NAMES)})** | {views_inline} | "
-                "Deduplicated leaderboards, comparable cohort rankings, backtest fold coverage, "
-                "run time ledger (`overhead_seconds >= 0`), and current job state. |"
+                "Self-documenting leaderboards, comparable cohort rankings, backtest fold "
+                "coverage, run time & job ledgers, FVA waterfall, horizon decay, Trigg bias & "
+                "exceptions, anomaly flags, feature attributions, and executive S&OP summary. |"
             ),
             "",
             "---",
@@ -1568,6 +1569,13 @@ def render_skill_execution_paths_reference() -> str:
                 "`f.evolve(target='ensemble')` / `f.evolve(target='similarity_kernel')` / "
                 "`Forecaster.evolve(from_run_ids=[...], target='ensemble')` |"
             ),
+            (
+                "| **Knowledge Catalog & Stateful BigQuery `DataAgent` (`bq_agent`)** | "
+                "`python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure` / "
+                '`--ask "Which model won on WAPE and why?"` | '
+                '`Forecaster.ensure_bq_agent()` / `f.ask("...")` / `f.sop_summary_df()` / '
+                '`Registry.ask("...")` |'
+            ),
             "",
             "---",
             "",
@@ -1582,7 +1590,8 @@ def render_skill_execution_paths_reference() -> str:
             "| :--- | :--- | :--- |",
             (
                 "| `init` | `python -m scale_forecasting.registry.ops init` | "
-                "Idempotently create the 5 registry tables and 5 analytical SQL views. |"
+                "Idempotently create the 5 registry tables and 11 analytical SQL views, and "
+                "sync missing column/table descriptions. |"
             ),
             (
                 "| `doctor` | `python -m scale_forecasting.registry.ops doctor` | "
@@ -1640,7 +1649,8 @@ def render_llms_txt() -> str:
                 "`vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, "
                 "conformal/quantile calibration (`conformal`, `aci`, `aci_normalized`), FPP3 "
                 "spatial/temporal/cross-temporal hierarchical reconciliation, and stacked "
-                "ensembling into a 5-table, 5-view BigQuery registry."
+                "ensembling into a self-documenting 5-table, 11-view BigQuery registry with "
+                "Knowledge Catalog and a stateful BigQuery Conversational Analytics `DataAgent`."
             ),
             "",
             "## Agent-First Surfaces (MCP, Skills & Schemas)",
@@ -1792,7 +1802,8 @@ def render_llms_txt() -> str:
             ),
             (
                 f"- [Output Schemas & Views]({_SITE_BASE}/output_schemas/): DDL and query "
-                "recipes for the 5 registry tables and 5 analytical views."
+                "recipes for the 5 registry tables, 11 self-documenting analytical views, and "
+                "Knowledge Catalog / BigQuery DataAgent."
             ),
             (
                 f"- [Operations & Surgical Repair]({_SITE_BASE}/operations/): Probing, settling, "
@@ -1800,7 +1811,7 @@ def render_llms_txt() -> str:
             ),
             (
                 f"- [Live Validation Ledger]({_SITE_BASE}/validation/): Proven `run_id` records "
-                "across 42 smokes, 20 demo configs, and 12 notebooks."
+                "across 42 smokes, 20 demo configs, and 13 notebooks."
             ),
             "",
         ]

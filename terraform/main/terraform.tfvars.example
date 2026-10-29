@@ -13,6 +13,7 @@ budget_amount_usd = 200
 
 # --- BYO toggles (defaults shown) ---
 # enable_apis             = true
+# enable_bq_agent         = true    # Knowledge Catalog + BigQuery Conversational Analytics (free at rest; false if restricted by org policy)
 # create_service_accounts = true
 # create_composer         = false   # keep off — provisions Airflow (~$300-400/mo); opt in when you want scheduled DAGs
 # build_image             = true    # build+push the runtime image on apply; false = you build it yourself

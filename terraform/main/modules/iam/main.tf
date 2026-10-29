@@ -46,6 +46,12 @@ variable "enable_alphaevolve" {
   default     = false
 }
 
+variable "enable_bq_agent" {
+  description = "When true (default), bind least-privilege Knowledge Catalog & BigQuery Conversational Analytics roles to scale-forecasting-runner."
+  type        = bool
+  default     = true
+}
+
 # --- the accounts --------------------------------------------------------------
 
 resource "google_service_account" "runner" {
@@ -87,36 +93,43 @@ locals {
   # values). Keys read as the role's short name; `connection` is the custom sfConnectionDelegate.
   runner_roles = merge(
     {
-      "bq.dataEditor"    = "roles/bigquery.dataEditor"            # write registry rows + create tables
-      "bq.jobUser"       = "roles/bigquery.jobUser"               # run queries / load jobs
-      "bq.readSession"   = "roles/bigquery.readSessionUser"       # Storage Read API: notebooks/tools read result + leaderboard tables as the runner SA (headless acceptance + human Colab-open both run AS this SA)
-      "connection"       = local.connection_role                  # get/use/delegate the BigLake connection
-      "storage.objAdmin" = "roles/storage.objectAdmin"            # warehouse + artifacts + code buckets
-      "dataproc.editor"  = "roles/dataproc.editor"                # submit Dataproc Serverless batches & ephemeral clusters
-      "aiplatform.user"  = "roles/aiplatform.user"                # submit Ray on Vertex, Vertex CustomJob, and Vertex AI AutoML jobs
-      "dataflow.dev"     = "roles/dataflow.developer"             # allow Vertex AI Tabular Workflows (automl_mode="tabular_workflow") to launch Dataflow FTE jobs
-      "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1"       # create/delete ephemeral GCE single-VM (runtime="gce") instances + compute.regions.get quota preflight
+      "bq.dataEditor"    = "roles/bigquery.dataEditor"               # write registry rows + create tables
+      "bq.jobUser"       = "roles/bigquery.jobUser"                  # run queries / load jobs
+      "bq.readSession"   = "roles/bigquery.readSessionUser"          # Storage Read API: notebooks/tools read result + leaderboard tables as the runner SA (headless acceptance + human Colab-open both run AS this SA)
+      "connection"       = local.connection_role                     # get/use/delegate the BigLake connection
+      "storage.objAdmin" = "roles/storage.objectAdmin"               # warehouse + artifacts + code buckets
+      "dataproc.editor"  = "roles/dataproc.editor"                   # submit Dataproc Serverless batches & ephemeral clusters
+      "aiplatform.user"  = "roles/aiplatform.user"                   # submit Ray on Vertex, Vertex CustomJob, and Vertex AI AutoML jobs
+      "dataflow.dev"     = "roles/dataflow.developer"                # allow Vertex AI Tabular Workflows (automl_mode="tabular_workflow") to launch Dataflow FTE jobs
+      "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1"          # create/delete ephemeral GCE single-VM (runtime="gce") instances + compute.regions.get quota preflight
       "serviceusage.use" = "roles/serviceusage.serviceUsageConsumer" # read live project quota ceilings (serviceusage.quotas.get) for dynamic 6-runtime preflight
-      "ray.cluster"      = local.ray_cluster_role                 # create/delete the Ray cluster it runs on
-      "container.admin"  = "roles/container.admin"                # provision ephemeral GKE clusters + dispatch K8s Indexed Jobs / Ray on GKE
-      "composer.worker"  = "roles/composer.worker"                # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
+      "ray.cluster"      = local.ray_cluster_role                    # create/delete the Ray cluster it runs on
+      "container.admin"  = "roles/container.admin"                   # provision ephemeral GKE clusters + dispatch K8s Indexed Jobs / Ray on GKE
+      "composer.worker"  = "roles/composer.worker"                   # Composer runs AS this SA: env workers need logging.logEntries.create + monitoring/storage (Google's prescribed env-SA role). Inert until create_composer = true.
     },
+    var.enable_bq_agent ? {
+      "catalog.editor" = "roles/dataplex.catalogEditor"             # Knowledge Catalog: sync Business Glossaries, Terms, and EntryLinks on scoped registry objects
+      "catalog.scans"  = "roles/dataplex.dataScanEditor"            # Knowledge Catalog: provision & run DataProfile scans on physical registry/source tables
+      "bqAgent.owner"  = "roles/geminidataanalytics.dataAgentOwner" # BigQuery Conversational Analytics: register/update DataAgents + stateful conversations
+      "bqAgent.query"  = "roles/geminidataanalytics.queryDataUser"  # BigQuery Conversational Analytics: execute agent-generated SQL against scoped tables/views
+      "companion.user" = "roles/cloudaicompanion.user"              # Gemini for Google Cloud companion service invocation for DataAgents
+    } : {},
     var.enable_alphaevolve ? {
-      "discoveryengine"  = "roles/discoveryengine.admin"          # Gemini Enterprise AlphaEvolve experiments (scale_forecasting.evolve, opt-in; runner SA only)
+      "discoveryengine" = "roles/discoveryengine.admin" # Gemini Enterprise AlphaEvolve experiments (scale_forecasting.evolve, opt-in; runner SA only)
     } : {},
   )
   compute_roles = {
     "bq.dataEditor"    = "roles/bigquery.dataEditor" # read source_series, write results
     "bq.jobUser"       = "roles/bigquery.jobUser"
-    "bq.readSession"   = "roles/bigquery.readSessionUser" # Storage Read API: spark-bigquery connector reads source_series
-    "connection"       = local.connection_role            # get/use/delegate the BigLake connection
-    "storage.objAdmin" = "roles/storage.objectAdmin"      # read/write model artifacts
-    "dataproc.worker"  = "roles/dataproc.worker"          # batch RUNTIME SA: logs/metrics/staging
-    "dataflow.worker"  = "roles/dataflow.worker"          # Tabular Workflow Feature Transform Engine Dataflow workers
-    "dataflow.dev"     = "roles/dataflow.developer"       # Tabular Workflow pipeline step submits/polls Dataflow FTE jobs
-    "aiplatform.user"  = "roles/aiplatform.user"          # Tabular Workflow pipeline steps submit Stage-1/2 jobs + upload Model
-    "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1" # allow GCE single-VM guest COS `trap cleanup EXIT` REST API self-delete on completion
-    "artifactreg.read" = "roles/artifactregistry.reader"  # pull the custom Spark runtime image
+    "bq.readSession"   = "roles/bigquery.readSessionUser"            # Storage Read API: spark-bigquery connector reads source_series
+    "connection"       = local.connection_role                       # get/use/delegate the BigLake connection
+    "storage.objAdmin" = "roles/storage.objectAdmin"                 # read/write model artifacts
+    "dataproc.worker"  = "roles/dataproc.worker"                     # batch RUNTIME SA: logs/metrics/staging
+    "dataflow.worker"  = "roles/dataflow.worker"                     # Tabular Workflow Feature Transform Engine Dataflow workers
+    "dataflow.dev"     = "roles/dataflow.developer"                  # Tabular Workflow pipeline step submits/polls Dataflow FTE jobs
+    "aiplatform.user"  = "roles/aiplatform.user"                     # Tabular Workflow pipeline steps submit Stage-1/2 jobs + upload Model
+    "compute.vmAdmin"  = "roles/compute.instanceAdmin.v1"            # allow GCE single-VM guest COS `trap cleanup EXIT` REST API self-delete on completion
+    "artifactreg.read" = "roles/artifactregistry.reader"             # pull the custom Spark runtime image
     "gke.nodeSa"       = "roles/container.defaultNodeServiceAccount" # GKE worker node telemetry + system logging/monitoring
   }
 
@@ -127,38 +140,38 @@ locals {
   # query) needs BigQuery job + dataset read (roles/bigquery.jobUser + a dataViewer/readSession grant
   # on the registry dataset); that is granted where the operator is bound, not in these roles.
   probe_reader_perms = [
-    "dataproc.batches.get",               # Dataproc Serverless: batch state
-    "dataproc.jobs.get",                  # Dataproc cluster: job state
-    "bigquery.jobs.list",                 # native family: resolve the run's jobs by id prefix
-    "bigquery.jobs.get",                  # ...and read each statement's state
-    "aiplatform.persistentResources.get", # Ray: reach the cluster to read job status
-    "aiplatform.customJobs.get",          # Vertex CustomJob: read job state by resource name
-    "aiplatform.customJobs.list",         # Vertex CustomJob: resolve job state by display_name
-    "aiplatform.pipelineJobs.get",        # Vertex Tabular Workflow: read PipelineJob state by resource name
-    "aiplatform.pipelineJobs.list",       # Vertex Tabular Workflow: resolve PipelineJob by display_name
+    "dataproc.batches.get",                     # Dataproc Serverless: batch state
+    "dataproc.jobs.get",                        # Dataproc cluster: job state
+    "bigquery.jobs.list",                       # native family: resolve the run's jobs by id prefix
+    "bigquery.jobs.get",                        # ...and read each statement's state
+    "aiplatform.persistentResources.get",       # Ray: reach the cluster to read job status
+    "aiplatform.customJobs.get",                # Vertex CustomJob: read job state by resource name
+    "aiplatform.customJobs.list",               # Vertex CustomJob: resolve job state by display_name
+    "aiplatform.pipelineJobs.get",              # Vertex Tabular Workflow: read PipelineJob state by resource name
+    "aiplatform.pipelineJobs.list",             # Vertex Tabular Workflow: resolve PipelineJob by display_name
     "aiplatform.hyperparameterTuningJobs.get",  # Vertex Tabular Workflow Stage-1 tuner: read trial counts
     "aiplatform.hyperparameterTuningJobs.list", # Vertex Tabular Workflow Stage-1 tuner: list child tuning jobs
-    "aiplatform.trainingPipelines.get",   # Vertex AutoML TrainingJob: read TrainingPipeline state
-    "aiplatform.trainingPipelines.list",  # Vertex AutoML TrainingJob: resolve TrainingPipeline by display_name
-    "compute.instances.get",              # GCE single-VM runtime: read VM state by instance name
-    "compute.instances.list",             # GCE single-VM runtime: list VMs across candidate zones
-    "container.clusters.get",             # GKE runtime: read cluster endpoint/status
-    "container.clusters.list",            # GKE runtime: resolve zonal/regional cluster by name
-    "container.jobs.get",                 # GKE runtime: read Kubernetes batch/v1 Job status
-    "container.pods.get",                 # GKE runtime: read Kubernetes Pod status
-    "container.pods.list",                # GKE runtime: list Pods for a Kubernetes Job
+    "aiplatform.trainingPipelines.get",         # Vertex AutoML TrainingJob: read TrainingPipeline state
+    "aiplatform.trainingPipelines.list",        # Vertex AutoML TrainingJob: resolve TrainingPipeline by display_name
+    "compute.instances.get",                    # GCE single-VM runtime: read VM state by instance name
+    "compute.instances.list",                   # GCE single-VM runtime: list VMs across candidate zones
+    "container.clusters.get",                   # GKE runtime: read cluster endpoint/status
+    "container.clusters.list",                  # GKE runtime: resolve zonal/regional cluster by name
+    "container.jobs.get",                       # GKE runtime: read Kubernetes batch/v1 Job status
+    "container.pods.get",                       # GKE runtime: read Kubernetes Pod status
+    "container.pods.list",                      # GKE runtime: list Pods for a Kubernetes Job
   ]
   job_canceller_perms = concat(local.probe_reader_perms, [
-    "dataproc.batches.delete",     # Serverless has no cancel — deleting a running batch stops it
-    "dataproc.jobs.cancel",        # Dataproc cluster job cancel
-    "aiplatform.customJobs.cancel",# Vertex CustomJob cancel
+    "dataproc.batches.delete",                    # Serverless has no cancel — deleting a running batch stops it
+    "dataproc.jobs.cancel",                       # Dataproc cluster job cancel
+    "aiplatform.customJobs.cancel",               # Vertex CustomJob cancel
     "aiplatform.pipelineJobs.cancel",             # Vertex Tabular Workflow PipelineJob cancel
     "aiplatform.hyperparameterTuningJobs.cancel", # Vertex Tabular Workflow Stage-1 tuner early-stop cancel
     "aiplatform.trainingPipelines.cancel",        # Vertex AutoML TrainingPipeline cancel
-    "compute.instances.delete",    # GCE single-VM runtime: delete running instance
-    "container.clusters.delete",   # GKE runtime: tear down ephemeral GKE cluster
-    "container.jobs.delete",       # GKE runtime: delete running Kubernetes Job
-    "bigquery.jobs.update",        # cancel a running BigQuery statement
+    "compute.instances.delete",                   # GCE single-VM runtime: delete running instance
+    "container.clusters.delete",                  # GKE runtime: tear down ephemeral GKE cluster
+    "container.jobs.delete",                      # GKE runtime: delete running Kubernetes Job
+    "bigquery.jobs.update",                       # cancel a running BigQuery statement
     # Ray stop_job goes through the cluster dashboard — no IAM verb beyond persistentResources.get.
   ])
 

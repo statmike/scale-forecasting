@@ -465,7 +465,7 @@ def test_mcp_run_auto_forecast_supports_evolve_target_while_keeping_11_tools(
     """MCP `run_auto_forecast` dispatches to `Forecaster.evolve` when `evolve_target` is set."""
     server = McpServer(repo_root=REPO_ROOT)
     tools = server.list_tools()
-    assert len(tools) == 13
+    assert len(tools) == 14
     auto_tool = next(t for t in tools if t["name"] == "run_auto_forecast")
     props = auto_tool["inputSchema"]["properties"]
     assert "evolve_target" in props

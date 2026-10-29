@@ -117,6 +117,7 @@ nav:
           - notebooks/09_custom_models_and_metrics.ipynb
           - notebooks/10_registry_operations_and_scale.ipynb
           - notebooks/11_auto_forecaster_and_autofocus.ipynb
+          - notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb
   - Reference:
       - Architecture: architecture.md
       - Compute runtimes: runtimes_reference.md
@@ -150,6 +151,7 @@ nav:
       - evolve: api/evolve.md
       - Synthetic DGP benchmarks: api/benchmarks.md
       - AI agent surfaces & probe: api/agent_surfaces.md
+      - BigQuery Registry Agent & Knowledge Catalog: api/bq_agent.md
       - MCP server (stdio): api/mcp.md
       - Run inspection & review: api/review.md
       - Model playground: api/playground.md

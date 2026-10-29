@@ -6,6 +6,7 @@ module "apis" {
   source             = "./modules/apis"
   project_id         = var.project_id
   enable             = var.enable_apis
+  enable_bq_agent    = var.enable_bq_agent
   enable_alphaevolve = var.enable_alphaevolve
 }
 
@@ -15,6 +16,7 @@ module "iam" {
   create             = var.create_service_accounts
   runner_email       = var.runner_sa_email
   compute_email      = var.compute_sa_email
+  enable_bq_agent    = var.enable_bq_agent
   enable_alphaevolve = var.enable_alphaevolve
 
   depends_on = [module.apis]

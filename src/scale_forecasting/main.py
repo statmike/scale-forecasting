@@ -434,6 +434,14 @@ def run(
             f"run {run_id} finished {status}: {', '.join(failed)} did not complete "
             f"(per-family cell tallies in run_jobs.job_telemetry.$.cells)"
         )
+    if cfg.output.ensure_bq_agent:
+        try:
+            from .bq_agent.client import ensure_registry_agent
+
+            agent_reg = ensure_registry_agent(settings=settings)
+            _log.info("registered BigQuery Conversational Agent: %s", agent_reg.agent_name)
+        except Exception as exc:  # noqa: BLE001 - post-run agent registration must not fail completed forecast
+            _log.warning("ensure_bq_agent did not complete for run %s: %s", run_id, exc)
     _log.info("run %s done: status=%s", run_id, status)
     return run_id
 

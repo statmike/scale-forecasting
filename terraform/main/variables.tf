@@ -70,6 +70,19 @@ variable "create_gke" {
   default     = false
 }
 
+variable "enable_bq_agent" {
+  description = <<-EOT
+    Enable Google Cloud Knowledge Catalog (`dataplex.googleapis.com`), BigQuery Conversational
+    Analytics (`geminidataanalytics.googleapis.com`), and Gemini for Google Cloud
+    (`cloudaicompanion.googleapis.com`), and grant `scale-forecasting-runner` the least-privilege
+    catalog and `DataAgent` roles (`scale_forecasting.bq_agent`, `Registry().ensure_bq_agent()`,
+    `Forecaster.ask()`, and `output.ensure_bq_agent`). Default TRUE — free at rest (zero standing
+    compute). Set FALSE in locked-down orgs where Conversational Analytics APIs are restricted.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "enable_alphaevolve" {
   description = <<-EOT
     Enable `discoveryengine.googleapis.com` and bind `roles/discoveryengine.admin` to

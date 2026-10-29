@@ -450,6 +450,10 @@ UNPROVEN: dict[str, str] = {
     "output.calibration_method=aci_normalized": (
         "tests/unit/test_aci.py::test_aci_config_and_calibration_dispatch"
     ),
+    "output.ensure_bq_agent=true": (
+        "tests/unit/test_bq_agent.py::"
+        "test_output_ensure_bq_agent_excluded_from_run_id_and_dispatched"
+    ),
     "output.integer_rounding=ceil": (
         "tests/unit/test_phase_g1_workbench.py::"
         "test_output_constraints_floor_cap_and_rounding_modes"

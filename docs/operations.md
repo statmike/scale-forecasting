@@ -188,19 +188,21 @@ teardown is a `bq` one-liner nobody needs us to wrap, and wrapping it invites th
 # The registry has its own dataset (you set SF_REGISTRY_DATASET_ID) — delete the dataset:
 bq rm -r -f <project>:<registry_dataset>
 
-# The registry shares SF_DATASET_ID with the source panel — drop the ten objects by name,
+# The registry shares SF_DATASET_ID with the source panel — drop the sixteen registry objects by name,
 # because deleting the dataset would take the seeded source panel with it:
 DS=<project>:<dataset>
 for v in v_run_summary v_run_jobs v_model_leaderboard v_backtest_coverage \
-         v_model_leaderboard_comparable; do bq rm -f -t "$DS.$v"; done
+         v_model_leaderboard_comparable v_fva_waterfall v_horizon_decay \
+         v_bias_and_exceptions v_anomalies v_feature_attributions \
+         v_executive_sop_summary; do bq rm -f -t "$DS.$v"; done
 for t in run_registry run_jobs forecast_metadata forecast_predictions backtest_oof; do
   bq rm -f -t "$DS.$t"
 done
 ```
 
 Drop the views before the tables — they read the tables, so the reverse order trips a dependency.
-Recreate everything with `python -m scale_forecasting.registry.ops init` (or just submit a run;
-`ensure_tables` runs on the way in).
+Recreate everything (including all 11 self-documenting SQL views and any missing table/column `OPTIONS(description='...')` on pre-existing registries) with `python -m scale_forecasting.registry.ops init` (or just submit a run;
+`ensure_tables` runs on the way in). To register or refresh the dataset's **Knowledge Catalog** Business Glossary, DataProfile scans, and stateful BigQuery Conversational Analytics Agent (`sf-registry-<dataset>`), run `python -m scale_forecasting.bq_agent --ensure-agent --sync-glossary --enable-scans`.
 
 > **Want a disposable registry instead?** Give it its own dataset via `SF_REGISTRY_DATASET_ID` and
 > `registry.ops init` it. Then discarding it is one `bq rm -r -f` that cannot reach the source panel

@@ -131,6 +131,7 @@ def test_mcp_tools_list_and_offline_tools(tmp_path: Path) -> None:
         "run_auto_forecast",
         "compute_time_series_similarity",
         "optimize_inventory_clearance",
+        "ask_forecast_registry",
     ]
 
     # 1. probe_environment
@@ -681,3 +682,19 @@ def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
     assert cv_res["mode"] == "contract_volume"
     assert len(cv_res["summary"]) >= 1
     assert "hierarchy_rollup" in cv_res
+
+    is_err_ask, ask_res = _call_tool(
+        server,
+        "ask_forecast_registry",
+        {
+            "question": "Which model won and what was the FVA lift?",
+            "mode": "offline_playground",
+            "model": "theta",
+            "horizon": 7,
+            "n_series": 2,
+        },
+    )
+    assert not is_err_ask, ask_res
+    assert ask_res["mode"] == "offline"
+    assert ask_res["row_count"] >= 1
+    assert "SELECT" in ask_res["sql"]

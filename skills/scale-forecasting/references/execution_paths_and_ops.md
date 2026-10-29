@@ -14,7 +14,7 @@ All cloud execution paths resolve their Google Cloud infrastructure target from 
 | `SF_CONNECTION` | **Yes** | `—` | BigLake connection reference (`project.region.connection_name`). |
 | `SF_WAREHOUSE_URI` | **Yes** | `—` | Cloud Storage warehouse root (`gs://<bucket>/warehouse`). |
 | `SF_DATASET_ID` | No | `scale_forecasting` | BigQuery dataset containing source series tables (and registry unless overridden). |
-| `SF_REGISTRY_DATASET_ID` | No | `<SF_DATASET_ID>` | Optional separate BigQuery dataset for the 5 registry tables and 5 views. |
+| `SF_REGISTRY_DATASET_ID` | No | `<SF_DATASET_ID>` | Optional separate BigQuery dataset for the 5 registry tables and 11 views. |
 | `SF_REGION` | No | `us-central1` | Default Google Cloud region for BigQuery, Dataproc, Vertex AI, and GKE. |
 | `SF_SERVICE_ACCOUNT` | No | `ADC / default SA` | Least-privilege runner service account email attached to cloud worker jobs. |
 | `SF_CONTAINER_IMAGE` | No | `Derived from project/region` | Artifact Registry container URI for Ray, Vertex CustomJob, GCE, and GKE. |
@@ -146,6 +146,7 @@ make composer-sync   # syncs src/scale_forecasting to Composer plugins bucket wh
 | **7-Question Practitioner Assessment & Model Comparison** | `python -m scale_forecasting.main --auto --benchmark dgp_04_true_vs_decoy_covs --autofocus` | `f.practitioner_assessment_df()` / `f.assess()` / `f.compare_models()` / `f.baseline_value_df()` / `f.hierarchy_value_df()` |
 | **Auto-Forecaster Composer 3 / Airflow DAG Emission** | `python -m scale_forecasting.main --auto --table source_series_native --tier wide_field --autofocus --emit-out /tmp/dag_autofocus.py` | `bp.emit_airflow_dag(autofocus=True)` / `f.emit_airflow_dag()` |
 | **Opt-In AlphaEvolve Code Evolution (`evolve`)** | `python -m scale_forecasting.evolve --target features --backend alphaevolve --model-name gemini-3.8-flash --dry-run` / `--from-run-ids <r1>,<r2>` | `Forecaster.evolve(panel, target='features', model_name='gemini-3.8-flash')` / `f.evolve(target='ensemble')` / `f.evolve(target='similarity_kernel')` / `Forecaster.evolve(from_run_ids=[...], target='ensemble')` |
+| **Knowledge Catalog & Stateful BigQuery `DataAgent` (`bq_agent`)** | `python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure` / `--ask "Which model won on WAPE and why?"` | `Forecaster.ensure_bq_agent()` / `f.ask("...")` / `f.sop_summary_df()` / `Registry.ask("...")` |
 
 ---
 
@@ -155,7 +156,7 @@ All mutating verbs default to **preview mode** and require `--yes` (CLI) or `yes
 
 | Verb | CLI Invocation | What It Does |
 | :--- | :--- | :--- |
-| `init` | `python -m scale_forecasting.registry.ops init` | Idempotently create the 5 registry tables and 5 analytical SQL views. |
+| `init` | `python -m scale_forecasting.registry.ops init` | Idempotently create the 5 registry tables and 11 analytical SQL views, and sync missing column/table descriptions. |
 | `doctor` | `python -m scale_forecasting.registry.ops doctor` | Read-only health report: table row counts, stuck `RUNNING` runs, orphaned GCS artifacts. |
 | `close-runs` | `python -m scale_forecasting.registry.ops close-runs [--yes]` | Finalize abandoned `RUNNING` headers whose `run_jobs` rows are all terminal. |
 | `drop-run` | `python -m scale_forecasting.registry.ops drop-run <run_id> [--yes]` | Delete named run(s) across GCS artifacts, BigQuery rows, and BQML model objects. |

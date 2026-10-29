@@ -306,7 +306,7 @@ def test_sdk_playground_report_and_mcp_goal_seek_integration(tmp_path) -> None:
 
     # MCP server integration (`run_playground` + direct `allocate_target` alias)
     srv = McpServer()
-    assert len(srv.list_tools()) == 13
+    assert len(srv.list_tools()) == 14
     assert len(srv.list_resources()) == 7
     mcp_pg = srv._dispatch_tool(
         "run_playground",

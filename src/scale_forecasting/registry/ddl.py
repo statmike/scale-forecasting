@@ -45,8 +45,9 @@ often than you clear a registry) and nothing about them requires a shared fate. 
 about the policy; ``render_deployment_ddl`` is the one place that knows which family goes where.
 
 Public surface: ``TABLE_NAMES``, ``REGISTRY_TABLE_NAMES``, ``SOURCE_TABLE_NAMES``,
-``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE``, ``render_deployment_ddl``,
-``render_create_tables``, ``render_drop_tables``, ``additive_columns``, ``render_migrations``.
+``SOURCE_TABLE_ICEBERG``, ``SOURCE_TABLE_NATIVE``, ``table_columns``, ``render_deployment_ddl``,
+``render_create_tables``, ``render_drop_tables``, ``additive_columns``, ``render_migrations``,
+``render_description_migrations``.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..metrics import METRIC_NAMES
+from .metadata import column_description, object_description, sql_escape_description
 
 # Table bodies: columns + PARTITION BY + CLUSTER BY.
 # `{d}` is the dataset ref (`project.dataset` or `dataset`). No trailing semicolon —
@@ -258,6 +260,44 @@ def _column_block(body: str) -> str:
     return body[open_paren + 1 : close_paren]
 
 
+def table_columns(table: str) -> list[str]:
+    """Return every declared column name of ``table`` in exact DDL declaration order."""
+    cols: list[str] = []
+    for piece in _column_block(_TABLE_BODIES[table]).split(","):
+        tokens = piece.split()
+        if tokens:
+            cols.append(tokens[0])
+    return cols
+
+
+def _inject_column_descriptions(table_name: str, rendered_body: str) -> str:
+    """Attach inline ``OPTIONS(description='...')`` to every column in ``rendered_body``."""
+    open_paren = rendered_body.index("(")
+    close_paren = rendered_body.index("\n)", open_paren)
+    col_block = rendered_body[open_paren + 1 : close_paren]
+
+    annotated_lines: list[str] = []
+    for line in col_block.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        has_comma = stripped.endswith(",")
+        core = line.rstrip()
+        if has_comma:
+            core = core[:-1]
+        col_name = stripped.rstrip(",").split()[0]
+        escaped = sql_escape_description(column_description(table_name, col_name))
+        suffix = "," if has_comma else ""
+        annotated_lines.append(f"{core} OPTIONS(description='{escaped}'){suffix}")
+
+    return (
+        rendered_body[: open_paren + 1]
+        + "\n"
+        + "\n".join(annotated_lines)
+        + rendered_body[close_paren:]
+    )
+
+
 def additive_columns(table: str) -> list[tuple[str, str]]:
     """Return the ``(name, type)`` of every NULLABLE column of ``table``, in declaration order.
 
@@ -299,11 +339,42 @@ def render_migrations(dataset: str, *, tables: Sequence[str] | None = None) -> d
     return out
 
 
+def render_description_migrations(
+    dataset: str, *, tables: Sequence[str] | None = None
+) -> dict[str, list[str]]:
+    """Render idempotent ``ALTER TABLE`` statements backfilling table and column descriptions.
+
+    Useful for SQL-only migration pipelines and offline verification; `tables.ensure_tables` also
+    patches existing tables directly through BigQuery's metadata API via
+    `metadata.sync_existing_descriptions` (single round-trip per table).
+    """
+    out: dict[str, list[str]] = {}
+    for name in tables if tables is not None else TABLE_NAMES:
+        table_desc = sql_escape_description(object_description(name))
+        stmts = [f"ALTER TABLE `{dataset}.{name}` SET OPTIONS (description = '{table_desc}');"]
+        for col in table_columns(name):
+            col_desc = sql_escape_description(column_description(name, col))
+            stmts.append(
+                f"ALTER TABLE `{dataset}.{name}` ALTER COLUMN {col} "
+                f"SET OPTIONS (description = '{col_desc}');"
+            )
+        out[name] = stmts
+    return out
+
+
+def _native_options(table_name: str) -> str:
+    """The OPTIONS block carrying the canonical description for a native BigQuery table."""
+    escaped = sql_escape_description(object_description(table_name))
+    return f"OPTIONS (\n  description = '{escaped}'\n)"
+
+
 def _iceberg_options(table_name: str, warehouse_uri: str) -> str:
-    """The OPTIONS block that makes a table a managed Iceberg table."""
+    """The OPTIONS block that makes a table a managed Iceberg table with its description."""
     storage_uri = f"{warehouse_uri.rstrip('/')}/{table_name}"
+    escaped = sql_escape_description(object_description(table_name))
     return (
         "OPTIONS (\n"
+        f"  description = '{escaped}',\n"
         "  file_format = 'PARQUET',\n"
         "  table_format = 'ICEBERG',\n"
         f"  storage_uri = '{storage_uri}'\n"
@@ -351,11 +422,13 @@ def _render_one(
     iceberg: bool,
 ) -> str:
     """Render a single ``CREATE TABLE`` statement, Iceberg-wrapped iff ``iceberg``."""
-    stmt = _TABLE_BODIES[name].format(d=dataset)
+    stmt = _inject_column_descriptions(name, _TABLE_BODIES[name].format(d=dataset))
     if iceberg:
         assert warehouse_uri is not None  # callers pass both when iceberg=True
         options = _iceberg_options(name, warehouse_uri)
         stmt = f"{stmt}\nWITH CONNECTION `{connection}`\n{options}"
+    else:
+        stmt = f"{stmt}\n{_native_options(name)}"
     return stmt + ";"
 
 

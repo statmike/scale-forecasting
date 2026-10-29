@@ -1025,6 +1025,34 @@ class PlaygroundWorkbenchMixin:
         out.attrs["relaxation_hint"] = res.relaxation_hint
         return out
 
+    def sop_summary_df(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 25,
+    ) -> pd.DataFrame:
+        """Return an offline Executive S&OP Scorecard DataFrame mirroring `v_executive_sop_summary`
+        for this `PlaygroundRun` or `BakeOff`.
+        """
+        from .bq_agent.offline import build_offline_sop_summary_df
+
+        _ = limit
+        return build_offline_sop_summary_df(self, run_id=run_id, default_n_series=1)
+
+    def ask(
+        self,
+        question: str,
+        *,
+        conversation_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Answer a natural-language forecasting question over this offline `PlaygroundRun` or
+        `BakeOff` (`bq_agent.offline.ask_offline`).
+        """
+        from .bq_agent.offline import ask_offline
+
+        return ask_offline(self, question, conversation_id=conversation_id)
+
 
 class WorkbenchMixin(PlaygroundWorkbenchMixin):
     """Post-run diagnostic, causal, hierarchical, and prescriptive optimization workbench methods
@@ -3274,4 +3302,119 @@ class WorkbenchMixin(PlaygroundWorkbenchMixin):
             emerging_trends_df=eff_trends,
             write_json=write_json,
             include_json_sidecar=include_json_sidecar,
+        )
+
+    def sop_summary_df(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 25,
+    ) -> pd.DataFrame:
+        """Return the Executive S&OP Rollup (`v_executive_sop_summary` in BigQuery or computed
+        offline for local in-memory `Forecaster` sessions).
+        """
+        import pandas as pd
+
+        is_local = (run_id is None or run_id == self.run_id) and (
+            (self._auto_session is not None and self._auto_session.where == "local")
+            or (
+                self._auto_session is None
+                and (
+                    self._predictions_df is not None
+                    or self._oof_df is not None
+                    or self._data is not None
+                )
+            )
+        )
+        if is_local:
+            from .bq_agent.offline import build_offline_sop_summary_df
+
+            return build_offline_sop_summary_df(self, run_id=self.run_id, default_n_series=0)
+
+        from .registry.reads import read_executive_sop_summary
+
+        rows = read_executive_sop_summary(
+            run_id=run_id or self.run_id,
+            limit=limit,
+            settings=self._settings,
+        )
+        return pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
+
+    def probe_bq_agent(
+        self,
+        *,
+        agent_id: str | None = None,
+        location: str = "global",
+    ) -> Any:
+        """Check whether BigQuery Conversational Analytics & **Knowledge Catalog** APIs are
+        enabled and authorized for this forecaster's registry without raising
+        (`bq_agent.probe.probe_bq_agent_access`).
+        """
+        from .bq_agent.probe import probe_bq_agent_access
+
+        return probe_bq_agent_access(
+            agent_id=agent_id,
+            location=location,
+            settings=self._settings,
+        )
+
+    def ensure_bq_agent(self, **kwargs: Any) -> Any:
+        """Idempotently provision or update the stateful BigQuery Conversational Analytics
+        `DataAgent` and **Knowledge Catalog** glossary/scans for this forecaster's registry
+        (`bq_agent.client.ensure_registry_agent`).
+        """
+        from .bq_agent.client import ensure_registry_agent
+
+        return ensure_registry_agent(settings=self._settings, **kwargs)
+
+    def ask(
+        self,
+        question: str,
+        *,
+        run_id: str | None = None,
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        offline: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Ask a natural-language question against this forecaster's results.
+
+        Routes automatically to the offline deterministic router (`bq_agent.offline.ask_offline`)
+        when called on an in-memory local `Forecaster` session (or when ``offline=True``), and to
+        the stateful BigQuery Conversational Analytics `DataAgent` (`bq_agent.client.ask_registry`)
+        scoped to ``run_id or self.run_id`` for BigQuery-backed runs.
+        """
+        use_offline = offline is True or (
+            offline is None
+            and run_id is None
+            and (
+                (self._auto_session is not None and self._auto_session.where == "local")
+                or (
+                    self._auto_session is None
+                    and (
+                        self._predictions_df is not None
+                        or self._oof_df is not None
+                        or self._data is not None
+                    )
+                )
+            )
+        )
+        if use_offline:
+            from .bq_agent.offline import ask_offline
+
+            return ask_offline(self, question, conversation_id=conversation_id)
+
+        from .bq_agent.client import ask_registry
+
+        return ask_registry(
+            question,
+            run_id=run_id or self.run_id,
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            settings=self._settings,
+            **kwargs,
         )

@@ -20,8 +20,17 @@ from scale_forecasting.registry.ddl import (
     additive_columns,
     render_create_tables,
     render_deployment_ddl,
+    render_description_migrations,
     render_drop_tables,
     render_migrations,
+    table_columns,
+)
+from scale_forecasting.registry.metadata import (
+    COLUMN_DESCRIPTIONS,
+    TABLE_DESCRIPTIONS,
+    column_description,
+    object_description,
+    sync_existing_descriptions,
 )
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "ddl_deployment.sql"
@@ -322,3 +331,104 @@ def test_no_not_null_column_is_ever_offered_to_an_existing_table(table: str) -> 
     assert required, f"{table} has no NOT NULL column; this guard would be vacuous"
     for name in required:
         assert f"ADD COLUMN IF NOT EXISTS {name} " not in stmt
+
+
+# --- self-documenting table & column descriptions + backfill parity ------------
+
+
+@pytest.mark.parametrize("table", TABLE_NAMES)
+def test_every_table_and_column_has_aligned_description(table: str) -> None:
+    """Every DDL table and column must have a 1-to-1 aligned description in metadata.py."""
+    declared_cols = table_columns(table)
+    meta_cols = list(COLUMN_DESCRIPTIONS[table].keys())
+    assert declared_cols == meta_cols, (
+        f"Column/description misalignment on {table}: DDL={declared_cols} vs metadata={meta_cols}"
+    )
+
+    stmt = render_deployment_ddl("proj.ds", **_KW)[table]
+    assert "description = '" in stmt
+    assert object_description(table)[:40] in stmt
+    for col in declared_cols:
+        desc = column_description(table, col)
+        assert desc.strip(), f"Empty description for {table}.{col}"
+        assert "NOT NULL" not in desc, f"Avoid literal 'NOT NULL' inside {table}.{col} description"
+        assert "OPTIONS(description='" in stmt
+
+
+def test_covariate_source_tables_have_aligned_descriptions() -> None:
+    expected_cov_cols = [
+        "ts_id",
+        "ds",
+        "y",
+        "archetype",
+        "is_holiday",
+        "region",
+        "category",
+        "promo_flag",
+        "price_index",
+        "temperature",
+    ]
+    for cov_table in ("source_series_covariates_iceberg", "source_series_covariates_native"):
+        assert cov_table in TABLE_DESCRIPTIONS
+        assert list(COLUMN_DESCRIPTIONS[cov_table].keys()) == expected_cov_cols
+
+
+def test_render_description_migrations_covers_every_table_and_column() -> None:
+    migs = render_description_migrations("proj.ds")
+    assert set(migs) == set(TABLE_NAMES)
+    for table in TABLE_NAMES:
+        stmts = migs[table]
+        assert stmts[0].startswith(f"ALTER TABLE `proj.ds.{table}` SET OPTIONS (description = '")
+        assert len(stmts) == 1 + len(table_columns(table))
+        for col, alter_stmt in zip(table_columns(table), stmts[1:], strict=True):
+            assert f"ALTER COLUMN {col} SET OPTIONS (description = '" in alter_stmt
+
+
+def test_sync_existing_descriptions_patches_legacy_tables_idempotently() -> None:
+    pytest.importorskip("google.cloud.bigquery")
+    from google.api_core import exceptions as gcp_exceptions
+    from google.cloud import bigquery
+
+    class _FakeTable:
+        def __init__(self, name: str, cols: list[str], *, populated: bool = False) -> None:
+            self.name = name
+            self.description = object_description(name) if populated else None
+            self.schema = [
+                bigquery.SchemaField(
+                    c,
+                    "STRING",
+                    description=column_description(name, c) if populated else None,
+                )
+                for c in cols
+            ]
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.tables = {
+                "proj.ds.run_registry": _FakeTable("run_registry", table_columns("run_registry")),
+                "proj.ds.run_jobs": _FakeTable(
+                    "run_jobs", table_columns("run_jobs"), populated=True
+                ),
+            }
+            self.updated: list[str] = []
+
+        def get_table(self, fqn: str) -> _FakeTable:
+            if fqn not in self.tables:
+                raise gcp_exceptions.NotFound(fqn)
+            return self.tables[fqn]
+
+        def update_table(self, table_obj: _FakeTable, fields: list[str]) -> None:
+            assert fields == ["description", "schema"]
+            self.updated.append(table_obj.name)
+
+    fake = _FakeClient()
+    first = sync_existing_descriptions(
+        fake, "proj.ds", ("run_registry", "run_jobs", "missing_optional_table")
+    )
+    assert first == ["run_registry"]
+    assert fake.tables["proj.ds.run_registry"].description == object_description("run_registry")
+    assert all(f.description for f in fake.tables["proj.ds.run_registry"].schema)
+
+    # Second run is a clean no-op once descriptions match.
+    second = sync_existing_descriptions(fake, "proj.ds", ("run_registry", "run_jobs"))
+    assert second == []

@@ -20,6 +20,12 @@ variable "enable_alphaevolve" {
   default     = false
 }
 
+variable "enable_bq_agent" {
+  description = "When true (default), enable Knowledge Catalog and BigQuery Conversational Analytics APIs for scale_forecasting.bq_agent."
+  type        = bool
+  default     = true
+}
+
 locals {
   # The full set for Spark + Ray + BigQuery + Composer + lineage. Grouped by purpose in the
   # comments so a reader knows why each is here.
@@ -49,8 +55,13 @@ locals {
       "cloudbilling.googleapis.com",         # link project ↔ billing account
       "billingbudgets.googleapis.com",       # the budget + threshold alerts (distinct API)
     ],
+    var.enable_bq_agent ? [
+      "dataplex.googleapis.com",            # Google Cloud Knowledge Catalog (Business Glossaries, EntryLinks, DataProfile scans)
+      "geminidataanalytics.googleapis.com", # BigQuery Conversational Analytics API (stateful Registry DataAgent + multi-turn chat)
+      "cloudaicompanion.googleapis.com",    # Gemini for Google Cloud companion service backing BigQuery Conversational Analytics
+    ] : [],
     var.enable_alphaevolve ? [
-      "discoveryengine.googleapis.com",      # Gemini Enterprise AlphaEvolve (scale_forecasting.evolve, opt-in)
+      "discoveryengine.googleapis.com", # Gemini Enterprise AlphaEvolve (scale_forecasting.evolve, opt-in)
     ] : [],
   )
 }

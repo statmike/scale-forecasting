@@ -97,6 +97,7 @@ _NOT_IDENTITY: tuple[tuple[str, ...], ...] = (
     ("compute", "capacity"),
     ("compute", "reuse_prior_runs"),
     ("compute", "reuse_from_run_id"),
+    ("output", "ensure_bq_agent"),
 )
 
 # Fields that have been *removed* from the config models but are pinned back into the digest at the
@@ -387,6 +388,7 @@ def make_model_spec_hash(model_name: str, cfg: RunConfig) -> str:
             features_payload["similarity_n_clusters"] = eff_f.similarity_n_clusters
 
     output_payload = spec.effective_cfg.output.model_dump(mode="json")
+    output_payload.pop("ensure_bq_agent", None)
     if output_payload.get("calibration_method") == "conformal":
         output_payload.pop("calibration_method", None)
     if output_payload.get("aci_gamma") == 0.05:

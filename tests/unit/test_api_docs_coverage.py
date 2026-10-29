@@ -83,6 +83,7 @@ def test_every_subpackage_is_documented_and_has_readme() -> None:
         p.name for p in SRC_PKG.iterdir() if p.is_dir() and (p / "__init__.py").is_file()
     )
     assert subpackages == [
+        "bq_agent",
         "data_gen",
         "engines",
         "evolve",

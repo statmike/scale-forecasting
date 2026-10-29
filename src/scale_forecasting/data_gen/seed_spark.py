@@ -282,31 +282,49 @@ def _ensure_covariate_tables(
     targets: tuple[tuple[str, bool], ...],
 ) -> None:
     """Create the 10-column covariate + hierarchy source tables if they do not yet exist."""
+    from ..registry.metadata import (
+        column_description,
+        object_description,
+        sql_escape_description,
+        sync_existing_descriptions,
+    )
 
     dataset = f"{settings.project_id}.{settings.dataset_id}"
-    body = """\
-CREATE TABLE IF NOT EXISTS `{dataset}.{table}` (
-  ts_id        STRING NOT NULL,
-  ds           DATE NOT NULL,
-  y            FLOAT64,
-  archetype    STRING,
-  is_holiday   BOOL,
-  region       STRING,
-  category     STRING,
-  promo_flag   INT64,
-  price_index  FLOAT64,
-  temperature  FLOAT64
-)
-"""
+    col_defs: tuple[tuple[str, str], ...] = (
+        ("ts_id", "STRING NOT NULL"),
+        ("ds", "DATE NOT NULL"),
+        ("y", "FLOAT64"),
+        ("archetype", "STRING"),
+        ("is_holiday", "BOOL"),
+        ("region", "STRING"),
+        ("category", "STRING"),
+        ("promo_flag", "INT64"),
+        ("price_index", "FLOAT64"),
+        ("temperature", "FLOAT64"),
+    )
     client = bigquery_client(settings.project_id)
     for table_name, is_iceberg in targets:
+        col_lines = []
+        for idx, (col_name, col_type) in enumerate(col_defs):
+            col_desc = sql_escape_description(column_description(table_name, col_name))
+            comma = "," if idx < len(col_defs) - 1 else ""
+            col_lines.append(
+                f"  {col_name:<12} {col_type} OPTIONS(description='{col_desc}'){comma}"
+            )
+        header = (
+            f"CREATE TABLE IF NOT EXISTS `{dataset}.{table_name}` (\n"
+            + "\n".join(col_lines)
+            + "\n)\n"
+        )
+        table_desc = sql_escape_description(object_description(table_name))
         if is_iceberg:
             storage_uri = f"{settings.warehouse_uri.rstrip('/')}/{table_name}"
             stmt = (
-                body.format(dataset=dataset, table=table_name)
+                header
                 + "CLUSTER BY ts_id\n"
                 + f"WITH CONNECTION `{settings.connection}`\n"
                 + "OPTIONS (\n"
+                + f"  description = '{table_desc}',\n"
                 + "  file_format = 'PARQUET',\n"
                 + "  table_format = 'ICEBERG',\n"
                 + f"  storage_uri = '{storage_uri}'\n"
@@ -314,10 +332,12 @@ CREATE TABLE IF NOT EXISTS `{dataset}.{table}` (
             )
         else:
             stmt = (
-                body.format(dataset=dataset, table=table_name)
-                + "PARTITION BY ds\nCLUSTER BY ts_id;"
+                header
+                + "PARTITION BY ds\nCLUSTER BY ts_id\n"
+                + f"OPTIONS (\n  description = '{table_desc}'\n);"
             )
         client.query(stmt).result()
+    sync_existing_descriptions(client, dataset, [t[0] for t in targets])
 
 
 def _write_variant(sdf: object, settings: Settings, table_name: str, write_method: str) -> None:
@@ -346,21 +366,46 @@ def _driver_load_variants(
     """Load an in-memory pandas DataFrame directly into the target BigQuery / Iceberg table(s)."""
     from google.cloud import bigquery
 
+    from ..registry.metadata import column_description
+
+    ref_table = SOURCE_COVARIATES_NATIVE if include_covariates else "source_series_native"
     schema = [
-        bigquery.SchemaField("ts_id", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("ds", "DATE", mode="REQUIRED"),
-        bigquery.SchemaField("y", "FLOAT64"),
-        bigquery.SchemaField("archetype", "STRING"),
-        bigquery.SchemaField("is_holiday", "BOOL"),
+        bigquery.SchemaField(
+            "ts_id", "STRING", mode="REQUIRED", description=column_description(ref_table, "ts_id")
+        ),
+        bigquery.SchemaField(
+            "ds", "DATE", mode="REQUIRED", description=column_description(ref_table, "ds")
+        ),
+        bigquery.SchemaField("y", "FLOAT64", description=column_description(ref_table, "y")),
+        bigquery.SchemaField(
+            "archetype", "STRING", description=column_description(ref_table, "archetype")
+        ),
+        bigquery.SchemaField(
+            "is_holiday", "BOOL", description=column_description(ref_table, "is_holiday")
+        ),
     ]
     if include_covariates:
         schema.extend(
             [
-                bigquery.SchemaField("region", "STRING"),
-                bigquery.SchemaField("category", "STRING"),
-                bigquery.SchemaField("promo_flag", "INT64"),
-                bigquery.SchemaField("price_index", "FLOAT64"),
-                bigquery.SchemaField("temperature", "FLOAT64"),
+                bigquery.SchemaField(
+                    "region", "STRING", description=column_description(ref_table, "region")
+                ),
+                bigquery.SchemaField(
+                    "category", "STRING", description=column_description(ref_table, "category")
+                ),
+                bigquery.SchemaField(
+                    "promo_flag", "INT64", description=column_description(ref_table, "promo_flag")
+                ),
+                bigquery.SchemaField(
+                    "price_index",
+                    "FLOAT64",
+                    description=column_description(ref_table, "price_index"),
+                ),
+                bigquery.SchemaField(
+                    "temperature",
+                    "FLOAT64",
+                    description=column_description(ref_table, "temperature"),
+                ),
             ]
         )
     client = bigquery_client(settings.project_id)

@@ -17,7 +17,7 @@ flowchart TD
     end
     Cells["2. Unified Result Writer (registry.cells.write_cells)<br/>Batch of CellResult -> Proto-Encoded Default Stream"]
     Tables["3. BigQuery Registry Tables (Storage Write API + Backoff)<br/>forecast_metadata · forecast_predictions · backtest_oof"]
-    Views["4. Five Analytical SQL Views (QUALIFY ROW_NUMBER() = 1 Dedupe-on-Read)<br/>v_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs"]
+    Views["4. Eleven Analytical SQL Views (QUALIFY ROW_NUMBER() = 1 Dedupe-on-Read)<br/>v_model_leaderboard · v_model_leaderboard_comparable · v_backtest_coverage · v_run_summary · v_run_jobs<br/>v_fva_waterfall · v_horizon_decay · v_bias_and_exceptions · v_anomalies · v_feature_attributions · v_executive_sop_summary"]
 
     Writers --> Cells --> Tables --> Views
 ```

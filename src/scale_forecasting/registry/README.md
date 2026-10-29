@@ -1,6 +1,6 @@
 # BigQuery Run Registry (`src/scale_forecasting/registry/`)
 
-This subpackage owns the **data and metadata layer** of `scale-forecasting`: the five native BigQuery registry tables, the four source panel tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, and `source_series_covariates_native`), the five analyst SQL views, the high-throughput Storage Write API writer, the deterministic `run_id` hash calculator, and the eight-verb operator maintenance surface (`Registry` / `python -m scale_forecasting.registry.ops`).
+This subpackage owns the **data and metadata layer** of `scale-forecasting`: the five native BigQuery registry tables, the four source panel tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, and `source_series_covariates_native`), the eleven self-documenting analytical SQL views, the high-throughput Storage Write API writer, the deterministic `run_id` hash calculator, and the eight-verb operator maintenance surface (`Registry` / `python -m scale_forecasting.registry.ops`).
 
 ```mermaid
 erDiagram
@@ -62,14 +62,21 @@ erDiagram
 ## Modules in This Subpackage
 
 ### 1. Schema, Views & Identity
-- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`), plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES` and `explanations JSON`.
-- **[`views.py`](./views.py):** Pure SQL definitions for the five analyst views created over the registry:
+- **[`metadata.py`](./metadata.py):** Canonical registry of table, view, and column `OPTIONS(description='...')` metadata across all 4 source tables, 5 registry tables, and 11 analytical SQL views, plus pure SQL builders (`render_table_description_alters`, `render_view_column_list`) for zero-downtime upgrade backfill.
+- **[`ddl.py`](./ddl.py):** Pure SQL DDL generator for the four source tables (`source_series_iceberg`, `source_series_native`, `source_series_covariates_iceberg`, `source_series_covariates_native`) and five registry tables (`run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof`) with inline `OPTIONS(description=...)`, plus idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` migrations derived from `METRIC_NAMES` and `explanations JSON`.
+- **[`views.py`](./views.py):** Pure SQL definitions for the eleven self-documenting analytical SQL views created over the registry:
   - `v_run_summary`: One row per run — the header's scaling knobs and `runtime_seconds`, a time ledger rolled up from the run's current `run_jobs` rows (`n_jobs`, `longest_job_seconds`, `jobs_seconds`, `jobs_span_seconds`, `overhead_seconds = span − longest`, `overhead_fraction`), and the Dataproc Serverless executor/DCU scalars plus raw `sizing` / `capacity` unpacked from the header's `job_telemetry`.
   - `v_run_jobs`: Deduplicated per-family job execution trace — the current attempt per `(run_id, family)` with runtime, hardware, platform job id, `started_at` / `ended_at` bracket, the platform's own `provision_seconds` / `execute_seconds` split of it (Dataproc Serverless and Vertex `CustomJob` families), `failure_reason`, and the `device_verdict` / `capacity` unpacked from the job's telemetry.
   - `v_model_leaderboard`: Per-run model roll-up over final rows (`fold_id IS NULL`) — `n_cells`, `no_artifact_rate`, `median_fit_seconds`, `mean_wape` / `mean_mae`, `mean_staleness_gap`, `refit_modes` — one row per `(run_id, model_type, ensemble_id)`.
   - `v_model_leaderboard_comparable`: The same ranking held to one question — restricted to the holdout fold of `backtest_oof` and pooled (`SUM(|y_true − yhat|) / SUM(|y_true|)` as `pooled_wape`, plus `pooled_mae`) so the number is one WAPE of the whole panel, with `n_series` / `n_points` carried as the evidence the rows are comparable.
   - `v_backtest_coverage`: The achieved-fold histogram per model — one row per `(run_id, model_type, ensemble_id, backtest_status, n_folds_achieved, backtest_refit)` with `n_series` and `series_share`.
-- **[`tables.py`](./tables.py):** Idempotent `ensure_tables(settings)` helper that creates missing tables, applies additive column migrations, and refreshes the five analyst views.
+  - `v_fva_waterfall`: Ordered 4-stage Forecast Value Added (`FVA`) progression (`1_naive_baseline` $\rightarrow$ `2_statistical_ml` $\rightarrow$ `3_deep_foundation_automl` $\rightarrow$ `4_reconciled_ensemble`) with `fva_wape_delta` and `fva_relative_lift_pct`.
+  - `v_horizon_decay`: Step-by-step accuracy, `signed_bias`, `empirical_coverage`, and `mean_interval_width` by `horizon_step` ($h = 1 \dots H$).
+  - `v_bias_and_exceptions`: Series-level Trigg `tracking_signal`, `sbc_class`, and operational exception flags (`CHRONIC_BIAS`, `WORSE_THAN_NAIVE`, `MODEL_ERROR`).
+  - `v_anomalies`: Out-of-fold conformal interval breaches (`SPIKE_ABOVE_UPPER`, `DROP_BELOW_LOWER`, `EXTREME_RESIDUAL`) with `residual_zscore`.
+  - `v_feature_attributions`: Unified `UNNEST` view over Tier 1 (`fit_diagnostics.feature_attributions`) and Tier 2 (`forecast_predictions.explanations`) feature attributions (`mean_attribution`, `mean_abs_attribution`).
+  - `v_executive_sop_summary`: Single-row-per-run S&OP executive scorecard combining champion accuracy, `fva_relative_lift_pct`, `total_forecast_units`, `n_exception_series`, and `n_gpu_waste_jobs`.
+- **[`tables.py`](./tables.py):** Idempotent `ensure_tables(settings)` and `sync_existing_descriptions(settings)` helpers that create missing tables, apply additive column migrations, backfill missing or outdated table/column descriptions onto pre-existing registries, and refresh all eleven analytical SQL views.
 - **[`ids.py`](./ids.py):** Computes deterministic `<slug>-<12hex>` `run_id`s (`make_run_id`) from canonicalized `RunConfig` JSON, maintaining historical `run_id` stability via `_REMOVED_DEFAULTS` and `_DEFAULT_ELIDED`.
 
 ### 2. High-Throughput Writing & Lifecycle

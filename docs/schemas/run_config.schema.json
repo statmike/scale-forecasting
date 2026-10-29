@@ -1527,6 +1527,11 @@
           "default": null,
           "title": "Cap Col"
         },
+        "ensure_bq_agent": {
+          "default": false,
+          "title": "Ensure Bq Agent",
+          "type": "boolean"
+        },
         "floor": {
           "anyOf": [
             {

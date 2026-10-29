@@ -6,7 +6,8 @@ where "rows in BigQuery" become "assets you review". They are pure ``CREATE OR R
 strings (no client), so they render + snapshot-test offline exactly like the table DDL, and
 ``registry.tables.ensure_views`` executes what this renders.
 
-Five views, matched to the questions a run prompts:
+Five core operational & leaderboard views, plus six server-side diagnostic & S&OP views (11 views
+total), matched to the questions a run prompts:
 
 - ``v_run_summary`` — *how did each run go, and how efficiently?* One row per run: the scaling
   knobs (``n_series``, ``n_models``), the header's whole-run ``runtime_seconds``, and a **time
@@ -167,12 +168,39 @@ registry is native BigQuery, so the column is the real ``JSON`` type — ``JSON_
 unchanged; see ``ddl.py``). Views tolerate a NULL ``job_telemetry`` (runs before this column,
 or whose telemetry capture was skipped): the unpacked fields come back NULL, the row still renders.
 
-Public surface: ``VIEW_NAMES``, ``render_create_views``.
+Six server-side diagnostic & S&OP views extend the read surface for planners, executives,
+`review.py` pushdown, and the BigQuery Conversational Analytics Agent (`bq_agent`):
+
+- ``v_fva_waterfall`` — *did complexity pay off?* Holdout-fold Forecast Value Added (FVA) across
+  six pipeline stages (`1_baseline_naive` -> `2_statistical` -> `3_univariate_ml_dl` ->
+  `4_covariate_ml_dl` -> `5_ensemble` -> `6_reconciled`) vs. the run's naive anchor.
+- ``v_horizon_decay`` — *how far ahead can we trust the forecast?* Step-by-step (`horizon_step`
+  1..H) pooled WAPE, MAE, signed bias, empirical coverage, and interval width from `backtest_oof`.
+- ``v_bias_and_exceptions`` — *which series need planner review?* Per-`(run_id, ts_id, model_type)`
+  Trigg's `tracking_signal`, SBC demand regime, WAPE, MASE, `staleness_gap`, and actionable
+  `exception_reason` (`CHRONIC_OVER_FORECAST`, `CHRONIC_UNDER_FORECAST`, `WORSE_THAN_NAIVE`,
+  `STALE_REFIT_DRIFT`, `CELL_FIT_ERROR`, or `OK`).
+- ``v_anomalies`` — *where did historical demand shock outside expectations?* Out-of-fold points
+  where `|residual_zscore| >= 2.5` or `y_true` breached `[yhat_lower, yhat_upper]`.
+- ``v_feature_attributions`` — *what drove the forecast?* Unpacks both global feature importances
+  (`fit_diagnostics.feature_attributions`) and horizon-averaged local attributions
+  (`forecast_predictions.explanations.attributions`) into one queryable long-format view.
+- ``v_executive_sop_summary`` — *one-row executive S&OP scorecard per run:* winning model, FVA %
+  lift over naive, forward horizon total volume and uncertainty band width, planner exception rate,
+  and GPU FinOps waste count.
+
+Every rendered ``CREATE OR REPLACE VIEW`` embeds positional column ``OPTIONS(description='...')``
+and view-level ``OPTIONS(description='...')`` from `registry.metadata` so BigQuery Studio,
+Knowledge Catalog, and Conversational Analytics API agents always read full schema semantics.
+
+Public surface: ``VIEW_NAMES``, ``CORE_VIEW_NAMES``, ``DIAGNOSTIC_VIEW_NAMES``,
+``view_output_columns``, ``render_create_views``.
 """
 
 from __future__ import annotations
 
 from .ids import REPAIR_SUFFIX
+from .metadata import column_description, object_description, sql_escape_description
 
 # View bodies. `{d}` is the dataset ref (`project.dataset` or `dataset`); the registry tables the
 # view reads are qualified with the same ref so a view and its sources always share a dataset.
@@ -376,24 +404,758 @@ LEFT JOIN refit AS r
   AND COALESCE(h.ensemble_id, '') = COALESCE(r.ensemble_id, '')
 WHERE h.y_true IS NOT NULL AND h.yhat IS NOT NULL
 GROUP BY h.run_id, h.model_type, h.ensemble_id""",
+    "v_fva_waterfall": """\
+CREATE OR REPLACE VIEW `{d}.v_fva_waterfall` AS
+WITH oof_deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+holdout AS (
+  SELECT *
+  FROM oof_deduped
+  WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+  QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+),
+meta_deduped AS (
+  SELECT
+    run_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    ANY_VALUE(compute_engine) AS compute_engine,
+    COALESCE(
+      JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.base_model'),
+      SPLIT(model_type, '@')[SAFE_OFFSET(0)]
+    ) AS base_model,
+    COALESCE(
+      CAST(JSON_VALUE(ANY_VALUE(fit_diagnostics), '$.is_univariate') AS BOOL),
+      TRUE
+    ) AS is_univariate
+  FROM (
+    SELECT *
+    FROM `{d}.forecast_metadata`
+    WHERE fold_id IS NULL
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+      ORDER BY created_at DESC NULLS LAST
+    ) = 1
+  )
+  GROUP BY run_id, model_type, ens_key
+),
+model_scores AS (
+  SELECT
+    h.run_id,
+    h.model_type,
+    h.ensemble_id,
+    COALESCE(h.ensemble_id, '') AS ens_key,
+    COUNT(DISTINCT h.ts_id) AS n_series,
+    COUNT(*) AS n_points,
+    SAFE_DIVIDE(SUM(ABS(h.y_true - h.yhat)), SUM(ABS(h.y_true))) AS pooled_wape,
+    AVG(ABS(h.y_true - h.yhat)) AS pooled_mae
+  FROM holdout AS h
+  GROUP BY h.run_id, h.model_type, h.ensemble_id
+),
+classified AS (
+  SELECT
+    s.run_id,
+    CASE
+      WHEN REGEXP_CONTAINS(
+        s.model_type,
+        r'_(bottom_up|wls_struct|mint_shrink|mint_nonneg|thief|cross_temporal_mint)$'
+      ) THEN 6
+      WHEN STARTS_WITH(s.model_type, 'ensemble_') OR s.ensemble_id IS NOT NULL THEN 5
+      WHEN STARTS_WITH(
+        LOWER(COALESCE(m.base_model, SPLIT(s.model_type, '@')[SAFE_OFFSET(0)])),
+        'naive'
+      ) THEN 1
+      WHEN LOWER(COALESCE(m.base_model, SPLIT(s.model_type, '@')[SAFE_OFFSET(0)])) IN (
+        'arima_plus', 'auto_arima', 'auto_ces', 'auto_ets', 'bats', 'croston',
+        'dynamic_optimized_theta', 'dynamicoptimizedtheta', 'ets', 'fft', 'holtwinters',
+        'kalman', 'mstl', 'prophet', 'sarimax', 'stl_bagging', 'tbats', 'theta', 'ucm'
+      ) THEN 2
+      WHEN COALESCE(m.is_univariate, TRUE)
+        AND COALESCE(m.compute_engine, '') != 'vertex_automl' THEN 3
+      ELSE 4
+    END AS stage_order,
+    s.model_type,
+    s.ensemble_id,
+    s.n_series,
+    s.n_points,
+    s.pooled_wape,
+    s.pooled_mae
+  FROM model_scores AS s
+  LEFT JOIN meta_deduped AS m
+    ON s.run_id = m.run_id AND s.model_type = m.model_type AND s.ens_key = m.ens_key
+),
+staged AS (
+  SELECT
+    c.*,
+    CASE c.stage_order
+      WHEN 1 THEN '1_baseline_naive'
+      WHEN 2 THEN '2_statistical'
+      WHEN 3 THEN '3_univariate_ml_dl'
+      WHEN 4 THEN '4_covariate_ml_dl'
+      WHEN 5 THEN '5_ensemble'
+      ELSE '6_reconciled'
+    END AS stage_name
+  FROM classified AS c
+),
+baseline AS (
+  SELECT
+    run_id,
+    model_type AS baseline_model,
+    pooled_wape AS baseline_wape
+  FROM staged
+  WHERE stage_order <= 4 AND pooled_wape IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id
+    ORDER BY
+      IF(stage_order = 1, 0, 1) ASC,
+      IF(stage_order = 1, pooled_wape, -pooled_wape) ASC,
+      model_type ASC
+  ) = 1
+)
+SELECT
+  s.run_id,
+  s.stage_order,
+  s.stage_name,
+  s.model_type,
+  s.ensemble_id,
+  s.n_series,
+  s.n_points,
+  s.pooled_wape,
+  s.pooled_mae,
+  b.baseline_model,
+  b.baseline_wape,
+  b.baseline_wape - s.pooled_wape AS fva_wape_delta,
+  100.0 * SAFE_DIVIDE(b.baseline_wape - s.pooled_wape, b.baseline_wape)
+    AS fva_relative_lift_pct
+FROM staged AS s
+LEFT JOIN baseline AS b USING (run_id)""",
+    "v_horizon_decay": """\
+CREATE OR REPLACE VIEW `{d}.v_horizon_decay` AS
+WITH deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+stepped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    ensemble_id,
+    COALESCE(
+      horizon_step,
+      ROW_NUMBER() OVER (
+        PARTITION BY run_id, ts_id, model_type, fold_id, COALESCE(ensemble_id, '')
+        ORDER BY forecast_date ASC
+      )
+    ) AS horizon_step,
+    y_true,
+    yhat,
+    yhat_lower,
+    yhat_upper,
+    IF(
+      yhat_lower IS NOT NULL AND yhat_upper IS NOT NULL,
+      IF(y_true BETWEEN yhat_lower AND yhat_upper, 1.0, 0.0),
+      NULL
+    ) AS in_bounds
+  FROM deduped
+  WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+)
+SELECT
+  run_id,
+  model_type,
+  ensemble_id,
+  horizon_step,
+  COUNT(DISTINCT ts_id) AS n_series,
+  COUNT(*) AS n_points,
+  SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
+  AVG(ABS(y_true - yhat)) AS pooled_mae,
+  AVG(yhat - y_true) AS signed_bias,
+  AVG(in_bounds) AS empirical_coverage,
+  AVG(yhat_upper - yhat_lower) AS mean_interval_width
+FROM stepped
+GROUP BY run_id, model_type, ensemble_id, horizon_step""",
+    "v_bias_and_exceptions": """\
+CREATE OR REPLACE VIEW `{d}.v_bias_and_exceptions` AS
+WITH meta_deduped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    ensemble_id,
+    COALESCE(ensemble_id, '') AS ens_key,
+    cell_status,
+    wape,
+    mase,
+    staleness_gap,
+    COALESCE(
+      JSON_VALUE(fit_diagnostics, '$.demand_profile.sbc_class'),
+      JSON_VALUE(fit_diagnostics, '$.sbc_class')
+    ) AS sbc_class
+  FROM `{d}.forecast_metadata`
+  WHERE fold_id IS NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+oof_deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+oof_agg AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    COUNT(*) AS n_oof_points,
+    AVG(y_true) AS mean_actual,
+    AVG(yhat) AS mean_forecast,
+    AVG(yhat - y_true) AS signed_bias,
+    AVG(ABS(y_true - yhat)) AS mad,
+    SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS oof_wape,
+    SAFE_DIVIDE(SUM(yhat - y_true), NULLIF(AVG(ABS(y_true - yhat)), 0.0)) AS tracking_signal
+  FROM oof_deduped
+  GROUP BY run_id, ts_id, model_type, ens_key
+),
+joined AS (
+  SELECT
+    m.run_id,
+    m.ts_id,
+    m.model_type,
+    m.ensemble_id,
+    m.sbc_class,
+    m.cell_status,
+    COALESCE(o.n_oof_points, 0) AS n_oof_points,
+    o.mean_actual,
+    o.mean_forecast,
+    o.signed_bias,
+    o.mad,
+    COALESCE(m.wape, o.oof_wape) AS wape,
+    m.mase,
+    m.staleness_gap,
+    o.tracking_signal,
+    CASE
+      WHEN m.cell_status = 'error' THEN 'CELL_FIT_ERROR'
+      WHEN o.tracking_signal > 4.0 THEN 'CHRONIC_OVER_FORECAST'
+      WHEN o.tracking_signal < -4.0 THEN 'CHRONIC_UNDER_FORECAST'
+      WHEN m.mase > 1.0 THEN 'WORSE_THAN_NAIVE'
+      WHEN m.staleness_gap > 0.05 THEN 'STALE_REFIT_DRIFT'
+      ELSE 'OK'
+    END AS exception_reason
+  FROM meta_deduped AS m
+  LEFT JOIN oof_agg AS o
+    ON m.run_id = o.run_id
+    AND m.ts_id = o.ts_id
+    AND m.model_type = o.model_type
+    AND m.ens_key = o.ens_key
+)
+SELECT
+  j.run_id,
+  j.ts_id,
+  j.model_type,
+  j.ensemble_id,
+  j.sbc_class,
+  j.cell_status,
+  j.n_oof_points,
+  j.mean_actual,
+  j.mean_forecast,
+  j.signed_bias,
+  j.mad,
+  j.wape,
+  j.mase,
+  j.staleness_gap,
+  j.tracking_signal,
+  j.exception_reason != 'OK' AS is_exception,
+  j.exception_reason
+FROM joined AS j""",
+    "v_anomalies": """\
+CREATE OR REPLACE VIEW `{d}.v_anomalies` AS
+WITH deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+scored AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    ensemble_id,
+    forecast_date,
+    fold_id,
+    y_true,
+    yhat,
+    yhat_lower,
+    yhat_upper,
+    y_true - yhat AS residual,
+    SAFE_DIVIDE(
+      (y_true - yhat) - AVG(y_true - yhat) OVER (
+        PARTITION BY run_id, ts_id, model_type, COALESCE(ensemble_id, '')
+      ),
+      NULLIF(
+        STDDEV_POP(y_true - yhat) OVER (
+          PARTITION BY run_id, ts_id, model_type, COALESCE(ensemble_id, '')
+        ),
+        0.0
+      )
+    ) AS residual_zscore,
+    IF(
+      yhat_lower IS NOT NULL AND yhat_upper IS NOT NULL,
+      y_true < yhat_lower OR y_true > yhat_upper,
+      FALSE
+    ) AS outside_interval,
+    IF(y_true >= yhat, 'POSITIVE_SPIKE', 'NEGATIVE_DIP') AS anomaly_type
+  FROM deduped
+)
+SELECT
+  s.run_id,
+  s.ts_id,
+  s.model_type,
+  s.ensemble_id,
+  s.forecast_date,
+  s.fold_id,
+  s.y_true,
+  s.yhat,
+  s.yhat_lower,
+  s.yhat_upper,
+  s.residual,
+  s.residual_zscore,
+  s.outside_interval,
+  s.anomaly_type
+FROM scored AS s
+WHERE ABS(s.residual_zscore) >= 2.5 OR s.outside_interval = TRUE""",
+    "v_feature_attributions": """\
+CREATE OR REPLACE VIEW `{d}.v_feature_attributions` AS
+WITH meta_deduped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    TO_JSON_STRING(JSON_QUERY(fit_diagnostics, '$.feature_attributions')) AS attr_json
+  FROM `{d}.forecast_metadata`
+  WHERE fold_id IS NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+global_attrs AS (
+  SELECT
+    m.run_id,
+    m.ts_id,
+    m.model_type,
+    'global_fit' AS attribution_scope,
+    REGEXP_EXTRACT(kv, r'^"([^"]+)"') AS feature_name,
+    SAFE_CAST(REGEXP_EXTRACT(kv, r':\\s*(.+)$') AS FLOAT64) AS mean_attribution,
+    ABS(SAFE_CAST(REGEXP_EXTRACT(kv, r':\\s*(.+)$') AS FLOAT64)) AS mean_abs_attribution,
+    CAST(NULL AS INT64) AS n_horizon_steps
+  FROM meta_deduped AS m,
+  UNNEST(
+    REGEXP_EXTRACT_ALL(
+      m.attr_json,
+      r'"[^"]+"\\s*:\\s*-?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+    )
+  ) AS kv
+  WHERE m.attr_json IS NOT NULL
+),
+pred_deduped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    forecast_date,
+    TO_JSON_STRING(JSON_QUERY(explanations, '$.attributions')) AS attr_json
+  FROM `{d}.forecast_predictions`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+local_unpacked AS (
+  SELECT
+    p.run_id,
+    p.ts_id,
+    p.model_type,
+    REGEXP_EXTRACT(kv, r'^"([^"]+)"') AS feature_name,
+    SAFE_CAST(REGEXP_EXTRACT(kv, r':\\s*(.+)$') AS FLOAT64) AS attr_val
+  FROM pred_deduped AS p,
+  UNNEST(
+    REGEXP_EXTRACT_ALL(
+      p.attr_json,
+      r'"[^"]+"\\s*:\\s*-?[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+    )
+  ) AS kv
+  WHERE p.attr_json IS NOT NULL
+),
+local_attrs AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    'horizon_local' AS attribution_scope,
+    feature_name,
+    AVG(attr_val) AS mean_attribution,
+    AVG(ABS(attr_val)) AS mean_abs_attribution,
+    COUNT(*) AS n_horizon_steps
+  FROM local_unpacked
+  WHERE feature_name IS NOT NULL AND attr_val IS NOT NULL
+  GROUP BY run_id, ts_id, model_type, feature_name
+),
+combined AS (
+  SELECT * FROM global_attrs WHERE feature_name IS NOT NULL AND mean_attribution IS NOT NULL
+  UNION ALL
+  SELECT * FROM local_attrs
+)
+SELECT
+  c.run_id,
+  c.ts_id,
+  c.model_type,
+  c.attribution_scope,
+  c.feature_name,
+  c.mean_attribution,
+  c.mean_abs_attribution,
+  c.n_horizon_steps
+FROM combined AS c""",
+    "v_executive_sop_summary": """\
+CREATE OR REPLACE VIEW `{d}.v_executive_sop_summary` AS
+WITH header AS (
+  SELECT
+    run_id,
+    created_at,
+    status,
+    JSON_VALUE(raw_config, '$.data.source_table') AS source_table,
+    n_series,
+    n_models,
+    runtime_seconds
+  FROM `{d}.run_registry`
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY created_at DESC NULLS LAST) = 1
+),
+oof_deduped AS (
+  SELECT *
+  FROM `{d}.backtest_oof`
+  WHERE y_true IS NOT NULL AND yhat IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+holdout_scores AS (
+  SELECT
+    run_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    SAFE_DIVIDE(SUM(ABS(y_true - yhat)), SUM(ABS(y_true))) AS pooled_wape,
+    AVG(ABS(y_true - yhat)) AS pooled_mae
+  FROM (
+    SELECT *
+    FROM oof_deduped
+    QUALIFY fold_id = MAX(fold_id) OVER (PARTITION BY run_id)
+  )
+  GROUP BY run_id, model_type, ens_key
+),
+pred_deduped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    forecast_date,
+    yhat,
+    yhat_lower,
+    yhat_upper
+  FROM `{d}.forecast_predictions`
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, forecast_date, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+fallback_models AS (
+  SELECT
+    run_id,
+    model_type,
+    ens_key
+  FROM pred_deduped
+  GROUP BY run_id, model_type, ens_key
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id
+    ORDER BY
+      IF(model_type = 'ensemble_champion', 0, IF(STARTS_WITH(model_type, 'ensemble_'), 1, 2)),
+      model_type ASC
+  ) = 1
+),
+scored_champion AS (
+  SELECT
+    run_id,
+    model_type,
+    ens_key,
+    pooled_wape,
+    pooled_mae
+  FROM holdout_scores
+  WHERE pooled_wape IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id ORDER BY pooled_wape ASC, model_type ASC
+  ) = 1
+),
+champion AS (
+  SELECT
+    h.run_id,
+    COALESCE(sc.model_type, fm.model_type) AS champion_model,
+    COALESCE(sc.ens_key, fm.ens_key, '') AS ens_key,
+    sc.pooled_wape AS champion_pooled_wape,
+    sc.pooled_mae AS champion_pooled_mae
+  FROM header AS h
+  LEFT JOIN scored_champion AS sc USING (run_id)
+  LEFT JOIN fallback_models AS fm USING (run_id)
+),
+baseline AS (
+  SELECT
+    run_id,
+    pooled_wape AS baseline_wape
+  FROM holdout_scores
+  WHERE NOT STARTS_WITH(model_type, 'ensemble_') AND ens_key = '' AND pooled_wape IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id
+    ORDER BY
+      IF(STARTS_WITH(LOWER(SPLIT(model_type, '@')[SAFE_OFFSET(0)]), 'naive'), 0, 1) ASC,
+      IF(
+        STARTS_WITH(LOWER(SPLIT(model_type, '@')[SAFE_OFFSET(0)]), 'naive'),
+        pooled_wape,
+        -pooled_wape
+      ) ASC,
+      model_type ASC
+  ) = 1
+),
+forward_rollup AS (
+  SELECT
+    p.run_id,
+    MIN(p.forecast_date) AS horizon_start_date,
+    MAX(p.forecast_date) AS horizon_end_date,
+    SUM(p.yhat) AS total_forecast_units,
+    AVG(p.yhat_upper - p.yhat_lower) AS mean_interval_width
+  FROM pred_deduped AS p
+  JOIN champion AS c
+    ON p.run_id = c.run_id AND p.model_type = c.champion_model AND p.ens_key = c.ens_key
+  GROUP BY p.run_id
+),
+meta_deduped AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    cell_status,
+    mase,
+    staleness_gap
+  FROM `{d}.forecast_metadata`
+  WHERE fold_id IS NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY run_id, ts_id, model_type, fold_id, ensemble_id
+    ORDER BY created_at DESC NULLS LAST
+  ) = 1
+),
+oof_ts AS (
+  SELECT
+    run_id,
+    ts_id,
+    model_type,
+    COALESCE(ensemble_id, '') AS ens_key,
+    SAFE_DIVIDE(SUM(yhat - y_true), NULLIF(AVG(ABS(y_true - yhat)), 0.0)) AS tracking_signal
+  FROM oof_deduped
+  GROUP BY run_id, ts_id, model_type, ens_key
+),
+exceptions_rollup AS (
+  SELECT
+    m.run_id,
+    COUNTIF(
+      m.cell_status = 'error'
+      OR ABS(t.tracking_signal) > 4.0
+      OR m.mase > 1.0
+      OR m.staleness_gap > 0.05
+    ) AS n_exception_series,
+    SAFE_DIVIDE(
+      COUNTIF(
+        m.cell_status = 'error'
+        OR ABS(t.tracking_signal) > 4.0
+        OR m.mase > 1.0
+        OR m.staleness_gap > 0.05
+      ),
+      COUNT(*)
+    ) AS exception_rate
+  FROM meta_deduped AS m
+  JOIN champion AS c
+    ON m.run_id = c.run_id AND m.model_type = c.champion_model AND m.ens_key = c.ens_key
+  LEFT JOIN oof_ts AS t
+    ON m.run_id = t.run_id
+    AND m.ts_id = t.ts_id
+    AND m.model_type = t.model_type
+    AND m.ens_key = t.ens_key
+  GROUP BY m.run_id
+),
+gpu_audit AS (
+  SELECT
+    run_id,
+    COUNTIF(
+      hardware = 'gpu'
+      AND JSON_VALUE(job_telemetry, '$.device_use.verdict') IS NOT NULL
+      AND JSON_VALUE(job_telemetry, '$.device_use.verdict') != 'ENGAGED_UTILISED'
+    ) AS n_gpu_waste_jobs
+  FROM (
+    SELECT *
+    FROM `{d}.run_jobs`
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY run_id, family ORDER BY attempt DESC, created_at DESC
+    ) = 1
+  )
+  GROUP BY run_id
+)
+SELECT
+  h.run_id,
+  h.created_at,
+  h.status,
+  h.source_table,
+  h.n_series,
+  h.n_models,
+  h.runtime_seconds,
+  c.champion_model,
+  c.champion_pooled_wape,
+  c.champion_pooled_mae,
+  b.baseline_wape,
+  100.0 * SAFE_DIVIDE(b.baseline_wape - c.champion_pooled_wape, b.baseline_wape)
+    AS fva_relative_lift_pct,
+  f.horizon_start_date,
+  f.horizon_end_date,
+  f.total_forecast_units,
+  f.mean_interval_width,
+  COALESCE(e.n_exception_series, 0) AS n_exception_series,
+  e.exception_rate,
+  COALESCE(g.n_gpu_waste_jobs, 0) AS n_gpu_waste_jobs
+FROM header AS h
+LEFT JOIN champion AS c USING (run_id)
+LEFT JOIN baseline AS b USING (run_id)
+LEFT JOIN forward_rollup AS f USING (run_id)
+LEFT JOIN exceptions_rollup AS e USING (run_id)
+LEFT JOIN gpu_audit AS g USING (run_id)""",
 }
 
+CORE_VIEW_NAMES: tuple[str, ...] = (
+    "v_run_summary",
+    "v_run_jobs",
+    "v_model_leaderboard",
+    "v_backtest_coverage",
+    "v_model_leaderboard_comparable",
+)
+DIAGNOSTIC_VIEW_NAMES: tuple[str, ...] = (
+    "v_fva_waterfall",
+    "v_horizon_decay",
+    "v_bias_and_exceptions",
+    "v_anomalies",
+    "v_feature_attributions",
+    "v_executive_sop_summary",
+)
 VIEW_NAMES: tuple[str, ...] = tuple(_VIEW_BODIES)
 
 
+def _split_top_level_commas(select_list: str) -> list[str]:
+    """Split a SQL SELECT list on top-level commas, ignoring commas inside parentheses/quotes."""
+    items: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    in_quote = False
+    i = 0
+    while i < len(select_list):
+        ch = select_list[i]
+        if ch == "'" and (i == 0 or select_list[i - 1] != "\\"):
+            in_quote = not in_quote
+        elif not in_quote:
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+            elif ch == "," and depth == 0:
+                items.append("".join(buf).strip())
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def view_output_columns(view_name: str) -> list[str]:
+    """Return the ordered list of output column names produced by ``view_name``'s final SELECT."""
+    body = _VIEW_BODIES[view_name]
+    select_list = body.rsplit("\nSELECT\n", 1)[1].split("\nFROM ", 1)[0]
+    cols: list[str] = []
+    for expr in _split_top_level_commas(select_list):
+        normalized = " ".join(expr.split())
+        if " AS " in normalized:
+            col = normalized.rsplit(" AS ", 1)[1]
+        else:
+            col = normalized.rsplit(".", 1)[-1]
+        cols.append(col)
+    return cols
+
+
+def _annotated_view_header(dataset: str, view_name: str) -> str:
+    """Render the ``CREATE OR REPLACE VIEW ... (...) OPTIONS (...) AS`` header for ``view_name``."""
+    cols = view_output_columns(view_name)
+    col_lines = []
+    for idx, col in enumerate(cols):
+        col_desc = sql_escape_description(column_description(view_name, col))
+        comma = "," if idx < len(cols) - 1 else ""
+        col_lines.append(f"  {col} OPTIONS(description='{col_desc}'){comma}")
+    view_desc = sql_escape_description(object_description(view_name))
+    return (
+        f"CREATE OR REPLACE VIEW `{dataset}.{view_name}` (\n"
+        + "\n".join(col_lines)
+        + "\n)\nOPTIONS (\n"
+        + f"  description = '{view_desc}'\n"
+        + ") AS"
+    )
+
+
 def render_create_views(dataset: str) -> dict[str, str]:
-    """Render ``{view_name: CREATE OR REPLACE VIEW statement}`` for the analyst views.
+    """Render ``{view_name: CREATE OR REPLACE VIEW statement}`` for all 11 analyst views.
 
     Args:
         dataset: dataset ref, ``project.dataset`` or ``dataset`` — substituted for both the view
             name and the registry tables it reads.
 
-    Each statement is ``CREATE OR REPLACE`` (idempotent — safe to re-run on every ``ensure``).
-    ``v_run_summary``'s ledger excludes repair rows by the same `registry.ids.REPAIR_SUFFIX` the
-    id scheme files them under, substituted here rather than spelled in the SQL so the two cannot
-    drift.
+    Each statement is ``CREATE OR REPLACE`` (idempotent — safe to re-run on every ``ensure``) and
+    carries positional column ``OPTIONS(description='...')`` and view ``OPTIONS(description='...')``
+    derived from `registry.metadata`.
     """
-    return {
-        name: body.format(d=dataset, repair_suffix=REPAIR_SUFFIX) + ";"
-        for name, body in _VIEW_BODIES.items()
-    }
+    out: dict[str, str] = {}
+    for name, body in _VIEW_BODIES.items():
+        raw_prefix = f"CREATE OR REPLACE VIEW `{{d}}.{name}` AS"
+        assert body.startswith(raw_prefix), f"{name} missing standard view header"
+        rest = (
+            body[len(raw_prefix) :]
+            .replace("{d}", dataset)
+            .replace("{repair_suffix}", REPAIR_SUFFIX)
+        )
+        out[name] = f"{_annotated_view_header(dataset, name)}{rest};"
+    return out

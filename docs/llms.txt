@@ -1,6 +1,6 @@
 # scale-forecasting
 
-> Declarative, multi-runtime enterprise time-series forecasting platform for Google Cloud. One frozen Pydantic `RunConfig` orchestrates 37 models across 5 families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, conformal/quantile calibration (`conformal`, `aci`, `aci_normalized`), FPP3 spatial/temporal/cross-temporal hierarchical reconciliation, and stacked ensembling into a 5-table, 5-view BigQuery registry.
+> Declarative, multi-runtime enterprise time-series forecasting platform for Google Cloud. One frozen Pydantic `RunConfig` orchestrates 37 models across 5 families (`statistical`, `ml`, `deep_learning`, `automl`, `native`), 21 evaluation metrics, 7 compute runtimes (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`), rolling-origin backtesting, Optuna HPO, conformal/quantile calibration (`conformal`, `aci`, `aci_normalized`), FPP3 spatial/temporal/cross-temporal hierarchical reconciliation, and stacked ensembling into a self-documenting 5-table, 11-view BigQuery registry with Knowledge Catalog and a stateful BigQuery Conversational Analytics `DataAgent`.
 
 ## Agent-First Surfaces (MCP, Skills & Schemas)
 
@@ -34,6 +34,6 @@
 - [Metrics Reference (21 Metrics)](https://statmike.github.io/scale-forecasting/metrics_reference/): All 16 point and 5 interval metrics.
 - [Runtimes Reference (7 Runtimes)](https://statmike.github.io/scale-forecasting/runtimes_reference/): Dataproc, Ray, Vertex CustomJob, GCE, GKE, Vertex AutoML, and BigQuery ML.
 - [Using the Python SDK (`Forecaster`)](https://statmike.github.io/scale-forecasting/using_the_sdk/): Programmatic execution, monitoring, review, and plotting.
-- [Output Schemas & Views](https://statmike.github.io/scale-forecasting/output_schemas/): DDL and query recipes for the 5 registry tables and 5 analytical views.
+- [Output Schemas & Views](https://statmike.github.io/scale-forecasting/output_schemas/): DDL and query recipes for the 5 registry tables, 11 self-documenting analytical views, and Knowledge Catalog / BigQuery DataAgent.
 - [Operations & Surgical Repair](https://statmike.github.io/scale-forecasting/operations/): Probing, settling, canceling, and repairing runs (`retry_run`, `registry.ops`).
-- [Live Validation Ledger](https://statmike.github.io/scale-forecasting/validation/): Proven `run_id` records across 42 smokes, 20 demo configs, and 12 notebooks.
+- [Live Validation Ledger](https://statmike.github.io/scale-forecasting/validation/): Proven `run_id` records across 42 smokes, 20 demo configs, and 13 notebooks.

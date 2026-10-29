@@ -116,4 +116,8 @@ jobs:
           uv venv --python 3.11 /tmp/rel
           uv pip install --python /tmp/rel/bin/python dist/*.whl
           /tmp/rel/bin/python -m scale_forecasting.agent_surfaces --release-notes "${GITHUB_REF_NAME#v}" > /tmp/release_notes.md
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file /tmp/release_notes.md --generate-notes
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --notes-file /tmp/release_notes.md --generate-notes
+          fi

@@ -12,7 +12,7 @@
 [![Terraform](https://img.shields.io/badge/Terraform-Two--Stage%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-4E5D6C?style=for-the-badge)](https://github.com/statmike/scale-forecasting/blob/main/LICENSE)
 
-`37 models` · `5 families` · `21 evaluation metrics` · `7 Google Cloud runtimes` · `5 Analytical SQL Views` · `validated at 100k series`
+`37 models` · `5 families` · `21 evaluation metrics` · `7 Google Cloud runtimes` · `11 Analytical SQL Views` · `BQ DataAgent` · `validated at 100k series`
 
 ```mermaid
 flowchart LR
@@ -37,8 +37,8 @@ flowchart LR
     subgraph OUT["3. Governed Results & Trust in BigQuery"]
         direction TB
         REG["5 BigQuery Registry Tables<br/>forecasts · backtests · metadata<br/>runs · jobs"]
-        VIEWS["5 Analytical SQL Views<br/>Leaderboards · Backtest Coverage<br/>Run & Job Summaries"]
-        USE["Practitioner Trust & Consumption<br/>7-Question Assessment · FVA Ladder<br/>Attributions · SDK · Looker"]
+        VIEWS["11 Analytical SQL Views<br/>Leaderboards · FVA · Exceptions<br/>Anomalies · S&OP Scorecard"]
+        USE["Practitioner Trust & Consumption<br/>BigQuery DataAgent · Knowledge Catalog<br/>7-Question Assessment · SDK · Looker"]
         REG --> VIEWS --> USE
     end
 
@@ -113,17 +113,31 @@ python -m scale_forecasting.main --config configs/ensemble_demo.json
 python -m scale_forecasting.main --config configs/spark_serverless_100k.json --emit-airflow dags/sf_100k.py
 ```
 
+Review executive S&OP scorecards (`v_executive_sop_summary`) or ask multi-turn natural-language questions against your BigQuery Registry (with non-raising check-and-run readiness probing):
+
+```python
+import scale_forecasting as sf
+
+reg = sf.Registry()
+sop_df = reg.sop_summary_df(limit=5)  # Pure BigQuery SQL scorecard — always available
+if reg.probe_bq_agent().ready:        # Safe check-and-run guard
+    turn1 = reg.ask("Which model won on the latest completed run and what was its pooled WAPE?")
+    turn2 = reg.ask("Show the FVA waterfall stages for that same run.", conversation_id=turn1.conversation_id)
+```
+
 Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md) and [Platform overview (`docs/overview.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md).
 
 ---
 
-## AI agents, portable skills & built-in MCP server
+## AI agents, BigQuery Registry `DataAgent`, portable skills & built-in MCP server
 
-`scale-forecasting` is ready out of the box for **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code Copilot**, and **Windsurf** — shipping a **portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md)** (auto-discovered via [`.agents/skills.json`](https://github.com/statmike/scale-forecasting/blob/main/.agents/skills.json)), an **Antigravity [`plugin.json`](https://github.com/statmike/scale-forecasting/blob/main/plugin.json) + [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json)**, a **built-in MCP server (`python -m scale_forecasting.mcp`, 13 tools including `compute_time_series_similarity` and `optimize_inventory_clearance`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](https://github.com/statmike/scale-forecasting/blob/main/docs/schemas/run_config.schema.json)**, and **[`llms.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms.txt) / [`llms-full.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms-full.txt)** compiled directly from code (`make agent-surfaces`):
+`scale-forecasting` is ready out of the box for **BigQuery Studio**, **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code Copilot**, and **Windsurf** — shipping a **stateful BigQuery Conversational Analytics `DataAgent` (`Forecaster.ensure_bq_agent()`, `Registry.ask()`, `python -m scale_forecasting.bq_agent`)** grounded in **Knowledge Catalog** Business Glossaries (`44` domain terms), DataProfile scans, `32` Golden SQL queries, and `11` self-documenting registry views, alongside a **portable [`SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md)** ([`.agents/skills.json`](https://github.com/statmike/scale-forecasting/blob/main/.agents/skills.json)), an **Antigravity [`plugin.json`](https://github.com/statmike/scale-forecasting/blob/main/plugin.json) + [`mcp_config.json`](https://github.com/statmike/scale-forecasting/blob/main/mcp_config.json)**, a **built-in MCP server (`python -m scale_forecasting.mcp`, 14 tools including `ask_forecast_registry`, `compute_time_series_similarity`, and `optimize_inventory_clearance`)**, a **Draft 2020-12 [`RunConfig` JSON Schema](https://github.com/statmike/scale-forecasting/blob/main/docs/schemas/run_config.schema.json)**, and **[`llms.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms.txt) / [`llms-full.txt`](https://github.com/statmike/scale-forecasting/blob/main/docs/llms-full.txt)** (`make agent-surfaces`):
 
 ```bash
-# Probe installed extras, available models, and SF_* readiness:
+# Probe local & BigQuery DataAgent readiness, or provision & chat with your stateful Registry DataAgent:
 python -m scale_forecasting.agent_surfaces --probe-env
+python -m scale_forecasting.bq_agent --dataset scale_forecasting --probe
+python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure-agent --ask "Which model won on the latest run?"
 
 # Launch Google Antigravity CLI (auto-discovers .agents/skills/ & AGENTS.md) or register MCP:
 agy
@@ -181,7 +195,7 @@ Full guide and interactive notebook: **[Glass-Box Auto-Forecaster & `autofocus` 
 | **Compute only while it runs** | Active model families launch in parallel (`dag.py`); fast CPU families tear down immediately while GPU families finish; single-VM GCE enforces triple-redundant self-deletion. | [`docs/runtimes_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [`docs/architecture.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/architecture.md) |
 | **Seven runtimes, one contract** | Run `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery` concurrently under one `run_id` across CPU and NVIDIA `T4`, `L4`, `A100`, `A100_80GB` GPUs. | [`docs/runtimes_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtimes_reference.md) · [`docs/validation.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) |
 | **Managed and open models on one leaderboard** | Benchmark BigQuery ML (`ARIMA_PLUS`, `AI.FORECAST` / `timesfm` / `bq_timesfm`) and Vertex AI AutoML alongside 31 open-source statistical, tree, deep learning, and foundation models (`chronos_bolt`, `chronos2`, `timesfm_torch`) on identical folds. | [`docs/models_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/models_reference.md) · [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) |
-| **Governed by construction** | Content-addressed `run_id`, snapshot-pinned reads, 5 registry tables, 5 analytical SQL views, surgical cell repair (`retry_run`), and 42 live-validated smoke configurations. | [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) · [`docs/operations.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md) · [`docs/validation.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) |
+| **Governed by construction** | Content-addressed `run_id`, snapshot-pinned reads, 5 self-documenting registry tables, 11 analytical SQL views, Knowledge Catalog Business Glossary & stateful BigQuery `DataAgent` (`Registry.ask()`), surgical cell repair (`retry_run`), and 42 live-validated smoke configurations. | [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) · [`docs/operations.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/operations.md) · [`docs/validation.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/validation.md) |
 | **Modular install & 1-file extensibility** | `pip install scale-forecasting` has zero Google Cloud dependencies; `[gcp]`, `[spark]`, `[ray]`, `[models]`, and `[all]` are opt-in extras; new models ship in 1 file with no image rebuild. | [`docs/runtime_dependencies.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/runtime_dependencies.md) · [`docs/adding_a_model.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/adding_a_model.md) |
 
 ---
@@ -217,31 +231,21 @@ Full guide and interactive notebook: **[Glass-Box Auto-Forecaster & `autofocus` 
   - **5-stage What-If scenarios, Lifecycle Clearance MILP (`optimize_clearance_df`), Vendor Contract Volume (`optimize_contract_volume_df`), Assortment Delisting Transference (`optimize_assortment_df`) & Price/Promo Calendar Optimizer (`optimize_scenario`):** Propagate shocks (`simulate_scenarios`), solve monotone markdown ladders with digital-twin elasticity borrowing and shelf/warehouse `target_space_freed` constraints (`optimize_clearance_df`), hit supplier all-units rebate tiers or Take-or-Pay commitments with Copula CVaR buffering (`optimize_contract_volume_df`), rationalize SKU assortments with similarity-driven demand transference and `walk_rate` (`optimize_assortment_df`), or solve for the profit- and CVaR-optimal forward price/promo schedule (`optimize_scenario`).
   - **Top-down Goal-Seek constrained QP, Portfolio Inventory (`optimize_inventory_df`), Simplex Pre-Pack Allocation (`optimize_prepacks_df`) & Lateral Store Rebalancing (`optimize_rebalancing_df`):** Disaggregate executive targets down the hierarchy (`allocate_target`), solve multi-SKU replenishment with similarity-pooled residual shrinkage (`similarity_pooling=True`) under shared working-capital (`max_budget`), warehouse volume (`max_volume`), aggregate fill-rate, and MOQ constraints (`optimize_inventory_df`), allocate integer pre-pack bundles against Aitchison CLR simplex size curves (`optimize_prepacks_df`, `estimate_simplex_size_curves`), and rebalance store-to-store/depot inventory via Hitchcock–Koopmans transshipment (`optimize_rebalancing_df`).
   - **Inventory policies, FVA audits & HTML reports:** $(s, S)$, $(R, S)$, Fill Rate, and Newsvendor policies (`inventory_policy_df`), modified Diebold–Mariano $p$-values (`compute_fva`), SBC regime routing, exception queues (`exceptions_df`), and interactive reports (`python -m scale_forecasting.report`).
+- **Self-Documenting BigQuery Registry, 11 Analytical SQL Views, Knowledge Catalog & Stateful `DataAgent`** — [`docs/output_schemas.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/output_schemas.md) · [`docs/agent_and_mcp_guide.md`](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md)
+  - **100% self-documenting DDL & 11 analytical SQL views:** Every registry table (`5`) and view (`11`, including `v_executive_sop_summary`, `v_fva_waterfall`, `v_horizon_decay`, `v_bias_and_exceptions`, `v_anomalies`, and `v_feature_attributions`) applies table and column descriptions at creation and backfills existing registries (`reg.init()`).
+  - **Knowledge Catalog governance & stateful multi-turn Q&A:** Synchronize a **44-term Knowledge Catalog Business Glossary** + optional `DataProfile` scans (`reg.ensure_bq_agent()`, `output.ensure_bq_agent = True`) and query runs conversationally in **BigQuery Studio**, Python (`reg.probe_bq_agent()`, `reg.ask()`, `f.ask()`, `Forecaster.from_run_id().ask()`), CLI (`scale_forecasting.bq_agent`), or MCP (`ask_forecast_registry`) — strictly scoped to registry tables, views, and `snapshot_millis`-anchored `source_table`s.
 
 ---
 
-## Learn by doing (12 notebooks across 4 tracks)
+## Learn by doing (13 notebooks across 4 tracks)
 
 All notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/README.md) include committed outputs and one-click **Colab Enterprise** launch links:
 
-- **Track 1 — Local sandbox, auto-forecaster & plugins (no GCP setup):**
-  - [`00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb)
-  - [`11_auto_forecaster_and_autofocus.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/11_auto_forecaster_and_autofocus.ipynb)
-  - [`09_custom_models_and_metrics.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_custom_models_and_metrics.ipynb)
-- **Track 2 — Cloud runtimes:**
-  - [`01_bigquery_native_sql.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_bigquery_native_sql.ipynb)
-  - [`02_vertex_and_gce_vms.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_vertex_and_gce_vms.ipynb)
-  - [`03_spark_serverless_and_connect.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_spark_serverless_and_connect.ipynb)
-  - [`04_ray_on_vertex_gpu.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex_gpu.ipynb)
-- **Track 3 — Covariates, hierarchy, HPO & ensembles:**
-  - [`05_covariates_and_global_models.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_covariates_and_global_models.ipynb)
-  - [`06_hierarchical_reconciliation.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_hierarchical_reconciliation.ipynb)
-  - [`07_hpo_backtesting_and_ensembles.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_hpo_backtesting_and_ensembles.ipynb)
-- **Track 4 — Master multi-engine DAG & operations:**
-  - [`08_multi_engine_master_workflow.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb)
-  - [`10_registry_operations_and_scale.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb)
-- **Team lab:**
-  - [Hands-on workshop guide (`docs/workshop.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
+- **Track 1 — Local sandbox, auto-forecaster & plugins (no GCP setup):** [`00_model_playground.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/00_model_playground.ipynb) · [`11_auto_forecaster_and_autofocus.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/11_auto_forecaster_and_autofocus.ipynb) · [`09_custom_models_and_metrics.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/09_custom_models_and_metrics.ipynb)
+- **Track 2 — Cloud runtimes:** [`01_bigquery_native_sql.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/01_bigquery_native_sql.ipynb) · [`02_vertex_and_gce_vms.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/02_vertex_and_gce_vms.ipynb) · [`03_spark_serverless_and_connect.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/03_spark_serverless_and_connect.ipynb) · [`04_ray_on_vertex_gpu.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/04_ray_on_vertex_gpu.ipynb)
+- **Track 3 — Covariates, hierarchy, HPO & ensembles:** [`05_covariates_and_global_models.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/05_covariates_and_global_models.ipynb) · [`06_hierarchical_reconciliation.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/06_hierarchical_reconciliation.ipynb) · [`07_hpo_backtesting_and_ensembles.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/07_hpo_backtesting_and_ensembles.ipynb)
+- **Track 4 — Master multi-engine DAG, operations & conversational analytics:** [`08_multi_engine_master_workflow.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/08_multi_engine_master_workflow.ipynb) · [`10_registry_operations_and_scale.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/10_registry_operations_and_scale.ipynb) · [`12_conversational_analytics_and_knowledge_catalog.ipynb`](https://github.com/statmike/scale-forecasting/blob/main/notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb)
+- **Team lab:** [Hands-on workshop guide (`docs/workshop.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
 
 ---
 

@@ -9,7 +9,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from scale_forecasting.registry.views import VIEW_NAMES, render_create_views
+import pytest
+
+from scale_forecasting.registry.metadata import (
+    COLUMN_DESCRIPTIONS,
+    VIEW_DESCRIPTIONS,
+    column_description,
+    object_description,
+)
+from scale_forecasting.registry.views import (
+    CORE_VIEW_NAMES,
+    DIAGNOSTIC_VIEW_NAMES,
+    VIEW_NAMES,
+    render_create_views,
+    view_output_columns,
+)
 
 SNAPSHOT = Path(__file__).parent / "snapshots" / "views.sql"
 
@@ -22,13 +36,23 @@ def _render_all() -> str:
 def test_all_views_rendered() -> None:
     stmts = render_create_views("proj.scale_forecasting")
     assert set(stmts) == set(VIEW_NAMES)
-    assert set(VIEW_NAMES) == {
+    assert len(VIEW_NAMES) == 11
+    assert set(CORE_VIEW_NAMES) == {
         "v_run_summary",
         "v_run_jobs",
         "v_model_leaderboard",
         "v_backtest_coverage",
         "v_model_leaderboard_comparable",
     }
+    assert set(DIAGNOSTIC_VIEW_NAMES) == {
+        "v_fva_waterfall",
+        "v_horizon_decay",
+        "v_bias_and_exceptions",
+        "v_anomalies",
+        "v_feature_attributions",
+        "v_executive_sop_summary",
+    }
+    assert (*CORE_VIEW_NAMES, *DIAGNOSTIC_VIEW_NAMES) == VIEW_NAMES
 
 
 def test_every_statement_is_replace_and_terminated() -> None:
@@ -322,3 +346,46 @@ def test_views_snapshot() -> None:
         SNAPSHOT.write_text(rendered)
     assert SNAPSHOT.exists(), "snapshot missing; run with SF_UPDATE_SNAPSHOTS=1 to create"
     assert rendered == SNAPSHOT.read_text()
+
+
+# --- strict 1-to-1 view & column description alignment + diagnostic views ------
+
+
+@pytest.mark.parametrize("view_name", VIEW_NAMES)
+def test_every_view_and_column_has_aligned_description(view_name: str) -> None:
+    """Positional CREATE VIEW (col OPTIONS(...)) headers MUST match SELECT columns 1-to-1."""
+    assert view_name in VIEW_DESCRIPTIONS
+    select_cols = view_output_columns(view_name)
+    meta_cols = list(COLUMN_DESCRIPTIONS[view_name].keys())
+    assert select_cols == meta_cols, (
+        f"Positional view column/description misalignment on {view_name}: "
+        f"SELECT={select_cols} vs metadata={meta_cols}"
+    )
+
+    stmt = render_create_views("proj.ds")[view_name]
+    assert object_description(view_name)[:40] in stmt
+    header_block = stmt.split("\nOPTIONS (\n", 1)[0]
+    header_cols = [
+        line.strip().split()[0] for line in header_block.splitlines()[1:-1] if line.strip()
+    ]
+    assert header_cols == select_cols
+    for col in select_cols:
+        assert column_description(view_name, col).strip()
+
+
+def test_diagnostic_views_are_self_contained_and_deduplicate_retries() -> None:
+    rendered = render_create_views("d")
+    # Every view reads base registry tables directly (zero cross-view creation-order dependency).
+    for name in DIAGNOSTIC_VIEW_NAMES:
+        stmt = rendered[name]
+        for other_view in VIEW_NAMES:
+            if other_view != name:
+                assert f"`d.{other_view}`" not in stmt, f"{name} must not depend on {other_view}"
+        assert "QUALIFY ROW_NUMBER() OVER (" in stmt, f"{name} must deduplicate append-only rows"
+
+    assert "fva_relative_lift_pct" in rendered["v_fva_waterfall"]
+    assert "empirical_coverage" in rendered["v_horizon_decay"]
+    assert "CHRONIC_OVER_FORECAST" in rendered["v_bias_and_exceptions"]
+    assert "residual_zscore" in rendered["v_anomalies"]
+    assert "'horizon_local' AS attribution_scope" in rendered["v_feature_attributions"]
+    assert "champion_pooled_wape" in rendered["v_executive_sop_summary"]

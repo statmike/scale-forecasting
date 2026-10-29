@@ -13,7 +13,7 @@ the module comment (next to the resource) wins.
   [`terraform/README.md`](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md).
 - **One rule to keep in mind:** Terraform owns the *containers* (project, dataset, buckets,
   connection, network, service accounts, roles). The **application** owns the *tables* — the nine
-  source/registry tables (`4` source + `5` registry) and five analytical SQL views are defined once in
+  source/registry tables (`4` source + `5` registry) and eleven analytical SQL views (`5` core + `6` diagnostic) are defined once in
   `src/scale_forecasting/registry/ddl.py` and `views.py` and created by
   `registry.tables.ensure_tables()` at run time, so there is a single source of truth for the DDL and no
   HCL↔Python drift.
@@ -55,7 +55,7 @@ the services are on); everything else depends on it.
 
 | Module | Creates | Notes |
 |--------|---------|-------|
-| `apis` | Enables the ~18 Google APIs the platform uses | `disable_on_destroy = false` so a teardown never yanks APIs other work relies on |
+| `apis` | Enables the ~21 Google APIs the platform uses | `disable_on_destroy = false` so a teardown never yanks APIs other work relies on |
 | `iam` | The two service accounts + their least-privilege roles + three custom roles | The heart of "why permissions" — see [Permissions](#permissions-why-each-is-granted-and-who-uses-it) |
 | `storage` | Three GCS buckets: `warehouse`, `artifacts`, `code` | Separate buckets, not one with prefixes — see [Storage](#storage-three-buckets-on-purpose) |
 | `bigquery` | The dataset + the BigLake (Cloud Resource) connection | Tables are **not** here — the app creates them. Connection exists for the Iceberg source variant |
@@ -148,6 +148,7 @@ toggles (all default to the greenfield/quickstart behavior).
 | Variable | Default | Turn off / change when… | What you must supply instead |
 |----------|---------|--------------------------|------------------------------|
 | `enable_apis` | `true` | An admin already enabled the APIs | Nothing — just ensure they're on |
+| `enable_bq_agent` | `true` | Your org restricts Conversational Analytics APIs | Flip **off** to skip Knowledge Catalog + BigQuery Conversational Analytics APIs and `DataAgent` IAM grants |
 | `create_service_accounts` | `true` | You bring your own SAs | `runner_sa_email` + `compute_sa_email` (and your admin owns their grants) |
 | `create_network` | `true` | Your org already manages a VPC | `subnetwork_uri` — a subnet with **Private Google Access** + an **internal-ingress** firewall rule |
 | `create_composer` | `false` | You want scheduled DAG runs | Nothing — flip **on** (starts the estimated `~\$300–\$400/mo` continuous Composer 3 meter); flip off to stop it, and delete the Composer-created `<region>-<env>-*-bucket` in Cloud Storage if you no longer need its DAGs/logs |
@@ -172,11 +173,12 @@ subnet without it will fail at batch-submission time, not at apply time.
 
 The `apis` module enables exactly these, grouped by what they're for:
 
-**Data + lineage**
-- **BigQuery** (`bigquery.googleapis.com`, `bigquerystorage.googleapis.com`) — the run registry (five native tables: `run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof` + five curated views),
+**Data + lineage + conversational analytics**
+- **BigQuery** (`bigquery.googleapis.com`, `bigquerystorage.googleapis.com`) — the run registry (five native tables: `run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof` + eleven curated analytical views),
   the BigQuery-native models (`ARIMA_PLUS`, `TimesFM`, SQL-only), and the example
   input tables. This is the system's spine: every run's config, metrics, forecasts, feature attributions, and artifact
-  links land here.
+  links land here, stamped with table, view, and column descriptions at creation.
+- **Knowledge Catalog & BigQuery Conversational Analytics** (`dataplex.googleapis.com`, `geminidataanalytics.googleapis.com`, `cloudaicompanion.googleapis.com`; controlled by `enable_bq_agent = true`) — backs `scale_forecasting.bq_agent` (`Registry().ensure_bq_agent()`, `Forecaster.ask()`, `output.ensure_bq_agent`): syncs the 44-term Forecasting Business Glossary and DataProfile scans into Knowledge Catalog and registers a stateful BigQuery `DataAgent` scoped strictly to the registry's tables/views and discovered source tables. Free at rest.
 - **BigLake / Cloud Resource connection** (`bigqueryconnection.googleapis.com`) — the managed-Iceberg
   source variant (`source_series_iceberg`) reads/writes its GCS files *through* this connection's
   Google-managed service agent, not through the caller. The registry tables are native and need no
@@ -287,6 +289,8 @@ attach it to worker jobs — again, no keys.
 | `roles/serviceusage.serviceUsageConsumer` | Read live Service Usage consumer quota limits (`serviceusage.quotas.get`) across `compute`, `aiplatform`, and `dataproc` for dynamic 6-runtime preflight before job launch | predefined |
 | `roles/container.admin` | Create/delete ephemeral GKE clusters and submit Kubernetes `Job`/`Deployment` manifests (`runtime="gke"`) | predefined |
 | **`sfRayClusterManager`** | Create + delete + get + list the Ray cluster it runs on | **custom** |
+| `roles/dataplex.catalogEditor` + `roles/dataplex.dataScanEditor` | Sync the Knowledge Catalog Forecasting Business Glossary, EntryLinks, and DataProfile scans (`enable_bq_agent = true`) | predefined |
+| `roles/geminidataanalytics.dataAgentOwner` + `roles/geminidataanalytics.queryDataUser` + `roles/cloudaicompanion.user` | Register/update stateful BigQuery Conversational Analytics `DataAgent`s and execute multi-turn natural-language registry queries (`enable_bq_agent = true`) | predefined |
 | `roles/composer.worker` | Allow Cloud Composer 3 environment workers to run as `scale-forecasting-runner` when `create_composer = true` | predefined |
 
 ### Compute SA roles

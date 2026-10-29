@@ -716,6 +716,10 @@ class OutputConfig(BaseModel):
     target_quantile: float | None = Field(default=None, gt=0.0, lt=1.0)
     calibration_method: CalibrationMethod = "conformal"
     aci_gamma: float = Field(default=0.05, gt=0.0, le=0.5)
+    # Opt-in post-run BigQuery Conversational Analytics Agent & Knowledge Catalog sync (Track D.1).
+    # Excluded from `run_id` and `model_spec_hash` so toggling operational agent registration never
+    # alters run identity.
+    ensure_bq_agent: bool = False
 
     @property
     def effective_target_quantile(self) -> float | None:

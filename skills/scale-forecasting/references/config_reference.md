@@ -122,6 +122,7 @@ Point-forecast arm selection (`raw`, `median`, `mean`, or per-cell `auto`), phys
 | `target_quantile` | `float \| None` | `null` | `> 0.0`, `< 1.0` |
 | `calibration_method` | `'conformal' \| 'aci' \| 'aci_normalized'` | `"conformal"` | — |
 | `aci_gamma` | `float` | `0.05` | `> 0.0`, `<= 0.5` |
+| `ensure_bq_agent` | `bool` | `false` | — |
 
 ### `hpo (HpoConfig)`
 

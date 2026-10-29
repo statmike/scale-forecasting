@@ -634,11 +634,12 @@ def _run_models(
 def init(
     *, settings: Settings | None = None, create_dataset: bool = False
 ) -> str:  # pragma: no cover - GCP I/O, @gcp smoke
-    """Create this registry's five tables + five views in `Settings.registry_dataset_ref`.
+    """Create this registry's five tables + eleven views in `Settings.registry_dataset_ref`.
 
-    Idempotent (``CREATE TABLE IF NOT EXISTS`` + ``CREATE OR REPLACE VIEW``) and **registry-only**:
-    the source panel is a separate concern with a separate lifetime and is never created here. Point
-    ``SF_REGISTRY_DATASET_ID`` at a new dataset and this is how you stand up a second registry.
+    Idempotent (``CREATE TABLE IF NOT EXISTS`` + ``CREATE OR REPLACE VIEW``) and **registry-only**
+    for table creation (also backfills table, view, and column descriptions onto pre-existing
+    tables from earlier releases). Point ``SF_REGISTRY_DATASET_ID`` at a new dataset and this is
+    how you stand up a second registry.
 
     Terraform owns dataset creation, so by default this expects the dataset to exist and fails with
     BigQuery's own 404 if it does not. ``create_dataset=True`` is the opt-in escape hatch for a
@@ -647,7 +648,8 @@ def init(
     """
 
     from ..errors import RegistryError
-    from .ddl import render_create_tables, render_migrations
+    from .ddl import SOURCE_TABLE_NAMES, render_create_tables, render_migrations
+    from .metadata import sync_existing_descriptions
     from .tables import ensure_views
 
     resolved = _resolved(settings)
@@ -675,6 +677,16 @@ def init(
                 client.query(statement).result()
             except Exception as exc:  # re-raised with table context
                 raise RegistryError(f"init failed {stage} {name}: {exc}") from exc
+    sync_existing_descriptions(client, resolved.registry_dataset_ref, REGISTRY_TABLE_NAMES)
+    sync_existing_descriptions(
+        client,
+        resolved.dataset_ref,
+        (
+            *SOURCE_TABLE_NAMES,
+            "source_series_covariates_iceberg",
+            "source_series_covariates_native",
+        ),
+    )
     ensure_views(settings=resolved)
     _log.info("registry ready: %s", resolved.registry_dataset_ref)
     return resolved.registry_dataset_ref

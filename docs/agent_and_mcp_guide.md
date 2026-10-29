@@ -1,29 +1,30 @@
-# AI Agents, Portable Skills & Built-in MCP Server
+# AI Agents, BigQuery Registry `DataAgent`, Portable Skills & Built-in MCP Server
 
-`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **37 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry operations** as structured, environment-aware tools and drift-locked reference surfaces.
+`scale-forecasting` is engineered as an **agent-first repository**. Whether you use **BigQuery Studio**, **Google Antigravity (`agy` CLI & IDE)**, **Claude Code**, **Cursor**, **VS Code GitHub Copilot (Agent Mode)**, **Windsurf**, **OpenAI Codex CLI**, or an LLM ingestion pipeline, the platform exposes its entire configuration contract (`RunConfig`), all **37 models**, **21 metrics**, **7 compute runtimes**, **5 execution paths**, and **live BigQuery registry conversational analytics** as structured, environment-aware tools and drift-locked reference surfaces.
 
 ```mermaid
 flowchart TD
     subgraph Truth["Single Source of Truth (Python Code & Registries)"]
         T1["config.py (RunConfig + 14 Blocks) · auto_policy.py · benchmarks.py (20 DGPs + 9 Public)"]
-        T2["models/* (37) · metrics/* (21) · resources/catalog.py · registry/views.py"]
-        T3["configs/*.json (20 Demo + 42 Smokes)"]
+        T2["models/* (37) · metrics/* (21) · resources/catalog.py · registry/views.py (11 Views)"]
+        T3["configs/*.json (20 Demo + 42 Smokes) · registry/metadata.py · bq_agent/*"]
     end
 
-    subgraph Surfaces["Four Agent-First Surfaces (Zero Extra Dependencies)"]
+    subgraph Surfaces["Five Agent-First Surfaces"]
         S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md + .agents/skills/ & .agents/skills.json"]
-        S2["2. Built-In MCP Server (7 Resources, 13 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
-        S3["3. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json (IDE Autocomplete via $schema)"]
-        S4["4. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt (Single-File RAG / Context Bundle)"]
+        S2["2. Built-In MCP Server (7 Resources, 14 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
+        S3["3. Stateful BigQuery DataAgent & Knowledge Catalog<br/>scale_forecasting.bq_agent (44 Glossary Terms · DataScans · 32 Golden SQL Queries)"]
+        S4["4. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json (IDE Autocomplete via $schema)"]
+        S5["5. LLM Context Indexes<br/>docs/llms.txt & docs/llms-full.txt (Single-File RAG / Context Bundle)"]
     end
 
     subgraph Guard["Automated Pre-Commit & CI Tripwires"]
         G1["make agent-surfaces (agent_surfaces.py --write/--check)"]
         G2["test_agent_surfaces.py (Zero-Drift & Schema Validation)"]
-        G3["test_mcp_server.py (In-Process + Subprocess stdio Tests)"]
+        G3["test_mcp_server.py & test_bq_agent.py (In-Process + Subprocess + Fake Session Tests)"]
     end
 
-    Truth -->|"Introspected by agent_surfaces.py & mcp.py"| Surfaces
+    Truth -->|"Introspected by agent_surfaces.py, mcp.py & bq_agent"| Surfaces
     Surfaces -->|"Verified on every commit"| Guard
 ```
 
@@ -141,7 +142,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | :--- | :--- | :--- |
 | [`skills/scale-forecasting/SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md) | YAML frontmatter (`name`, `description`) + 4-step operational workflow (Probe → Author & Validate `RunConfig` → Pre-Flight & Execute across 5 paths → Review & Surgically Repair). | Hand-authored workflow guide |
 | [`skills/scale-forecasting/references/config_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/config_reference.md) | Every field, type, default, and constraint across `RunConfig` and all 14 nested Pydantic config classes, 7 cross-field normalization rules, GPU-to-VM shape matrix, and `run_id` digest exclusions. | Auto-generated from [`config.py`](./api/config.md) |
-| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **37 models**, **21 metrics**, **7 runtimes**, **13 extras**, **4 source / 5 registry / 5 view schemas**, and **62 shipped configs** (`20` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
+| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **37 models**, **21 metrics**, **7 runtimes**, **13 extras**, **4 source / 5 registry / 11 view schemas**, and **62 shipped configs** (`20` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
 | [`skills/scale-forecasting/references/execution_paths_and_ops.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/execution_paths_and_ops.md) | Exact CLI commands and Python SDK snippets for `SF_*` environment variables, all 5 execution paths, monitoring/calibration/review, surgical cell repair (`retry_run`), and registry operations (`registry.ops`). | Auto-generated from [`agent_surfaces.py`](./api/agent_surfaces.md) |
 
 ---
@@ -160,9 +161,9 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `forecast://catalog/metrics` | `application/json` | All 21 evaluation metrics (16 point + 5 interval) with direction and requirements. |
 | `forecast://catalog/runtimes` | `application/json` | All 7 compute runtimes and 4 GPU types (`T4`, `L4`, `A100`, `A100_80GB`). |
 | `forecast://catalog/configs` | `application/json` | All 62 shipped configs (20 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
-| `forecast://catalog/views` | `application/json` | The 4 source tables, 5 registry tables, and 5 analytical SQL views. |
+| `forecast://catalog/views` | `application/json` | The 4 source tables, 5 registry tables, and 11 analytical SQL views. |
 
-### 13 MCP Tools (`tools/list` & `tools/call`)
+### 14 MCP Tools (`tools/list` & `tools/call`)
 
 | Tool Name | Requires `[gcp]`? | Requires `--allow-launch`? | Purpose |
 | :--- | :---: | :---: | :--- |
@@ -179,6 +180,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `run_auto_forecast` | Only for cloud run | Only for cloud run | Execute `Forecaster.auto()` with optional multi-branch `autofocus=True` tournament (including Branch 2c `cold_start_analog_transfer`) across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables; returns Step 0 `profile_table`, `autofocus_ledger`, `baseline_value` ladder, `hierarchy_value`, `model_comparison`, and the **7-Question `practitioner_assessment`**. |
 | `compute_time_series_similarity` | Only for BQ table | No | Compute 7-lens time-series similarity (`hybrid`, `physics_attractor`, `spectral_phase`, `elastic_dtw`, `minirocket`, `structural_signature`, `foundation_latent`), silhouette-optimal behavioral clusters (`cluster_by_similarity_df`), 2D phase-space & econometric embeddings (`embed_series_df`), SKU substitutes (`recommend_substitutes_df`), emerging trend breakouts (`detect_emerging_trends_df`), and top-$k$ digital-twin analog lookup (`query_ts_id`, `mode` in `("full_history", "launch_prefix", "recent_window", "substitutes", "emerging_trends")`) across any of the 20 synthetic DGP benchmarks, local CSV/Parquet files, or BigQuery tables. |
 | `optimize_inventory_clearance` | No | No | Solve lifecycle markdown & perishable expiry clearance MILP (`mode="clearance"`, monotone discount ladder, FWL covariate partialling, digital-twin elasticity borrowing, shelf/warehouse `target_space_freed` constraint, bottom-up `hierarchy_rollup`) or vendor contract volume & tiered rebate / Take-or-Pay optimization (`mode="contract_volume"`, `contract_tiers`, `min_contract_volume`, `risk_aversion_lambda`, `cvar_alpha`). |
+| `ask_forecast_registry` | Only for `bigquery_agent` / `probe` | Only for `ensure_agent=True` | Probe Conversational Analytics & **Knowledge Catalog** readiness (`mode="probe"`), ask a stateful multi-turn natural-language forecasting question (`mode="auto"` or `mode="bigquery_agent"`, defaulting to the latest `COMPLETED` run and returning generated SQL, DataFrame rows, Vega-Lite `chart_spec`, and reusable `conversation_id`), or query an offline synthetic benchmark (`mode="offline"`). |
 
 ### Safety-By-Default (`--allow-launch`)
 
@@ -188,7 +190,95 @@ By default, starting `python -m scale_forecasting.mcp` runs in **safe read/plan/
 
 ---
 
-## 5. IDE JSON Schema Autocomplete (`$schema`) & `llms.txt`
+## 5. Stateful BigQuery Conversational Analytics `DataAgent` & Knowledge Catalog (`scale_forecasting.bq_agent`)
+
+In addition to local coding agents and MCP clients, [`scale_forecasting.bq_agent`](./api/bq_agent.md) registers a **stateful Google Cloud BigQuery Conversational Analytics `DataAgent`** (`geminidataanalytics.googleapis.com/v1`) enriched by **Knowledge Catalog** (`dataplex.googleapis.com/v1`) over any `scale-forecasting` registry dataset:
+
+1. **Strict Allowlisted Object Scope:** `discover_registry_scope` attaches **only** the 5 canonical `REGISTRY_TABLE_NAMES`, the 11 canonical `VIEW_NAMES`, and verified `source_table`s discovered from `run_registry.raw_config` (`$.data.source_table`) — never calling dataset-wide `list_tables`, so ephemeral `_sf_automl_*` staging tables and unrelated user tables in the same dataset are strictly excluded.
+2. **Self-Documenting Registry & Upgrade Backfill:** All source tables, registry tables, and 11 analytical views carry table- and column-level `OPTIONS(description='...')` at creation (`ddl.py`, `views.py`), and `Registry().init()` / `ensure_registry_agent()` automatically backfills missing descriptions onto pre-existing registries created by earlier releases (`sync_existing_descriptions`).
+3. **Knowledge Catalog Business Glossary, DataProfile Scans & 32 Golden SQL Queries:** Syncs 44 forecasting domain terms (`WAPE`, `MASE`, `MSIS`, `FVA`, `Trigg's Tracking Signal`, `SBC`, `THieF`, `snapshot_millis`, etc.) via Knowledge Catalog `EntryLink`s (`<= 8` links per object), optionally triggers Knowledge Catalog `DataScan` profile jobs (`catalogPublishingEnabled=True`), and embeds 32 verified Golden SQL queries plus explicit `SchemaRelationship` join edges in `publishedContext`.
+4. **Non-Raising Check-and-Run Readiness Probe (`probe_bq_agent_access`):**
+   - `reg.probe_bq_agent()`, `forecaster.probe_bq_agent()`, CLI `python -m scale_forecasting.bq_agent --probe`, and MCP `ask_forecast_registry(mode="probe")` check whether `geminidataanalytics.googleapis.com` and `dataplex.googleapis.com` (**Knowledge Catalog**) are enabled and reachable **without raising**. When disabled or unconfigured, `status.ready` is `False` and `status.setup_hint` provides exact `gcloud services enable ...` instructions, allowing notebooks and CI pipelines to run pure-SQL scorecards (`reg.sop_summary_df()`) unconditionally and execute conversational cells only when ready.
+5. **Default-to-Latest-`COMPLETED`-Run & Multi-Surface Access:**
+   - **BigQuery Studio UI:** Open **BigQuery Studio → Agents** and chat directly with `scale-forecasting Registry Agent (<dataset>)`.
+   - **Python SDK (`Registry` / `Forecaster` / `PlaygroundRun` / `BakeOff`):**
+     ```python
+     from scale_forecasting import Forecaster, Registry
+
+     reg = Registry()
+     sop_df = reg.sop_summary_df(limit=5)  # Pure BigQuery SQL — always available
+     agent_status = reg.probe_bq_agent()   # Non-raising check-and-run guard
+     if agent_status.ready:
+         receipt = reg.ensure_bq_agent(sync_glossary=True, run_scans=False)
+         r1 = reg.ask("Which model won on the latest completed run and what was its pooled WAPE?")
+         r2 = reg.ask("Now show me the FVA waterfall stages for that same run.", conversation_id=r1.conversation_id)
+         hist = Forecaster.from_run_id("track-p-p2-live-sim-hierarchy-3mode-01dd2c1edab7").ask(
+             "Compare all models on this historical run by pooled_wape."
+         )
+     else:
+         print(agent_status.setup_hint)
+     ```
+   - **CLI & Declarative `RunConfig`:** Run `python -m scale_forecasting.bq_agent --dataset scale_forecasting --probe`, `python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure-agent --ask "..."`, or set `"output": {"ensure_bq_agent": true}` in any `RunConfig` JSON (excluded from `run_id` hashing).
+   - **Interactive Notebooks:** Walk through the full curriculum in [`notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb`](./notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb) (plus check-and-run Day-2 review in [`notebooks/10_registry_operations_and_scale.ipynb`](./notebooks/10_registry_operations_and_scale.ipynb) and offline parity in [`notebooks/00_model_playground.ipynb`](./notebooks/00_model_playground.ipynb)).
+
+### 5.1 Live Verified Multi-Turn & Domain Q&A Gallery
+
+The transcripts below were captured live against a Google Cloud BigQuery Registry (`sf-registry-scale-forecasting`, grounded in all 44 **Knowledge Catalog** Business Glossary terms and 11 analytical views) immediately after completing a forecast run configured with `output={"ensure_bq_agent": True}` (`run_id = track-d1-live-agent-auto-refresh-15c1fc6a7155`):
+
+#### A. 4-Turn Stateful Conversation (`conversation_id = "sf-conv-653d12086416"`)
+
+Passing `conversation_id=turn1.conversation_id` keeps the active `run_id` and champion model in server-side `Conversation` state across follow-up questions:
+
+| Turn | User Prompt (`reg.ask(...)`) | Target View Chosen by `DataAgent` | Live Agent Answer Summary & Returned Rows |
+| :--- | :--- | :--- | :--- |
+| **Turn 1** (`run_id="latest"`) | *"Which model won on the latest completed run and what were its pooled WAPE and pooled MAE?"* | `v_run_summary` $\bowtie$ `v_model_leaderboard_comparable` | Identifies `track-d1-live-agent-auto-refresh-15c1fc6a7155` and crowns **`ensemble_mean`** with `pooled_wape = 0.08526` (`8.53%`) and `pooled_mae = 10.76149` across `6` series (`8` leaderboard rows + Vega-Lite chart spec). |
+| **Turn 2** (`conversation_id` reused) | *"Show the Forecast Value Added (FVA) waterfall stages and relative lift % for that same run."* | `v_fva_waterfall` | Resolves *"that same run"* from conversation state and traces progression from `2_statistical` (`arima_plus` baseline `0.0950` $\rightarrow$ `arima_plus@xreg` `+2.77%`) $\rightarrow$ `3_univariate_ml_dl` (`timesfm@univariate` `+6.72%`) $\rightarrow$ `5_ensemble` (`ensemble_mean` **`+10.28%` relative lift**, `8` rows). |
+| **Turn 3** (`conversation_id` reused) | *"How does forecast accuracy (pooled_wape) and empirical interval coverage change across horizon_step 1 to 14 for the winning model on that run?"* | `v_executive_sop_summary` $\bowtie$ `v_horizon_decay` | Resolves *"the winning model"* (`ensemble_mean`) and returns all `14` lead-time steps (`pooled_wape = 0.0623` at Step 1, peaking at `0.1494` on Step 3, settling to `0.0671` at Step 14). |
+| **Turn 4** (`conversation_id` reused) | *"Are any series flagged with is_exception = TRUE or high Trigg's tracking_signal in v_bias_and_exceptions on that run?"* | `v_bias_and_exceptions` | Surfaces `5` planner exception series ordered by `ABS(tracking_signal) DESC`, distinguishing `CHRONIC_UNDER_FORECAST` (`s_000002`, `tracking_signal = -17.50`) from `CHRONIC_OVER_FORECAST` (`s_000004`, `tracking_signal = +8.77`). |
+
+Representative SQL generated by the stateful `DataAgent` on **Turn 2** (`v_fva_waterfall`) and **Turn 4** (`v_bias_and_exceptions`):
+
+```sql
+-- Turn 2: FVA Waterfall across complexity stages
+WITH latest_run AS (
+  SELECT run_id FROM `your-gcp-project-id.scale_forecasting.v_run_summary`
+  ORDER BY IF(status = 'COMPLETED', 0, 1), created_at DESC LIMIT 1
+)
+SELECT f.stage_order, f.stage_name, f.model_type, f.pooled_wape,
+       f.baseline_model, f.baseline_wape, f.fva_wape_delta, f.fva_relative_lift_pct
+FROM `your-gcp-project-id.scale_forecasting.v_fva_waterfall` AS f
+JOIN latest_run USING (run_id)
+ORDER BY f.stage_order ASC, f.pooled_wape ASC;
+
+-- Turn 4: Planner Exception Triage via Trigg's Tracking Signal
+WITH champion AS (
+  SELECT run_id, champion_model
+  FROM `your-gcp-project-id.scale_forecasting.v_executive_sop_summary`
+  ORDER BY IF(status = 'COMPLETED', 0, 1), created_at DESC LIMIT 1
+)
+SELECT e.ts_id, e.model_type, e.sbc_class, e.exception_reason,
+       e.tracking_signal, e.signed_bias, e.wape, e.mase
+FROM `your-gcp-project-id.scale_forecasting.v_bias_and_exceptions` AS e
+JOIN champion AS c ON e.run_id = c.run_id AND e.model_type = c.champion_model
+WHERE e.is_exception = TRUE
+ORDER BY ABS(e.tracking_signal) DESC NULLS LAST, e.wape DESC NULLS LAST
+LIMIT 50;
+```
+
+#### B. Explainability, Anomalies, Historical `run_id` Pinning, Cross-Run S&OP & `snapshot_millis` Lineage
+
+| Analytical Pattern | SDK / MCP Call | Live Verified Behavior & SQL Target |
+| :--- | :--- | :--- |
+| **Exogenous Feature Attributions** | `fc.ask("Which exogenous features or covariates have the largest mean_abs_attribution in v_feature_attributions for this run?")` | Aggregates `v_feature_attributions` by `(model_type, attribution_scope, feature_name)`, ranking `price_index` (`avg_abs_importance = 85.60`, `horizon_local`) ahead of `trend` (`84.70`), `seasonal` (`15.04`), `promo_flag` (`1.99`), and `holiday_effect` (`0.65`) (`13` rows). |
+| **Historical Run Pinning** | `Forecaster.from_run_id("track-p-p2-live-sim-hierarchy-3mode-01dd2c1edab7").ask("Compare all models on this historical run in v_model_leaderboard_comparable by pooled_wape.")` | Pins `WHERE run_id = 'track-p-p2-live-sim-hierarchy-3mode-01dd2c1edab7'` and ranks all `21` candidate models (`lightgbm` & `lightgbm@similarity_global` tied at `9.33%` WAPE ahead of `lightgbm_cross_temporal_mint` at `9.68%`). |
+| **Out-of-Fold Demand Anomalies** | `reg.ask("Show 5 notable historical out-of-fold demand anomalies from v_anomalies...", run_id="all")` | Queries `v_anomalies` ordered by `ABS(residual_zscore) DESC`, flagging `POSITIVE_SPIKE` events on `s_000005` (`2024-12-25`, $z = +2.58$) and `s_000004` (`2024-12-23`, $z = +2.57$). |
+| **Cross-Run Executive S&OP Scorecard** | `reg.ask("Compare the 5 most recent completed runs in v_executive_sop_summary...", run_id="all")` | Queries `v_executive_sop_summary WHERE status = 'COMPLETED' ORDER BY created_at DESC LIMIT 5`, comparing `champion_model`, `champion_pooled_wape` (`8.53%`–`13.88%`), `fva_relative_lift_pct` (`+10.28%`–`+37.99%`), and `total_forecast_units` across runs. |
+| **Source Table & `snapshot_millis` Lineage** | `reg.ask("For the latest completed run, what source_table and snapshot_millis were recorded in run_registry, and how many distinct ts_id series are in source_series_covariates_native?")` | Extracts `JSON_VALUE(raw_config, '$.data.source_table')` (`source_series_covariates_native`) and `snapshot_millis = 1793278799656` from `run_registry` (`QUALIFY ROW_NUMBER() ... = 1`) and cross-joins `COUNT(DISTINCT ts_id) = 100` from the scoped source table. |
+| **Live MCP `ask_forecast_registry` Tool** | `McpServer().call_tool("ask_forecast_registry", {"mode": "bigquery_agent", "run_id": ..., "question": "Return the executive S&OP scorecard row..."})` | Returns structured JSON (`isError=False`, `mode="bigquery_agent"`, `row_count=1`) with `champion_model="ensemble_mean"` and `total_forecast_units=10683.15`. |
+
+---
+
+## 6. IDE JSON Schema Autocomplete (`$schema`) & `llms.txt`
 
 ### Authoring `RunConfig` JSON With Editor Autocomplete
 
@@ -239,7 +329,7 @@ For LLM web crawlers, documentation indexers, and notebook/chat context attachme
 
 ---
 
-## 6. How We Built a Drift-Free Agent-First Repository
+## 7. How We Built a Drift-Free Agent-First Repository
 
 Hand-written agent prompts and JSON schemas rot the moment a new model is registered, a `RunConfig` field is added, or a CLI flag changes. We engineered `scale-forecasting` so that **agent surfaces are compiled from code and enforced by pre-commit tripwires**:
 
@@ -255,4 +345,4 @@ Hand-written agent prompts and JSON schemas rot the moment a new model is regist
 3. **Automated Pre-Commit & CI Gate ([`tests/unit/test_agent_surfaces.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_agent_surfaces.py) & [`tests/unit/test_mcp_server.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_mcp_server.py)):**
    - `test_agent_surfaces_zero_drift` calls `check_agent_surfaces()` in `.githooks/pre-commit` and CI. If any of the 6 generated files on disk differs by a single byte from what current code produces, the commit is blocked with instructions to run `make agent-surfaces`.
    - `test_all_shipped_configs_validate_with_schema_key_and_preserve_run_id` validates all 62 shipped configs (plus `"$schema"` round-trip and `run_id` invariance) against `docs/schemas/run_config.schema.json`.
-   - `test_mcp_server.py` exercises all 7 MCP resources and 13 MCP tools both in-process and over a real `python -m scale_forecasting.mcp` subprocess `stdio` pipe using both newline-delimited and `Content-Length` JSON-RPC framing.
+   - `test_mcp_server.py` exercises all 7 MCP resources and 14 MCP tools both in-process and over a real `python -m scale_forecasting.mcp` subprocess `stdio` pipe using both newline-delimited and `Content-Length` JSON-RPC framing.

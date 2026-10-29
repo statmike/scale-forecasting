@@ -545,6 +545,7 @@ Controls point-forecast calibration, physical domain guardrails (`floor`, `cap`,
 | `overage_cost` | `float` \| `null` | `null` | Unit holding / spoilage / markdown cost $c_o > 0$; paired with `underage_cost`. |
 | `calibration_method` | `"conformal"` \| `"aci"` \| `"aci_normalized"` | `"conformal"` | Prediction-interval calibration engine: static out-of-fold split conformal (`"conformal"`), online Adaptive Conformal Inference (`"aci"`, Gibbs & Candès 2021), or volatility-normalized online ACI (`"aci_normalized"`, [`aci.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/aci.py)). |
 | `aci_gamma` | `float` (`0 < γ ≤ 0.5`) | `0.05` | Online learning rate $\gamma$ for `"aci"` / `"aci_normalized"` updating the effective miscoverage rate $\alpha_{t+1} = \text{clip}(\alpha_t + \gamma(\alpha - \text{err}_{t-h+1}), [0.001, 0.999])$. |
+| `ensure_bq_agent` | `bool` | `false` | Opt-in post-run Knowledge Catalog & BigQuery Conversational Analytics Agent sync ([`bq_agent`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/bq_agent)): after a live run writes to BigQuery, automatically syncs table/view descriptions, Knowledge Catalog Business Glossary terms, and the dataset's stateful `DataAgent` (`sf-registry-<dataset>`) so any newly added `source_table` enters the agent's allowlisted scope. Excluded from `run_id` and `model_spec_hash`. |
 
 Every model emits one number per future date, so something decides what that number is:
 

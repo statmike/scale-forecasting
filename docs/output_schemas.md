@@ -1,8 +1,8 @@
 # Output schemas — the registry tables
 
 Every run writes to the same **registry tables** plus a backtest table, and reads back through
-five curated views. This page documents the layout of each — what every column collects and how the
-tiers link — so you can query the results directly, not just through the notebooks.
+eleven curated views. Every table, view, and column carries a structured BigQuery `OPTIONS(description='...')` from [`src/scale_forecasting/registry/metadata.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/metadata.py) (and `Registry().init()` / `sync_existing_descriptions` automatically backfills missing descriptions onto pre-existing registries created by earlier releases). This page documents the layout of each — what every column collects and how the
+tiers link — so you can query the results directly in SQL, through Looker, or conversationally via the stateful BigQuery Registry `DataAgent` (`Registry.ask()`).
 
 Two facts hold for all of them:
 
@@ -33,17 +33,18 @@ flowchart LR
         BO["backtest_oof<br/>(N rows per run_id × ts_id × model_type × fold_id × forecast_date)"]
         RR -->|"run_id"| RJ & FM & FP & BO
     end
-    subgraph Views["5 Curated Serving Views (Dedupe-on-Read)"]
-        VRS["v_run_summary"]
-        VRJ["v_run_jobs"]
-        VML["v_model_leaderboard"]
-        VBC["v_backtest_coverage"]
-        VMC["v_model_leaderboard_comparable"]
+    subgraph Views["11 Curated Serving Views (Dedupe-on-Read)"]
+        VRS["v_run_summary · v_run_jobs"]
+        VML["v_model_leaderboard · v_backtest_coverage"]
+        VMC["v_model_leaderboard_comparable · v_fva_waterfall"]
+        VDG["v_horizon_decay · v_bias_and_exceptions · v_anomalies"]
+        VEX["v_feature_attributions · v_executive_sop_summary"]
     end
-    RR --> VRS
-    RJ --> VRJ
-    FM --> VML & VBC
-    BO --> VMC
+    RR --> VRS & VEX
+    RJ --> VRS & VEX
+    FM --> VML & VEX
+    FP --> VEX
+    BO --> VMC & VDG & VEX
 ```
 
 Everything joins on **`run_id`** (the config digest — see
@@ -525,10 +526,9 @@ cutoff says and the ordinal does not. The ensemble joins on `(ts_id, cutoff_date
 
 ---
 
-## The read surface — five views
+## The read surface — eleven views
 
-You rarely query the raw tables. Five `CREATE OR REPLACE VIEW`s are the curated read surface (and they
-apply the dedupe-on-read). Full operator loop in
+You rarely query the raw tables. Eleven `CREATE OR REPLACE VIEW`s (`5` core operational views + `6` server-side diagnostic and executive S&OP views) are the curated read surface, and all eleven apply `QUALIFY ROW_NUMBER() = 1` dedupe-on-read. Full operator loop in
 [running_and_reviewing.md](./running_and_reviewing.md).
 
 ### `v_run_summary` — how did each run go, and how efficiently?
@@ -663,6 +663,39 @@ It reads `backtest_oof` rather than `forecast_metadata` because that is the only
 per-fold truth; `forecast_metadata` stores one rolled-up row per cell and cannot be restricted to a
 fold after the fact. Ensembles appear here beside the base models, because they write their blended
 out-of-fold rows into that same table.
+
+### `v_fva_waterfall` — did model complexity earn its keep over naive?
+
+One row per `(run_id, stage_order, model_type, ensemble_id)` across six ordered Forecast Value Added stages:
+
+- `1_baseline_naive` (`naive_*`)
+- `2_statistical` (`theta`, `auto_theta`, `holtwinters`, `autoets`, `auto_arima`, `sarimax`, `tbats`, `auto_ces`, `stl_bagging`, `ucm`, `kalman`, `prophet`, `croston`, `fft`, `arima_plus`)
+- `3_univariate_ml_dl` (univariate tree, PyTorch, and foundation runs)
+- `4_covariate_ml_dl` (covariate-driven `ml`, `deep_learning`, and `vertex_automl` runs)
+- `5_ensemble` (`ensemble_*` without reconciliation)
+- `6_reconciled` (`*_(bottom_up|wls_struct|mint_shrink|mint_nonneg|thief|cross_temporal_mint)` coherent forecasts)
+
+Columns: `run_id`, `stage_order`, `stage_name`, `model_type`, `ensemble_id`, `n_series`, `n_points`, `pooled_wape`, `pooled_mae`, `baseline_model`, `baseline_wape`, `fva_wape_delta`, and `fva_relative_lift_pct` (`100 * (baseline_wape - pooled_wape) / baseline_wape`). Positive `fva_relative_lift_pct` proves the stage beat the run's baseline; negative flags complexity that hurt holdout accuracy.
+
+### `v_horizon_decay` — how fast do accuracy and interval coverage degrade by lead time?
+
+One row per `(run_id, model_type, ensemble_id, horizon_step)` over deduplicated `backtest_oof` rows: `n_series`, `n_points`, `pooled_wape`, `pooled_mae`, `signed_bias`, `empirical_coverage` (fraction of actuals inside `[yhat_lower, yhat_upper]`), and `mean_interval_width`. Use it to compare Day-1 operational accuracy against Week-2/Week-4 planning horizons without re-running models.
+
+### `v_bias_and_exceptions` — which series need human planner attention right now?
+
+One row per `(run_id, ts_id, model_type, ensemble_id)` holding the series-level planner triage queue: `sbc_class`, `cell_status`, `n_oof_points`, `mean_actual`, `mean_forecast`, `signed_bias`, `mad`, `wape`, `mase`, `staleness_gap`, Trigg's `tracking_signal` (`SUM(yhat - y_true) / MAD`, flagging persistent directional drift when `|tracking_signal| > 4.0`), `is_exception`, and `exception_reason` (`CELL_FIT_ERROR`, `CHRONIC_OVER_FORECAST`, `CHRONIC_UNDER_FORECAST`, `WORSE_THAN_NAIVE`, `STALE_REFIT_DRIFT`, or `OK`).
+
+### `v_anomalies` — which historical dates were extreme demand spikes or stockout dips?
+
+One row per anomalous `(run_id, ts_id, model_type, ensemble_id, forecast_date, fold_id)` in `backtest_oof` where `|residual_zscore| >= 2.5` or `outside_interval = TRUE`: `y_true`, `yhat`, `yhat_lower`, `yhat_upper`, `residual`, `residual_zscore`, `outside_interval`, and `anomaly_type` (`POSITIVE_SPIKE` or `NEGATIVE_DIP`).
+
+### `v_feature_attributions` — which covariates drove the forecast?
+
+Unified unnested view of **Tier 1** global/series driver weights (`forecast_metadata.fit_diagnostics.feature_attributions`, `attribution_scope = 'global_fit'`, `n_horizon_steps = NULL`) and **Tier 2** per-horizon-step local contributions (`forecast_predictions.explanations.attributions`, `attribution_scope = 'horizon_local'`) across `run_id`, `ts_id`, `model_type`, `attribution_scope`, `feature_name`, `mean_attribution`, `mean_abs_attribution`, and `n_horizon_steps`.
+
+### `v_executive_sop_summary` — one-row executive S&OP scorecard per run
+
+Joins `run_registry`, `backtest_oof`, `forecast_predictions`, `forecast_metadata`, and `run_jobs` into a single executive row per `run_id` (also readable directly in Python via `Registry.sop_summary_df()` and `Forecaster.sop_summary_df()`): `run_id`, `created_at`, `status`, `source_table`, `n_series`, `n_models`, `runtime_seconds`, `champion_model`, `champion_pooled_wape`, `champion_pooled_mae`, `baseline_wape`, `fva_relative_lift_pct`, `horizon_start_date`, `horizon_end_date`, `total_forecast_units`, `mean_interval_width`, `n_exception_series`, `exception_rate`, and `n_gpu_waste_jobs`.
 
 ---
 

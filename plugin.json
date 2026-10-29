@@ -2,16 +2,16 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "scale-forecasting",
   "displayName": "Scale Forecasting on Google Cloud",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "license": "Apache-2.0",
   "ownership": {
     "team": "cloud-gtm/agentic-data-science",
     "poc": "statmike"
   },
-  "description": "Configure, validate, dry-run, execute, review, and optimize enterprise time-series forecasting on Google Cloud (37 models, 21 metrics, 7 runtimes, Glass-Box Auto-Forecaster, multi-branch autofocus, AlphaEvolve/Vertex Gemini evolution, causal @monotone & Double-ML elasticity, 3-mode THieF/cross-temporal & simplex reconciliation, Goal-Seek QP, cold-start NPI, 7-lens multi-modal time-series similarity, SKU substitutes & emerging trends, online ACI, copula VaR/CVaR tail risk, and prescriptive inventory, clearance markdown, vendor contract volume & price/promo optimizers).",
+  "description": "Configure, validate, dry-run, execute, review, and optimize enterprise time-series forecasting on Google Cloud (37 models, 21 metrics, 7 runtimes, self-documenting 5-table / 11-view BigQuery registry with Knowledge Catalog & stateful BigQuery DataAgent, Glass-Box Auto-Forecaster, multi-branch autofocus, AlphaEvolve/Vertex Gemini evolution, causal @monotone & Double-ML elasticity, 3-mode THieF/cross-temporal & simplex reconciliation, Goal-Seek QP, cold-start NPI, 7-lens multi-modal time-series similarity, SKU substitutes & emerging trends, online ACI, copula VaR/CVaR tail risk, and prescriptive inventory, clearance markdown, vendor contract volume, assortment, pre-pack & rebalancing optimizers).",
   "suggestedPrompts": [
     "Run the Glass-Box Auto-Forecaster with multi-branch autofocus on dgp_04_true_vs_decoy_covs and show the 7-Question Practitioner Assessment",
-    "Run playground with online ACI, Student-t copula VaR/CVaR tail risk, portfolio inventory optimization, and lifecycle markdown clearance & vendor contract volume MILP",
-    "Compute 7-lens time-series similarity, recommend SKU substitutes, detect emerging trends, and review the latest BigQuery run with causal promo elasticity and Goal-Seek allocation"
+    "Provision the Knowledge Catalog glossary & stateful BigQuery DataAgent on scale_forecasting and ask which model won on WAPE and which series have Trigg bias alerts",
+    "Compute 7-lens time-series similarity, recommend SKU substitutes, detect emerging trends, and optimize markdown clearance, assortment transference, and store rebalancing"
   ]
 }

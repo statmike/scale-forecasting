@@ -202,9 +202,9 @@ WHERE run_id = 'YOUR_RUN_ID';
 
 ## Where to go next
 
-- **[Platform overview](./overview.md):** Conceptual tour of the 7 runtimes, 37 models, 21 metrics, and 5 analytical SQL views.
+- **[Platform overview](./overview.md):** Conceptual tour of the 7 runtimes, 37 models, 21 metrics, and 11 analytical SQL views.
 - **[Auto-forecaster & `autofocus`](./auto_forecaster.md):** Compile explained configs (`Forecaster.build_config`) or run multi-branch `autofocus=True` tournaments (`Forecaster.auto`).
 - **[Running and reviewing](./running_and_reviewing.md):** Full operator loop — feasibility checks, quota preflight, live monitoring, and re-ensembling.
-- **[Notebook tour](./notebooks/README.md):** 12 end-to-end notebooks (`00`–`11`) across local sandbox, auto-forecaster, cloud runtimes, covariates/hierarchy/HPO, and operations.
+- **[Notebook tour](./notebooks/README.md):** 13 end-to-end notebooks (`00`–`12`) across local sandbox, auto-forecaster, cloud runtimes, covariates/hierarchy/HPO, operations, and conversational analytics.
 - **[Compute runtimes reference](./runtimes_reference.md):** Detailed guide to `spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, and `bigquery`.
 - **[Configuration reference](./configuration_reference.md):** Every `RunConfig` section, field, default, and validation rule.

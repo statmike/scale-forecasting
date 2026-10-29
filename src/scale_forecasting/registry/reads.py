@@ -1023,3 +1023,179 @@ def read_feature_attributions(
     except Exception as exc:  # re-raised with context
         raise RegistryError(f"read_feature_attributions failed for run {run_id}: {exc}") from exc
     return [dict(r) for r in rows]
+
+
+def read_fva_waterfall(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_fva_waterfall`` rows for ``run_id`` ordered by pipeline stage."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_fva_waterfall')}` "
+        "WHERE run_id=@run_id ORDER BY stage_order ASC, pooled_wape ASC NULLS LAST"
+    )
+    params = [header_param("run_id", run_id)]
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(f"read_fva_waterfall failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_horizon_decay_view(
+    run_id: str, *, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_horizon_decay`` rows for ``run_id`` ordered by model and step."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_horizon_decay')}` "
+        "WHERE run_id=@run_id ORDER BY model_type ASC, horizon_step ASC"
+    )
+    params = [header_param("run_id", run_id)]
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(f"read_horizon_decay_view failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_bias_and_exceptions(
+    run_id: str,
+    *,
+    exceptions_only: bool = False,
+    limit: int = 5000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_bias_and_exceptions`` rows for ``run_id``."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    where_extra = " AND is_exception = TRUE" if exceptions_only else ""
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_bias_and_exceptions')}` "
+        f"WHERE run_id=@run_id{where_extra} "
+        "ORDER BY is_exception DESC, ABS(tracking_signal) DESC NULLS LAST, wape DESC NULLS LAST "
+        "LIMIT @limit"
+    )
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit)),
+    ]
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(f"read_bias_and_exceptions failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_anomalies_view(
+    run_id: str, *, limit: int = 5000, settings: Settings | None = None
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_anomalies`` rows for ``run_id`` ordered by ``|residual_zscore|``."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_anomalies')}` "
+        "WHERE run_id=@run_id ORDER BY ABS(residual_zscore) DESC NULLS LAST LIMIT @limit"
+    )
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit)),
+    ]
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(f"read_anomalies_view failed for run {run_id}: {exc}") from exc
+    return [dict(r) for r in rows]
+
+
+def read_feature_attributions_view(
+    run_id: str,
+    *,
+    scope: str | None = None,
+    limit: int = 5000,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_feature_attributions`` rows for ``run_id``."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    scope_clause = " AND attribution_scope=@scope" if scope else ""
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_feature_attributions')}` "
+        f"WHERE run_id=@run_id{scope_clause} "
+        "ORDER BY mean_abs_attribution DESC NULLS LAST LIMIT @limit"
+    )
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("run_id", "STRING", run_id),
+        bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit)),
+    ]
+    if scope:
+        params.append(bigquery.ScalarQueryParameter("scope", "STRING", scope))
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(
+            f"read_feature_attributions_view failed for run {run_id}: {exc}"
+        ) from exc
+    return [dict(r) for r in rows]
+
+
+def read_executive_sop_summary(
+    run_id: str | None = None,
+    *,
+    limit: int = 25,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:  # pragma: no cover - GCP I/O
+    """Read server-side ``v_executive_sop_summary`` scorecard row(s)."""
+    from google.cloud import bigquery
+
+    from ..errors import RegistryError
+
+    resolved = resolve_settings(settings)
+    where_clause = " WHERE run_id=@run_id" if run_id is not None else ""
+    sql = (
+        f"SELECT * FROM `{resolved.registry_table_ref('v_executive_sop_summary')}`"
+        f"{where_clause} ORDER BY created_at DESC NULLS LAST LIMIT @limit"
+    )
+    params: list[Any] = [bigquery.ScalarQueryParameter("limit", "INT64", max(1, limit))]
+    if run_id is not None:
+        params.append(bigquery.ScalarQueryParameter("run_id", "STRING", run_id))
+    client = bigquery_client(resolved.project_id)
+    try:
+        rows = list(
+            client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
+        )
+    except Exception as exc:
+        raise RegistryError(f"read_executive_sop_summary failed: {exc}") from exc
+    return [dict(r) for r in rows]

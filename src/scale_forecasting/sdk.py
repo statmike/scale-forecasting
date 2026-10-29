@@ -2011,7 +2011,30 @@ class Registry:
     There is deliberately no wipe-everything method: a full teardown is ``bq rm -r -f <dataset>``.
     """
 
-    def __init__(self, *, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings | None = None,
+        project_id: str | None = None,
+        dataset_id: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        if settings is None and project_id is not None:
+            import os
+
+            from .settings import Settings as _Settings
+
+            eff_ds = dataset_id or os.environ.get("SF_DATASET_ID", "scale_forecasting")
+            eff_reg = region or os.environ.get("SF_REGION", "us-central1")
+            settings = _Settings(
+                project_id=project_id,
+                dataset_id=eff_ds,
+                region=eff_reg,
+                connection=os.environ.get("SF_CONNECTION", f"{project_id}.{eff_reg}.sf-iceberg"),
+                warehouse_uri=os.environ.get(
+                    "SF_WAREHOUSE_URI", f"gs://{project_id}-warehouse/warehouse"
+                ),
+            )
         self._settings = settings
 
     def __repr__(self) -> str:
@@ -2286,6 +2309,105 @@ class Registry:
             sigma_threshold=sigma_threshold,
             engine=engine,
             limit=limit,
+        )
+
+    def sop_summary_df(
+        self,
+        run_id: str | None = None,
+        *,
+        limit: int = 25,
+    ) -> pd.DataFrame:
+        """Read ``v_executive_sop_summary`` for this registry (champion WAPE/MASE/coverage, FVA
+        lift, total forecast units, and Trigg bias alert counts per run).
+        """
+        import pandas as pd
+
+        from .registry.reads import read_executive_sop_summary
+
+        rows = read_executive_sop_summary(run_id=run_id, limit=limit, settings=self._settings)
+        return pd.DataFrame.from_records(rows) if rows else pd.DataFrame()
+
+    def probe_bq_agent(
+        self,
+        *,
+        agent_id: str | None = None,
+        location: str = "global",
+    ) -> Any:
+        """Check whether BigQuery Conversational Analytics & **Knowledge Catalog** APIs are
+        enabled and authorized for this registry without raising
+        (`bq_agent.probe.probe_bq_agent_access`).
+        """
+        from .bq_agent.probe import probe_bq_agent_access
+
+        return probe_bq_agent_access(
+            agent_id=agent_id,
+            location=location,
+            settings=self._settings,
+        )
+
+    def ensure_bq_agent(self, **kwargs: Any) -> Any:
+        """Idempotently provision or update the stateful BigQuery Conversational Analytics
+        `DataAgent` and **Knowledge Catalog** glossary/scans for this registry
+        (`bq_agent.client.ensure_registry_agent`).
+        """
+        from .bq_agent.client import ensure_registry_agent
+
+        return ensure_registry_agent(settings=self._settings, **kwargs)
+
+    def get_bq_agent(self, *, agent_id: str | None = None, location: str = "global") -> Any:
+        """Return the registered BigQuery `DataAgent` metadata dict, or ``None`` if not yet
+        registered (`bq_agent.client.get_registry_agent`).
+        """
+        from .bq_agent.client import get_registry_agent
+
+        return get_registry_agent(
+            agent_id=agent_id,
+            location=location,
+            settings=self._settings,
+        )
+
+    def delete_bq_agent(self, *, agent_id: str | None = None, location: str = "global") -> bool:
+        """Delete the registered BigQuery `DataAgent` if it exists; returns ``True`` when deleted
+        (`bq_agent.client.delete_registry_agent`).
+        """
+        from .bq_agent.client import delete_registry_agent
+
+        return delete_registry_agent(
+            agent_id=agent_id,
+            location=location,
+            settings=self._settings,
+        )
+
+    def ask(
+        self,
+        question: str,
+        *,
+        run_id: str | None = "latest",
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Ask a natural-language question against this registry's stateful BigQuery
+        Conversational Analytics `DataAgent` (`bq_agent.client.ask_registry`).
+
+        Defaults ``run_id='latest'`` to the newest ``COMPLETED`` run in ``v_run_summary`` unless
+        the question explicitly asks a cross-run comparison (or ``run_id='all'`` is passed); also
+        accepts short ``run_name`` prefixes (e.g. ``run_id='ensemble-demo'``). Pass back
+        ``resp.conversation_id`` to ask stateful multi-turn follow-up questions.
+        """
+        from .bq_agent.client import ask_registry
+
+        return ask_registry(
+            question,
+            run_id=run_id,
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            settings=self._settings,
+            **kwargs,
         )
 
 

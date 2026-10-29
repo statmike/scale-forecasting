@@ -117,7 +117,7 @@
 | :--- | :--- | :--- |
 | **Source Tables (4)** | `source_series_iceberg`, `source_series_native`, `source_series_wide_native`, `source_series_hierarchical_native` | Input time-series panels (Apache Iceberg on GCS via BigLake + native BigQuery tables). |
 | **Registry Tables (5)** | `run_registry`, `run_jobs`, `forecast_metadata`, `forecast_predictions`, `backtest_oof` | Append-only experiment header, per-family job ledger, cell metadata/metrics, forward predictions, and out-of-fold backtests. |
-| **Analytical SQL Views (5)** | `v_run_summary`, `v_run_jobs`, `v_model_leaderboard`, `v_backtest_coverage`, `v_model_leaderboard_comparable` | Deduplicated leaderboards, comparable cohort rankings, backtest fold coverage, run time ledger (`overhead_seconds >= 0`), and current job state. |
+| **Analytical SQL Views (11)** | `v_run_summary`, `v_run_jobs`, `v_model_leaderboard`, `v_backtest_coverage`, `v_model_leaderboard_comparable`, `v_fva_waterfall`, `v_horizon_decay`, `v_bias_and_exceptions`, `v_anomalies`, `v_feature_attributions`, `v_executive_sop_summary` | Self-documenting leaderboards, comparable cohort rankings, backtest fold coverage, run time & job ledgers, FVA waterfall, horizon decay, Trigg bias & exceptions, anomaly flags, feature attributions, and executive S&OP summary. |
 
 ---
 

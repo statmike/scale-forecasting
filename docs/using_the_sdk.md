@@ -25,7 +25,7 @@ flowchart TD
     subgraph Doors["Three Python Surfaces (`import scale_forecasting as sf`)"]
         D1["1. Easy Path: `sf.Forecaster`<br/>.dry_run() · .feasibility() · .dag()<br/>.run() · .monitor() · .review_run()"]
         D2["2. Direct Path: Embed in Spark / Ray<br/>sf.make_group_runner · sf.make_chunk_runner<br/>sf.chunk_cells · sf.run_group"]
-        D3["3. Manage Path: `sf.Registry`<br/>.doctor() · .close_runs() · .drop_run()<br/>.reap_clusters() · .snapshot() · .export()"]
+        D3["3. Manage Path: `sf.Registry`<br/>.doctor() · .close_runs() · .drop_run()<br/>.ensure_bq_agent() · .ask() · .sop_summary_df()"]
     end
     D1 --> Main["main.run (Family DAG Orchestrator)"]
     Main --> Cell["worker.run_cell (Single Series × Model)"]
@@ -55,7 +55,7 @@ print(plan.bq_models)  # models routed to BigQuery-native
 # Run it. Python / AutoML families and BigQuery-native run in parallel under one run_id.
 result = forecaster.run()
 print(result.run_id, result.dataset_ref)
-print(result.views)  # the five registry views — query any of them by run_id
+print(result.views)  # the eleven analytical SQL views — query any of them by run_id
 ```
 
 `Forecaster` construction:
@@ -188,6 +188,8 @@ After a run finishes, `Forecaster` provides zero-SQL pandas DataFrame builders a
 | `forecaster.hierarchy_value_df()` | `pd.DataFrame` | Per-level hierarchy reconciliation audit (`Root`, `Intermediate`, `Leaf`) with base vs. reconciled accuracy and reconciliation lift |
 | `forecaster.explain_auto_decisions_df()` | `pd.DataFrame` | Unified end-to-end audit table combining Pass 1 compilation rationales (`[PINNED]` user constraints + tier rules) and all subsequent `autofocus` changes |
 | `forecaster.preview_next_loop()` / `forecaster.step()` | `LoopContinuation` / `Forecaster` | Preview proposed next-pass mutations and advance one interactive step when running with `step_by_step=True` |
+| `forecaster.sop_summary_df()` | `pd.DataFrame` | Executive S&OP run scorecard (`champion_model`, `champion_pooled_wape`, `fva_relative_lift_pct`, `total_forecast_units`, `n_exception_series`, `n_gpu_waste_jobs`) backed by `v_executive_sop_summary` |
+| `forecaster.ensure_bq_agent(...)` / `forecaster.ask(question, *, conversation_id=None)` | `BQAgentRegistration` / `BQAgentResponse` | Provision the **Knowledge Catalog** Business Glossary, DataProfile scans, and stateful BigQuery `DataAgent` (`sf-registry-<dataset>`), or ask multi-turn natural-language questions (falls back to zero-GCP `ask_offline` on local DataFrames) |
 | `forecaster.export_report("report.html")` | `pathlib.Path` | Exports a self-contained, single-file interactive HTML (and optional `.json`) executive report |
 
 Every `Forecaster` visual and tabular helper delegates to a pure, offline function exported at the
@@ -222,6 +224,12 @@ reg.drop_run("abc123", yes=True)  # artifacts, then BQML models, then rows
 
 reg.snapshot("before_migration", expiration_days=7)
 reg.export("gs://my-bucket/registry-dump", fmt="JSON")
+
+# Provision Knowledge Catalog + stateful BigQuery DataAgent & ask multi-turn questions
+reg.ensure_bq_agent(sync_glossary=True, enable_scans=True)
+r1 = reg.ask("Which model won on the latest completed run and what was its pooled WAPE?")
+r2 = reg.ask("Show me the FVA waterfall stages for that same run.", conversation_id=r1.conversation_id)
+sop_df = reg.sop_summary_df(limit=5)
 ```
 
 Every method delegates to `registry.ops`, the same code

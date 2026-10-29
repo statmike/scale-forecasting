@@ -92,7 +92,8 @@ the project bootstrap just created. If your org forbids `owner`, the equivalent 
 `roles/resourcemanager.projectIamAdmin`, `roles/iam.roleAdmin` (three custom roles),
 `roles/storage.admin`, `roles/bigquery.admin`, `roles/compute.networkAdmin`,
 `roles/dataproc.admin`, `roles/aiplatform.admin`, `roles/cloudbuild.builds.editor`,
-`roles/artifactregistry.admin`, and `roles/billingbudgets.budgetsEditor`.
+`roles/artifactregistry.admin`, `roles/dataplex.admin` (Knowledge Catalog),
+`roles/geminidataanalytics.admin` (BigQuery Conversational Analytics), and `roles/billingbudgets.budgetsEditor`.
 
 ---
 
@@ -306,6 +307,7 @@ in `terraform.tfvars` and pass existing resources by variable:
 | Variable | Default | Turn off when… |
 |----------|---------|----------------|
 | `enable_apis` | `true` | an admin already enabled the APIs |
+| `enable_bq_agent` | `true` | your org restricts Conversational Analytics / Knowledge Catalog APIs (`dataplex.googleapis.com`, `geminidataanalytics.googleapis.com`, `cloudaicompanion.googleapis.com`) and `DataAgent` IAM bindings on `scale-forecasting-runner` |
 | `create_service_accounts` | `true` | you bring your own SAs (`runner_sa_email`, `compute_sa_email`) |
 | `create_network` | `true` | your org already has a network — pass an existing subnet (`subnetwork_uri`) with Private Google Access + internal-ingress |
 | `create_composer` | `false` | (already off) turn **on** for scheduled DAG runs |
@@ -321,8 +323,8 @@ in `terraform.tfvars` and pass existing resources by variable:
 
 | Module | Purpose |
 | :--- | :--- |
-| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Dataproc, Vertex AI, Dataflow, Pipelines, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets, plus opt-in `discoveryengine.googleapis.com` when `enable_alphaevolve = true`). |
-| [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, Google-managed service-agent bindings, and opt-in `roles/discoveryengine.admin` on `scale-forecasting-runner` when `enable_alphaevolve = true`. |
+| [`apis`](./main/modules/apis/main.tf) | Enables required Google Cloud APIs (BigQuery, Knowledge Catalog, BigQuery Conversational Analytics, Dataproc, Vertex AI, Dataflow, Pipelines, GKE, Cloud Build, Artifact Registry, Storage, Compute, Billing Budgets, plus opt-in `discoveryengine.googleapis.com` when `enable_alphaevolve = true`). |
+| [`iam`](./main/modules/iam/main.tf) | Creates the two workload service accounts (`sf-runner` and `sf-compute`), custom least-privilege roles, Knowledge Catalog + BigQuery Conversational Analytics grants on `scale-forecasting-runner` (`enable_bq_agent = true`), Google-managed service-agent bindings, and opt-in `roles/discoveryengine.admin` when `enable_alphaevolve = true`. |
 | [`network`](./main/modules/network/main.tf) | Provisions the VPC, regional subnet with Private Google Access, Cloud Router/NAT, internal firewall rules, Private Service Access peering, and PSC network attachment for Vertex Ray. |
 | [`storage`](./main/modules/storage/main.tf) | Creates the two GCS buckets (`<project>-warehouse` for Iceberg tables and model artifacts; `<project>-code` for staged configs, package zips, and packed-venv archives). |
 | [`bigquery`](./main/modules/bigquery/main.tf) | Creates the `scale_forecasting` BigQuery dataset and the Cloud Resource BigLake connection used by managed Apache Iceberg tables. |
