@@ -13,6 +13,7 @@
 
 - [Documentation Home](https://statmike.github.io/scale-forecasting/): Navigation hub by role and goal.
 - [Platform Overview](https://statmike.github.io/scale-forecasting/overview/): End-to-end architecture, capabilities summary, and registry model.
+- [Visual System Walkthrough](https://statmike.github.io/scale-forecasting/visual_architecture/): Progressive 9-level (Levels 0-8 + Persona Map) color-coded diagram tour mapped directly to code, guides, notebooks, and tests.
 - [Getting Started](https://statmike.github.io/scale-forecasting/getting_started/): 5-minute offline sandbox (`pip install scale-forecasting`) to first cloud run.
 - [Choosing a Runtime](https://statmike.github.io/scale-forecasting/choosing_a_runtime/): Decision flow and fit matrix across all 7 Google Cloud runtimes.
 - [Cost Estimates](https://statmike.github.io/scale-forecasting/cost_estimates/): Service-by-service cost drivers, zero-idle vs. always-on resources, and run cost bands.

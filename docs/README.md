@@ -15,7 +15,8 @@ flowchart TD
 
 ## Start here
 Understand what the platform does, fit your first forecast locally in 5 minutes, choose a runtime, and review cost controls before launching your first cloud run.
-- [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 37 models, 21 evaluation metrics, per-family DAG, and 5 analytical SQL views.
+- [overview.md](./overview.md) — **Platform overview**: conceptual tour of the 7 Google Cloud runtimes, 37 models, 21 evaluation metrics, per-family DAG, and 11 analytical SQL views.
+- [visual_architecture.md](./visual_architecture.md) — **Visual system walkthrough**: progressive 9-level color-coded diagram tour + 5-persona entry map (from two-stage Terraform & zero-rebuild `src.zip` delivery through `RunConfig` compilation, 5 execution paths, 7 runtimes, worker primitives, `erDiagram` registry + Knowledge Catalog, the 6-pillar Forecaster Workbench & 7 LP/MILP solvers, and AI agent / MCP surfaces) auto-synced with live code reflection.
 - [getting_started.md](./getting_started.md) — **Getting started**: install the offline layer or `[gcp]` extra, run the local playground, validate a `RunConfig` with `dry_run()`, connect to a Google Cloud deployment, and read the leaderboard.
 - [agent_and_mcp_guide.md](./agent_and_mcp_guide.md) — **AI agents, portable skills & built-in MCP server**: connect Google Antigravity (`agy` CLI & IDE), Claude Code, Cursor, VS Code Copilot, and Windsurf via `python -m scale_forecasting.mcp`, `SKILL.md`, JSON Schema autocomplete, and `llms.txt`.
 - [choosing_a_runtime.md](./choosing_a_runtime.md) — **Choosing a runtime**: decision flowchart, 7-runtime fit matrix, structural advantages, and multi-runtime per-family routing example.
@@ -47,7 +48,7 @@ How it works and every knob.
   codebase.
 - [configuration_reference.md](./configuration_reference.md) — every config field, type, default,
   constraint.
-- [models_reference.md](./models_reference.md) — all 37 built-in models, 9 ensemble strategies, 8 reconciliation methods,
+- [models_reference.md](./models_reference.md) — all 37 built-in models, 8 ensemble strategies, 9 reconciliation methods,
   Two-Tier Explainability (`attributions_df`, `plot_attributions`), upstream package provenance, hyperparameter search spaces, and optional dependency extras.
 - [metrics_reference.md](./metrics_reference.md) — all 21 evaluation metrics, mathematical
   definitions, direction/calibration flags, and edge-case rules.
@@ -93,7 +94,7 @@ always matches the code.
 End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
 Vertex AI CustomJob, GCE Single-VM, GKE, Vertex AI AutoML Tabular Workflows, and BigQuery (distinct from forecast backtesting).
 - [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
-  architecture axes, 42 smoke configs, 20 demonstration configs, 11 notebooks, and 19 capabilities
+  architecture axes, 42 smoke configs, 20 demonstration configs, 13 notebooks, and 19 capabilities
   proven on live GCP.
 - [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 42-smoke suite
   (`smoke_harness.py`) to verify a deployment or infrastructure change.

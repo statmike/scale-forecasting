@@ -3,68 +3,38 @@
 Beyond scaling 37 models across 7 Google Cloud runtimes, `scale-forecasting` includes an end-to-end **Forecaster Workbench** designed around the daily workflow of demand planners, supply-chain analysts, retail merchandisers, and econometricians. Every capability runs identically in the zero-GCP local playground (`scale_forecasting.playground`), the Python SDK (`sf.Forecaster`), the built-in MCP server (`scale_forecasting.mcp`), and distributed cloud jobs.
 
 ```mermaid
-flowchart TD
-    classDef g1 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
-    classDef g2 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
-    classDef g3 fill:#faf5ff,stroke:#9333ea,stroke-width:1.5px,color:#581c87
-
-    subgraph S1["Stage 1: Pre-Fit Data Hygiene & Regime Routing (G.2)"]
-        H1["Grid Regularization, Pre-Launch Trim & Outlier Winsorization<br/>data.grid_policy · data.trim_leading_zeros · features.trading_days · features.outlier_policy · censored_col"]:::g1
-        H2["SBC Demand Regime Classification<br/>compute_demand_profile (smooth · erratic · intermittent · lumpy)"]:::g1
-        H1 --> H2
+flowchart LR
+    subgraph COL1["1. Pre-Fit Hygiene, Guardrails & Trust Diagnostics"]
+        direction TB
+        S1["Pre-Fit Hygiene, SBC Regimes & Variant Borrowing<br/>grid_policy · censored_col · outlier_policy · SBC regime_routing<br/>base_model@tag · ablation_modes · reuse_prior_runs"]
+        S2["Physical Bounds, Monotone Fans & Ensembles<br/>floor / cap · cumulative_round · Chernozhukov quantiles<br/>Newsvendor q* · 8 Ensemble Strategies · mint_nonneg"]
+        S3["Practitioner Trust, FVA, Live Drift & Whipsaw<br/>assess() · fva_df (Diebold-Mariano & Wilcoxon) · horizon_decay_df<br/>score_realized · revision_stability_df · 12-Tab export_report"]
     end
 
-    subgraph S2["Stage 2: Physical Guardrails, Quantiles & Smart Blending (G.1 & G.2)"]
-        B1["Physical Bounds, Coherent Rounding & Monotone Fans<br/>output.floor · output.cap · cumulative_round · output.quantiles (Chernozhukov) · underage_cost / overage_cost"]:::g1
-        B2["Smart Ensembles & Non-Negative Hierarchies<br/>champion · horizon_specialist · top_k · mint_nonneg"]:::g1
-        B1 --> B2
+    subgraph COL2["2. Similarity, Causal Econometrics & Joint Tail Risk"]
+        direction TB
+        S4["7-Lens + Multi-Modal Similarity & Merchandising<br/>similarity_df (TF-IDF + Gower + LCA) · @similarity_global<br/>recommend_substitutes_df · detect_emerging_trends_df · cold_start_transfer"]
+        S5["Causal Guardrails, Double-ML & 5-Stage What-If<br/>@monotone · holiday_window · promo_elasticity_df<br/>simulate_scenarios (Margin + Coherent Rollup + Delta ROP/SS)"]
+        S6["3-Mode Coherence, Online ACI & Copula Tail Risk<br/>THieF · cross_temporal_mint · @transform_clr / @transform_ilr<br/>aci_df · Gaussian/Student-t sample_trajectories & tail_risk_df (VaR/CVaR)"]
     end
 
-    subgraph S3["Stage 3: Econometric Diagnostics, Rollups & Scenarios (G.3 + Track B)"]
-        D1["Forecast Value Added (FVA), DM p-values, Horizon Decay & Bias<br/>compute_fva · diebold_mariano_test (HLN 1997) · compute_horizon_decay (h*) · compute_bias_report"]:::g1
-        D2["Autocorrelation-Aware Rollup, Inventory Policies & Promo/Price Scenarios<br/>rollup_time · compute_inventory_policy (ROP / SS) · simulate_scenarios"]:::g1
-        D1 --> D2
+    subgraph COL3["3. Top-Down Goal-Seek & 7 LP/MILP Solvers"]
+        direction TB
+        S7["Smooth Multi-Period Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets, locks, bounds, smoothness_weight)"]
+        S8["Inventory Policy, Portfolio Capital & Promo Solvers<br/>inventory_policy_df (ROP/SS) · optimize_inventory_df<br/>optimize_scenario (Double-ML + CVaR Guardrail)"]
+        S9["Commercial, Merchandising & Network MILP Solvers<br/>optimize_clearance_df · optimize_contract_volume_df<br/>optimize_assortment_df · optimize_prepacks_df · optimize_rebalancing_df"]
     end
 
-    subgraph S4["Stage 4: Live Drift, Whipsaw Stability & Executive Report (G.4)"]
-        L1["Realized Accuracy, Live Drift & Revision Stability ('Whipsaw')<br/>compute_realized_accuracy · Forecaster.score_realized · compute_revision_stability"]:::g2
-        L2["Top-N Exception Triage & Self-Contained HTML Report<br/>compute_exceptions_queue · export_report (python -m scale_forecasting.report)"]:::g2
-        L1 --> L2
-    end
+    COL1 --> COL2 --> COL3
 
-    subgraph S5["Stage 5: Model Variants, Ablation Ladders & Cell Borrowing (G.5)"]
-        V1["Model Variants, Orthogonal Taxonomy & Multi-Baseline FVA<br/>base_model@tag · ablation_modes · variant_policy · covariate_fva_pct · pooling_fva_pct"]:::g2
-        V2["Snapshot-Verified Cross-Run Cell Borrowing<br/>compute.reuse_prior_runs · model_spec_hash · borrowed_from_run_id"]:::g2
-        V1 --> V2
-    end
-
-    subgraph S6["Stage 6: Causal & Structural Econometric Guardrails (Track J)"]
-        J1["Monotonic Sign Constraints & Moving-Holiday Windows<br/>features.monotonic_constraints (@monotone) · features.holiday_window"]:::g2
-        J2["Double-ML Promo Elasticity & 5-Stage Full-Chain Margin/Inventory What-If<br/>promo_elasticity_df · simulate_scenarios(unit_cost=..., reconcile=True, include_inventory_impact=True)"]:::g2
-        J1 --> J2
-    end
-
-    subgraph S7["Stage 7: Cross-Temporal THieF, Simplex & Goal-Seek QP (Track K)"]
-        K1["3-Mode Reconciliation & Compositional Simplex Transforms<br/>spatial_only · temporal_only · cross_temporal_mint · features.transform = 'clr' | 'ilr' (@transform_ilr)"]:::g3
-        K2["Smooth Multi-Period Top-Down Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets=..., locks=..., bounds=..., smoothness_weight=10.0)"]:::g3
-        K1 --> K2
-    end
-
-    subgraph S8["Stage 8: Cold-Start, Online ACI, Copula Risk & Optimization (Track L)"]
-        M1["Cold-Start NPI Transfer, Online ACI & Copula Tail Risk<br/>cold_start_transfer · calibration_method = 'aci' | 'aci_normalized' · sample_trajectories · tail_risk_df"]:::g3
-        M2["Portfolio Inventory & Prescriptive Price/Promo Optimization<br/>optimize_inventory_df (budget/volume/fill-rate) · optimize_scenario (Double-ML + CVaR)"]:::g3
-        M1 --> M2
-    end
-
-    subgraph S9["Stage 9: Multi-Lens Similarity & Merchandising Intelligence (Track P)"]
-        P_SIM1["7-Lens + Multi-Modal PSD Similarity & Cluster-Aware Global Pooling<br/>hybrid · physics_attractor · spectral_phase · @similarity_global · @similarity_cold_start · similarity_hierarchy"]:::g3
-        P_SIM2["SKU Substitutes, Emerging Trends, Copulas, Inventory Pooling & OOF Smoothing<br/>recommend_substitutes_df · detect_emerging_trends_df · similarity_shrinkage · ensemble.similarity_smoothing"]:::g3
-        P_SIM1 --> P_SIM2
-    end
-
-    S1 --> S4 --> S7
-    S2 --> S5 --> S8
-    S3 --> S6 --> S9
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class S1 config
+    class S2,S3,S4 compute
+    class S5,S6 semantic
+    class S7,S8,S9 decision
 ```
 
 ---
@@ -81,13 +51,13 @@ Real-world operational forecasts must obey physical constraints (non-negative de
 | `output.cap` | `float \| null` | `null` | Clips point forecasts, intervals, and quantiles at a static ceiling (e.g., `100.0` for utilization percentages or fixed plant capacity). |
 | `output.floor_col` / `output.cap_col` | `str \| null` | `null` | Reads dynamic per-series, per-date floor or ceiling bounds directly from a source column (e.g., store shelf capacity or min safety stock). |
 | `output.integer_rounding` | `"none"` \| `"round"` \| `"ceil"` \| `"floor"` \| `"cumulative_round"` | `"none"` | Rounds discrete unit forecasts after interval calibration. `"cumulative_round"` applies error-diffusion rounding so multi-step horizon totals are preserved without systematic downward bias on slow movers. |
-| `ensemble.strategies` | `list[str]` | `["mean", "inverse_error", "nnls", "xgb"]` | Supports 9 strategies: `"mean"`, `"median"`, `"trimmed_mean"`, `"inverse_error"`, `"champion"` (per-series OOF winner), `"horizon_specialist"` (per-series, per-horizon-bucket OOF weights), `"nnls"`, `"ridge"`, and `"xgb"`. |
+| `ensemble.strategies` | `list[str]` | `["median"]` | Supports 8 strategies: `"mean"`, `"median"`, `"inverse_error"`, `"champion"` (per-series OOF winner), `"horizon_specialist"` (per-series, per-horizon-bucket OOF weights), `"nnls"`, `"ridge"`, and `"xgb"`. |
 | `ensemble.top_k` | `int \| null` | `null` | Prunes the candidate pool per series to the top-$K$ lowest-error base models before computing ensemble weights. |
 | `ensemble.parsimony_margin` | `float` | `0.0` | Complexity guardrail (e.g., `0.01` = 1%): if a complex model or ensemble does not beat the simplest baseline (`naive_seasonal` / `theta`) by at least this relative margin on OOF folds, `"champion"` falls back to the simpler model. |
 | `ensemble.variant_policy` | `"all"` \| `"best_per_base_model"` \| `"primary_only"` | `"all"` | Controls how `<base_model>@<tag>` variants participate in ensemble blending (`"best_per_base_model"` selects the single best variant per `(ts_id, base_model)` before blending). |
-| `hierarchy.reconciliation_methods` | `list[str]` | `["bottom_up", "mint_shrink"]` | Adds `"mint_nonneg"` (active-set non-negative Minimum Trace projection) and `"cross_temporal_mint"` (simultaneous cross-sectional and temporal reconciliation) so reconciled bottom-level SKU forecasts are guaranteed $\ge 0$ and sum coherently across the tree and calendar. |
+| `hierarchy.reconciliation_methods` | `list[str]` | `["bottom_up", "wls_struct", "mint_shrink"]` | Supports 9 methods including `"mint_nonneg"` (active-set non-negative Minimum Trace projection) and `"cross_temporal_mint"` (simultaneous cross-sectional and temporal reconciliation) so reconciled bottom-level SKU forecasts are guaranteed $\ge 0$ and sum coherently across the tree and calendar. |
 
-All 9 ensemble strategies automatically propagate conformal prediction intervals (`yhat_lower`, `yhat_upper`) and score all 5 interval evaluation metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`) alongside the 16 point metrics.
+All 8 ensemble strategies automatically propagate conformal prediction intervals (`yhat_lower`, `yhat_upper`) and score all 5 interval evaluation metrics (`coverage`, `pinball`, `interval_score`, `interval_width`, `msis`) alongside the 16 point metrics.
 
 ---
 

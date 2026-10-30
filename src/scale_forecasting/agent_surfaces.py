@@ -64,12 +64,13 @@ from .config import (
     ProfileConfig,
     RetryResources,
     RunConfig,
+    Strategy,
 )
 from .errors import EXTRA_MODULES, configure_cli_logging, is_importable
 from .metrics import METRIC_NAMES, get_metric
 from .models import get_model, list_models
 from .registry.ddl import REGISTRY_TABLE_NAMES, SOURCE_TABLE_NAMES
-from .registry.views import VIEW_NAMES
+from .registry.views import CORE_VIEW_NAMES, DIAGNOSTIC_VIEW_NAMES, VIEW_NAMES
 
 __all__ = [
     "ALL_EXTRA_MODULES",
@@ -89,6 +90,8 @@ __all__ = [
     "render_skill_catalog_reference",
     "render_skill_config_reference",
     "render_skill_execution_paths_reference",
+    "render_visual_architecture_inventory",
+    "sync_visual_architecture_text",
     "write_agent_surfaces",
 ]
 
@@ -1685,6 +1688,11 @@ def render_llms_txt() -> str:
                 "capabilities summary, and registry model."
             ),
             (
+                f"- [Visual System Walkthrough]({_SITE_BASE}/visual_architecture/): Progressive "
+                "9-level (Levels 0-8 + Persona Map) color-coded diagram tour mapped directly to "
+                "code, guides, notebooks, and tests."
+            ),
+            (
                 f"- [Getting Started]({_SITE_BASE}/getting_started/): 5-minute offline sandbox "
                 "(`pip install scale-forecasting`) to first cloud run."
             ),
@@ -1840,6 +1848,227 @@ def render_llms_full_txt(repo_root: Path | None = None) -> str:
     return "\n".join(parts)
 
 
+_VISUAL_INVENTORY_BEGIN = "<!-- BEGIN AUTO-SYNCED VISUAL INVENTORY -->"
+_VISUAL_INVENTORY_END = "<!-- END AUTO-SYNCED VISUAL INVENTORY -->"
+
+
+def _visual_inventory_counts(repo_root: Path | None = None) -> dict[str, int]:
+    """Collect live repository counts via Python reflection for ``docs/visual_architecture.md``."""
+    from .bq_agent.glossary import GLOSSARY_TERMS
+    from .bq_agent.golden_queries import build_golden_queries
+    from .config import VALID_VARIANT_TAGS
+    from .mcp import McpServer
+    from .registry.metadata import COLUMN_DESCRIPTIONS, TABLE_DESCRIPTIONS, VIEW_DESCRIPTIONS
+    from .similarity import VALID_SIMILARITY_METHODS
+
+    root = repo_root or _default_repo_root()
+    fam_counts: dict[str, int] = dict.fromkeys(
+        ("statistical", "ml", "deep_learning", "automl", "native"), 0
+    )
+    for model_name in list_models():
+        fam = get_model(model_name).family
+        fam_counts[fam] = fam_counts.get(fam, 0) + 1
+
+    n_metrics = len(METRIC_NAMES)
+    n_interval = sum(1 for name in METRIC_NAMES if get_metric(name).needs_intervals)
+    srv = McpServer()
+    notebooks_dir = root / "notebooks"
+    smokes_dir = root / "configs" / "smokes"
+    configs_dir = root / "configs"
+    tf_mods_dir = root / "terraform" / "main" / "modules"
+
+    n_notebooks = len(list(notebooks_dir.glob("*.ipynb"))) if notebooks_dir.is_dir() else 13
+    n_smokes = len(list(smokes_dir.glob("*.json"))) if smokes_dir.is_dir() else 42
+    n_demos = (
+        len([p for p in configs_dir.glob("*.json") if p.name != "compute_fallback.json"])
+        if configs_dir.is_dir()
+        else 20
+    )
+    n_tf_mods = (
+        len([p for p in tf_mods_dir.iterdir() if p.is_dir()]) if tf_mods_dir.is_dir() else 12
+    )
+    return {
+        "n_models": len(list_models()),
+        "n_stat": fam_counts["statistical"],
+        "n_ml": fam_counts["ml"],
+        "n_dl": fam_counts["deep_learning"],
+        "n_automl": fam_counts["automl"],
+        "n_native": fam_counts["native"],
+        "n_metrics": n_metrics,
+        "n_point_metrics": n_metrics - n_interval,
+        "n_interval_metrics": n_interval,
+        "n_runtimes": len(RUNTIME_CATALOG),
+        "n_gpus": len(GPU_CATALOG),
+        "n_run_fields": len(RunConfig.model_fields),
+        "n_tiers": len(EXPOSURE_TIERS),
+        "n_scale_regimes": len(SCALE_REGIMES),
+        "n_dgps": len(BENCHMARK_SPECS),
+        "n_pub_bench": len(PUBLIC_BENCHMARK_SPECS),
+        "n_strategies": len(get_args(Strategy)),
+        "n_reconcile": len(RECONCILIATION_METHODS),
+        "n_variant_tags": len(VALID_VARIANT_TAGS),
+        "n_sim_lenses": len(VALID_SIMILARITY_METHODS),
+        "n_reg_tables": len(REGISTRY_TABLE_NAMES),
+        "n_views": len(VIEW_NAMES),
+        "n_core_views": len(CORE_VIEW_NAMES),
+        "n_diag_views": len(DIAGNOSTIC_VIEW_NAMES),
+        "n_meta_objs": len(TABLE_DESCRIPTIONS) + len(VIEW_DESCRIPTIONS),
+        "n_meta_cols": sum(len(cols) for cols in COLUMN_DESCRIPTIONS.values()),
+        "n_glossary": len(GLOSSARY_TERMS),
+        "n_golden": len(build_golden_queries("proj", "ds")),
+        "n_mcp_res": len(srv.list_resources()),
+        "n_mcp_tools": len(srv.list_tools()),
+        "n_extras": len(ALL_EXTRA_MODULES),
+        "n_notebooks": n_notebooks,
+        "n_smokes": n_smokes,
+        "n_demos": n_demos,
+        "n_tf_mods": n_tf_mods,
+    }
+
+
+def render_visual_architecture_inventory(repo_root: Path | None = None) -> str:
+    """Render the auto-synced inventory table embedded in ``docs/visual_architecture.md``."""
+    c = _visual_inventory_counts(repo_root)
+    src_blob = f"{_REPO_URL}/blob/main/src/scale_forecasting"
+    rows = [
+        _VISUAL_INVENTORY_BEGIN,
+        "| System Surface | Live Code Count & Breakdown | Canonical Source of Truth |",
+        "| :--- | :--- | :--- |",
+        (
+            f"| **Forecasting Models** | **{c['n_models']} models** across **5 families** "
+            f"(`{c['n_stat']}` `statistical`, `{c['n_ml']}` `ml`, `{c['n_dl']}` `deep_learning`, "
+            f"`{c['n_automl']}` `automl`, `{c['n_native']}` `native`) + "
+            f"**{c['n_variant_tags']} `@tag` modifiers** | "
+            f"[`models/__init__.py`]({src_blob}/models/__init__.py), "
+            f"[`config.py`]({src_blob}/config.py) |"
+        ),
+        (
+            f"| **Evaluation Metrics** | **{c['n_metrics']} metrics** (`{c['n_point_metrics']}` "
+            f"point accuracy + `{c['n_interval_metrics']}` prediction interval) | "
+            f"[`metrics/__init__.py`]({src_blob}/metrics/__init__.py) |"
+        ),
+        (
+            f"| **Cloud Runtimes & GPUs** | **{c['n_runtimes']} runtimes** (`spark`, `ray`, "
+            "`vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`) · "
+            f"**{c['n_gpus']} GPU types** (`T4`, `L4`, `A100`, `A100_80GB`) | "
+            f"[`config.py`]({src_blob}/config.py), "
+            f"[`resources/catalog.py`]({src_blob}/resources/catalog.py) |"
+        ),
+        (
+            f"| **Config, Auto-Compiler & Benchmarks** | **{c['n_run_fields']} root `RunConfig` "
+            f"fields** · **{c['n_tiers']} exposure tiers** · **{c['n_scale_regimes']} scale "
+            f"regimes** · **{c['n_dgps']} synthetic DGPs + "
+            f"{c['n_pub_bench']} public benchmarks** | "
+            f"[`auto.py`]({src_blob}/auto.py), "
+            f"[`auto_policy.py`]({src_blob}/auto_policy.py), "
+            f"[`benchmarks.py`]({src_blob}/benchmarks.py) |"
+        ),
+        (
+            "| **Similarity, Ensembles & Coherence** | "
+            f"**{c['n_sim_lenses']} similarity lenses** · "
+            f"**{c['n_strategies']} ensemble strategies** · **{c['n_reconcile']} reconciliation "
+            "methods** (3-mode `THieF` & `cross_temporal_mint` + `clr`/`ilr` simplex) | "
+            f"[`similarity.py`]({src_blob}/similarity.py), "
+            f"[`ensembler.py`]({src_blob}/ensembler.py), "
+            f"[`temporal_reconciliation.py`]({src_blob}/temporal_reconciliation.py) |"
+        ),
+        (
+            f"| **Always-On BigQuery Registry & Views** | **{c['n_reg_tables']} native registry "
+            f"tables** · **{c['n_views']} always-created SQL views** (`{c['n_core_views']}` core + "
+            f"`{c['n_diag_views']}` diagnostic/S&OP) · `{c['n_meta_objs']}` object & "
+            f"`{c['n_meta_cols']}` column descriptions | "
+            f"[`registry/ddl.py`]({src_blob}/registry/ddl.py), "
+            f"[`registry/views.py`]({src_blob}/registry/views.py), "
+            f"[`registry/metadata.py`]({src_blob}/registry/metadata.py) |"
+        ),
+        (
+            "| **Opt-In Knowledge Catalog & `DataAgent`** | "
+            f"**{c['n_glossary']} Business Glossary terms** · `DataProfile` scans · "
+            f"**{c['n_golden']} Golden SQL queries** · **5 chat surfaces** | "
+            f"[`bq_agent/`]({_REPO_URL}/tree/main/src/scale_forecasting/bq_agent) |"
+        ),
+        (
+            "| **Forecaster Workbench & Solvers** | **6 Workbench pillars** · **7-Question "
+            "`assess()`** · **Single-SKU `ROP`/`SS` + 7 SciPy/HiGHS LP & MILP optimizers** · "
+            "**12-tab HTML/JSON report** | "
+            f"[`workbench.py`]({src_blob}/workbench.py), "
+            f"[`inventory_optimizer.py`]({src_blob}/inventory_optimizer.py), "
+            f"[`clearance_optimizer.py`]({src_blob}/clearance_optimizer.py) |"
+        ),
+        (
+            "| **AI Agent & MCP Ecosystem** | **6 generated agent files** · **1 portable "
+            f"`SKILL.md`** · **MCP server (`{c['n_mcp_res']}` resources, `{c['n_mcp_tools']}` "
+            "tools)** across 5 IDE/CLI clients | "
+            f"[`agent_surfaces.py`]({src_blob}/agent_surfaces.py), "
+            f"[`mcp.py`]({src_blob}/mcp.py) |"
+        ),
+        (
+            "| **Infrastructure, Notebooks & Validation** | "
+            f"**{c['n_tf_mods']} Terraform modules** "
+            f"· **{c['n_extras']} packaging extras** · **{c['n_notebooks']} notebooks** · "
+            f"**{c['n_smokes']} smoke + {c['n_demos']} demo configs** | "
+            f"[`terraform/`]({_REPO_URL}/tree/main/terraform), "
+            f"[`notebooks/`]({_REPO_URL}/tree/main/notebooks), "
+            f"[`configs/`]({_REPO_URL}/tree/main/configs) |"
+        ),
+        _VISUAL_INVENTORY_END,
+    ]
+    return "\n".join(rows)
+
+
+def sync_visual_architecture_text(text: str, repo_root: Path | None = None) -> str:
+    """Sync the live inventory table and Mermaid counts in ``docs/visual_architecture.md``."""
+    c = _visual_inventory_counts(repo_root)
+    inv_block = render_visual_architecture_inventory(repo_root)
+    updated = re.sub(
+        rf"{re.escape(_VISUAL_INVENTORY_BEGIN)}[\s\S]*?{re.escape(_VISUAL_INVENTORY_END)}",
+        lambda _: inv_block,
+        text,
+        count=1,
+    )
+    subs: tuple[tuple[str, str], ...] = (
+        (r"\(\d+ Models Total\)", f"({c['n_models']} Models Total)"),
+        (r"statistical \(\d+\)", f"statistical ({c['n_stat']})"),
+        (r"ml \(\d+\)", f"ml ({c['n_ml']})"),
+        (r"deep_learning \(\d+\)", f"deep_learning ({c['n_dl']})"),
+        (r"automl \(\d+\)", f"automl ({c['n_automl']})"),
+        (r"native \(\d+\)", f"native ({c['n_native']})"),
+        (r"Across \d+ Metrics", f"Across {c['n_metrics']} Metrics"),
+        (r"\d+ Ensemble Strategies", f"{c['n_strategies']} Ensemble Strategies"),
+        (
+            r"\(\d+ Strategies in ensembler\.py\)",
+            f"({c['n_strategies']} Strategies in ensembler.py)",
+        ),
+        (r"\d+ Reconciliation Methods", f"{c['n_reconcile']} Reconciliation Methods"),
+        (r"\d+ Composable @tag Modifiers", f"{c['n_variant_tags']} Composable @tag Modifiers"),
+        (r"All \d+ Registered Metrics", f"All {c['n_metrics']} Registered Metrics"),
+        (
+            r"\d+ Core Operational & Leaderboard Views",
+            f"{c['n_core_views']} Core Operational & Leaderboard Views",
+        ),
+        (
+            r"\d+ Diagnostic & Executive S&OP Views",
+            f"{c['n_diag_views']} Diagnostic & Executive S&OP Views",
+        ),
+        (r"\d+ Domain Terms", f"{c['n_glossary']} Domain Terms"),
+        (
+            r"\d+ Parameterized Golden SQL Queries",
+            f"{c['n_golden']} Parameterized Golden SQL Queries",
+        ),
+        (r"MCP Tool #\d+", f"MCP Tool #{c['n_mcp_tools']}"),
+        (
+            r"\d+ Resources, \d+ Tools",
+            f"{c['n_mcp_res']} Resources, {c['n_mcp_tools']} Tools",
+        ),
+        (r"\d+ Terraform Modules", f"{c['n_tf_mods']} Terraform Modules"),
+        (r"\d+ Packaging Extras", f"{c['n_extras']} Packaging Extras"),
+        (r"\d+-Smoke Live Suite", f"{c['n_smokes']}-Smoke Live Suite"),
+    )
+    for pattern, repl in subs:
+        updated = re.sub(pattern, repl, updated)
+    return updated
+
+
 def expected_agent_surface_files(repo_root: Path | None = None) -> dict[Path, str]:
     """Return ``{path: expected_content}`` for all 6 code-generated agent files."""
     root = repo_root or _default_repo_root()
@@ -1855,13 +2084,20 @@ def expected_agent_surface_files(repo_root: Path | None = None) -> dict[Path, st
 
 
 def write_agent_surfaces(repo_root: Path | None = None) -> list[Path]:
-    """Write all generated agent surface files to disk and return their paths."""
-    expected = expected_agent_surface_files(repo_root)
+    """Write all generated agent surface files to disk and sync ``docs/visual_architecture.md``."""
+    root = repo_root or _default_repo_root()
+    expected = expected_agent_surface_files(root)
     written: list[Path] = []
     for path, content in expected.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(path)
+    visual_path = root / "docs" / "visual_architecture.md"
+    if visual_path.is_file():
+        raw = visual_path.read_text(encoding="utf-8")
+        synced = sync_visual_architecture_text(raw, root)
+        if synced != raw:
+            visual_path.write_text(synced, encoding="utf-8")
     return written
 
 
@@ -1879,6 +2115,18 @@ def check_agent_surfaces(repo_root: Path | None = None) -> list[str]:
         if actual != content:
             drifted.append(
                 f"{rel}: out of sync with canonical code declarations (run `make agent-surfaces`)"
+            )
+    visual_path = root / "docs" / "visual_architecture.md"
+    if visual_path.is_file():
+        actual_visual = visual_path.read_text(encoding="utf-8")
+        if (
+            _VISUAL_INVENTORY_BEGIN not in actual_visual
+            or _VISUAL_INVENTORY_END not in actual_visual
+            or actual_visual != sync_visual_architecture_text(actual_visual, root)
+        ):
+            drifted.append(
+                "docs/visual_architecture.md: out of sync with canonical code declarations "
+                "(run `make agent-surfaces`)"
             )
     return drifted
 

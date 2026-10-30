@@ -2824,7 +2824,7 @@ class WorkbenchMixin(PlaygroundWorkbenchMixin):
         engine: str = "auto",
         limit: int = 50000,
     ) -> pd.DataFrame:
-        """Detect time-series anomalies across any of the 37 models, 9 ensembles, or past runs.
+        """Detect time-series anomalies across any of the 37 models, 8 ensembles, or past runs.
 
         Supports four complementary execution paths controlled by ``model_name`` and ``engine``:
 

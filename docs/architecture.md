@@ -10,7 +10,7 @@ The design bet is **one capability per file** and **one unit of work everywhere*
 `(series, model)` cell, and it runs *identically* on your laptop, inside a Spark task, and inside a
 Ray task. Everything else is plumbing that decides *which* cells run where and *where the results go*.
 
-For the *what/why* of each config knob see
+For a progressive, color-coded 9-level diagram tour + 5-persona entry map of the entire platform (starting from the top-level `README.md` map and zooming into every subsystem, the 6-pillar Forecaster Workbench, and code/doc/test tables), see [visual_architecture.md](./visual_architecture.md). For the *what/why* of each config knob see
 [configuration_reference.md](./configuration_reference.md); for the *tables* a run writes see
 [output_schemas.md](./output_schemas.md). This doc is the *how*.
 

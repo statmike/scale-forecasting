@@ -3,36 +3,41 @@
 `scale-forecasting` provides a declarative, leak-free feature engineering, target-transformation, time-series similarity, and cold-start transfer pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py), and [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
 
 ```mermaid
-flowchart TD
-    classDef s1 fill:#eff6ff,stroke:#2563eb,stroke-width:1.5px,color:#1e3a8a
-    classDef s2 fill:#f0fdf4,stroke:#16a34a,stroke-width:1.5px,color:#14532d
-    classDef s3 fill:#faf5ff,stroke:#9333ea,stroke-width:1.5px,color:#581c87
-
-    subgraph S1["1. Fold-Safe Pre-Fit Hygiene & Target Transforms"]
+flowchart LR
+    subgraph S1["1. Fold-Safe Hygiene & Simplex Transforms (ds <= cutoff_date)"]
         direction TB
-        T1["Timestamp Regularization & Pre-Launch Trim<br/>data.grid_policy · data.trim_leading_zeros · features.censored_col"]:::s1
-        T2["Promo/Holiday-Aware Outlier Winsorization<br/>features.outlier_policy = 'winsorize' | 'interpolate' | 'stl_resid'"]:::s1
-        T3["Univariate & Compositional Simplex Target Transforms<br/>features.transform = 'none' | 'log1p' | 'boxcox' | 'clr' | 'ilr'<br/>features.simplex_sum = 1.0 | 100.0 (@transform_clr · @transform_ilr)"]:::s1
+        T1["Grid Regularization, Pre-Launch Trim & Lineage<br/>data.grid_policy · trim_leading_zeros<br/>features.censored_col · supersession_map"]
+        T2["Promo/Holiday-Aware Outlier & Regime Hygiene<br/>outlier_policy = winsorize | interpolate | flag | stl_resid<br/>regime_routing (SBC Smooth · Erratic · Intermittent · Lumpy)"]
+        T3["Univariate & Compositional Simplex Target Transforms<br/>transform = none | log1p | boxcox | clr | ilr<br/>simplex_sum = 1.0 | 100.0 (@transform_clr · @transform_ilr)"]
         T1 --> T2 --> T3
     end
 
-    subgraph S2["2. Three-Tier Exogenous Covariate Architecture"]
+    subgraph S2["2. Three-Tier Covariates Across the Cutoff Boundary"]
         direction TB
-        C1["Static Covariates (features.static_covariates)<br/>Time-invariant series attributes (region, category, store_format)"]:::s2
-        C2["Known-Future Covariates (features.future_covariates)<br/>Planned price, promo_flag, holidays, holiday_window, fourier, trading_days"]:::s2
-        C3["Historical-Only Past Covariates (features.past_covariates)<br/>Observed temperature, foot_traffic, macro indices — strictly masked > cutoff_date"]:::s2
+        C1["Tier 1 · Static Metadata (features.static_covariates)<br/>Time-invariant entity attributes (region, category, store_format)"]
+        C2["Tier 2 · Known-Future Drivers (ds <= cutoff_date + H)<br/>future_covariates · holidays · holiday_window ramps<br/>fourier · trading_days · degree_day_cols (Weather HDD/CDD)"]
+        C3["Tier 3 · Historical-Only Past Drivers (Strictly ds <= cutoff_date)<br/>past_covariates · exog_lags · Observed traffic/macro<br/>Masked beyond cutoff_date to guarantee zero future leakage"]
         C1 --> C2 --> C3
     end
 
-    subgraph S3["3. Model Variants, Guardrails, Similarity Clustering & Cold-Start Transfer"]
+    subgraph S3["3. Guardrails, Variant Ablations, Similarity & Cold-Start"]
         direction TB
-        V1["Capability-Aware Routing & Monotonic Sign Guardrails<br/>features.on_unsupported_covariates = 'fallback' | 'error'<br/>features.monotonic_constraints = {'price_index': -1, 'promo_flag': 1} (@monotone)"]:::s3
-        V2["Orthogonal Variant Taxonomy & Cluster-Aware Global Pooling<br/>features.ablation_modes · @univariate · @cov_future_only · @global · @similarity_global · @local"]:::s3
-        V3["7-Lens & Multi-Modal Time-Series Similarity & Cold-Start Transfer (similarity.py · cold_start.py)<br/>@similarity_cold_start · cold_start_matching = 'auto' | 'attribute' | 'similarity' | 'hybrid' · similarity_cluster_feature"]:::s3
+        V1["Capability Routing & Monotonic Sign Guardrails<br/>on_unsupported_covariates = fallback | error<br/>monotonic_constraints = {price: -1, promo: +1} (@monotone)"]
+        V2["Orthogonal @tag Ablation & Cluster-Aware Global Pooling<br/>ablation_modes · @univariate .. @cov_all<br/>@local · @global · @hybrid · @similarity_global"]
+        V3["7-Lens Similarity, Cold-Start NPI & Decline Physics<br/>similarity_method (7 Lenses) · @similarity_cold_start<br/>analog_transfer · bass_diffusion · weibull_lifecycle · @arps_decline"]
         V1 & V2 --> V3
     end
 
     S1 & S2 --> S3
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    class C1,C2,C3 data
+    class V1,V2 route
+    class T1,T2,T3 compute
+    class V3 config
 ```
 
 ---
@@ -65,7 +70,7 @@ Forecasting each share independently in raw space produces predictions that drif
 | Transform Mode | Forward Mapping ($\mathcal{S}^D \to \mathbb{R}^K$) | Inverse Closure ($\mathbb{R}^K \to \mathcal{S}^D$) | Key Properties |
 | :--- | :--- | :--- | :--- |
 | **Centered Log-Ratio (`"clr"` / `@transform_clr`)** | $z_{i,t} = \ln y_{i,t}^* - \frac{1}{D}\sum_{j=1}^D \ln y_{j,t}^*$ | $\hat{y}_{i,t} = S \cdot \frac{\exp(\hat{z}_{i,t})}{\sum_{j=1}^D \exp(\hat{z}_{j,t})}$ | Symmetric 1-to-1 series mapping; works seamlessly with per-series (`local`), panel (`global`), and ensemble models followed by softmax simplex closure. |
-| **Isometric Log-Ratio (`"ilr"` / `@transform_ilr`)** | $\mathbf{z}_t = \text{clr}(\mathbf{y}_t^*) \cdot \mathbf{V}$ using the $D \times (D-1)$ orthonormal **Helmert contrast matrix** $\mathbf{V}$ | $\hat{\mathbf{y}}_t = \text{clr}^{-1}(\hat{\mathbf{z}}_t \mathbf{V}^\top, S)$ | Full-rank isometric coordinate representation in $\mathbb{R}^{D-1}$ (`ilr_transform` / `ilr_inverse`, `forecast_simplex_panel`) and per-series log-odds closure across all 37 models and 9 ensemble strategies. |
+| **Isometric Log-Ratio (`"ilr"` / `@transform_ilr`)** | $\mathbf{z}_t = \text{clr}(\mathbf{y}_t^*) \cdot \mathbf{V}$ using the $D \times (D-1)$ orthonormal **Helmert contrast matrix** $\mathbf{V}$ | $\hat{\mathbf{y}}_t = \text{clr}^{-1}(\hat{\mathbf{z}}_t \mathbf{V}^\top, S)$ | Full-rank isometric coordinate representation in $\mathbb{R}^{D-1}$ (`ilr_transform` / `ilr_inverse`, `forecast_simplex_panel`) and per-series log-odds closure across all 37 models and 8 ensemble strategies. |
 
 ### Zero Replacement, Post-Blend Evolution & Simplex Coherence Verification
 1. **Martín-Fernández Multiplicative Zero Replacement (`multiplicative_replacement`):** Structural or transient zeros ($y_{i,t} = 0$) are replaced prior to log-transformation using $y_{i,t}^* = \delta$ for zero parts and $y_{i,t}^* = y_{i,t} \cdot (1 - c \cdot \delta / S)$ for positive parts, preserving exact cross-series sums $\sum_i y_{i,t}^* = S$ with zero NaNs or infinities.

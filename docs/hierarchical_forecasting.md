@@ -6,19 +6,19 @@ Enterprise supply-chain, retail, and financial planning require forecasts that a
 
 ```mermaid
 flowchart TD
-    IN["Base & Backtest OOF Forecasts + RunConfig.hierarchy<br/>(Local Playground · Python SDK · Spark · Ray · Vertex · GCE · GKE)"]
+    IN["Base & Backtest OOF Forecasts + RunConfig.hierarchy / features.transform<br/>(Local Playground · Python SDK · Spark · Ray · Vertex · GCE · GKE)"]
 
-    subgraph S1["1. Cross-Sectional & Similarity Hierarchy (reconciliation.py)"]
-        CS1["Build Explicit Tree or Latent Clusters<br/>hierarchy.levels OR similarity_hierarchy = true<br/>Summing Matrix S_cs (__total__ -> levels -> leaves)"]
-        CS2["Project Base & OOF onto Spatial Subspace<br/>bottom_up · top_down · middle_out · ols<br/>wls_struct · wls_var · mint_shrink · mint_nonneg"]
-        CS3["Verify Spatial Coherence<br/>verify_coherence(reconciled_df, spec) < 1e-6"]
+    subgraph S1["1. Cross-Sectional, Similarity & Simplex Coherence (reconciliation.py · simplex.py)"]
+        CS1["Build Explicit Tree, Latent Clusters or Share Simplex<br/>hierarchy.levels OR similarity_hierarchy = true (7 Lenses)<br/>+ Compositional Simplex Closure (@transform_clr · @transform_ilr)"]
+        CS2["Project Base & OOF onto Spatial Subspace (8 Spatial Methods)<br/>bottom_up · top_down · middle_out · ols<br/>wls_struct · wls_var · mint_shrink · mint_nonneg"]
+        CS3["Verify Spatial & Simplex Coherence<br/>verify_coherence(reconciled_df, spec) < 1e-6"]
         CS1 --> CS2 --> CS3
     end
 
     subgraph S2["2. Temporal & Cross-Temporal THieF (temporal_reconciliation.py)"]
         TH1["Compile Non-Overlapping Calendar Hierarchy<br/>default_temporal_aggregations(freq)<br/>Cutoff-aligned buckets + S_temp = I_(m/k) (x) 1_k^T"]
-        TH2["3-Mode Routing & Spatial-Temporal Weighting<br/>spatial_only (alpha=1.0) · temporal_only (alpha=0.0)<br/>cross_temporal_mint (spatial_temporal_weight='auto')"]
-        TH3["Verify Coherence & Sample Paths<br/>verify_cross_temporal_coherence < 1e-6<br/>sample_coherent_paths(n_paths=200, seed=42)"]
+        TH2["3-Mode Routing & Spatial-Temporal Weighting (Method #9)<br/>spatial_only (alpha=1.0) · temporal_only (alpha=0.0)<br/>cross_temporal_mint (spatial_temporal_weight='auto')"]
+        TH3["Verify Coherence & Sample Joint Paths<br/>verify_cross_temporal_coherence < 1e-6<br/>sample_coherent_paths(n_paths=200, seed=42)"]
         TH1 --> TH2 --> TH3
     end
 
@@ -33,14 +33,14 @@ flowchart TD
     CS3 --> GS1
     TH3 --> GS2
 
-    classDef innode fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
-    classDef cs fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
-    classDef th fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
-    classDef gs fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
-    class IN innode
-    class CS1,CS2,CS3 cs
-    class TH1,TH2,TH3 th
-    class GS1,GS2,GS3 gs
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class IN config
+    class CS1,CS2,CS3 data
+    class TH1,TH2,TH3 compute
+    class GS1,GS2,GS3 decision
 ```
 
 ---

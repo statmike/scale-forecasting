@@ -25,26 +25,37 @@ The schema below is rendered from a single source of truth,
 
 ```mermaid
 flowchart LR
-    subgraph Tables["5 Native Registry Tables (Append-Only via Storage Write API)"]
-        RR["run_registry<br/>(1 row per run_id)"]
-        RJ["run_jobs<br/>(1 row per run_id × family)"]
-        FM["forecast_metadata<br/>(1 row per run_id × ts_id × model_type)"]
-        FP["forecast_predictions<br/>(N rows per run_id × ts_id × model_type × forecast_date)"]
-        BO["backtest_oof<br/>(N rows per run_id × ts_id × model_type × fold_id × forecast_date)"]
+    subgraph Tables["1. 5 Native Registry Tables + Inline Metadata (Storage Write API)"]
+        direction TB
+        RR["run_registry (1 row per run_id)<br/>raw_config · snapshot_millis · job_telemetry"]
+        RJ["run_jobs (1 row per run_id x family)<br/>runtime · attempt · GPU device_verdict"]
+        FM["forecast_metadata (1 row per cell)<br/>21 metric cols · backtest_status · fit_diagnostics"]
+        FP["forecast_predictions (horizon rows)<br/>yhat · bounds · quantiles · explanations"]
+        BO["backtest_oof (holdout fold rows)<br/>y_true · yhat · cutoff_date · horizon_step"]
         RR -->|"run_id"| RJ & FM & FP & BO
     end
-    subgraph Views["11 Curated Serving Views (Dedupe-on-Read)"]
-        VRS["v_run_summary · v_run_jobs"]
-        VML["v_model_leaderboard · v_backtest_coverage"]
-        VMC["v_model_leaderboard_comparable · v_fva_waterfall"]
-        VDG["v_horizon_decay · v_bias_and_exceptions · v_anomalies"]
-        VEX["v_feature_attributions · v_executive_sop_summary"]
+
+    subgraph Views["2. 11 Always-On Serving Views (Dedupe-on-Read · $0 Storage)"]
+        direction TB
+        V5["5 Core Operational & Leaderboard Views<br/>v_run_summary · v_run_jobs · v_model_leaderboard<br/>v_model_leaderboard_comparable · v_backtest_coverage"]
+        V6["6 Diagnostic & Executive S&OP Views<br/>v_fva_waterfall · v_horizon_decay · v_bias_and_exceptions<br/>v_anomalies · v_feature_attributions · v_executive_sop_summary"]
     end
-    RR --> VRS & VEX
-    RJ --> VRS & VEX
-    FM --> VML & VEX
-    FP --> VEX
-    BO --> VMC & VDG & VEX
+
+    subgraph Semantic["3. Opt-In Knowledge Catalog & Conversational DataAgent"]
+        direction TB
+        KC["Knowledge Catalog Governance (bq_agent)<br/>44 Business Glossary Terms · DataProfile Scans<br/>32 Golden SQL Queries · Strict Dataset Allowlist"]
+        DA["Stateful BigQuery DataAgent (sf-registry-<dataset>)<br/>BigQuery Studio · Registry.ask() · CLI --ask · MCP"]
+        KC --> DA
+    end
+
+    RR & RJ & FM --> V5
+    FM & FP & BO --> V6
+    V5 & V6 -->|"Queried directly OR published via ensure_bq_agent()"| KC
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
+    class RR,RJ,FM,FP,BO,V5,V6 data
+    class KC,DA semantic
 ```
 
 Everything joins on **`run_id`** (the config digest — see

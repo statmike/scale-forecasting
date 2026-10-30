@@ -320,3 +320,41 @@ def test_variant_tags_and_track_l_enums_have_zero_drift() -> None:
     assert "optimize_contract_volume_df" in norm_text
     for cop_t in COPULA_TYPES:
         assert f'"{cop_t}"' in norm_text
+
+
+def test_visual_architecture_sync_and_drift_detection(tmp_path: Path) -> None:
+    """Verify check_agent_surfaces detects stale counts in docs/visual_architecture.md and
+    write_agent_surfaces heals them back to zero drift.
+    """
+    shutil.copy2(REPO_ROOT / "mkdocs.yml", tmp_path / "mkdocs.yml")
+    configs_dir = tmp_path / "configs" / "smokes"
+    configs_dir.mkdir(parents=True)
+    shutil.copy2(
+        REPO_ROOT / "configs" / "mixed_demo.json",
+        tmp_path / "configs" / "mixed_demo.json",
+    )
+    shutil.copy2(
+        REPO_ROOT / "configs" / "smokes" / "01_serverless_cpu.json",
+        configs_dir / "01_serverless_cpu.json",
+    )
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    visual_dst = docs_dir / "visual_architecture.md"
+    shutil.copy2(REPO_ROOT / "docs" / "visual_architecture.md", visual_dst)
+
+    written = agent_surfaces.write_agent_surfaces(tmp_path)
+    assert len(written) == 6
+    assert agent_surfaces.check_agent_surfaces(tmp_path) == []
+
+    # Simulate adding/removing a model or glossary term so Mermaid & inventory counts drift.
+    stale_text = visual_dst.read_text(encoding="utf-8").replace(
+        "(37 Models Total)", "(99 Models Total)"
+    )
+    visual_dst.write_text(stale_text, encoding="utf-8")
+
+    drifted = agent_surfaces.check_agent_surfaces(tmp_path)
+    assert any(msg.startswith("docs/visual_architecture.md:") for msg in drifted)
+
+    agent_surfaces.write_agent_surfaces(tmp_path)
+    assert agent_surfaces.check_agent_surfaces(tmp_path) == []
+    assert "(37 Models Total)" in visual_dst.read_text(encoding="utf-8")

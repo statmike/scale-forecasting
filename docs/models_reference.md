@@ -1,14 +1,15 @@
 # Models & ensembles reference
 
-`scale-forecasting` ships **37 built-in forecasting models** (31 Python models, 4 Vertex AI AutoML models, and 2 BigQuery-native SQL models) alongside **9 ensemble blending and stacking strategies** and **9 hierarchical and temporal forecast reconciliation methods**. Every model implements the [`BaseModel`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/base_model.py) contract in its own module under [`src/scale_forecasting/models/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/models) and registers itself at import time.
+`scale-forecasting` ships **37 built-in forecasting models** (31 Python models, 4 Vertex AI AutoML models, and 2 BigQuery-native SQL models) alongside **8 ensemble blending and stacking strategies**, **9 hierarchical and temporal forecast reconciliation methods**, and **31 composable `<model>@<tag>` variant modifiers**. Every model implements the [`BaseModel`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/base_model.py) contract in its own module under [`src/scale_forecasting/models/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/models) and registers itself at import time.
 
 When a run is submitted, the orchestrator groups the requested models by **`family`** (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and routes each family to its designated compute runtime in parallel.
 
 ```mermaid
 flowchart TD
-    Base["BaseModel Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles) · fit_panel(panel, ...) · predict_panel(horizon, ...)<br/>feature_attributions · search_space(trial) · recondition(y, X)"]
+    Base["BaseModel Plugin Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles) · fit_panel / predict_panel<br/>feature_attributions · explain · search_space(trial) · recondition(y, X)"]
 
     subgraph Stat["1. Family: statistical (18 Python Models — Spark · Ray · Vertex · GCE · GKE)"]
+        direction TB
         S1["Baselines, Spectral & Intermittent (6)<br/>naive_mean · naive_seasonal · naive_drift · naive_moving_average · croston · fft"]
         S2["Exponential Smoothing & Decomposition (7)<br/>theta · auto_theta · holtwinters · autoets · auto_ces · tbats · stl_bagging"]
         S3["ARIMA, State-Space & Additive (5)<br/>auto_arima · sarimax · ucm · kalman · prophet"]
@@ -16,34 +17,35 @@ flowchart TD
     end
 
     subgraph ML_DL["2 & 3. Tabular ML (5) & Deep Learning / Foundation (8)"]
-        M1["Family: ml (5 Python Models via _lag_forecaster.py)<br/>Recursive & Direct Lags + @monotone + TreeSHAP Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
-        D1["Family: deep_learning — PyTorch Local, Global & @similarity_global (5)<br/>neuralprophet · tide · tft · tsmixer · patchtst"]
-        D2["Family: deep_learning — Zero-Shot Foundation Models (3)<br/>chronos_bolt · chronos2 · timesfm_torch"]
+        direction TB
+        M1["Family: ml (5 Python Models via _lag_forecaster.py)<br/>Recursive & Direct Lags · @monotone · TreeSHAP Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
+        D1["Family: deep_learning — Supervised PyTorch Local, Global & @similarity_global (5)<br/>neuralprophet · tide · tft · tsmixer · patchtst"]
+        D2["Family: deep_learning — Open-Weight Foundation Models (3)<br/>chronos_bolt · chronos2 · timesfm_torch"]
         M1 --> D1 --> D2
     end
 
-    subgraph Managed["4. Managed Cloud Families: automl (4) & native (2)"]
-        A1["Family: automl (4 KFP v2 Pipelines on vertex_automl)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
-        N1["Family: native (2 Serverless SQL Models on bigquery)<br/>arima_plus / arima_plus_xreg · timesfm / bq_timesfm (AI.FORECAST)"]
+    subgraph Managed["4 & 5. Managed Cloud Families: automl (4) & native (2)"]
+        direction TB
+        A1["Family: automl (4 Vertex AI AutoML / Tabular Workflows)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
+        N1["Family: native (2 Serverless SQL Models on BigQuery)<br/>arima_plus (ARIMA_PLUS / XREG) · timesfm (AI.FORECAST)"]
+        A1 --> N1
     end
 
-    Rec["5. Hierarchical, Temporal (THieF) & Similarity Reconciliation (9 Methods)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg · cross_temporal_mint"]
-    Ens["6. Ensemble Blending & Stacking Engine (9 Strategies)<br/>mean · median · trimmed_mean · inverse_error · champion · horizon_specialist · nnls · ridge · xgb"]
+    Tags["Composable <model>@<tag> Variant Modifiers (31 Tags in config.py)<br/>Scope: @local · @global · @hybrid · @similarity_global · @direct · @recursive<br/>Covariates & Transforms: @univariate .. @cov_all · @transform_log1p / boxcox / clr / ilr<br/>Domain & Calibration: @monotone · @arps_decline · @analog_transfer / bass / weibull · @aci"]
+    Rec["Hierarchical, Temporal (THieF) & Similarity Reconciliation (9 Methods)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg · cross_temporal_mint"]
+    Ens["Ensemble Blending & Stacking Engine (8 Strategies)<br/>Calculated & Selection: mean · median · inverse_error · champion · horizon_specialist<br/>Learned OOF Stackers: nnls · ridge · xgb (+ top_k · parsimony_margin · similarity_smoothing)"]
 
     Base --> S1 & M1 & A1
-    S1 --> S2 --> S3
-    M1 --> D1 --> D2
-    A1 --> N1
-    S3 & D2 & N1 --> Rec --> Ens
+    S3 & D2 & N1 --> Tags --> Rec & Ens
 
-    classDef contract fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
-    classDef pyfam fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
-    classDef mgdfam fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
-    classDef post fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
-    class Base contract
-    class S1,S2,S3,M1,D1,D2 pyfam
-    class A1,N1 mgdfam
-    class Rec,Ens post
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class Base,Tags config
+    class A1,N1 route
+    class S1,S2,S3,M1,D1,D2 compute
+    class Rec,Ens decision
 ```
 
 ---
@@ -323,7 +325,6 @@ When `ensemble.enabled: true`, the driver combines base-model forecasts into one
 | :--- | :--- | :---: | :--- | :--- |
 | **`mean`** | Calculated | No | [`numpy`](https://numpy.org/) | Unweighted arithmetic average across all available base models per `(ts_id, forecast_date)`. |
 | **`median`** | Calculated | No | [`numpy`](https://numpy.org/) | Row-wise median across base models; robust to single-model divergence. |
-| **`trimmed_mean`** | Calculated | No | [`numpy`](https://numpy.org/) | Symmetric 20% trimmed mean (`trim_ratio=0.2`) dropping the highest and lowest base predictions at each `(ts_id, forecast_date)` before averaging when $\ge 3$ models are present. |
 | **`inverse_error`** | Calculated | Recommended | [`numpy`](https://numpy.org/) | Weighted average with weights $w_m \propto 1 / \text{loss}_m$ under `backtest.decision_metric` (with optional shrinkage toward uniform $1/K$ via `ensemble.weight_shrinkage`), normalized to sum to $1$. |
 | **`champion`** | Calculated Selection | Yes | [`numpy`](https://numpy.org/) | Per-series winner-take-all selector ($w_{m^*} = 1.0$, $0$ elsewhere) picking the single model with the lowest out-of-fold `backtest.decision_metric` loss on that `ts_id`. |
 | **`horizon_specialist`** | Learned Horizon Blending | Yes | [`numpy`](https://numpy.org/) | Partitions the forecast horizon into 3 buckets (short `1..H/3`, medium, long) and computes inverse-RMSE weights per `(ts_id, bucket)` so fast autoregressive models dominate near-term steps and trend/seasonal models dominate long-horizon steps. |

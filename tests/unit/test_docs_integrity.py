@@ -519,10 +519,13 @@ def test_social_card_and_site_url() -> None:
     mkdocs_yml = (_REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
     readme_text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
     overview_text = (_REPO_ROOT / "docs" / "overview.md").read_text(encoding="utf-8")
+    visual_arch_path = _REPO_ROOT / "docs" / "visual_architecture.md"
 
     assert html_path.is_file(), "Missing docs/assets/social_card.html"
     assert assets_readme.is_file(), "Missing docs/assets/README.md"
     assert png_path.is_file(), "Missing docs/assets/social_card.png (run: make social-card)"
+    assert visual_arch_path.is_file(), "Missing docs/visual_architecture.md"
+    visual_arch_text = visual_arch_path.read_text(encoding="utf-8")
 
     html_text = html_path.read_text(encoding="utf-8")
     expected_models = f"{len(list_models())} models"
@@ -538,18 +541,25 @@ def test_social_card_and_site_url() -> None:
 
     readme_mermaid_m = re.search(r"```mermaid\n(.*?)```", readme_text, flags=re.DOTALL)
     overview_mermaid_m = re.search(r"```mermaid\n(.*?)```", overview_text, flags=re.DOTALL)
+    visual_arch_mermaid_m = re.search(r"```mermaid\n(.*?)```", visual_arch_text, flags=re.DOTALL)
     html_mermaid_m = re.search(
         r'<pre class="mermaid">\n(.*?)\n  </pre>', html_text, flags=re.DOTALL
     )
     assert readme_mermaid_m, "README.md missing hero ```mermaid block"
     assert overview_mermaid_m, "docs/overview.md missing hero ```mermaid block"
+    assert visual_arch_mermaid_m, "docs/visual_architecture.md missing Level 0 ```mermaid block"
     assert html_mermaid_m, 'docs/assets/social_card.html missing <pre class="mermaid"> block'
 
     readme_mermaid = readme_mermaid_m.group(1).strip()
     overview_mermaid = overview_mermaid_m.group(1).strip()
+    visual_arch_mermaid = visual_arch_mermaid_m.group(1).strip()
     html_mermaid = html_mermaid_m.group(1).strip()
     assert overview_mermaid == readme_mermaid, (
         "docs/overview.md hero Mermaid block drifted from README.md (run: make social-card)"
+    )
+    assert visual_arch_mermaid == readme_mermaid, (
+        "docs/visual_architecture.md Level 0 Mermaid block drifted from README.md "
+        "(run: make social-card)"
     )
     assert html_mermaid == readme_mermaid, (
         "docs/assets/social_card.html Mermaid block drifted from README.md (run: make social-card)"
@@ -805,3 +815,209 @@ def test_mermaid_diagram_aspect_ratio_balance(markdown_files: list[Path]) -> Non
                     f"in 2-3 parallel columns so GitHub does not shrink the diagram text"
                 )
     assert not offenders, "Tall/skinny Mermaid diagrams detected:\n" + "\n".join(offenders)
+
+
+def test_visual_architecture_completeness_and_live_parity() -> None:
+    """Verify docs/visual_architecture.md covers all 9 levels, 5 personas, 6 Workbench pillars,
+    7 LP/MILP solvers, Stage 0 infra, AI agent surfaces, and stays synced with Python reflection.
+    """
+    from scale_forecasting.agent_surfaces import (
+        render_visual_architecture_inventory,
+        sync_visual_architecture_text,
+    )
+
+    visual_path = _REPO_ROOT / "docs" / "visual_architecture.md"
+    assert visual_path.is_file(), "Missing docs/visual_architecture.md"
+    text = visual_path.read_text(encoding="utf-8")
+
+    # 1. Exact auto-synced inventory table and Mermaid count parity
+    expected_inv = render_visual_architecture_inventory(_REPO_ROOT)
+    assert expected_inv in text, (
+        "docs/visual_architecture.md inventory block drifted from Python reflection "
+        "(run: make agent-surfaces)"
+    )
+    assert text == sync_visual_architecture_text(text, _REPO_ROOT), (
+        "docs/visual_architecture.md Mermaid counts drifted from Python reflection "
+        "(run: make agent-surfaces)"
+    )
+
+    # 2. All 9 progressive levels + Persona Map
+    required_headings = (
+        "## Level 0 —",
+        "## Persona Map —",
+        "## Level 1 —",
+        "## Level 2 —",
+        "## Level 3 —",
+        "## Level 4 —",
+        "## Level 5 —",
+        "## Level 6 —",
+        "## Level 7 —",
+        "## Level 8 —",
+    )
+    for heading in required_headings:
+        assert heading in text, f"docs/visual_architecture.md missing section '{heading}'"
+
+    # 3. All 5 enterprise personas
+    for persona in (
+        "Data Scientist & Quant Forecaster",
+        "Demand Planner & Merchandiser",
+        "Executive & S&OP Leader",
+        "Cloud Architect & FinOps Lead",
+        "MLOps Engineer & AI Coding Agent",
+    ):
+        assert persona in text, f"docs/visual_architecture.md missing persona '{persona}'"
+
+    # 4. All 6 Forecaster Workbench pillars + single-SKU policy + all 7 LP/MILP solvers + report
+    for wb_token in (
+        "practitioner_assessment_df",
+        "fva_df",
+        "fva_cascade_df",
+        "score_realized",
+        "revision_stability_df",
+        "detect_change_points_df",
+        "recommend_substitutes_df",
+        "detect_emerging_trends_df",
+        "promo_elasticity_df",
+        "simulate_scenarios",
+        "aci_df",
+        "sample_trajectories",
+        "tail_risk_df",
+        "allocate_target",
+        "inventory_policy_df",
+        "optimize_inventory_df",
+        "optimize_clearance_df",
+        "optimize_contract_volume_df",
+        "optimize_assortment_df",
+        "optimize_prepacks_df",
+        "optimize_rebalancing_df",
+        "optimize_scenario",
+        "export_report",
+    ):
+        assert wb_token in text, (
+            f"docs/visual_architecture.md missing Forecaster Workbench capability '{wb_token}'"
+        )
+
+    # 5. Stage 0 cloud deployment, code delivery, AI agent ecosystem & 3-tier verification
+    for infra_token in (
+        "terraform/bootstrap",
+        "terraform/main",
+        "code_delivery.py",
+        "data_gen",
+        "device_audit.py",
+        "SKILL.md",
+        "run_config.schema.json",
+        "llms-full.txt",
+        "scale_forecasting.mcp",
+        "Knowledge Catalog",
+    ):
+        assert infra_token in text, (
+            f"docs/visual_architecture.md missing system capability '{infra_token}'"
+        )
+
+    # 6. Complete Forecasting Science (`5A`–`5E`) & Reference Hero Visual Parity
+    from typing import get_args
+
+    from scale_forecasting.config import (
+        CALIBRATION_METHODS,
+        RECONCILIATION_METHODS,
+        VALID_VARIANT_TAGS,
+        BacktestConfig,
+        Strategy,
+    )
+
+    models_ref_text = (_REPO_ROOT / "docs" / "models_reference.md").read_text(encoding="utf-8")
+    metrics_ref_text = (_REPO_ROOT / "docs" / "metrics_reference.md").read_text(encoding="utf-8")
+    backtest_ref_text = (_REPO_ROOT / "docs" / "backtesting.md").read_text(encoding="utf-8")
+    hier_ref_text = (_REPO_ROOT / "docs" / "hierarchical_forecasting.md").read_text(
+        encoding="utf-8"
+    )
+
+    for sub_heading in ("### 5A.", "### 5B.", "### 5C.", "### 5D.", "### 5E."):
+        assert sub_heading in text, (
+            f"docs/visual_architecture.md missing forecasting science subsection '{sub_heading}'"
+        )
+
+    # Every registered model (all 37) must appear in visual_architecture.md and models_reference.md
+    for model_name in list_models():
+        assert model_name in text, (
+            f"docs/visual_architecture.md missing registered model '{model_name}'"
+        )
+        assert model_name in models_ref_text, (
+            f"docs/models_reference.md missing registered model '{model_name}'"
+        )
+
+    # Every registered metric (all 21) must appear in visual_architecture.md & metrics_reference.md
+    for metric_name in METRIC_NAMES:
+        assert metric_name in text, (
+            f"docs/visual_architecture.md missing registered metric '{metric_name}'"
+        )
+        assert metric_name in metrics_ref_text, (
+            f"docs/metrics_reference.md missing registered metric '{metric_name}'"
+        )
+
+    # Every Strategy (8) and Reconciliation method (9) must appear in visual_architecture.md & refs
+    for strat in get_args(Strategy):
+        assert strat in text, f"docs/visual_architecture.md missing ensemble strategy '{strat}'"
+        assert strat in models_ref_text, (
+            f"docs/models_reference.md missing ensemble strategy '{strat}'"
+        )
+    for rec in RECONCILIATION_METHODS:
+        assert rec in text, f"docs/visual_architecture.md missing reconciliation method '{rec}'"
+        assert rec in models_ref_text, (
+            f"docs/models_reference.md missing reconciliation method '{rec}'"
+        )
+        assert rec in hier_ref_text, (
+            f"docs/hierarchical_forecasting.md missing reconciliation method '{rec}'"
+        )
+
+    # Every BacktestConfig.scheme (4) and calibration_method (3) must appear in both docs
+    bt_schemes = get_args(BacktestConfig.model_fields["scheme"].annotation)
+    for sch in bt_schemes:
+        assert sch in text, f"docs/visual_architecture.md missing backtest.scheme '{sch}'"
+        assert sch in backtest_ref_text, f"docs/backtesting.md missing backtest.scheme '{sch}'"
+    for cal_m in CALIBRATION_METHODS:
+        assert cal_m in text, f"docs/visual_architecture.md missing calibration_method '{cal_m}'"
+        assert cal_m in backtest_ref_text, (
+            f"docs/backtesting.md missing calibration_method '{cal_m}'"
+        )
+
+    # Every @tag in VALID_VARIANT_TAGS (all 31) must appear in visual_architecture.md
+    for vtag in VALID_VARIANT_TAGS:
+        assert f"@{vtag}" in text, (
+            f"docs/visual_architecture.md 5A missing composable variant tag '@{vtag}'"
+        )
+
+    # Guard against stale 'trimmed_mean' or '9 ensemble' regression across docs and src
+    for doc_path in (_REPO_ROOT / "docs").glob("*.md"):
+        doc_txt = doc_path.read_text(encoding="utf-8")
+        assert "trimmed_mean" not in doc_txt, (
+            f"{doc_path.relative_to(_REPO_ROOT)} references non-existent 'trimmed_mean' strategy"
+        )
+        assert "9 ensemble" not in doc_txt.lower(), (
+            f"{doc_path.relative_to(_REPO_ROOT)} has stale '9 ensemble' count (Strategy has 8)"
+        )
+
+    # Verify all 8 core reference docs feature a top-of-page 6-color Hero Mermaid diagram
+    hero_docs = (
+        "models_reference.md",
+        "metrics_reference.md",
+        "features_and_covariates.md",
+        "backtesting.md",
+        "hierarchical_forecasting.md",
+        "output_schemas.md",
+        "forecaster_workbench.md",
+        "auto_forecaster.md",
+    )
+    for doc_name in hero_docs:
+        d_txt = (_REPO_ROOT / "docs" / doc_name).read_text(encoding="utf-8")
+        idx = d_txt.find("```mermaid")
+        assert idx != -1, f"docs/{doc_name} missing Hero ```mermaid diagram"
+        first_line = d_txt[:idx].count("\n") + 1
+        assert first_line <= 40, (
+            f"docs/{doc_name} Hero Mermaid diagram should appear in the first 40 lines, "
+            f"found at line {first_line}"
+        )
+        first_block = d_txt[idx : d_txt.find("```", idx + 10)]
+        assert "classDef " in first_block, (
+            f"docs/{doc_name} Hero Mermaid diagram missing semantic color classDef palette"
+        )

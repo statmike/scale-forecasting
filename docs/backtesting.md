@@ -17,6 +17,41 @@ everything else in the product that has an opinion — hyperparameter search, le
 `inverse_error` weighting, the comparable leaderboard — depends on it, and says so when it is
 missing.
 
+```mermaid
+flowchart LR
+    subgraph FOLDS["1. Fold Geometry & Short-Series Policy (make_folds)"]
+        direction TB
+        F_SCH["4 Walk-Forward Schemes (backtest.scheme)<br/>expanding · sliding (window)<br/>expanding_frozen (recondition) · expanding_stale"]
+        F_GRID["Cutoff Layout & Operational Lag<br/>n_folds · horizon · step · gap · min_train · control_arm"]
+        F_SHORT["Short-Series Policy (backtest.short_series)<br/>adapt · overlap · shrink_train · skip · error<br/>-> Status: full · reduced · unscored · failed"]
+    end
+
+    subgraph EXEC["2. Leak-Free Fold Loop, Optuna HPO & Final Fit"]
+        direction TB
+        E_HPO["Optional Optuna TPE HPO (hpo.py)<br/>fleetwide (sampled pre-pass) OR per_series<br/>Minimizes backtest.decision_metric inside cutoffs"]
+        E_OOF["Per-Fold Fit & Holdout Scoring (ds <= cutoff_date)<br/>Fold-safe hygiene, transforms & covariates<br/>Computes all 21 Metrics per Fold"]
+        E_SHIP["Separate Full-History Production Fit<br/>Fits once on 100% of history -> Shipped Horizon Forecast<br/>(Written even if backtest_status = unscored)"]
+    end
+
+    subgraph CAL["3. OOF Calibration, Guardrails & Registry Outputs"]
+        direction TB
+        C_INT["Empirical Interval Calibration (calibration.py / aci.py)<br/>conformal (per-horizon) · aci · aci_normalized<br/>+ Chernozhukov Monotone Quantile Rearrangement"]
+        C_POL["Physical Bounds & Asymmetric Cost Target<br/>floor / cap · integer_rounding (cumulative_round)<br/>underage_cost / overage_cost Newsvendor q*"]
+        C_OUT["BigQuery Registry & Views<br/>backtest_oof · forecast_metadata · forecast_predictions<br/>v_backtest_coverage · v_model_leaderboard_comparable"]
+    end
+
+    FOLDS --> EXEC --> CAL
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class F_SCH,F_GRID,F_SHORT config
+    class E_HPO,E_OOF,E_SHIP compute
+    class C_INT,C_POL decision
+    class C_OUT data
+```
+
 ---
 
 ## 1. What a backtest produces, and what it costs

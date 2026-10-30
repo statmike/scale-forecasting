@@ -89,6 +89,7 @@ nav:
   - Home: README.md
   - Start here:
       - Platform overview: overview.md
+      - Visual system walkthrough: visual_architecture.md
       - Getting started: getting_started.md
       - AI agents, skills & MCP: agent_and_mcp_guide.md
       - Choosing a runtime: choosing_a_runtime.md

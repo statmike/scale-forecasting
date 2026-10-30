@@ -2,24 +2,39 @@
 
 `scale-forecasting` computes **21 built-in evaluation metrics** for every `(series, model)` cell during rolling-origin backtesting. Every metric subclasses [`BaseMetric`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/base_metric.py) in its own module under [`src/scale_forecasting/metrics/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/metrics) and is listed in `METRIC_NAMES` in [`src/scale_forecasting/metrics/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/__init__.py).
 
-All five model families (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and all nine ensemble strategies are scored through the exact same Python function (`metrics.compute_metrics`), guaranteeing that a metric column in `forecast_metadata` has an identical mathematical definition regardless of which compute engine produced the forecast.
+All five model families (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and all eight ensemble strategies are scored through the exact same Python function (`metrics.compute_metrics`), guaranteeing that a metric column in `forecast_metadata` has an identical mathematical definition regardless of which compute engine produced the forecast.
 
 ```mermaid
-flowchart TD
-    OOF["Out-of-Fold Evaluation Window (MetricContext)<br/>y_true · yhat · err = yhat − y_true<br/>y_train · lower · upper · seasonal_period"]
+flowchart LR
+    OOF["Out-of-Fold Evaluation Window (MetricContext)<br/>y_true · yhat · err = yhat - y_true<br/>y_train · lower · upper · seasonal_period"]
 
     subgraph Panel["21-Metric Evaluation Panel (metrics.compute_metrics)"]
         direction TB
         C1["Relative & Percentage Error (5)<br/>wape · smape · mape · maape · ope"]
-        C2["Scale-Dependent & Log Error (5)<br/>mae · rmse · mse · rmsle · bias"]
+        C2["Scale-Dependent, Log & Signed Bias (5)<br/>mae · rmse · mse · rmsle · bias"]
         C3["Training-Scaled Point Error (4)<br/>mase · mase_seasonal · rmsse · msse"]
         C4["Goodness-of-Fit & Dispersion (2)<br/>r2 · cv"]
         C5["Prediction-Interval & Quantile Quality (5)<br/>coverage · pinball · interval_score · interval_width · msis"]
     end
 
-    Downstream["Downstream Consumers<br/>forecast_metadata DDL & Storage Write API<br/>HPO Objective · inverse_error Weights · point_forecast Calibration"]
+    subgraph Steer["Downstream Consumers of backtest.decision_metric"]
+        direction TB
+        D1["Registry DDL & Leaderboards<br/>forecast_metadata (21 cols) · v_model_leaderboard_comparable (Pooled OOF)"]
+        D2["Search & Variant Selection<br/>Optuna HPO Objective · @tag Ablation Winner · autofocus Champion Ratchet"]
+        D3["Ensembles & Point Calibration<br/>inverse_error / champion / nnls / ridge / xgb · point_forecast='auto'"]
+    end
 
-    OOF --> Panel --> Downstream
+    OOF --> C1 & C2 & C3 & C4 & C5
+    C1 & C2 & C3 & C4 & C5 --> D1 & D2 & D3
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class OOF,D1 data
+    class D2 route
+    class C1,C2,C3,C4,C5 compute
+    class D3 decision
 ```
 
 ---

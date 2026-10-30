@@ -332,8 +332,8 @@ GLOSSARY_TERMS: tuple[GlossaryTermSpec, ...] = (
         display_name="Calculated Blend",
         description=(
             "Zero-training ensemble combiner (ensemble_mean, ensemble_median, "
-            "ensemble_trimmed_mean, ensemble_inverse_error) combining candidate models "
-            "without fitting a meta-learner."
+            "ensemble_inverse_error, ensemble_champion, ensemble_horizon_specialist) "
+            "combining candidate models without fitting a meta-learner."
         ),
         labels=("ensemble", "models"),
         linked_objects=("v_model_leaderboard_comparable",),

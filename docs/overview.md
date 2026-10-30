@@ -42,7 +42,7 @@ flowchart LR
     class S,RY,V,G,K,A,B compute
 ```
 
-New to the project? Start with [Getting started](./getting_started.md) for a 5-minute local forecast and your first cloud run.
+New to the project? Start with [Getting started](./getting_started.md) for a 5-minute local forecast and your first cloud run, or open the [Visual system walkthrough](./visual_architecture.md) to zoom into every box of the diagram above across 9 color-coded levels + a 5-persona entry map traced directly to code, guides, notebooks, and tests.
 
 ---
 

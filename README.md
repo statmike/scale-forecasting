@@ -54,6 +54,8 @@ flowchart LR
     class S,RY,V,G,K,A,B compute
 ```
 
+> **Zoom into every box:** Follow the progressive 9-level color-coded diagram tour — including the 5-persona entry map, 6-pillar Forecaster Workbench, and code/doc/notebook/test traceability tables — in **[Visual System Walkthrough (`docs/visual_architecture.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/visual_architecture.md)**.
+
 ---
 
 ## What you just found
@@ -254,6 +256,7 @@ All notebooks in [`notebooks/`](https://github.com/statmike/scale-forecasting/bl
 - **Start here:**
   - [Getting started](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md)
   - [Platform overview](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md)
+  - [Visual system walkthrough](https://github.com/statmike/scale-forecasting/blob/main/docs/visual_architecture.md)
   - [Auto-forecaster & `autofocus`](https://github.com/statmike/scale-forecasting/blob/main/docs/auto_forecaster.md)
   - [AlphaEvolve runtime harness](https://github.com/statmike/scale-forecasting/blob/main/docs/alphaevolve_runner.md)
   - [Forecaster workbench](https://github.com/statmike/scale-forecasting/blob/main/docs/forecaster_workbench.md)
