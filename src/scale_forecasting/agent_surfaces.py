@@ -2063,6 +2063,16 @@ def sync_visual_architecture_text(text: str, repo_root: Path | None = None) -> s
         (r"\d+ Terraform Modules", f"{c['n_tf_mods']} Terraform Modules"),
         (r"\d+ Packaging Extras", f"{c['n_extras']} Packaging Extras"),
         (r"\d+-Smoke Live Suite", f"{c['n_smokes']}-Smoke Live Suite"),
+        (
+            r"\d+ Models · \d+ Metrics · \d+ Ensembles",
+            f"{c['n_models']} Models · {c['n_metrics']} Metrics · {c['n_strategies']} Ensembles",
+        ),
+        (r"\d+ Glossary Terms", f"{c['n_glossary']} Glossary Terms"),
+        (r"\d+ Golden SQL", f"{c['n_golden']} Golden SQL"),
+        (
+            r"\d+ Registry Tables · \d+ Always-On Views",
+            f"{c['n_reg_tables']} Registry Tables · {c['n_views']} Always-On Views",
+        ),
     )
     for pattern, repl in subs:
         updated = re.sub(pattern, repl, updated)

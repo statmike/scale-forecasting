@@ -1,45 +1,8 @@
 # Visual system walkthrough — progressive architecture
 
-This guide unveils the entire **`scale-forecasting`** repository progressively — starting from the **10,000-foot three-stage system map**, routing **5 enterprise personas** to their exact entry surfaces, and zooming step by step into **cloud deployment & zero-rebuild code delivery**, **`RunConfig` compilation & ablation**, **5 execution paths**, **parallel per-family routing across all 7 Google Cloud runtimes**, **worker domain primitives & 3-mode coherence**, the **self-documenting BigQuery registry & Knowledge Catalog**, the **6-pillar Forecaster Workbench & prescriptive optimizers**, and the **AI agent, Day-2 repair, and 3-tier verification architecture**.
-
-Every diagram uses the **same 6-color semantic palette**, every zoom level ends with a **4-column code/doc/notebook/test traceability table**, and **dynamic counts + `Level 0` stay automatically synchronized with the codebase** via `make social-card` and `make agent-surfaces` (enforced on every commit by `test_docs_integrity.py` and `test_agent_surfaces.py`).
-
-### Semantic color palette (shared across every diagram)
-
-| Color Role | Mermaid Class | Swatch (Fill / Stroke) | What This Color Always Represents |
-| :--- | :---: | :--- | :--- |
-| **BigQuery Data, Registry & Always-On Views** | `data` | Light Blue (`#E8F0FE` / `#4285F4`) | Source panels (`BigQuery` native & `BigLake Iceberg`), `data_gen` seeding, the **5 append-only registry tables**, inline schema descriptions, and all **11 always-created analytical SQL views**. |
-| **Config, Infrastructure & Entrypoints** | `config` | Soft Amber (`#FEF7E0` / `#F9AB00`) | Two-stage Terraform (`12` modules), `13` dependency extras, declarative `RunConfig` JSON, Glass-Box Auto-Forecaster (`autofocus`), `Forecaster.evolve()`, and the 5 launch entrypoints. |
-| **Routing, Sizing, Preflight & Lifecycle** | `route` | Warm Coral (`#FCE8E6` / `#EA4335`) | Parallel per-family DAG routing, pool/GPU sizing, `--feasibility` & `--quota` preflight, `src.zip` code shipping, live probes, surgical `retry_run`, and automated CI tripwires. |
-| **Zero-Idle Compute & Worker Execution** | `compute` | Mint Green (`#E6F4EA` / `#34A853`) | The **7 Google Cloud compute runtimes**, `worker.run_cell` / `run_panel_model`, **37 models**, **21 metrics**, domain primitives, 3-mode reconciliation, and 8 ensemble strategies. |
-| **Knowledge Catalog, Conversational & AI Agents** | `semantic` | Soft Purple (`#F3E8FD` / `#9334E6`) | Opt-in **Knowledge Catalog** Business Glossary (`44` terms), `DataProfile` scans, `32` Golden SQL queries, stateful `DataAgent`, portable `SKILL.md`, and the built-in MCP server. |
-| **Workbench, Econometrics & Optimization** | `decision` | Deep Teal (`#E4F7FB` / `#12B5CB`) | 7-Question `assess()`, FVA/Diebold–Mariano, live drift/whipsaw, 7-lens similarity merchandising, Double-ML elasticity, Copula `VaR`/`CVaR`, Goal-Seek QP, **7 LP/MILP solvers**, and HTML reports. |
-
-### Auto-synced repository inventory
-
-> [!NOTE]
-> The table below (and all dynamic counts inside the Mermaid diagrams on this page) is regenerated automatically from live Python reflection whenever `make agent-surfaces` (`python -m scale_forecasting.agent_surfaces --write`) runs, and `Level 0` is synced from `README.md` via `make social-card`.
-
-<!-- BEGIN AUTO-SYNCED VISUAL INVENTORY -->
-| System Surface | Live Code Count & Breakdown | Canonical Source of Truth |
-| :--- | :--- | :--- |
-| **Forecasting Models** | **37 models** across **5 families** (`18` `statistical`, `5` `ml`, `8` `deep_learning`, `4` `automl`, `2` `native`) + **31 `@tag` modifiers** | [`models/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/__init__.py), [`config.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/config.py) |
-| **Evaluation Metrics** | **21 metrics** (`16` point accuracy + `5` prediction interval) | [`metrics/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/__init__.py) |
-| **Cloud Runtimes & GPUs** | **7 runtimes** (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`) · **4 GPU types** (`T4`, `L4`, `A100`, `A100_80GB`) | [`config.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/config.py), [`resources/catalog.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/resources/catalog.py) |
-| **Config, Auto-Compiler & Benchmarks** | **12 root `RunConfig` fields** · **4 exposure tiers** · **5 scale regimes** · **20 synthetic DGPs + 9 public benchmarks** | [`auto.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/auto.py), [`auto_policy.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/auto_policy.py), [`benchmarks.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/benchmarks.py) |
-| **Similarity, Ensembles & Coherence** | **7 similarity lenses** · **8 ensemble strategies** · **9 reconciliation methods** (3-mode `THieF` & `cross_temporal_mint` + `clr`/`ilr` simplex) | [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py), [`ensembler.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ensembler.py), [`temporal_reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/temporal_reconciliation.py) |
-| **Always-On BigQuery Registry & Views** | **5 native registry tables** · **11 always-created SQL views** (`5` core + `6` diagnostic/S&OP) · `20` object & `326` column descriptions | [`registry/ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py), [`registry/views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py), [`registry/metadata.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/metadata.py) |
-| **Opt-In Knowledge Catalog & `DataAgent`** | **44 Business Glossary terms** · `DataProfile` scans · **32 Golden SQL queries** · **5 chat surfaces** | [`bq_agent/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/bq_agent) |
-| **Forecaster Workbench & Solvers** | **6 Workbench pillars** · **7-Question `assess()`** · **Single-SKU `ROP`/`SS` + 7 SciPy/HiGHS LP & MILP optimizers** · **12-tab HTML/JSON report** | [`workbench.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/workbench.py), [`inventory_optimizer.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/inventory_optimizer.py), [`clearance_optimizer.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/clearance_optimizer.py) |
-| **AI Agent & MCP Ecosystem** | **6 generated agent files** · **1 portable `SKILL.md`** · **MCP server (`7` resources, `14` tools)** across 5 IDE/CLI clients | [`agent_surfaces.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/agent_surfaces.py), [`mcp.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/mcp.py) |
-| **Infrastructure, Notebooks & Validation** | **12 Terraform modules** · **13 packaging extras** · **13 notebooks** · **42 smoke + 20 demo configs** | [`terraform/`](https://github.com/statmike/scale-forecasting/tree/main/terraform), [`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks), [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) |
-<!-- END AUTO-SYNCED VISUAL INVENTORY -->
-
----
+This visual atlas unpacks **`scale-forecasting`** from the **10,000-foot system map (`Level 0`)** down through **5 enterprise personas** and **8 progressive zoom levels**, using a single **6-color semantic key** that maps every box to source modules, guides, notebooks, and tests.
 
 ## Level 0 — The 10,000-foot system map
-
-This is the canonical front-door diagram from [`README.md`](https://github.com/statmike/scale-forecasting/blob/main/README.md) (drift-locked via `make social-card`):
 
 ```mermaid
 flowchart LR
@@ -81,19 +44,34 @@ flowchart LR
     class S,RY,V,G,K,A,B compute
 ```
 
-### Progressive zoom index
+### Visual 6-color key (shared across every diagram)
 
-| System Stage | Section | What You Will See Unpacked |
-| :--- | :--- | :--- |
-| **Role Routing** | [**Persona Map — 5 Enterprise Personas & Entry Surfaces**](#persona-map--5-enterprise-personas--entry-surfaces) | Which SDK methods, CLI commands, SQL views, notebooks (`00`–`12`), and zoom levels serve each team role. |
-| **0. Foundation** | [**Level 1 — Stage 0: Two-Stage Cloud Deployment, 100k Seeding & Zero-Rebuild Code Delivery**](#level-1--stage-0-two-stage-cloud-deployment-100k-seeding--zero-rebuild-code-delivery) | `terraform/bootstrap` + `12` `terraform/main` modules, `13` packaging extras, 100k deterministic `data_gen`, and dynamic `src.zip` shipping. |
-| **1. Data, Config & Launch** | [**Level 2 — Stage 1A: Authoring, Auto-Compiling, Ablating & Evolving a `RunConfig`**](#level-2--stage-1a-authoring-auto-compiling-ablating--evolving-a-runconfig) | `12` root `RunConfig` blocks, `@tag` ablation ladders, Glass-Box Auto-Forecaster (`autofocus` + `29` benchmarks), `Forecaster.evolve()`, and `run_id`. |
-| **1. Data, Config & Launch** | [**Level 3 — Stage 1B: The 5 Execution Paths, Preflight & Duration/Cost Predictor**](#level-3--stage-1b-the-5-execution-paths-preflight--durationcost-predictor) | Pure-offline sandbox, `--feasibility` / `--quota` / `predict_run_duration`, `--stage-only`, `main.run`, direct submitters, and Cloud Composer 3. |
-| **2. Zero-Idle Compute** | [**Level 4 — Stage 2A: Parallel Per-Family Routing, Sizing, GPU Audit & 7 Cloud Runtimes**](#level-4--stage-2a-parallel-per-family-routing-sizing-gpu-audit--7-cloud-runtimes) | Parallel `FamilyJob` fan-out, `ResourceSlot`/`UnitShape` sizing, regional fallback, Arrow `row_restriction` pushdown, 7 runtimes, and `device_verdict`. |
-| **2. Zero-Idle Compute** | [**Level 5 — Stage 2B: Forecasting Science Inside the Worker (`5A`–`5E`)**](#level-5--stage-2b-forecasting-science-inside-the-worker-5a5e) | `5A` all `37` models & `31` `@tag` modifiers · `5B` 3-tier covariates across `T_cutoff` & domain hygiene · `5C` 4-scheme backtesting, Optuna HPO & calibration · `5D` all `21` metrics · `5E` 3-mode coherence (`9` methods) & 3-scope ensembles (`8` strategies). |
-| **3. Governed Results** | [**Level 6 — Stage 3A: Self-Documenting Registry (`erDiagram`), 11 Always-On Views & Knowledge Catalog**](#level-6--stage-3a-self-documenting-registry-erdiagram-11-always-on-views--knowledge-catalog) | Primary/join keys across 5 tables & **11 always-created views** vs. the **opt-in** Knowledge Catalog glossary, `DataProfile` scans, and `DataAgent`. |
-| **3. Governed Results** | [**Level 7 — Stage 3B: The Forecaster Workbench — 6 Pillars & Prescriptive Solvers**](#level-7--stage-3b-the-forecaster-workbench--6-pillars--prescriptive-solvers) | FVA/DM tests, live drift & whipsaw, 7-lens similarity merchandising, Double-ML & 5-stage What-If, Copula `VaR`/`CVaR`, Goal-Seek QP, and **7 LP/MILP solvers**. |
-| **3. Governed Results** | [**Level 8 — Stage 3C: AI Agent Ecosystem, 5 Chat Surfaces, Day-2 Repair & 3-Tier Verification**](#level-8--stage-3c-ai-agent-ecosystem-5-chat-surfaces-day-2-repair--3-tier-verification) | 5 repository AI surfaces (`SKILL.md`, MCP, JSON Schema, `llms.txt`), 5 `DataAgent` chat surfaces, surgical `retry_run`, and the 3-tier test gate. |
+```mermaid
+flowchart LR
+    C_CFG["Config, Infra & Launch (config)<br/>Soft Amber · 12 Terraform Modules<br/>RunConfig · autofocus · evolve() · 5 Paths"]
+    C_RTE["Routing, Sizing & Lifecycle (route)<br/>Warm Coral · Family DAG · --quota<br/>src.zip · retry_run · CI Tripwires"]
+    C_CMP["Zero-Idle Compute & Science (compute)<br/>Mint Green · 7 Cloud Runtimes<br/>37 Models · 21 Metrics · 8 Ensembles"]
+    C_DATA["BigQuery Data & Views (data)<br/>Light Blue · Source Panels<br/>5 Registry Tables · 11 Always-On Views"]
+    C_SEM["Knowledge Catalog & Agents (semantic)<br/>Soft Purple · 44 Glossary Terms<br/>DataProfile · 32 Golden SQL · DataAgent · MCP"]
+    C_DEC["Workbench & Optimization (decision)<br/>Deep Teal · 7-Q assess() · FVA · Double-ML<br/>Similarity · Copula · 7 LP/MILP Solvers"]
+
+    C_CFG --> C_RTE --> C_CMP --> C_DATA --> C_SEM & C_DEC
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
+    classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
+    classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class C_CFG config
+    class C_RTE route
+    class C_CMP compute
+    class C_DATA data
+    class C_SEM semantic
+    class C_DEC decision
+```
+
+**Jump to zoom level:** [Persona Map](#persona-map--5-enterprise-personas--entry-surfaces) · [Level 1: Cloud Infra & `src.zip`](#level-1--stage-0-two-stage-cloud-deployment-100k-seeding--zero-rebuild-code-delivery) · [Level 2: `RunConfig`, Auto & Evolve](#level-2--stage-1a-authoring-auto-compiling-ablating--evolving-a-runconfig) · [Level 3: 5 Execution Paths](#level-3--stage-1b-the-5-execution-paths-preflight--durationcost-predictor) · [Level 4: 7 Cloud Runtimes](#level-4--stage-2a-parallel-per-family-routing-sizing-gpu-audit--7-cloud-runtimes) · [Level 5: Models, Covariates, CV & Metrics (`5A`–`5E`)](#level-5--stage-2b-forecasting-science-inside-the-worker-5a5e) · [Level 6: Registry & Knowledge Catalog](#level-6--stage-3a-self-documenting-registry-erdiagram-11-always-on-views--knowledge-catalog) · [Level 7: Workbench & Solvers](#level-7--stage-3b-the-forecaster-workbench--6-pillars--prescriptive-solvers) · [Level 8: Agents, Repair & CI](#level-8--stage-3c-ai-agent-ecosystem-5-chat-surfaces-day-2-repair--3-tier-verification) · [Appendix: Index & Auto-Synced Inventory](#appendix--zoom-index--auto-synced-repository-inventory)
 
 ---
 
@@ -829,6 +807,44 @@ flowchart LR
 | **5 Conversational Analytics Surfaces** | [`bq_agent/probe.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/bq_agent/probe.py), [`bq_agent/client.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/bq_agent/client.py), [`bq_agent/offline.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/bq_agent/offline.py), [`bq_agent/__main__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/bq_agent/__main__.py) | [running_and_reviewing.md](./running_and_reviewing.md), [Notebook 10](./notebooks/10_registry_operations_and_scale.ipynb), [Notebook 12](./notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb) | [`test_bq_agent.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_bq_agent.py), [`test_bq_agent_live.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/integration/test_bq_agent_live.py) |
 | **Live Probes, Surgical `retry_run` & Hygiene** | [`probes/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/probes), [`retry_run.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/retry_run.py), [`retry_policy.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/retry_policy.py), [`registry/ops.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ops.py), [`ray_reaper.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ray_reaper.py) | [operations.md](./operations.md), [troubleshooting.md](./troubleshooting.md), [Notebook 10](./notebooks/10_registry_operations_and_scale.ipynb) | [`test_probes.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_probes.py), [`test_retry_run.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_retry_run.py), [`test_registry_ops.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_registry_ops.py), [`repair_retry_demo.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/repair_retry_demo.json) |
 | **3-Tier Test Suite & Drift Tripwires** | [`notebook_acceptance.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/notebook_acceptance.py), [`smoke_run.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/smoke_run.py), [`tests/smokes/smoke_harness.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/smokes/smoke_harness.py) | [validation.md](./validation.md), [smoke_testing.md](./smoke_testing.md) | [`test_docs_integrity.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_docs_integrity.py), [`test_validation_ledger.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_validation_ledger.py), [`test_pathological_torture_suite.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_pathological_torture_suite.py), [`test_sql_injection_safety.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_sql_injection_safety.py) |
+
+---
+
+## Appendix — Zoom index & auto-synced repository inventory
+
+### Progressive zoom index
+
+| System Stage | Section | What Is Unpacked |
+| :--- | :--- | :--- |
+| **Role Routing** | [**Persona Map — 5 Enterprise Personas & Entry Surfaces**](#persona-map--5-enterprise-personas--entry-surfaces) | Which SDK methods, CLI commands, SQL views, notebooks (`00`–`12`), and zoom levels serve each team role. |
+| **0. Foundation** | [**Level 1 — Stage 0: Two-Stage Cloud Deployment, 100k Seeding & Zero-Rebuild Code Delivery**](#level-1--stage-0-two-stage-cloud-deployment-100k-seeding--zero-rebuild-code-delivery) | `terraform/bootstrap` + `12` `terraform/main` modules, `13` packaging extras, 100k deterministic `data_gen`, and dynamic `src.zip` shipping. |
+| **1. Data, Config & Launch** | [**Level 2 — Stage 1A: Authoring, Auto-Compiling, Ablating & Evolving a `RunConfig`**](#level-2--stage-1a-authoring-auto-compiling-ablating--evolving-a-runconfig) | `12` root `RunConfig` blocks, `@tag` ablation ladders, Glass-Box Auto-Forecaster (`autofocus` + `29` benchmarks), `Forecaster.evolve()`, and `run_id`. |
+| **1. Data, Config & Launch** | [**Level 3 — Stage 1B: The 5 Execution Paths, Preflight & Duration/Cost Predictor**](#level-3--stage-1b-the-5-execution-paths-preflight--durationcost-predictor) | Pure-offline sandbox, `--feasibility` / `--quota` / `predict_run_duration`, `--stage-only`, `main.run`, direct submitters, and Cloud Composer 3. |
+| **2. Zero-Idle Compute** | [**Level 4 — Stage 2A: Parallel Per-Family Routing, Sizing, GPU Audit & 7 Cloud Runtimes**](#level-4--stage-2a-parallel-per-family-routing-sizing-gpu-audit--7-cloud-runtimes) | Parallel `FamilyJob` fan-out, `ResourceSlot`/`UnitShape` sizing, regional fallback, Arrow `row_restriction` pushdown, 7 runtimes, and `device_verdict`. |
+| **2. Zero-Idle Compute** | [**Level 5 — Stage 2B: Forecasting Science Inside the Worker (`5A`–`5E`)**](#level-5--stage-2b-forecasting-science-inside-the-worker-5a5e) | `5A` all `37` models & `31` `@tag` modifiers · `5B` 3-tier covariates across `T_cutoff` & domain hygiene · `5C` 4-scheme backtesting, Optuna HPO & calibration · `5D` all `21` metrics · `5E` 3-mode coherence (`9` methods) & 3-scope ensembles (`8` strategies). |
+| **3. Governed Results** | [**Level 6 — Stage 3A: Self-Documenting Registry (`erDiagram`), 11 Always-On Views & Knowledge Catalog**](#level-6--stage-3a-self-documenting-registry-erdiagram-11-always-on-views--knowledge-catalog) | Primary/join keys across 5 tables & **11 always-created views** vs. the **opt-in** Knowledge Catalog glossary, `DataProfile` scans, and `DataAgent`. |
+| **3. Governed Results** | [**Level 7 — Stage 3B: The Forecaster Workbench — 6 Pillars & Prescriptive Solvers**](#level-7--stage-3b-the-forecaster-workbench--6-pillars--prescriptive-solvers) | FVA/DM tests, live drift & whipsaw, 7-lens similarity merchandising, Double-ML & 5-stage What-If, Copula `VaR`/`CVaR`, Goal-Seek QP, and **7 LP/MILP solvers**. |
+| **3. Governed Results** | [**Level 8 — Stage 3C: AI Agent Ecosystem, 5 Chat Surfaces, Day-2 Repair & 3-Tier Verification**](#level-8--stage-3c-ai-agent-ecosystem-5-chat-surfaces-day-2-repair--3-tier-verification) | 5 repository AI surfaces (`SKILL.md`, MCP, JSON Schema, `llms.txt`), 5 `DataAgent` chat surfaces, surgical `retry_run`, and the 3-tier test gate. |
+
+### Auto-synced repository inventory
+
+> [!NOTE]
+> The table below (and all dynamic counts inside the Mermaid diagrams on this page) is regenerated automatically from live Python reflection via `make agent-surfaces` (`python -m scale_forecasting.agent_surfaces --write`), and `Level 0` is synced from `README.md` via `make social-card`.
+
+<!-- BEGIN AUTO-SYNCED VISUAL INVENTORY -->
+| System Surface | Live Code Count & Breakdown | Canonical Source of Truth |
+| :--- | :--- | :--- |
+| **Forecasting Models** | **37 models** across **5 families** (`18` `statistical`, `5` `ml`, `8` `deep_learning`, `4` `automl`, `2` `native`) + **31 `@tag` modifiers** | [`models/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/models/__init__.py), [`config.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/config.py) |
+| **Evaluation Metrics** | **21 metrics** (`16` point accuracy + `5` prediction interval) | [`metrics/__init__.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/metrics/__init__.py) |
+| **Cloud Runtimes & GPUs** | **7 runtimes** (`spark`, `ray`, `vertex`, `gce`, `gke`, `vertex_automl`, `bigquery`) · **4 GPU types** (`T4`, `L4`, `A100`, `A100_80GB`) | [`config.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/config.py), [`resources/catalog.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/resources/catalog.py) |
+| **Config, Auto-Compiler & Benchmarks** | **12 root `RunConfig` fields** · **4 exposure tiers** · **5 scale regimes** · **20 synthetic DGPs + 9 public benchmarks** | [`auto.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/auto.py), [`auto_policy.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/auto_policy.py), [`benchmarks.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/benchmarks.py) |
+| **Similarity, Ensembles & Coherence** | **7 similarity lenses** · **8 ensemble strategies** · **9 reconciliation methods** (3-mode `THieF` & `cross_temporal_mint` + `clr`/`ilr` simplex) | [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py), [`ensembler.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/ensembler.py), [`temporal_reconciliation.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/temporal_reconciliation.py) |
+| **Always-On BigQuery Registry & Views** | **5 native registry tables** · **11 always-created SQL views** (`5` core + `6` diagnostic/S&OP) · `20` object & `326` column descriptions | [`registry/ddl.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/ddl.py), [`registry/views.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/views.py), [`registry/metadata.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/registry/metadata.py) |
+| **Opt-In Knowledge Catalog & `DataAgent`** | **44 Business Glossary terms** · `DataProfile` scans · **32 Golden SQL queries** · **5 chat surfaces** | [`bq_agent/`](https://github.com/statmike/scale-forecasting/tree/main/src/scale_forecasting/bq_agent) |
+| **Forecaster Workbench & Solvers** | **6 Workbench pillars** · **7-Question `assess()`** · **Single-SKU `ROP`/`SS` + 7 SciPy/HiGHS LP & MILP optimizers** · **12-tab HTML/JSON report** | [`workbench.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/workbench.py), [`inventory_optimizer.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/inventory_optimizer.py), [`clearance_optimizer.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/clearance_optimizer.py) |
+| **AI Agent & MCP Ecosystem** | **6 generated agent files** · **1 portable `SKILL.md`** · **MCP server (`7` resources, `14` tools)** across 5 IDE/CLI clients | [`agent_surfaces.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/agent_surfaces.py), [`mcp.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/mcp.py) |
+| **Infrastructure, Notebooks & Validation** | **12 Terraform modules** · **13 packaging extras** · **13 notebooks** · **42 smoke + 20 demo configs** | [`terraform/`](https://github.com/statmike/scale-forecasting/tree/main/terraform), [`notebooks/`](https://github.com/statmike/scale-forecasting/tree/main/notebooks), [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) |
+<!-- END AUTO-SYNCED VISUAL INVENTORY -->
 
 ---
 

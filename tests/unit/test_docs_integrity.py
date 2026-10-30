@@ -997,6 +997,21 @@ def test_visual_architecture_completeness_and_live_parity() -> None:
             f"{doc_path.relative_to(_REPO_ROOT)} has stale '9 ensemble' count (Strategy has 8)"
         )
 
+    # Verify visual_architecture.md opens immediately with Level 0 + rendered 6-color Mermaid key
+    # before any Markdown tables appear.
+    first_mermaid_idx = text.find("```mermaid")
+    first_table_idx = text.find("\n| ")
+    assert first_mermaid_idx != -1, "docs/visual_architecture.md missing opening Mermaid diagram"
+    assert text[:first_mermaid_idx].count("\n") + 1 <= 15, (
+        "docs/visual_architecture.md must open with Level 0 Mermaid diagram in the first 15 lines"
+    )
+    assert first_table_idx == -1 or first_mermaid_idx < first_table_idx, (
+        "docs/visual_architecture.md must render its opening visuals before any Markdown tables"
+    )
+    assert "### Visual 6-color key" in text, (
+        "docs/visual_architecture.md missing rendered '### Visual 6-color key' Mermaid legend"
+    )
+
     # Verify all 8 core reference docs feature a top-of-page 6-color Hero Mermaid diagram
     hero_docs = (
         "models_reference.md",
