@@ -3,6 +3,7 @@
 **Enterprise time-series forecasting on Google Cloud — from 10 series on a laptop to 100,000+ across 7 cloud runtimes, using BigQuery as the single data surface with zero data replication, one JSON configuration, and no idle compute.**
 
 [![PyPI](https://img.shields.io/pypi/v/scale-forecasting?style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/scale-forecasting/)
+[![skills.sh](https://img.shields.io/badge/skills.sh-Agent%20Skill-000000?style=for-the-badge&logo=vercel&logoColor=white)](https://skills.sh/statmike/scale-forecasting)
 [![Colab Enterprise](https://img.shields.io/badge/Colab%20Enterprise-Launch%20Playground-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://console.cloud.google.com/vertex-ai/colab/import/https%3A%2F%2Fraw.githubusercontent.com%2Fstatmike%2Fscale-forecasting%2Fmain%2Fnotebooks%2F00_model_playground.ipynb)
 [![Open in Cloud Shell](https://img.shields.io/badge/Cloud%20Shell-Open%20Tutorial-4285F4?style=for-the-badge&logo=google-cloud&logoColor=white)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/statmike/scale-forecasting&cloudshell_tutorial=cloudshell_tutorial.md)
 [![Documentation](https://img.shields.io/badge/Docs-Documentation%20Site-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://statmike.github.io/scale-forecasting/)
@@ -141,7 +142,8 @@ python -m scale_forecasting.agent_surfaces --probe-env
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --probe
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure-agent --ask "Which model won on the latest run?"
 
-# Launch Google Antigravity CLI (auto-discovers .agents/skills/ & AGENTS.md) or register MCP:
+# Install the portable Agent Skill via skills.sh, launch Antigravity CLI, or register MCP:
+npx skills add statmike/scale-forecasting
 agy
 claude mcp add scale-forecasting -- python3 -m scale_forecasting.mcp
 ```

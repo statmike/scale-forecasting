@@ -775,7 +775,7 @@ flowchart LR
 
     subgraph AGENTS["1. AI Agent & Conversational Ecosystem"]
         direction TB
-        AG_REPO["5 Repository Agent Surfaces (agent_surfaces.py + mcp.py)<br/>SKILL.md + .agents/skills.json · MCP Server (7 Resources, 14 Tools)<br/>JSON Schema ($schema) · llms.txt & llms-full.txt · Antigravity plugin.json"]
+        AG_REPO["5 Repository Agent Surfaces (agent_surfaces.py + mcp.py)<br/>skills.sh (npx skills add statmike/scale-forecasting) · SKILL.md · MCP (7 Resources, 14 Tools)<br/>JSON Schema ($schema) · llms.txt & llms-full.txt · Antigravity plugin.json"]
         AG_CHAT["5 Conversational Analytics Surfaces (bq_agent/)<br/>1. BigQuery Studio UI · 2. SDK/Notebooks probe_bq_agent() + ask() / BakeOff.ask()<br/>3. CLI --ask · 4. MCP Tool #14 ask_forecast_registry · 5. output.ensure_bq_agent"]
     end
 

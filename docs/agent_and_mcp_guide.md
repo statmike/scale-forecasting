@@ -11,7 +11,7 @@ flowchart TD
     end
 
     subgraph Surfaces["Five Agent-First Surfaces"]
-        S1["1. Portable Skill & Auto-Discovery<br/>skills/scale-forecasting/SKILL.md + .agents/skills/ & .agents/skills.json"]
+        S1["1. Portable Skill & skills.sh CLI<br/>npx skills add statmike/scale-forecasting · skills/scale-forecasting/SKILL.md + .agents/skills/"]
         S2["2. Built-In MCP Server (7 Resources, 14 Tools)<br/>python -m scale_forecasting.mcp (plugin.json · mcp_config.json · .mcp.json)"]
         S3["3. Stateful BigQuery DataAgent & Knowledge Catalog<br/>scale_forecasting.bq_agent (44 Glossary Terms · DataScans · 32 Golden SQL Queries)"]
         S4["4. JSON Schema (Draft 2020-12)<br/>docs/schemas/run_config.schema.json (IDE Autocomplete via $schema)"]
@@ -26,13 +26,27 @@ flowchart TD
 
     Truth -->|"Introspected by agent_surfaces.py, mcp.py & bq_agent"| Surfaces
     Surfaces -->|"Verified on every commit"| Guard
+
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
+    classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
+    classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
+    classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E
+    class T1,T3 config
+    class T2 data
+    class S1,S2,S3,S4,S5 semantic
+    class G1,G2,G3 route
 ```
 
 ---
 
 ## 1. Quickstart by AI Agent Client
 
-Every agent surface works out of the box on a base `pip install scale-forecasting` (or `pip install -e .`) installation — **zero extra MCP or web-server dependencies are required**.
+Every agent surface works out of the box on a base `pip install scale-forecasting` (or `pip install -e .`) installation — **zero extra MCP or web-server dependencies are required** — and the portable skill can also be installed into **any external repository** in one command from [**skills.sh (`statmike/scale-forecasting`)**](https://skills.sh/statmike/scale-forecasting):
+
+```bash
+# Install the portable Agent Skill into any project (Antigravity, Claude Code, Cursor, Copilot, Codex, Windsurf):
+npx skills add statmike/scale-forecasting
+```
 
 | AI Agent Environment | Automatic Workspace Discovery (In-Repo) | Global / Plugin Registration |
 | :--- | :--- | :--- |
