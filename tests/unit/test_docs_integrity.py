@@ -252,6 +252,12 @@ def test_mermaid_blocks_syntax_and_quoting(markdown_files: list[Path]) -> None:
                         errors.append(
                             f"{rel}:{b_no}: literal \\n in mermaid label (use <br/> instead)"
                         )
+                    for html_m in re.finditer(r"</?[0-9A-Za-z_][0-9A-Za-z_-]*/?>", b_line):
+                        if html_m.group(0).lower() not in ("<br/>", "<br>"):
+                            errors.append(
+                                f"{rel}:{b_no}: raw angle-bracket placeholder {html_m.group(0)!r} "
+                                f"is swallowed as an HTML tag by Mermaid; use '{{...}}' instead"
+                            )
                     for match in unquoted_node_re.finditer(b_line):
                         errors.append(
                             f"{rel}:{b_no}: unquoted special chars in mermaid label "
@@ -1012,7 +1018,46 @@ def test_visual_architecture_completeness_and_live_parity() -> None:
         "docs/visual_architecture.md missing rendered '### Visual 6-color key' Mermaid legend"
     )
 
-    # Verify all 8 core reference docs feature a top-of-page 6-color Hero Mermaid diagram
+    # Verify all zoom diagrams below Level 0 in visual_architecture.md are vertical (flowchart TD),
+    # capped at <= 3 columns per rank, and use concise subgraph/node labels so GitHub never shrinks
+    # them into wide, tiny-font strips.
+    vis_blocks = re.findall(r"```mermaid\n([\s\S]*?)```", text)
+    assert len(vis_blocks) >= 17, (
+        f"Expected >= 17 Mermaid diagrams in docs/visual_architecture.md, found {len(vis_blocks)}"
+    )
+    label_re = re.compile(r'\["([^"]+)"\]')
+    sg_title_re = re.compile(r'^\s*subgraph\s+[A-Za-z0-9_]+\["([^"]+)"\]')
+    for idx, blk in enumerate(vis_blocks[1:], start=2):
+        aspect = _analyze_mermaid_rank_aspect(blk)
+        assert aspect is not None, (
+            f"docs/visual_architecture.md diagram #{idx} must be a flowchart TD block"
+        )
+        direction, _n_ranks, max_cols, _ratio = aspect
+        assert direction in ("TD", "TB"), (
+            f"docs/visual_architecture.md diagram #{idx} uses {direction}; zoom diagrams must use "
+            f"vertical flowchart TD orientation"
+        )
+        assert max_cols <= 3, (
+            f"docs/visual_architecture.md diagram #{idx} fans out to {max_cols} horizontal columns "
+            f"(keep <= 3 columns so diagrams fit GitHub's column width without shrinking)"
+        )
+        for ln in blk.splitlines():
+            sg_m = sg_title_re.match(ln)
+            if sg_m:
+                assert len(sg_m.group(1)) <= 50, (
+                    f"docs/visual_architecture.md diagram #{idx} subgraph title exceeds 50 chars: "
+                    f"{sg_m.group(1)!r}"
+                )
+            for lbl_m in label_re.finditer(ln):
+                if sg_m and lbl_m.group(1) == sg_m.group(1):
+                    continue
+                for seg in lbl_m.group(1).split("<br/>"):
+                    assert len(seg) <= 72, (
+                        f"docs/visual_architecture.md diagram #{idx} node line exceeds 72 chars: "
+                        f"{seg!r}"
+                    )
+
+    # Verify all 8 core reference docs feature a top-of-page 6-color vertical Hero Mermaid diagram
     hero_docs = (
         "models_reference.md",
         "metrics_reference.md",
@@ -1032,7 +1077,12 @@ def test_visual_architecture_completeness_and_live_parity() -> None:
             f"docs/{doc_name} Hero Mermaid diagram should appear in the first 40 lines, "
             f"found at line {first_line}"
         )
-        first_block = d_txt[idx : d_txt.find("```", idx + 10)]
+        first_block = d_txt[idx + len("```mermaid\n") : d_txt.find("```", idx + 10)]
         assert "classDef " in first_block, (
             f"docs/{doc_name} Hero Mermaid diagram missing semantic color classDef palette"
+        )
+        h_aspect = _analyze_mermaid_rank_aspect(first_block)
+        assert h_aspect is not None and h_aspect[0] in ("TD", "TB") and h_aspect[2] <= 3, (
+            f"docs/{doc_name} Hero Mermaid diagram must use vertical flowchart TD with <= 3 cols, "
+            f"got {h_aspect}"
         )

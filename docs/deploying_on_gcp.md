@@ -25,7 +25,7 @@ the module comment (next to the resource) wins.
 ```mermaid
 flowchart TD
     subgraph Stage1["Stage 1 · terraform/bootstrap/ (Local State, Run Once)"]
-        B1["GCP Project (optional) + Billing Link"] --> B2["GCS State Bucket (<project_id>-tfstate)"]
+        B1["GCP Project (optional) + Billing Link"] --> B2["GCS State Bucket ({project_id}-tfstate)"]
     end
     subgraph Stage2["Stage 2 · terraform/main/ (Remote State in GCS)"]
         M_API["1. apis (Enable Google Cloud APIs)"] --> M_CORE["2. Foundation Modules<br/>iam · storage · bigquery · budget · network · container"]

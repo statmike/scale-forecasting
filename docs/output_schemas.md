@@ -24,33 +24,31 @@ The schema below is rendered from a single source of truth,
 ## How the tiers link
 
 ```mermaid
-flowchart LR
-    subgraph Tables["1. 5 Native Registry Tables + Inline Metadata (Storage Write API)"]
-        direction TB
-        RR["run_registry (1 row per run_id)<br/>raw_config · snapshot_millis · job_telemetry"]
-        RJ["run_jobs (1 row per run_id x family)<br/>runtime · attempt · GPU device_verdict"]
-        FM["forecast_metadata (1 row per cell)<br/>21 metric cols · backtest_status · fit_diagnostics"]
-        FP["forecast_predictions (horizon rows)<br/>yhat · bounds · quantiles · explanations"]
-        BO["backtest_oof (holdout fold rows)<br/>y_true · yhat · cutoff_date · horizon_step"]
-        RR -->|"run_id"| RJ & FM & FP & BO
+flowchart TD
+    subgraph Tables["1. 5 Native Registry Tables + Inline Metadata"]
+        RR["1. run_registry<br/>1 row per run_id<br/>raw_config · snapshot_millis"]
+        RJ["2. run_jobs<br/>1 row per (run_id, family)<br/>sizing · GPU device_verdict"]
+        FM["3. forecast_metadata<br/>1 row per (ts_id, model)<br/>21 metric cols · diagnostics"]
+        FP["4. forecast_predictions<br/>Horizon rows<br/>yhat · quantiles · drivers"]
+        BO["5. backtest_oof<br/>Holdout fold rows<br/>y_true · yhat · step"]
+        RR -->|"run_id"| RJ & FM
+        FM -->|"cell key"| FP & BO
     end
 
-    subgraph Views["2. 11 Always-On Serving Views (Dedupe-on-Read · $0 Storage)"]
-        direction TB
+    subgraph Views["2. 11 Always-On Views ($0 Storage)"]
         V5["5 Core Operational & Leaderboard Views<br/>v_run_summary · v_run_jobs · v_model_leaderboard<br/>v_model_leaderboard_comparable · v_backtest_coverage"]
         V6["6 Diagnostic & Executive S&OP Views<br/>v_fva_waterfall · v_horizon_decay · v_bias_and_exceptions<br/>v_anomalies · v_feature_attributions · v_executive_sop_summary"]
     end
 
-    subgraph Semantic["3. Opt-In Knowledge Catalog & Conversational DataAgent"]
-        direction TB
-        KC["Knowledge Catalog Governance (bq_agent)<br/>44 Business Glossary Terms · DataProfile Scans<br/>32 Golden SQL Queries · Strict Dataset Allowlist"]
-        DA["Stateful BigQuery DataAgent (sf-registry-<dataset>)<br/>BigQuery Studio · Registry.ask() · CLI --ask · MCP"]
+    subgraph Semantic["3. Opt-In Knowledge Catalog & DataAgent"]
+        KC["Knowledge Catalog Governance<br/>44 Glossary Terms · DataProfile Scans<br/>32 Golden SQL · Strict Allowlist"]
+        DA["Stateful BigQuery DataAgent<br/>sf-registry-{dataset}<br/>Studio · ask() · CLI · MCP"]
         KC --> DA
     end
 
-    RR & RJ & FM --> V5
-    FM & FP & BO --> V6
-    V5 & V6 -->|"Queried directly OR published via ensure_bq_agent()"| KC
+    RJ & FM --> V5
+    FP & BO --> V6
+    V5 & V6 -->|"Optional ensure_bq_agent()"| KC
 
     classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
     classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799

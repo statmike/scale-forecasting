@@ -14,27 +14,27 @@ When you sit down to forecast a new dataset, you usually face an uncomfortable t
 3. **Multi-pass `autofocus` learns across passes without re-fitting finished models:** When `autofocus=True`, the controller runs an initial pass, checks the backtest errors to see what is still missing, tests targeted improvements in parallel **"what-if" branches (`2A`, `2B`, `2C`)**, **reuses ("borrows") models that already finished in Pass 1** so you never pay to train them twice, and uses a **Champion Ratchet** so your final result is guaranteed never to be worse than an earlier pass.
 
 ```mermaid
-flowchart LR
-    subgraph S0["1. Step 0 Data Profile & User Dials"]
-        direction TB
-        PROF["8-Dimension Panel Profiler (profile_data)<br/>5 Scale Regimes · SBC Intermittency · Seasonality<br/>Gaps · Covariate Tiers · Simplex · Hierarchy"]
-        DIALS["2 Dials + Optional [PINNED] Locks<br/>tier: first_light · wide_field · deep_sky · deep_field<br/>where: local or any of 7 GCP Runtimes"]
+flowchart TD
+    subgraph S0["1. Step 0 Profile & Dials"]
+        PROF["8-Dimension Profiler (profile_data)<br/>5 Scale Regimes · SBC · Seasonality<br/>Gaps · Covariates · Simplex"]
+        DIALS["2 Dials + [PINNED] Locks<br/>tier: first_light -> deep_field<br/>where: local or 7 GCP Runtimes"]
+        PROF --> DIALS
     end
 
-    subgraph COMP["2. Deterministic Policy & Multi-Branch autofocus (0 Runtime LLM Calls)"]
-        direction TB
-        POL["Pure-Python Policy Compiler (auto_policy.py)<br/>Evolved offline with AlphaEvolve across 20 DGPs + 9 Public Benchmarks"]
-        P1["Pass 1 · 4-Anchor Baseline Ladder + Tier Shortlist<br/>naive_seasonal · theta · univariate & covariate foundation anchors"]
-        P2["Parallel What-If Branches + Snapshot Cell Borrowing (reuse_prior_runs)<br/>2A (Scale/Outliers) · 2B (Feature Pruning/Horizon) · 2C (Intermittent/Hierarchy)<br/>-> Champion Ratchet (Monotonic Accuracy Guarantee)"]
+    subgraph COMP["2. Policy & Multi-Branch autofocus"]
+        POL["Pure-Python Compiler (auto_policy.py)<br/>0 Runtime LLM Calls · 29 Benchmarks"]
+        P1["Pass 1 · 4-Anchor Ladder<br/>naive_seasonal · theta · foundation"]
+        P2["Branches 2A / 2B / 2C + Borrowing<br/>reuse_prior_runs -> Champion Ratchet"]
+        POL --> P1 --> P2
     end
 
-    subgraph TRUST["3. Glass-Box Artifacts & Practitioner Trust"]
-        direction TB
-        BLUE["Editable RunConfig JSON + Plain-English Rationale<br/>bp.explain() · bp.to_file() · Deterministic run_id"]
-        ASSESS["7-Question Practitioner Assessment<br/>practitioner_assessment_df() · baseline_value_df()<br/>+ Optional Forecaster.evolve() (# EVOLVE-BLOCK)"]
+    subgraph TRUST["3. Glass-Box Artifacts & Trust"]
+        BLUE["Editable RunConfig + Rationale<br/>bp.explain() · bp.to_file() · run_id"]
+        ASSESS["7-Question Assessment<br/>practitioner_assessment_df()<br/>+ Optional Forecaster.evolve()"]
     end
 
-    S0 --> COMP --> TRUST
+    DIALS --> POL
+    P2 --> BLUE & ASSESS
 
     classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
     classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E

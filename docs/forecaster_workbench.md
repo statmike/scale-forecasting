@@ -3,38 +3,38 @@
 Beyond scaling 37 models across 7 Google Cloud runtimes, `scale-forecasting` includes an end-to-end **Forecaster Workbench** designed around the daily workflow of demand planners, supply-chain analysts, retail merchandisers, and econometricians. Every capability runs identically in the zero-GCP local playground (`scale_forecasting.playground`), the Python SDK (`sf.Forecaster`), the built-in MCP server (`scale_forecasting.mcp`), and distributed cloud jobs.
 
 ```mermaid
-flowchart LR
-    subgraph COL1["1. Pre-Fit Hygiene, Guardrails & Trust Diagnostics"]
-        direction TB
-        S1["Pre-Fit Hygiene, SBC Regimes & Variant Borrowing<br/>grid_policy · censored_col · outlier_policy · SBC regime_routing<br/>base_model@tag · ablation_modes · reuse_prior_runs"]
-        S2["Physical Bounds, Monotone Fans & Ensembles<br/>floor / cap · cumulative_round · Chernozhukov quantiles<br/>Newsvendor q* · 8 Ensemble Strategies · mint_nonneg"]
-        S3["Practitioner Trust, FVA, Live Drift & Whipsaw<br/>assess() · fva_df (Diebold-Mariano & Wilcoxon) · horizon_decay_df<br/>score_realized · revision_stability_df · 12-Tab export_report"]
+flowchart TD
+    IN_WB["Governed Predictions, OOF & Metadata<br/>Cloud Forecaster (BigQuery) OR Offline BakeOff"]
+
+    subgraph COL1["1. Hygiene, Trust & Similarity"]
+        S1["Pre-Fit Hygiene & Bounds<br/>grid_policy · censored_col · SBC<br/>floor / cap · cumulative_round<br/>8 Ensembles · mint_nonneg"]
+        S2["Practitioner Trust & Live Drift<br/>7-Q assess() · fva_df (DM/Wilcoxon)<br/>horizon_decay · score_realized<br/>revision_stability · change-points"]
+        S3["7-Lens Similarity & NPI<br/>Multi-Modal Kernel · @similarity_global<br/>recommend_substitutes_df<br/>detect_emerging_trends_df · cold_start"]
+        S1 --> S2 --> S3
     end
 
-    subgraph COL2["2. Similarity, Causal Econometrics & Joint Tail Risk"]
-        direction TB
-        S4["7-Lens + Multi-Modal Similarity & Merchandising<br/>similarity_df (TF-IDF + Gower + LCA) · @similarity_global<br/>recommend_substitutes_df · detect_emerging_trends_df · cold_start_transfer"]
-        S5["Causal Guardrails, Double-ML & 5-Stage What-If<br/>@monotone · holiday_window · promo_elasticity_df<br/>simulate_scenarios (Margin + Coherent Rollup + Delta ROP/SS)"]
-        S6["3-Mode Coherence, Online ACI & Copula Tail Risk<br/>THieF · cross_temporal_mint · @transform_clr / @transform_ilr<br/>aci_df · Gaussian/Student-t sample_trajectories & tail_risk_df (VaR/CVaR)"]
+    subgraph COL2["2. Causal, Tail Risk & 7 Solvers"]
+        S4["Causal & 5-Stage What-If<br/>@monotone · holiday_window<br/>promo_elasticity_df (Double-ML)<br/>simulate_scenarios (Margin + ROP)"]
+        S5["Coherence, ACI & Copula Risk<br/>THieF · cross_temporal_mint · clr/ilr<br/>aci_df · Copula VaR / CVaR<br/>allocate_target Goal-Seek QP"]
+        S6["Inventory & 7 LP/MILP Solvers<br/>ROP/SS · optimize_inventory_df<br/>optimize_scenario · clearance · contracts<br/>assortment · prepacks · rebalancing"]
+        S4 --> S5 --> S6
     end
 
-    subgraph COL3["3. Top-Down Goal-Seek & 7 LP/MILP Solvers"]
-        direction TB
-        S7["Smooth Multi-Period Goal-Seek QP (goal_seek.py)<br/>allocate_target(targets, locks, bounds, smoothness_weight)"]
-        S8["Inventory Policy, Portfolio Capital & Promo Solvers<br/>inventory_policy_df (ROP/SS) · optimize_inventory_df<br/>optimize_scenario (Double-ML + CVaR Guardrail)"]
-        S9["Commercial, Merchandising & Network MILP Solvers<br/>optimize_clearance_df · optimize_contract_volume_df<br/>optimize_assortment_df · optimize_prepacks_df · optimize_rebalancing_df"]
-    end
+    REP["12-Tab Self-Contained HTML & JSON Report (export_report)"]
 
-    COL1 --> COL2 --> COL3
+    IN_WB --> S1 & S4
+    S3 & S6 --> REP
 
+    classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
     classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00
     classDef compute fill:#E6F4EA,stroke:#34A853,stroke-width:2px,color:#0D652D
     classDef semantic fill:#F3E8FD,stroke:#9334E6,stroke-width:2px,color:#5B1799
     classDef decision fill:#E4F7FB,stroke:#12B5CB,stroke-width:2px,color:#005A66
+    class IN_WB data
     class S1 config
-    class S2,S3,S4 compute
-    class S5,S6 semantic
-    class S7,S8,S9 decision
+    class S2,S3 compute
+    class S4,S5 semantic
+    class S6,REP decision
 ```
 
 ---

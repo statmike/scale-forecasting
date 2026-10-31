@@ -51,7 +51,7 @@ flowchart TB
         Raw["Mode A: Raw Panel (DataFrame or BigQuery Table)<br/>OR Mode B: Completed Run(s) (f.evolve / from_runs / from_run_ids)"]
         Inner["Inner Evolution Panel / Inner OOF Window<br/>t = 1 ... T - H_lockdown (Visible to Evolution Loop)"]
         Lock["Held-Out Lockdown Fold / Final OOF Window<br/>Last H_lockdown Steps (NEVER Visible During Evolution)"]
-        Auto["Mode A: Forecaster.auto(inner_panel) + make_model_spec_hash Borrowing<br/>Mode B: verify_oof_pool_compatibility (Pools OOF & Predictions Across Runs,<br/>Disambiguates <model>@<run_short_id>, Sets Reigning #1 Model or ensemble_* Baseline)"]
+        Auto["Mode A: Forecaster.auto(inner_panel) + make_model_spec_hash Borrowing<br/>Mode B: verify_oof_pool_compatibility (Pools OOF & Predictions Across Runs,<br/>Disambiguates {model}@{run_short_id}, Sets Reigning #1 Model or ensemble_* Baseline)"]
         Raw --> Inner & Lock
         Inner --> Auto
     end

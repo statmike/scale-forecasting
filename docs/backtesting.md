@@ -18,29 +18,31 @@ everything else in the product that has an opinion — hyperparameter search, le
 missing.
 
 ```mermaid
-flowchart LR
-    subgraph FOLDS["1. Fold Geometry & Short-Series Policy (make_folds)"]
-        direction TB
-        F_SCH["4 Walk-Forward Schemes (backtest.scheme)<br/>expanding · sliding (window)<br/>expanding_frozen (recondition) · expanding_stale"]
-        F_GRID["Cutoff Layout & Operational Lag<br/>n_folds · horizon · step · gap · min_train · control_arm"]
-        F_SHORT["Short-Series Policy (backtest.short_series)<br/>adapt · overlap · shrink_train · skip · error<br/>-> Status: full · reduced · unscored · failed"]
+flowchart TD
+    subgraph FOLDS["1. Fold Geometry (make_folds)"]
+        F_SCH["4 Walk-Forward Schemes<br/>expanding · sliding<br/>expanding_frozen · expanding_stale"]
+        F_GRID["Cutoff Layout & Lag<br/>n_folds · horizon · step<br/>gap · min_train · control_arm"]
+        F_SHORT["Short-Series Policy (5)<br/>adapt · overlap · shrink_train<br/>skip · error -> 4 Statuses"]
+        F_SCH --> F_GRID --> F_SHORT
     end
 
-    subgraph EXEC["2. Leak-Free Fold Loop, Optuna HPO & Final Fit"]
-        direction TB
-        E_HPO["Optional Optuna TPE HPO (hpo.py)<br/>fleetwide (sampled pre-pass) OR per_series<br/>Minimizes backtest.decision_metric inside cutoffs"]
-        E_OOF["Per-Fold Fit & Holdout Scoring (ds <= cutoff_date)<br/>Fold-safe hygiene, transforms & covariates<br/>Computes all 21 Metrics per Fold"]
-        E_SHIP["Separate Full-History Production Fit<br/>Fits once on 100% of history -> Shipped Horizon Forecast<br/>(Written even if backtest_status = unscored)"]
+    subgraph EXEC["2. Leak-Free CV, HPO & Refit"]
+        E_HPO["Optuna TPE Search (hpo.py)<br/>fleetwide OR per_series<br/>Minimizes decision_metric"]
+        E_OOF["Per-Fold Fit & Scoring<br/>Fold-safe hygiene (<= cutoff)<br/>All 21 Metrics per Fold"]
+        E_SHIP["Separate 100%-History Fit<br/>Shipped Horizon Forecast<br/>Always Written (1..H)"]
+        E_HPO --> E_OOF --> E_SHIP
     end
 
-    subgraph CAL["3. OOF Calibration, Guardrails & Registry Outputs"]
-        direction TB
-        C_INT["Empirical Interval Calibration (calibration.py / aci.py)<br/>conformal (per-horizon) · aci · aci_normalized<br/>+ Chernozhukov Monotone Quantile Rearrangement"]
-        C_POL["Physical Bounds & Asymmetric Cost Target<br/>floor / cap · integer_rounding (cumulative_round)<br/>underage_cost / overage_cost Newsvendor q*"]
-        C_OUT["BigQuery Registry & Views<br/>backtest_oof · forecast_metadata · forecast_predictions<br/>v_backtest_coverage · v_model_leaderboard_comparable"]
+    subgraph CAL["3. Calibration & Bounds"]
+        C_INT["Empirical Intervals (3)<br/>conformal · aci · aci_normalized<br/>+ Monotone Quantiles"]
+        C_POL["Bounds & Newsvendor Target<br/>floor / cap · cumulative_round<br/>underage / overage q*"]
+        C_INT --> C_POL
     end
 
-    FOLDS --> EXEC --> CAL
+    C_OUT["BigQuery Registry & Views<br/>backtest_oof · forecast_metadata · forecast_predictions<br/>v_backtest_coverage · v_model_leaderboard_comparable"]
+
+    F_SHORT --> E_OOF
+    E_SHIP & C_POL --> C_OUT
 
     classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
     classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00

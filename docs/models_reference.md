@@ -6,34 +6,31 @@ When a run is submitted, the orchestrator groups the requested models by **`fami
 
 ```mermaid
 flowchart TD
-    Base["BaseModel Plugin Contract (models/base_model.py)<br/>fit(y, X) · predict(horizon, X, quantiles) · fit_panel / predict_panel<br/>feature_attributions · explain · search_space(trial) · recondition(y, X)"]
+    Base["BaseModel Plugin Contract (base_model.py)<br/>fit / fit_panel · search_space · recondition · explain"]
 
-    subgraph Stat["1. Family: statistical (18 Python Models — Spark · Ray · Vertex · GCE · GKE)"]
-        direction TB
-        S1["Baselines, Spectral & Intermittent (6)<br/>naive_mean · naive_seasonal · naive_drift · naive_moving_average · croston · fft"]
-        S2["Exponential Smoothing & Decomposition (7)<br/>theta · auto_theta · holtwinters · autoets · auto_ces · tbats · stl_bagging"]
-        S3["ARIMA, State-Space & Additive (5)<br/>auto_arima · sarimax · ucm · kalman · prophet"]
+    subgraph Stat["1. statistical (18 — CPU)"]
+        S1["Baselines & Intermittent (6)<br/>naive_mean · naive_seasonal · naive_drift<br/>naive_moving_average · croston · fft"]
+        S2["Smoothing & Decomp (7)<br/>theta · auto_theta · holtwinters<br/>autoets · auto_ces · tbats · stl_bagging"]
+        S3["ARIMA & State-Space (5)<br/>auto_arima · sarimax · ucm · kalman · prophet"]
         S1 --> S2 --> S3
     end
 
-    subgraph ML_DL["2 & 3. Tabular ML (5) & Deep Learning / Foundation (8)"]
-        direction TB
-        M1["Family: ml (5 Python Models via _lag_forecaster.py)<br/>Recursive & Direct Lags · @monotone · TreeSHAP Explainability<br/>regression_lags · random_forest · lightgbm · xgboost · catboost"]
-        D1["Family: deep_learning — Supervised PyTorch Local, Global & @similarity_global (5)<br/>neuralprophet · tide · tft · tsmixer · patchtst"]
-        D2["Family: deep_learning — Open-Weight Foundation Models (3)<br/>chronos_bolt · chronos2 · timesfm_torch"]
+    subgraph ML_DL["2–3. ml (5) & deep_learning (8)"]
+        M1["ml (5 — Trees & Linear)<br/>regression_lags · random_forest<br/>lightgbm · xgboost · catboost"]
+        D1["PyTorch Global/Hybrid (5)<br/>neuralprophet · tide · tft<br/>tsmixer · patchtst"]
+        D2["Open-Weight Foundation (3)<br/>chronos_bolt · chronos2 · timesfm_torch"]
         M1 --> D1 --> D2
     end
 
-    subgraph Managed["4 & 5. Managed Cloud Families: automl (4) & native (2)"]
-        direction TB
-        A1["Family: automl (4 Vertex AI AutoML / Tabular Workflows)<br/>vertex_l2l · vertex_tide · vertex_tft · vertex_seq2seq"]
-        N1["Family: native (2 Serverless SQL Models on BigQuery)<br/>arima_plus (ARIMA_PLUS / XREG) · timesfm (AI.FORECAST)"]
+    subgraph Managed["4–5. automl (4) & native (2)"]
+        A1["automl (4 — Vertex AI)<br/>vertex_l2l · vertex_tide<br/>vertex_tft · vertex_seq2seq"]
+        N1["native (2 — BigQuery SQL)<br/>arima_plus · timesfm"]
         A1 --> N1
     end
 
-    Tags["Composable <model>@<tag> Variant Modifiers (31 Tags in config.py)<br/>Scope: @local · @global · @hybrid · @similarity_global · @direct · @recursive<br/>Covariates & Transforms: @univariate .. @cov_all · @transform_log1p / boxcox / clr / ilr<br/>Domain & Calibration: @monotone · @arps_decline · @analog_transfer / bass / weibull · @aci"]
-    Rec["Hierarchical, Temporal (THieF) & Similarity Reconciliation (9 Methods)<br/>bottom_up · top_down · middle_out · ols · wls_struct · wls_var · mint_shrink · mint_nonneg · cross_temporal_mint"]
-    Ens["Ensemble Blending & Stacking Engine (8 Strategies)<br/>Calculated & Selection: mean · median · inverse_error · champion · horizon_specialist<br/>Learned OOF Stackers: nnls · ridge · xgb (+ top_k · parsimony_margin · similarity_smoothing)"]
+    Tags["31 Composable @tag Modifiers (config.py)<br/>@local · @global · @hybrid · @similarity_global · @direct · @recursive<br/>@univariate .. @cov_all · @transform_log1p / boxcox / clr / ilr · @monotone · @aci"]
+    Rec["9 Reconciliation Methods (Spatial + THieF)<br/>bottom_up · top_down · middle_out · ols · wls_struct<br/>wls_var · mint_shrink · mint_nonneg · cross_temporal_mint"]
+    Ens["8 Ensemble Strategies (ensembler.py)<br/>mean · median · inverse_error · champion · horizon_specialist<br/>nnls · ridge · xgb (+ top_k · parsimony_margin)"]
 
     Base --> S1 & M1 & A1
     S3 & D2 & N1 --> Tags --> Rec & Ens

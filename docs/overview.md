@@ -134,7 +134,7 @@ The same orchestration path (`main.run`) drives every launch surface:
 
 ```mermaid
 flowchart TD
-    src["Author via Hand-Crafted RunConfig JSON<br/>OR Glass-Box Auto-Forecaster (Forecaster.build_config / Forecaster.auto)"] --> cfg["Validated RunConfig (<slug>-<12hex> run_id)"]
+    src["Author via Hand-Crafted RunConfig JSON<br/>OR Glass-Box Auto-Forecaster (Forecaster.build_config / Forecaster.auto)"] --> cfg["Validated RunConfig ({slug}-{12hex} run_id)"]
     cfg --> E1["1. Python SDK (Forecaster.run / Forecaster.auto)"]
     cfg --> E2["2. CLI (python -m scale_forecasting.main --config / --auto)"]
     cfg --> E3["3. Staged Native CLI (launch_plan.stage_run)"]

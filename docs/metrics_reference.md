@@ -5,27 +5,29 @@
 All five model families (`statistical`, `ml`, `deep_learning`, `automl`, and `native`) and all eight ensemble strategies are scored through the exact same Python function (`metrics.compute_metrics`), guaranteeing that a metric column in `forecast_metadata` has an identical mathematical definition regardless of which compute engine produced the forecast.
 
 ```mermaid
-flowchart LR
-    OOF["Out-of-Fold Evaluation Window (MetricContext)<br/>y_true · yhat · err = yhat - y_true<br/>y_train · lower · upper · seasonal_period"]
+flowchart TD
+    OOF["Out-of-Fold Evaluation Window (MetricContext)<br/>y_true · yhat · y_train · lower · upper"]
 
     subgraph Panel["21-Metric Evaluation Panel (metrics.compute_metrics)"]
-        direction TB
-        C1["Relative & Percentage Error (5)<br/>wape · smape · mape · maape · ope"]
-        C2["Scale-Dependent, Log & Signed Bias (5)<br/>mae · rmse · mse · rmsle · bias"]
-        C3["Training-Scaled Point Error (4)<br/>mase · mase_seasonal · rmsse · msse"]
-        C4["Goodness-of-Fit & Dispersion (2)<br/>r2 · cv"]
-        C5["Prediction-Interval & Quantile Quality (5)<br/>coverage · pinball · interval_score · interval_width · msis"]
+        C1["Relative Point (5)<br/>wape · smape<br/>mape · maape · ope"]
+        C3["Training-Scaled (4)<br/>mase · mase_seasonal<br/>rmsse · msse"]
+        C2["Scale, Log & Bias (5)<br/>mae · rmse · mse<br/>rmsle · bias"]
+        C4["Fit & Dispersion (2)<br/>r2 · cv"]
+        C5["Interval & Quantile (5)<br/>coverage · pinball · msis<br/>interval_score · interval_width"]
+        C1 --> C3
+        C2 --> C4
     end
 
-    subgraph Steer["Downstream Consumers of backtest.decision_metric"]
-        direction TB
-        D1["Registry DDL & Leaderboards<br/>forecast_metadata (21 cols) · v_model_leaderboard_comparable (Pooled OOF)"]
-        D2["Search & Variant Selection<br/>Optuna HPO Objective · @tag Ablation Winner · autofocus Champion Ratchet"]
-        D3["Ensembles & Point Calibration<br/>inverse_error / champion / nnls / ridge / xgb · point_forecast='auto'"]
+    subgraph Steer["Downstream decision_metric Consumers"]
+        D1["Registry & Leaderboards<br/>forecast_metadata · 11 Views"]
+        D2["HPO & Variant Winner<br/>Optuna · @tag · autofocus"]
+        D3["Ensembles & Calibration<br/>champion · stackers · auto point"]
     end
 
-    OOF --> C1 & C2 & C3 & C4 & C5
-    C1 & C2 & C3 & C4 & C5 --> D1 & D2 & D3
+    OOF --> C1 & C2 & C5
+    C3 --> D1
+    C4 --> D2
+    C5 --> D3
 
     classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
     classDef route fill:#FCE8E6,stroke:#EA4335,stroke-width:2px,color:#A50E0E

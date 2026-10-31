@@ -3,32 +3,30 @@
 `scale-forecasting` provides a declarative, leak-free feature engineering, target-transformation, time-series similarity, and cold-start transfer pipeline across [`features.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/features.py), [`simplex.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/simplex.py), [`monotonicity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/monotonicity.py), [`holiday_window.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/holiday_window.py), [`cold_start.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/cold_start.py), and [`similarity.py`](https://github.com/statmike/scale-forecasting/blob/main/src/scale_forecasting/similarity.py). Every transformation executes strictly inside each rolling-origin backtest fold (`ds <= cutoff_date`) so future observations never leak into historical training windows.
 
 ```mermaid
-flowchart LR
-    subgraph S1["1. Fold-Safe Hygiene & Simplex Transforms (ds <= cutoff_date)"]
-        direction TB
-        T1["Grid Regularization, Pre-Launch Trim & Lineage<br/>data.grid_policy · trim_leading_zeros<br/>features.censored_col · supersession_map"]
-        T2["Promo/Holiday-Aware Outlier & Regime Hygiene<br/>outlier_policy = winsorize | interpolate | flag | stl_resid<br/>regime_routing (SBC Smooth · Erratic · Intermittent · Lumpy)"]
-        T3["Univariate & Compositional Simplex Target Transforms<br/>transform = none | log1p | boxcox | clr | ilr<br/>simplex_sum = 1.0 | 100.0 (@transform_clr · @transform_ilr)"]
+flowchart TD
+    subgraph S1["1. Fold-Safe Hygiene (ds <= cutoff_date)"]
+        T1["Grid, Zero-Trim & Lineage<br/>grid_policy · censored_col<br/>supersession_map"]
+        T2["Outliers & SBC Regimes<br/>winsorize · interpolate · stl_resid<br/>SBC 4-Regime Routing"]
+        T3["Target & Simplex Transforms<br/>none · log1p · boxcox<br/>clr · ilr (simplex_sum)"]
         T1 --> T2 --> T3
     end
 
-    subgraph S2["2. Three-Tier Covariates Across the Cutoff Boundary"]
-        direction TB
-        C1["Tier 1 · Static Metadata (features.static_covariates)<br/>Time-invariant entity attributes (region, category, store_format)"]
-        C2["Tier 2 · Known-Future Drivers (ds <= cutoff_date + H)<br/>future_covariates · holidays · holiday_window ramps<br/>fourier · trading_days · degree_day_cols (Weather HDD/CDD)"]
-        C3["Tier 3 · Historical-Only Past Drivers (Strictly ds <= cutoff_date)<br/>past_covariates · exog_lags · Observed traffic/macro<br/>Masked beyond cutoff_date to guarantee zero future leakage"]
+    subgraph S2["2. 3-Tier Covariates Across Cutoff"]
+        C1["Tier 1 · Static Metadata<br/>static_covariates<br/>Store · category · region"]
+        C2["Tier 2 · Known-Future (<= cutoff + H)<br/>future_covariates · holidays & ramps<br/>fourier · trading_days · HDD/CDD"]
+        C3["Tier 3 · Past-Only (<= cutoff)<br/>past_covariates + exog_lags<br/>Masked > cutoff (no leakage)"]
         C1 --> C2 --> C3
     end
 
-    subgraph S3["3. Guardrails, Variant Ablations, Similarity & Cold-Start"]
-        direction TB
-        V1["Capability Routing & Monotonic Sign Guardrails<br/>on_unsupported_covariates = fallback | error<br/>monotonic_constraints = {price: -1, promo: +1} (@monotone)"]
-        V2["Orthogonal @tag Ablation & Cluster-Aware Global Pooling<br/>ablation_modes · @univariate .. @cov_all<br/>@local · @global · @hybrid · @similarity_global"]
-        V3["7-Lens Similarity, Cold-Start NPI & Decline Physics<br/>similarity_method (7 Lenses) · @similarity_cold_start<br/>analog_transfer · bass_diffusion · weibull_lifecycle · @arps_decline"]
+    subgraph S3["3. Guardrails, Similarity & Cold-Start"]
+        V1["Capability & Sign Guardrails<br/>on_unsupported_covariates<br/>@monotone (price: -1, promo: +1)"]
+        V2["@tag Ablation & Similarity<br/>@univariate .. @cov_all<br/>7 Lenses · @similarity_global"]
+        V3["Cold-Start NPI & Decline<br/>analog_transfer · bass_diffusion<br/>weibull_lifecycle · @arps_decline"]
         V1 & V2 --> V3
     end
 
-    S1 & S2 --> S3
+    T3 --> V1
+    C3 --> V2
 
     classDef data fill:#E8F0FE,stroke:#4285F4,stroke-width:2px,color:#174EA6
     classDef config fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px,color:#7A5A00

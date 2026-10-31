@@ -37,7 +37,7 @@ flowchart LR
     Lock --> Img["Shared Runtime Container<br/>(/opt/venv on debian:12-slim)"]
     Img --> Sless["Dataproc Serverless<br/>& Spark Connect"]
     Img --> Vtx["Vertex AI CustomJob · GCE Single-VM<br/>& GKE (Indexed Job & Ray on GKE)"]
-    Img -->|"tar /opt/venv"| Venv["Packed Venv Archive<br/>(gs://.../envs/<hash>.tar.gz)"]
+    Img -->|"tar /opt/venv"| Venv["Packed Venv Archive<br/>(gs://.../envs/{hash}.tar.gz)"]
     Venv --> Cluster["Dataproc GCE Cluster<br/>(--archives=...#env)"]
     Req --> RayEnv["Vertex AI Ray<br/>(runtime_env uv plugin)"]
     Lock --> Colab["Colab Enterprise (sf-main)<br/>& Local uv sync --frozen"]

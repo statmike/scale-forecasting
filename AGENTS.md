@@ -18,43 +18,29 @@ This file is the authoritative engineering charter and review checklist for AI c
 ## 2. Core Architectural Invariants
 
 ```mermaid
-flowchart LR
+flowchart TD
     subgraph Pure["Pure Offline Layer (Zero GCP Imports)"]
-        direction TB
-        P1["config.py · registry/ids.py"]
-        P2["models/* (37 Models · BaseModel · explain())"]
-        P3["metrics/* (21 Metrics · BaseMetric)"]
-        P4["features.py · backtest.py · calibration.py"]
-        P5["reconciliation.py · ensembler.py · hpo.py"]
-        P6["worker.py (run_cell · run_panel_model · attributions)"]
-        P7["profiling/* · resources/*"]
-        P8["agent_surfaces.py · mcp.py"]
+        P1["config.py · registry/ids.py<br/>models/* (37 Models · BaseModel)<br/>metrics/* (21 Metrics · BaseMetric)"]
+        P2["features.py · backtest.py · calibration.py<br/>reconciliation.py · ensembler.py · hpo.py<br/>worker.py (run_cell · run_panel_model)"]
+        P3["profiling/* · resources/* · workbench.py<br/>agent_surfaces.py · mcp.py"]
+        P1 --> P2 --> P3
     end
 
     subgraph Cloud["Thin Cloud Engine & Registry Wrappers"]
-        direction TB
-        C1["engines/spark_engine.py (Serverless · Cluster · Connect)"]
-        C2["engines/ray_engine.py (Vertex AI Ray · Ray on GKE)"]
-        C3["engines/vertex_engine.py (Vertex CustomJob · GCE Single-VM · GKE Indexed Job)"]
-        C4["engines/automl_engine.py (Tabular Workflow · AutoML Training Job)"]
-        C5["engines/bigquery_engine.py (ARIMA_PLUS · AI.FORECAST)"]
-        C6["registry/bq.py · storage.py · ops.py · bq_agent/*"]
+        C1["spark_engine.py · ray_engine.py<br/>vertex_engine.py (Vertex · GCE · GKE)"]
+        C2["automl_engine.py · bigquery_engine.py"]
+        C3["registry/bq.py · storage.py · ops.py<br/>bq_agent/* (Knowledge Catalog · DataAgent)"]
+        C1 --> C2 --> C3
     end
 
     subgraph Tripwires["Automated Pre-Commit & CI Tripwires"]
-        direction TB
-        T1["test_validation_ledger.py"]
-        T2["test_config_coverage.py"]
-        T3["test_docs_integrity.py"]
-        T4["test_api_docs_coverage.py"]
-        T5["test_test_dependencies_declared.py"]
-        T6["test_notebook_hygiene.py"]
-        T7["test_packaging_extras.py"]
-        T8["test_agent_surfaces.py"]
+        T1["test_validation_ledger · test_config_coverage<br/>test_docs_integrity · test_api_docs_coverage"]
+        T2["test_test_dependencies_declared · test_notebook_hygiene<br/>test_packaging_extras · test_agent_surfaces"]
     end
 
-    Pure -->|"Shared execution contract"| Cloud
-    Pure & Cloud -->|"Enforced by"| Tripwires
+    P2 -->|"Shared execution contract"| C1
+    P3 --> T1
+    C3 --> T2
 ```
 
 1. **Declarative Config-Driven Execution (`config.py`):**
