@@ -64,7 +64,7 @@ def _build_enablement_hint(project_id: str, missing_apis: list[str], *, iam_deni
         parts.append(
             f"Enable required Google Cloud APIs: `gcloud services enable {apis_str} "
             f"--project={project_id}` (or apply `terraform/main` with "
-            "`enable_bq_conversational_agent = true`)."
+            "`enable_bq_agent = true`)."
         )
     if iam_denied:
         parts.append(

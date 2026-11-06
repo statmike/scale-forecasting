@@ -1982,18 +1982,29 @@ class McpServer:
                     "properties": {
                         "question": {
                             "type": "string",
-                            "description": "Natural-language question about forecast runs.",
+                            "description": (
+                                "Natural-language question about forecast runs (required except "
+                                "when mode='probe' or mode='ensure')."
+                            ),
                         },
                         "mode": {
                             "type": "string",
-                            "enum": ["auto", "bigquery_agent", "offline_playground", "probe"],
+                            "enum": [
+                                "auto",
+                                "bigquery_agent",
+                                "offline_playground",
+                                "offline",
+                                "probe",
+                                "ensure",
+                            ],
                             "default": "auto",
                             "description": (
                                 "'bigquery_agent' queries the stateful BigQuery DataAgent; "
-                                "'offline_playground' runs offline on synthetic panel data; "
-                                "'probe' checks Conversational Analytics & Knowledge Catalog API "
-                                "readiness without raising; 'auto' selects BigQuery when ready, "
-                                "else offline_playground."
+                                "'offline_playground' (or 'offline') runs offline on synthetic "
+                                "panel data; 'probe' checks Conversational Analytics & Knowledge "
+                                "Catalog API readiness without raising; 'ensure' provisions or "
+                                "refreshes the BigQuery DataAgent & Knowledge Catalog glossary; "
+                                "'auto' selects BigQuery when ready, else offline_playground."
                             ),
                         },
                         "run_id": {
@@ -2025,7 +2036,23 @@ class McpServer:
                             "type": "boolean",
                             "default": True,
                             "description": (
-                                "Provision the BigQuery DataAgent automatically if not yet created."
+                                "Provision/refresh the BigQuery DataAgent automatically if needed."
+                            ),
+                        },
+                        "sync_glossary": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": (
+                                "Sync the 44 Knowledge Catalog Business Glossary terms when "
+                                "mode='ensure'."
+                            ),
+                        },
+                        "run_scans": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": (
+                                "Trigger Knowledge Catalog DataProfile scan jobs on physical "
+                                "tables when mode='ensure' (requires --allow-launch)."
                             ),
                         },
                         "model": {
@@ -3952,12 +3979,36 @@ class McpServer:
                     dataset_id=str(ds_arg) if ds_arg else None,
                 ).to_dict()
 
+            if req_mode == "ensure":
+                run_scans_flag = bool(args.get("run_scans", False))
+                if run_scans_flag and not self.allow_launch:
+                    return {
+                        "allowed": False,
+                        "mode": "ensure",
+                        "message": (
+                            "Launching Knowledge Catalog DataProfile scan jobs (`run_scans=True`) "
+                            "is locked by default. Start the MCP server with `--allow-launch` or "
+                            "call `mode='ensure'` with `run_scans=False`."
+                        ),
+                    }
+                from .bq_agent.client import ensure_registry_agent
+                from .errors import require_extra
+
+                require_extra("gcp", purpose="BigQuery Conversational Analytics Agent")
+                reg = ensure_registry_agent(
+                    project_id=str(proj_arg) if proj_arg else None,
+                    dataset_id=str(ds_arg) if ds_arg else None,
+                    sync_glossary=bool(args.get("sync_glossary", True)),
+                    run_scans=run_scans_flag,
+                )
+                return reg.to_dict()
+
             question = str(args.get("question", "")).strip()
             if not question:
                 raise ValueError("question must be a non-empty string")
             conv_id = args.get("conversation_id")
 
-            eff_mode = req_mode
+            eff_mode = "offline_playground" if req_mode == "offline" else req_mode
             if eff_mode == "auto":
                 if proj_arg and probe_environment(self.repo_root)["extras"]["gcp"]["installed"]:
                     from .bq_agent.probe import probe_bq_agent_access
@@ -4008,7 +4059,7 @@ class McpServer:
 
             raise ValueError(
                 f"Unknown ask_forecast_registry mode {req_mode!r}; expected "
-                "'auto', 'probe', 'bigquery_agent', or 'offline_playground'."
+                "'auto', 'probe', 'ensure', 'bigquery_agent', 'offline', or 'offline_playground'."
             )
 
         raise ValueError(f"Unknown tool: {name!r}")

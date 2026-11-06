@@ -28,6 +28,7 @@ from ..registry.views import VIEW_NAMES
 from .context import (
     BQAgentScope,
     IncludeSourcesMode,
+    _table_exists,
     build_published_context,
     discover_registry_scope,
 )
@@ -235,6 +236,35 @@ def resolve_registry_run_id(
     return hint
 
 
+def _has_any_registry_object(client: Any, project_id: str, dataset_id: str) -> bool:
+    """Return True if at least one canonical registry table or view already exists in BigQuery."""
+    return any(
+        _table_exists(client, f"{project_id}.{dataset_id}.{name}")
+        for name in (*REGISTRY_TABLE_NAMES, *VIEW_NAMES)
+    )
+
+
+def _existing_agent_table_fqns(agent_payload: dict[str, Any]) -> set[str]:
+    """Extract allowlisted ``project.dataset.table`` FQNs from an existing `DataAgent` payload."""
+    refs = (
+        agent_payload.get("dataAnalyticsAgent", {})
+        .get("publishedContext", {})
+        .get("datasourceReferences", {})
+        .get("bq", {})
+        .get("tableReferences", ())
+    )
+    fqns: set[str] = set()
+    for ref in refs if isinstance(refs, list) else ():
+        if not isinstance(ref, dict):
+            continue
+        proj = ref.get("projectId")
+        ds = ref.get("datasetId")
+        tbl = ref.get("tableId")
+        if proj and ds and tbl:
+            fqns.add(f"{proj}.{ds}.{tbl}")
+    return fqns
+
+
 def ensure_registry_agent(
     *,
     project_id: str | None = None,
@@ -255,8 +285,9 @@ def ensure_registry_agent(
 ) -> BQAgentRegistration:
     """Idempotently provision/update the BigQuery Conversational Analytics `DataAgent`.
 
-    1. Refreshes all 11 analytical SQL views and backfills table, view, and column descriptions on
-       pre-existing registries when ``sync_descriptions=True``.
+    1. Verifies that registry tables exist first (never deploys an empty agent onto a dataset with
+       zero tables), then refreshes all 11 analytical SQL views and backfills table, view, and
+       column descriptions on pre-existing registries when ``sync_descriptions=True``.
     2. Discovers the strict allowlisted `BQAgentScope` (excluding unrelated/staging tables).
     3. Optionally syncs the **Knowledge Catalog** Business Glossary & EntryLinks
        (``sync_glossary=True``) and DataProfile scans (``run_scans=True``).
@@ -271,6 +302,13 @@ def ensure_registry_agent(
     )
     eff_agent_id = agent_id or default_agent_id(eff_reg_ds)
     client = bq_client if bq_client is not None else bigquery_client(eff_proj)
+
+    if not _has_any_registry_object(client, eff_proj, eff_reg_ds):
+        raise ConfigError(
+            f"No scale-forecasting registry tables or views found in `{eff_proj}.{eff_reg_ds}`. "
+            "Run a forecast job or `Registry().init()` first so the agent is never deployed with "
+            "zero tables."
+        )
 
     patched_descriptions: list[str] = []
     if sync_descriptions:
@@ -614,6 +652,7 @@ def ask_registry(
     agent_id: str | None = None,
     location: str = "global",
     settings: Settings | None = None,
+    bq_client: Any = None,
     session: Any = None,
 ) -> BQAgentResponse:
     """Ask a natural-language question against a registered BigQuery Registry `DataAgent`.
@@ -621,14 +660,15 @@ def ask_registry(
     - Automatically resolves ``run_id`` (`'latest'` -> newest COMPLETED run, `'all'` -> cross-run,
       or prefix match against recent runs in ``v_run_summary``).
     - Auto-provisions the `DataAgent` on first use when ``auto_ensure_agent=True`` and the agent
-      does not yet exist.
+      does not yet exist, and auto-refreshes its allowlisted `publishedContext` when a newer run
+      has introduced an additional ``source_table`` not yet present on the agent.
     - Maintains multi-turn conversation memory in Google Cloud when ``stateful=True``; pass back
       ``resp.conversation_id`` to ask follow-up questions in the same session.
     """
     if not question or not question.strip():
         raise ConfigError("question must be a non-empty string")
 
-    eff_proj, eff_reg_ds, _, _ = resolve_target_coordinates(
+    eff_proj, eff_reg_ds, eff_src_ds, _ = resolve_target_coordinates(
         project_id=project_id,
         dataset_id=dataset_id,
         settings=settings,
@@ -658,8 +698,33 @@ def ask_registry(
             agent_id=eff_agent_id,
             location=location,
             settings=settings,
+            bq_client=bq_client,
             session=sess,
         )
+    elif auto_ensure_agent and (bq_client is not None or session is None):
+        current_fqns = _existing_agent_table_fqns(existing)
+        if current_fqns:
+            try:
+                scope_now = discover_registry_scope(
+                    eff_proj,
+                    eff_reg_ds,
+                    default_source_dataset_id=eff_src_ds,
+                    client=bq_client,
+                )
+                desired_fqns = {ref.fqn for ref in scope_now.all_objects}
+            except Exception as exc:  # noqa: BLE001 - keep chat non-blocking when scope discovery is restricted
+                logger.debug("Skipping scope refresh check on %s: %s", agent_name, exc)
+                desired_fqns = set()
+            if desired_fqns - current_fqns:
+                ensure_registry_agent(
+                    project_id=eff_proj,
+                    dataset_id=eff_reg_ds,
+                    agent_id=eff_agent_id,
+                    location=location,
+                    settings=settings,
+                    bq_client=bq_client,
+                    session=sess,
+                )
 
     resolved_run_id = resolve_registry_run_id(
         run_id,

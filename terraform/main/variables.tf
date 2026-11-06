@@ -76,8 +76,10 @@ variable "enable_bq_agent" {
     Analytics (`geminidataanalytics.googleapis.com`), and Gemini for Google Cloud
     (`cloudaicompanion.googleapis.com`), and grant `scale-forecasting-runner` the least-privilege
     catalog and `DataAgent` roles (`scale_forecasting.bq_agent`, `Registry().ensure_bq_agent()`,
-    `Forecaster.ask()`, and `output.ensure_bq_agent`). Default TRUE — free at rest (zero standing
-    compute). Set FALSE in locked-down orgs where Conversational Analytics APIs are restricted.
+    `Forecaster.ask()`, `RunResult.ask()`, and `output.ensure_bq_agent`). Default TRUE — free at
+    rest (zero standing compute); `sf-registry-<dataset>` itself is registered only once registry
+    tables exist so an agent is never created against an empty dataset. Set FALSE in locked-down
+    orgs where Conversational Analytics APIs are restricted.
   EOT
   type        = bool
   default     = true

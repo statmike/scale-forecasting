@@ -290,6 +290,15 @@ def finalize_run(config_uri: str) -> None:
         runtime_seconds=runtime_seconds,
         bq_models=list(native.models) if native else [],
     )
+    out_cfg = getattr(cfg, "output", None)
+    if status == "COMPLETED" and bool(getattr(out_cfg, "ensure_bq_agent", False)):
+        try:
+            from .bq_agent.client import ensure_registry_agent
+
+            agent_reg = ensure_registry_agent(settings=settings)
+            _log.info("registered BigQuery Conversational Agent: %s", agent_reg.agent_name)
+        except Exception as exc:  # noqa: BLE001 - post-run agent registration must not fail completed DAG
+            _log.warning("ensure_bq_agent did not complete for run %s: %s", run_id, exc)
 
 
 def create_ray_cluster(config_uri: str) -> list[str]:

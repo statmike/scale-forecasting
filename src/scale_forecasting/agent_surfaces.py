@@ -1576,8 +1576,8 @@ def render_skill_execution_paths_reference() -> str:
                 "| **Knowledge Catalog & Stateful BigQuery `DataAgent` (`bq_agent`)** | "
                 "`python -m scale_forecasting.bq_agent --dataset scale_forecasting --ensure` / "
                 '`--ask "Which model won on WAPE and why?"` | '
-                '`Forecaster.ensure_bq_agent()` / `f.ask("...")` / `f.sop_summary_df()` / '
-                '`Registry.ask("...")` |'
+                '`Forecaster.ensure_bq_agent()` / `f.ask("...")` / `res.ask("...")` / '
+                '`f.sop_summary_df()` / `Registry.ask("...")` |'
             ),
             "",
             "---",

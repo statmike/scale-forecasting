@@ -525,6 +525,15 @@ def retry_run(
     for row in read_run_jobs(plan.run_id, settings=s):
         if row.get("family") in repaired and row.get("job_id"):
             update_job(row["job_id"], settings=s, merge_telemetry={"retry": audit})
+    out_cfg = getattr(cfg, "output", None)
+    if not outcome.errors and bool(getattr(out_cfg, "ensure_bq_agent", False)):
+        try:
+            from .bq_agent.client import ensure_registry_agent
+
+            agent_reg = ensure_registry_agent(settings=s)
+            _log.info("registered BigQuery Conversational Agent: %s", agent_reg.agent_name)
+        except Exception as exc:  # noqa: BLE001 - post-repair agent sync must not fail completed repair
+            _log.warning("ensure_bq_agent did not complete after repair %s: %s", plan.run_id, exc)
     return RetryReport(
         run_id=plan.run_id,
         plan=plan,

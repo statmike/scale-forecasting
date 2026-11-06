@@ -1012,3 +1012,245 @@ def test_context_client_and_offline_edge_branches() -> None:
         in ask_offline(object(), "What are the top feature attributions?").answer.lower()
     )
     assert "offline-run" in ask_offline(object(), "Unmatched generic question xyz").answer
+
+
+def test_empty_dataset_guard_and_lazy_source_table_scope_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting.errors import ConfigError
+
+    # 1. Empty dataset with default sync_descriptions=True and bq_client=None MUST fail fast before
+    # calling ensure_views() so an agent is never created with zero tables.
+    empty_bq = _FakeBQClient(existing_fqns=set(), raw_sources=[])
+    ensure_views_called = False
+
+    def _fail_if_called(**_: Any) -> None:
+        nonlocal ensure_views_called
+        ensure_views_called = True
+
+    monkeypatch.setattr("scale_forecasting.bq_agent.client.bigquery_client", lambda _p: empty_bq)
+    monkeypatch.setattr("scale_forecasting.bq_agent.client.ensure_views", _fail_if_called)
+    with pytest.raises(ConfigError, match="never deployed with zero tables"):
+        ensure_registry_agent(
+            project_id=_PROJECT,
+            dataset_id=_DATASET,
+            sync_descriptions=True,
+            session=_FakeAuthorizedSession(),
+        )
+    assert ensure_views_called is False
+    monkeypatch.undo()
+
+    # 2. Lazy scope refresh on ask_registry: Run 1 registers agent with source_series_native;
+    # Run 2 introduces raw_erp.demand_history -> next ask_registry auto-updates publishedContext!
+    existing = {
+        *(f"{_PROJECT}.{_DATASET}.{t}" for t in REGISTRY_TABLE_NAMES),
+        *(f"{_PROJECT}.{_DATASET}.{v}" for v in VIEW_NAMES),
+        f"{_PROJECT}.{_DATASET}.source_series_native",
+    }
+    fake_bq = _FakeBQClient(existing_fqns=existing, raw_sources=["source_series_native"])
+    fake_sess = _FakeAuthorizedSession()
+
+    ensure_registry_agent(
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        sync_glossary=False,
+        bq_client=fake_bq,
+        session=fake_sess,
+    )
+    update_calls_before = sum(1 for m, u, _, _ in fake_sess.calls if u.endswith(":updateSync"))
+    assert update_calls_before == 0
+
+    # Now a second forecast job adds `raw_erp.demand_history` to `run_registry` & BigQuery:
+    fake_bq.existing_fqns.add(f"{_PROJECT}.raw_erp.demand_history")
+    fake_bq.raw_sources.append("raw_erp.demand_history")
+
+    with patch("scale_forecasting.bq_agent.client.read_recent_runs", return_value=[]):
+        ask_registry(
+            "Compare forecast vs historical demand.",
+            project_id=_PROJECT,
+            dataset_id=_DATASET,
+            bq_client=fake_bq,
+            session=fake_sess,
+        )
+        update_calls_after_new_src = sum(
+            1 for m, u, _, _ in fake_sess.calls if u.endswith(":updateSync")
+        )
+        assert update_calls_after_new_src == 1
+
+        # Verify raw_erp.demand_history is now in the registered agent's publishedContext!
+        updated_agent = get_registry_agent(
+            project_id=_PROJECT, dataset_id=_DATASET, session=fake_sess
+        )
+        assert updated_agent is not None
+        tbl_refs = updated_agent["dataAnalyticsAgent"]["publishedContext"]["datasourceReferences"][
+            "bq"
+        ]["tableReferences"]
+        fqns = {f"{r['projectId']}.{r['datasetId']}.{r['tableId']}" for r in tbl_refs}
+        assert f"{_PROJECT}.raw_erp.demand_history" in fqns
+
+        # Subsequent ask with no new source tables skips `:updateSync`!
+        ask_registry(
+            "Follow-up question on the same scope.",
+            project_id=_PROJECT,
+            dataset_id=_DATASET,
+            bq_client=fake_bq,
+            session=fake_sess,
+        )
+        update_calls_steady = sum(1 for m, u, _, _ in fake_sess.calls if u.endswith(":updateSync"))
+        assert update_calls_steady == 1
+
+
+def test_run_result_ask_airflow_finalize_retry_and_mcp_ensure_polish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scale_forecasting import RunResult, airflow_tasks, retry_run
+    from scale_forecasting.bq_agent.probe import probe_bq_agent_access
+    from scale_forecasting.job_launch import RetryOutcome
+    from scale_forecasting.mcp import McpServer
+    from scale_forecasting.retry_run import RetryPlan
+    from scale_forecasting.settings import Settings
+
+    # 1. Probe setup_hint names `enable_bq_agent = true` (matching terraform/main/variables.tf)
+    class _DisabledSession:
+        def request(self, **_: Any) -> _FakeHTTPResponse:
+            return _FakeHTTPResponse(403, {"error": "SERVICE_DISABLED"})
+
+    p_res = probe_bq_agent_access(
+        project_id=_PROJECT, dataset_id=_DATASET, session=_DisabledSession()
+    )
+    assert "enable_bq_agent = true" in p_res.setup_hint
+    assert "enable_bq_conversational_agent" not in p_res.setup_hint
+
+    # 2. RunResult.ask() and RunResult.sop_summary_df() preserve equality & forward run_id/coords
+    s = Settings(
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        connection=f"{_PROJECT}.us-central1.sf-iceberg",
+        warehouse_uri=f"gs://{_PROJECT}-warehouse/warehouse",
+    )
+    r_a = RunResult(run_id="demo-run-123", dataset_ref=f"{_PROJECT}.{_DATASET}", views=VIEW_NAMES)
+    r_b = RunResult(
+        run_id="demo-run-123",
+        dataset_ref=f"{_PROJECT}.{_DATASET}",
+        views=VIEW_NAMES,
+        _settings=s,
+    )
+    assert r_a == r_b
+    assert "_settings" not in repr(r_b)
+
+    captured_ask: dict[str, Any] = {}
+
+    def _fake_ask(q: str, **kw: Any) -> BQAgentResponse:
+        captured_ask["q"] = q
+        captured_ask.update(kw)
+        return BQAgentResponse(
+            question=q,
+            answer="ensemble_mean won.",
+            sql="SELECT 1",
+            df=pd.DataFrame([{"ok": 1}]),
+            run_id=kw.get("run_id"),
+            conversation_id="sf-conv-runresult",
+        )
+
+    monkeypatch.setattr("scale_forecasting.bq_agent.client.ask_registry", _fake_ask)
+    ans = r_a.ask("Which model won?")
+    assert ans.run_id == "demo-run-123"
+    assert captured_ask["project_id"] == _PROJECT
+    assert captured_ask["dataset_id"] == _DATASET
+
+    monkeypatch.setattr(
+        "scale_forecasting.registry.reads.read_executive_sop_summary",
+        lambda **kw: [{"run_id": kw["run_id"], "champion_model": "theta"}],
+    )
+    sop = r_b.sop_summary_df()
+    assert len(sop) == 1 and sop.iloc[0]["run_id"] == "demo-run-123"
+
+    # 3. Composer Airflow `finalize_run` triggers `ensure_registry_agent` when ensure_bq_agent=True
+    cfg_ens = RunConfig.model_validate(
+        {
+            "run_name": "airflow_agent_hook",
+            "data": {"source_table": "source_series_native", "horizon": 7},
+            "models": ["theta"],
+            "output": {"ensure_bq_agent": True},
+        }
+    )
+    ensured_calls: list[Any] = []
+    fake_reg = BQAgentRegistration(
+        agent_name=f"projects/{_PROJECT}/locations/global/dataAgents/sf-registry-{_DATASET}",
+        agent_id=f"sf-registry-{_DATASET}",
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        location="global",
+        created=False,
+        scoped_tables=(f"{_PROJECT}.{_DATASET}.run_registry",),
+        scoped_views=(f"{_PROJECT}.{_DATASET}.v_run_summary",),
+        scoped_sources=(),
+        data_scans=(),
+    )
+    monkeypatch.setattr(
+        "scale_forecasting.bq_agent.client.ensure_registry_agent",
+        lambda **kw: ensured_calls.append(kw) or fake_reg,
+    )
+    monkeypatch.setattr("scale_forecasting.config.load_config_uri", lambda _u: cfg_ens)
+    monkeypatch.setattr("scale_forecasting.settings.Settings.resolve", lambda: s)
+    monkeypatch.setattr(
+        "scale_forecasting.registry.jobs.read_run_jobs",
+        lambda *_a, **_kw: [{"family": "statistical", "status": "COMPLETED", "runtime_seconds": 5}],
+    )
+    monkeypatch.setattr("scale_forecasting.registry.header.update_header", lambda *_a, **_kw: None)
+
+    airflow_tasks.finalize_run("gs://code/cfg.json")
+    assert len(ensured_calls) == 1
+
+    # 4. `retry_run(..., confirm=True)` triggers `ensure_registry_agent` when repair succeeds
+    monkeypatch.setattr(
+        retry_run,
+        "build_retry_plan",
+        lambda _c, settings=None: RetryPlan(
+            run_id=make_run_id(cfg_ens),
+            header_status="PARTIAL",
+            models=("theta",),
+            n_targets=2,
+        ),
+    )
+    monkeypatch.setattr(
+        "scale_forecasting.job_launch.submit_retry",
+        lambda *_a, **_kw: RetryOutcome(families=("statistical_repair",), errors={}),
+    )
+    monkeypatch.setattr("scale_forecasting.identity.resolve_principal", lambda _s: "tester")
+    monkeypatch.setattr("scale_forecasting.registry.jobs.update_job", lambda *_a, **_kw: None)
+
+    rep = retry_run.retry_run(cfg_ens, confirm=True, settings=s)
+    assert rep.executed is True
+    assert len(ensured_calls) == 2
+
+    # 5. MCP `ask_forecast_registry`: `mode="offline"` alias + `mode="ensure"` & `--allow-launch`
+    srv_safe = McpServer(allow_launch=False)
+    off_env = srv_safe.call_tool(
+        "ask_forecast_registry",
+        {"mode": "offline", "question": "Which model won?", "n_series": 2, "horizon": 7},
+    )
+    assert off_env["isError"] is False
+    assert json.loads(off_env["content"][0]["text"])["mode"] == "offline"
+
+    blocked_scans = srv_safe.call_tool(
+        "ask_forecast_registry",
+        {"mode": "ensure", "project_id": _PROJECT, "dataset_id": _DATASET, "run_scans": True},
+    )
+    assert blocked_scans["isError"] is False
+    assert json.loads(blocked_scans["content"][0]["text"])["allowed"] is False
+
+    ens_env = srv_safe.call_tool(
+        "ask_forecast_registry",
+        {"mode": "ensure", "project_id": _PROJECT, "dataset_id": _DATASET, "run_scans": False},
+    )
+    assert ens_env["isError"] is False
+    assert json.loads(ens_env["content"][0]["text"])["agent_id"] == f"sf-registry-{_DATASET}"
+
+    srv_launch = McpServer(allow_launch=True)
+    scans_ok = srv_launch.call_tool(
+        "ask_forecast_registry",
+        {"mode": "ensure", "project_id": _PROJECT, "dataset_id": _DATASET, "run_scans": True},
+    )
+    assert scans_ok["isError"] is False
+    assert ensured_calls[-1]["run_scans"] is True

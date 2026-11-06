@@ -19,7 +19,7 @@ from __future__ import annotations
 import contextlib
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .config import Fanout, RunConfig, Workload, estimate_workload, load_config
@@ -107,6 +107,53 @@ class RunResult:
     views: tuple[str, ...]
     status: str | None = None
     runtime_seconds: float | None = None
+    _settings: Settings | None = field(default=None, repr=False, compare=False)
+
+    def _dataset_coords(self) -> tuple[str | None, str | None]:
+        """Split ``dataset_ref`` (``'project.dataset'``) into ``(project_id, dataset_id)``."""
+        if self.dataset_ref and "." in self.dataset_ref:
+            proj, ds = self.dataset_ref.split(".", 1)
+            return (proj.strip() or None, ds.strip() or None)
+        return (None, None)
+
+    def sop_summary_df(self, *, limit: int = 25) -> pd.DataFrame:
+        """Read ``v_executive_sop_summary`` scoped to ``self.run_id``."""
+        proj, ds = self._dataset_coords()
+        reg = Registry(settings=self._settings, project_id=proj, dataset_id=ds)
+        return reg.sop_summary_df(run_id=self.run_id, limit=limit)
+
+    def ask(
+        self,
+        question: str,
+        *,
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Ask a natural-language question against this run via the stateful BigQuery
+        Conversational Analytics `DataAgent` (`bq_agent.client.ask_registry`).
+
+        Automatically pins ``run_id=self.run_id`` (unless explicitly overridden via ``run_id=...``)
+        and auto-provisions/refreshes ``sf-registry-{dataset}`` when ``auto_ensure_agent=True``.
+        """
+        from .bq_agent.client import ask_registry
+
+        proj, ds = self._dataset_coords()
+        eff_run_id = kwargs.pop("run_id", self.run_id)
+        return ask_registry(
+            question,
+            run_id=eff_run_id,
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            project_id=kwargs.pop("project_id", proj),
+            dataset_id=kwargs.pop("dataset_id", ds),
+            settings=self._settings,
+            **kwargs,
+        )
 
 
 @dataclass(frozen=True)
@@ -897,7 +944,12 @@ class Forecaster(WorkbenchMixin):
             n_series=n_series,
             max_executors=max_executors,
         )
-        return RunResult(run_id=run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES)
+        return RunResult(
+            run_id=run_id,
+            dataset_ref=self._resolved_dataset_ref(),
+            views=VIEW_NAMES,
+            _settings=self._settings,
+        )
 
     def review(self) -> RunResult:
         """Return a pointer to this config's results **without** running anything (offline).
@@ -908,7 +960,10 @@ class Forecaster(WorkbenchMixin):
         caller can construct the query once infra is known.
         """
         return RunResult(
-            run_id=self.run_id, dataset_ref=self._resolved_dataset_ref(), views=VIEW_NAMES
+            run_id=self.run_id,
+            dataset_ref=self._resolved_dataset_ref(),
+            views=VIEW_NAMES,
+            _settings=self._settings,
         )
 
     def monitor(self, run_id: str | None = None, *, probe: bool = False) -> Any:
@@ -1271,6 +1326,7 @@ class Forecaster(WorkbenchMixin):
                 views=res.views,
                 status=res.status or "COMPLETED",
                 runtime_seconds=res.runtime_seconds or elapsed,
+                _settings=self._settings,
             )
 
         effective_cfg = (
@@ -1334,6 +1390,7 @@ class Forecaster(WorkbenchMixin):
             views=res.views,
             status=final_status,
             runtime_seconds=res.runtime_seconds or elapsed,
+            _settings=self._settings,
         )
 
     def leaderboard_df(
