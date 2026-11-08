@@ -698,3 +698,45 @@ def test_mcp_track_l_enums_and_direct_tool_aliases() -> None:
     assert ask_res["mode"] == "offline"
     assert ask_res["row_count"] >= 1
     assert "SELECT" in ask_res["sql"]
+
+
+def test_mcp_validate_and_plan_execution_surface_duration_estimates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP `validate_and_dry_run` and `plan_execution` (`dry_run` & `feasibility`) expose cost."""
+    import scale_forecasting.launch_plan as lp_mod
+
+    monkeypatch.setenv("SF_PROJECT_ID", "your-gcp-project-id")
+    monkeypatch.setenv("SF_CONNECTION", "us-central1.sf-iceberg")
+    monkeypatch.setenv("SF_WAREHOUSE_URI", "gs://example-bucket/warehouse")
+
+    server = mcp.McpServer(allow_launch=False, repo_root=REPO_ROOT)
+    test_cfg = {
+        "run_name": "cost-check",
+        "models": ["holtwinters", "arima_plus"],
+        "data": {"source_table": "source_series_native", "horizon": 14, "series_limit": 120},
+    }
+
+    is_err_val, val_res = _call_tool(server, "validate_and_dry_run", {"config": test_cfg})
+    assert not is_err_val, val_res
+    assert val_res["duration_estimate"]["n_series"] == 120
+    assert val_res["duration_estimate"]["n_series_source"] == "series_limit"
+    assert val_res["duration_estimate"]["estimated_usd"] > 0.0
+    assert len(val_res["duration_estimate"]["families"]) == 2
+
+    is_err_dry, dry_res = _call_tool(
+        server, "plan_execution", {"config": test_cfg, "mode": "dry_run"}
+    )
+    assert not is_err_dry, dry_res
+    assert dry_res["duration_estimate"]["n_series"] == 120
+    assert dry_res["duration_estimate"]["estimated_usd"] > 0.0
+
+    parsed_cfg = mcp._parse_run_config_input(test_cfg, REPO_ROOT)
+    real_lines = lp_mod.feasibility_lines(parsed_cfg, [400] * 320, bq_dry_run_bytes=20 * 1024**3)
+    monkeypatch.setattr(lp_mod, "feasibility_report", lambda cfg: real_lines)
+    is_err_feas, feas_res = _call_tool(
+        server, "plan_execution", {"config": test_cfg, "mode": "feasibility"}
+    )
+    assert not is_err_feas, feas_res
+    assert feas_res["duration_estimate"]["n_series"] == 320
+    assert feas_res["duration_estimate"]["n_series_source"] == "measured"

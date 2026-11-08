@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from .commands import LaunchCommands
     from .config import Fanout, RunConfig
     from .dag import DagNode
+    from .profiling.duration import DurationEstimate
     from .settings import Settings
 
 _log = get_logger(__name__)
@@ -109,6 +110,7 @@ class LaunchPlan:
     force: bool
     nodes: tuple[DagNode, ...]
     variant_plan: tuple[dict[str, object], ...] = ()
+    duration_estimate: DurationEstimate | None = None
 
 
 @dataclass(frozen=True)
@@ -482,6 +484,22 @@ def _emit_plan(result: LaunchPlan) -> None:
     for node in result.nodes:
         after = f" after [{', '.join(node.depends_on)}]" if node.depends_on else ""
         _log.info("  node %s: %s on %s%s", node.family, node.job_key, node.runtime, after)
+    if result.duration_estimate is not None:
+        est = result.duration_estimate
+        scope_note = (
+            f"{est.n_series:,} series"
+            if est.n_series_source != "default_100"
+            else f"assumed {est.n_series} series; pass --feasibility for live panel"
+        )
+        _log.info(
+            "  estimate (approx, not a quote): p50=%.1fm p90=%.1fm | ~est_cost=$%.2f USD | "
+            "bottleneck=%s (%s)",
+            est.total_p50_minutes,
+            est.total_p90_minutes,
+            est.estimated_usd,
+            est.bottleneck_family,
+            scope_note,
+        )
     if result.commands is None:
         _log.info(
             "%s %s: infra unresolved (no SF_* env, or the gcp extra is not installed) — "
@@ -797,8 +815,10 @@ def plan_run(
         config_uri = None
         commands = None
     from .features import variant_diagnostics_for
+    from .profiling.duration import predict_run_duration
 
     variant_plan = tuple({"model_type": m, **variant_diagnostics_for(m, cfg)} for m in cfg.models)
+    duration_estimate = predict_run_duration(cfg)
     result = LaunchPlan(
         run_id=plan.run_id,
         python_runtime=cfg.python_runtime,
@@ -812,9 +832,39 @@ def plan_run(
         force=force,
         nodes=nodes,
         variant_plan=variant_plan,
+        duration_estimate=duration_estimate,
     )
     _emit_plan(result)
     return result
+
+
+def dry_run_source_bytes(
+    cfg: RunConfig, *, settings: Settings | None = None
+) -> int | None:  # pragma: no cover - GCP I/O, covered by live smokes
+    """Return BigQuery dry-run byte scan for ``source_table`` columns (zero-cost metadata check)."""
+    from google.cloud import bigquery
+
+    from .engines.bigquery_names import source_ref
+    from .settings import Settings as _Settings
+
+    eff_settings = settings or _Settings.resolve()
+    table = source_ref(cfg, eff_settings.dataset_ref)
+    cols = [
+        cfg.data.ts_id_col,
+        cfg.data.date_col,
+        cfg.data.target_col,
+        *cfg.features.all_covariates,
+    ]
+    seen_cols: list[str] = []
+    for col in cols:
+        if col and col not in seen_cols:
+            seen_cols.append(col)
+    col_sql = ", ".join(f"`{c}`" for c in seen_cols)
+    sql = f"SELECT {col_sql} FROM `{table}`"
+    job_cfg = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+    job = bigquery_client(eff_settings.project_id).query(sql, job_config=job_cfg)
+    total_bytes = getattr(job, "total_bytes_processed", None)
+    return int(total_bytes) if total_bytes is not None else None
 
 
 def read_series_lengths(
@@ -847,13 +897,52 @@ def read_series_lengths(
     return [int(r["n_obs"]) for r in rows]
 
 
-def feasibility_lines(cfg: RunConfig, obs_counts: Sequence[int]) -> list[str]:
+def _append_feasibility_cost_lines(
+    lines: list[str],
+    cfg: RunConfig,
+    obs_counts: Sequence[int],
+    *,
+    bq_dry_run_bytes: int | None = None,
+) -> list[str]:
+    """Append parametric wall-clock and USD estimate lines calibrated to measured ``obs_counts``."""
+    import statistics
+
+    from .profiling.duration import predict_run_duration
+
+    median_obs = float(statistics.median(obs_counts)) if obs_counts else 365.0
+    est = predict_run_duration(
+        cfg,
+        n_series=max(1, len(obs_counts)),
+        median_n_obs=median_obs,
+        bq_dry_run_bytes=bq_dry_run_bytes,
+    )
+    lines.append(
+        f"  estimate (approx, not a quote): p50={est.total_p50_minutes:.1f}m "
+        f"p90={est.total_p90_minutes:.1f}m | ~est_cost=${est.estimated_usd:.2f} USD "
+        f"(bottleneck={est.bottleneck_family}, median_obs={median_obs:.0f})"
+    )
+    if len(est.families) > 1:
+        fam_parts = ", ".join(
+            f"{f.family}=${f.estimated_usd:.2f} ({f.pricing_basis or f.runtime})"
+            for f in est.families
+        )
+        lines.append(f"    families: {fam_parts}")
+    return lines
+
+
+def feasibility_lines(
+    cfg: RunConfig,
+    obs_counts: Sequence[int],
+    *,
+    bq_dry_run_bytes: int | None = None,
+) -> list[str]:
     """The feasibility report for a measured panel, as lines to print (pure).
 
-    What ``plan --feasibility`` prints once it has the counts. Three things, in the order an
+    What ``plan --feasibility`` prints once it has the counts. Four things, in the order an
     operator needs them: how much work this is (cells, fits, and the honest backtest multiplier),
     who actually gets scored (the achieved-fold cohorts, which on a ragged panel are not one
-    number), and what to change if the answer is unwelcome (`backtest.suggest_min_train`).
+    number), what to change if the answer is unwelcome (`backtest.suggest_min_train`), and an
+    order-of-magnitude wall-clock & cloud cost estimate calibrated to the measured panel.
 
     Advisory only — it reads nothing but the counts and writes nothing at all. ``min_train`` is a
     config field, so acting on the suggestion moves the run_id, which is the caller's decision to
@@ -870,7 +959,9 @@ def feasibility_lines(cfg: RunConfig, obs_counts: Sequence[int]) -> list[str]:
     ]
     if not cfg.backtest.enabled:
         lines.append("  backtest: off — one full-history fit per cell, no folds to achieve")
-        return lines
+        return _append_feasibility_cost_lines(
+            lines, cfg, obs_counts, bq_dry_run_bytes=bq_dry_run_bytes
+        )
     for k, n in sorted(w.fold_histogram.items(), reverse=True):
         share = n / (w.n_series or 1)
         verdict = "all folds" if k == cfg.backtest.n_folds else "UNSCORED" if k == 0 else "reduced"
@@ -898,7 +989,7 @@ def feasibility_lines(cfg: RunConfig, obs_counts: Sequence[int]) -> list[str]:
             f"  min_train={current} is within budget: up to {suggested} still keeps 90% of series "
             "at full folds"
         )
-    return lines
+    return _append_feasibility_cost_lines(lines, cfg, obs_counts, bq_dry_run_bytes=bq_dry_run_bytes)
 
 
 def feasibility_report(cfg: RunConfig, *, settings: Settings | None = None) -> list[str]:
@@ -916,7 +1007,11 @@ def feasibility_report(cfg: RunConfig, *, settings: Settings | None = None) -> l
         return [f"feasibility: could not read the source panel ({exc}); reporting counts only"]
     if not obs_counts:
         return ["feasibility: the source panel returned no series"]
-    return feasibility_lines(cfg, obs_counts)
+    bq_bytes: int | None = None
+    if split_by_runtime(cfg)[1]:
+        with suppress(Exception):
+            bq_bytes = dry_run_source_bytes(cfg, settings=settings)
+    return feasibility_lines(cfg, obs_counts, bq_dry_run_bytes=bq_bytes)
 
 
 def preflight_short_series(cfg: RunConfig, *, settings: Settings | None = None) -> None:
@@ -1071,8 +1166,10 @@ def stage_run(
         launcher_uri=launcher_uri,
     )
     from .features import variant_diagnostics_for
+    from .profiling.duration import predict_run_duration
 
     variant_plan = tuple({"model_type": m, **variant_diagnostics_for(m, cfg)} for m in cfg.models)
+    duration_estimate = predict_run_duration(cfg)
     result = LaunchPlan(
         run_id=plan.run_id,
         python_runtime=cfg.python_runtime,
@@ -1086,6 +1183,7 @@ def stage_run(
         force=force,
         nodes=nodes,
         variant_plan=variant_plan,
+        duration_estimate=duration_estimate,
     )
     manifest_uri = stage_manifest(
         _manifest_dict(result, created_at=datetime.now(UTC).isoformat()), plan.run_id, code_bucket

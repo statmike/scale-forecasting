@@ -411,7 +411,8 @@ class McpServer:
                 "name": "validate_and_dry_run",
                 "description": (
                     "Validate a RunConfig (dict, JSON string, or file path) offline, compute its "
-                    "deterministic content-addressed run_id, estimate cell/fit workload, resolve "
+                    "deterministic content-addressed run_id, estimate cell/fit workload and "
+                    "approximate wall-clock/USD duration_estimate (not a quote), resolve "
                     "per-family compute placement and DAG nodes, and check whether any requested "
                     "models require an uninstalled optional extra."
                 ),
@@ -760,11 +761,12 @@ class McpServer:
                 "name": "plan_execution",
                 "description": (
                     "Plan or emit execution artifacts across the platform's execution paths: "
-                    "'dry_run' (offline plan + CLI/gcloud launch commands + idempotency check when "
-                    "SF_* is configured), 'emit_airflow' (render Cloud Composer 3 / Airflow DAG "
-                    "Python source offline), 'feasibility' (query live BigQuery series lengths vs. "
-                    "backtest geometry), 'quota' (query regional CPU/GPU quota meters), or "
-                    "'stage_only' (upload config + code archive to GCS; requires --allow-launch)."
+                    "'dry_run' (offline plan + duration/cost estimate + CLI/gcloud launch commands "
+                    "+ idempotency check when SF_* is configured), 'emit_airflow' (render Cloud "
+                    "Composer 3 / Airflow DAG Python source offline), 'feasibility' (query live "
+                    "BigQuery series lengths vs. backtest geometry + live-calibrated duration/cost "
+                    "estimate), 'quota' (query regional CPU/GPU quota meters), or 'stage_only' "
+                    "(upload config + code archive to GCS; requires --allow-launch)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -2184,6 +2186,8 @@ class McpServer:
             )
 
         if name == "validate_and_dry_run":
+            from .profiling.duration import predict_run_duration
+
             cfg = _parse_run_config_input(args["config"], self.repo_root)
             n_series = args.get("n_series")
             if n_series is not None:
@@ -2192,6 +2196,7 @@ class McpServer:
                 cfg = cfg.with_available_models()
             run_id = make_run_id(cfg)
             workload = estimate_workload(cfg)
+            duration_est = predict_run_duration(cfg)
             run_dag = plan_dag(cfg)
             nodes = dag_nodes(run_dag)
             by_family = group_models_by_family(cfg)
@@ -2220,6 +2225,7 @@ class McpServer:
                 "valid": True,
                 "run_id": run_id,
                 "workload": dataclasses.asdict(workload),
+                "duration_estimate": duration_est.to_dict(),
                 "families": {fam: list(ms) for fam, ms in by_family.items()},
                 "resolved_family_compute": resolved_families,
                 "dag_nodes": [dataclasses.asdict(n) for n in nodes],
@@ -2543,6 +2549,11 @@ class McpServer:
                     "python_models": plan.python_models,
                     "bq_models": plan.bq_models,
                     "fanout": dataclasses.asdict(plan.fanout),
+                    "duration_estimate": (
+                        plan.duration_estimate.to_dict()
+                        if plan.duration_estimate is not None
+                        else None
+                    ),
                     "staged": plan.staged,
                     "config_uri": plan.config_uri,
                     "idempotency": dataclasses.asdict(plan.idempotency),
@@ -2555,11 +2566,27 @@ class McpServer:
                 }
 
             if mode == "feasibility":
+                import re
+
+                from .profiling.duration import predict_run_duration
+
                 lines = launch_plan.feasibility_report(cfg)
+                parsed_n: int | None = None
+                parsed_obs: float | None = None
+                for line in lines:
+                    m_n = re.match(r"^feasibility:\s+(\d+)\s+series\b", str(line))
+                    if m_n:
+                        parsed_n = int(m_n.group(1))
+                    m_obs = re.search(r"median_obs=([0-9.]+)", str(line))
+                    if m_obs:
+                        parsed_obs = float(m_obs.group(1))
                 return {
                     "mode": "feasibility",
                     "run_id": make_run_id(cfg),
                     "report_lines": list(lines),
+                    "duration_estimate": predict_run_duration(
+                        cfg, n_series=parsed_n, median_n_obs=parsed_obs
+                    ).to_dict(),
                 }
 
             if mode == "quota":

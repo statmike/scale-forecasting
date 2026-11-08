@@ -130,8 +130,9 @@ the runtime template Terraform ships, see [notebook_runtimes.md](./notebook_runt
 
 ## 1. Check the config offline first
 
-`--dry-run` resolves the config, resolves the `run_id`, and estimates the workload without touching
-GCP. Always cheap, always safe:
+`--dry-run` resolves the config, resolves the `run_id`, estimates the workload, and prints an
+approximate wall-clock (`p50`/`p90`) and cloud cost estimate (`not a quote`) without touching GCP.
+Always cheap, always safe:
 
 ```bash
 python -m scale_forecasting.main --config configs/explode_demo.json --dry-run
@@ -164,17 +165,20 @@ feasibility: 1000 series x 4 models = 4000 cells
   30 series get no folds at all: they are still fit and forecast, but they contribute nothing
   to any leaderboard (see v_backtest_coverage)
   min_train=180 is within budget: up to 316 still keeps 90% of series at full folds
+  estimate (approx, not a quote): p50=4.2m p90=6.1m | ~est_cost=$0.38 USD (bottleneck=statistical, median_obs=365)
 ```
 
-Read it as three answers. **Cost:** "3.862 whole-history fits per cell" is the honest multiplier on
+Read it as three answers plus a live-calibrated cost preview. **Cost:** "3.862 whole-history fits per cell" is the honest multiplier on
 your compute bill — a three-fold backtest is not 3× a plain run, it is however much the shrinking
 training windows add up to, and the number is derived from the same `make_folds` the workers use, so
 it cannot drift from what actually runs. **Coverage:** the fold histogram is the population you will
 be able to compare models on; a large `UNSCORED` cohort means a leaderboard built from a fraction of
-the fleet. **The knob:** the last line names the largest `min_train` that still brings 90% of series
+the fleet. **The knob:** the `min_train` line names the largest `min_train` that still brings 90% of series
 to full folds, or tells you that no value of `min_train` can and the fold count itself has to come
 down. Changing `min_train` changes the config digest and therefore the `run_id`, which the line says
-out loud.
+out loud. Finally, the `estimate` line recalibrates `forecaster.predict_duration()` against the
+measured series count, median history length, and a zero-cost BigQuery dry-run byte scan when
+`native` SQL models are included (see [cost_estimates.md](./cost_estimates.md)).
 
 `--feasibility` implies `--dry-run` — a flag whose name promises a report can never be the thing that
 launches a run. If the panel can't be read (no credentials, table missing), it degrades to one line

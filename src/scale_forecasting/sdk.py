@@ -80,8 +80,9 @@ class DryRunResult:
     ``run_id`` is the deterministic config hash (identical to what an actual run lands under);
     ``workload`` is the estimated work (cells always; fits and fold cohorts only once a caller has
     supplied per-series lengths, which this offline path has not); ``python_models``/``bq_models``
-    are the runtime split. ``fanout`` is the same estimate narrowed to its four count fields, kept
-    because it is the older name and is in the public ``__init__``.
+    are the runtime split; ``duration_estimate`` carries the parametric wall-clock (`p50`/`p90`)
+    and approximate cloud cost estimate (not a quote). ``fanout`` is the same estimate narrowed to
+    its four count fields, kept because it is the older name and is in the public ``__init__``.
     """
 
     run_id: str
@@ -89,6 +90,14 @@ class DryRunResult:
     python_models: list[str]
     bq_models: list[str]
     workload: Workload | None = None
+    duration_estimate: Any = None
+
+    @property
+    def estimated_usd(self) -> float | None:
+        """Approximate cloud compute cost in USD (planning estimate, not a quote)."""
+        if self.duration_estimate is None:
+            return None
+        return float(self.duration_estimate.estimated_usd)
 
 
 @dataclass(frozen=True)
@@ -652,6 +661,8 @@ class Forecaster(WorkbenchMixin):
         median_n_obs: float | None = None,
         where: str | None = None,
         borrowed_models: Sequence[str] | None = None,
+        calibration: Any = None,
+        bq_dry_run_bytes: int | None = None,
     ) -> Any:
         """Predict end-to-end wall-clock duration (`p50`/`p90`) and cloud cost for this config."""
         from .profiling.duration import predict_run_duration
@@ -662,6 +673,8 @@ class Forecaster(WorkbenchMixin):
             median_n_obs=median_n_obs,
             where=where,
             borrowed_models=borrowed_models,
+            calibration=calibration,
+            bq_dry_run_bytes=bq_dry_run_bytes,
         )
 
     def autofocus_ledger_df(self) -> pd.DataFrame:
@@ -836,7 +849,8 @@ class Forecaster(WorkbenchMixin):
         """Validate the config and report the planned fan-out + runtime split — touches no GCP.
 
         Delegates the run_id to `main.run` (``dry_run=True``) so it is the single source of
-        truth, then adds the estimated fanout and the python/BigQuery model split.
+        truth, then adds the estimated fanout, python/BigQuery model split, and parametric
+        duration/cost estimate.
         """
         from . import main
 
@@ -849,6 +863,7 @@ class Forecaster(WorkbenchMixin):
             python_models=python_models,
             bq_models=bq_models,
             workload=workload,
+            duration_estimate=self.predict_duration(),
         )
 
     def emit_airflow_dag(

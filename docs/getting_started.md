@@ -167,7 +167,8 @@ import scale_forecasting as sf
 
 forecaster = sf.Forecaster.from_file("configs/ensemble_demo.json")
 
-# Check live series lengths and fold coverage before launching
+# Check offline workload & approximate cost, or measure live series lengths before launching
+print(forecaster.dry_run().duration_estimate.summary())
 print(forecaster.feasibility())
 
 # Submit the per-family DAG and stream live progress until completion

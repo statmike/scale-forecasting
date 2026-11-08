@@ -977,3 +977,173 @@ def test_an_unreadable_panel_warns_and_defers_rather_than_refusing_the_run(
 
     monkeypatch.setattr(launch_plan, "read_series_lengths", _boom)
     assert launch_plan.preflight_short_series(_bt_cfg(short_series="error")) is None
+
+
+# --- Pre-run duration & cost estimation (Gap A + Gap B) ------------------------
+
+
+def test_duration_estimator_machine_shapes_and_worker_scaling() -> None:
+    """Shape-aware VM pricing (`e2` < `n2` < `c2`) and multi-worker pool scaling on `vertex`."""
+    from scale_forecasting.profiling.duration import predict_run_duration
+
+    def _vertex_cfg(machine_type: str, workers: int = 1) -> RunConfig:
+        return _cfg(
+            python_runtime="vertex",
+            data={"source_table": "source_series_native", "horizon": 14, "series_limit": 200},
+            models=["holtwinters", "theta"],
+            compute={"machine_type": machine_type, "workers": workers},
+        )
+
+    est_e2 = predict_run_duration(_vertex_cfg("e2-standard-4"))
+    est_n2 = predict_run_duration(_vertex_cfg("n2-standard-8"))
+    est_c2 = predict_run_duration(_vertex_cfg("c2-standard-30"))
+
+    assert est_e2.estimated_usd < est_n2.estimated_usd < est_c2.estimated_usd
+    assert "e2-standard-4" in est_e2.families[0].pricing_basis
+    assert "n2-standard-8" in est_n2.families[0].pricing_basis
+    assert "c2-standard-30" in est_c2.families[0].pricing_basis
+    assert est_n2.n_series_source == "series_limit"
+
+    est_w4 = predict_run_duration(_vertex_cfg("n2-standard-8", workers=4))
+    assert est_w4.families[0].parallel_slots > est_n2.families[0].parallel_slots
+    assert est_w4.families[0].exec_p50_s < est_n2.families[0].exec_p50_s
+    assert "4x n2-standard-8" in est_w4.families[0].pricing_basis
+
+
+def test_duration_estimator_gpu_sku_hierarchy_and_multi_gpu() -> None:
+    """GPU SKU hierarchy (`T4` < `L4` < `A100` < `A100_80GB` in USD; `A100` faster than `T4`)."""
+    from scale_forecasting.profiling.duration import predict_run_duration
+
+    def _gpu_cfg(gpu_type: str, accelerator_count: int = 1) -> RunConfig:
+        return _cfg(
+            python_runtime="vertex",
+            data={"source_table": "source_series_native", "horizon": 14, "series_limit": 400},
+            models=["tft"],
+            compute={
+                "families": {
+                    "deep_learning": {
+                        "runtime": "vertex",
+                        "hardware": "gpu",
+                        "gpu_type": gpu_type,
+                        "accelerator_count": accelerator_count,
+                    }
+                },
+            },
+        )
+
+    est_t4 = predict_run_duration(_gpu_cfg("T4", 1))
+    est_l4 = predict_run_duration(_gpu_cfg("L4", 1))
+    est_a100 = predict_run_duration(_gpu_cfg("A100", 1))
+    est_a100_80 = predict_run_duration(_gpu_cfg("A100_80GB", 1))
+
+    assert est_t4.estimated_usd < est_l4.estimated_usd
+    assert est_l4.estimated_usd < est_a100.estimated_usd
+    assert est_a100.estimated_usd < est_a100_80.estimated_usd
+    assert est_a100_80.families[0].exec_p50_s <= est_a100.families[0].exec_p50_s
+    assert est_a100.families[0].exec_p50_s < est_l4.families[0].exec_p50_s
+    assert est_l4.families[0].exec_p50_s < est_t4.families[0].exec_p50_s
+
+    est_l4_x2 = predict_run_duration(_gpu_cfg("L4", 2))
+    assert est_l4_x2.families[0].accelerator_count == 2
+    assert est_l4_x2.families[0].gpu_type == "L4"
+    assert est_l4_x2.families[0].parallel_slots > est_l4.families[0].parallel_slots
+    assert est_l4_x2.estimated_usd > est_l4.estimated_usd
+    df = est_l4_x2.to_dataframe()
+    assert df.loc[0, "gpu_type"] == "L4"
+    assert "2x L4" in str(df.loc[0, "pricing_basis"])
+
+
+def test_duration_estimator_automl_budget_and_warm_start_reuse() -> None:
+    """Vertex AutoML scales with `train_budget_milli_node_hours` and discounts warm-start tuning."""
+    from scale_forecasting.profiling.duration import predict_run_duration
+
+    cfg_1k = _cfg(
+        data={"source_table": "source_series_native", "horizon": 14, "series_limit": 100},
+        models=["vertex_tide"],
+        model_params={"vertex_tide": {"train_budget_milli_node_hours": 1000}},
+        compute={"families": {"automl": {"runtime": "vertex_automl"}}},
+    )
+    cfg_3k = _cfg(
+        data={"source_table": "source_series_native", "horizon": 14, "series_limit": 100},
+        models=["vertex_tide"],
+        model_params={"vertex_tide": {"train_budget_milli_node_hours": 3000}},
+        compute={"families": {"automl": {"runtime": "vertex_automl"}}},
+    )
+    cfg_warm = _cfg(
+        data={"source_table": "source_series_native", "horizon": 14, "series_limit": 100},
+        models=["vertex_tide"],
+        model_params={
+            "vertex_tide": {
+                "train_budget_milli_node_hours": 1000,
+                "reuse_tuning_from_run_id": "prior-123456789abc",
+            }
+        },
+        compute={"families": {"automl": {"runtime": "vertex_automl"}}},
+    )
+
+    est_1k = predict_run_duration(cfg_1k)
+    est_3k = predict_run_duration(cfg_3k)
+    est_warm = predict_run_duration(cfg_warm)
+
+    assert est_3k.estimated_usd > est_1k.estimated_usd > est_warm.estimated_usd
+    assert (
+        est_3k.families[0].exec_p50_s
+        > est_1k.families[0].exec_p50_s
+        > est_warm.families[0].exec_p50_s
+    )
+    assert "3.0 node-hr" in est_3k.families[0].pricing_basis
+    assert "warm-start" in est_warm.families[0].pricing_basis
+
+
+def test_duration_estimator_bigquery_dry_run_bytes() -> None:
+    """BigQuery native cost scales with `bq_dry_run_bytes` when provided."""
+    from scale_forecasting.profiling.duration import predict_run_duration
+
+    cfg_bq = _cfg(
+        data={"source_table": "source_series_native", "horizon": 14, "series_limit": 100},
+        models=["arima_plus", "timesfm"],
+    )
+    est_small = predict_run_duration(cfg_bq, bq_dry_run_bytes=10 * 1024**2)
+    est_large = predict_run_duration(cfg_bq, bq_dry_run_bytes=200 * 1024**3)
+
+    assert est_large.estimated_usd > est_small.estimated_usd
+    assert "bq dry-run" in est_large.families[0].pricing_basis
+
+
+def test_plan_run_feasibility_and_forecaster_sdk_surface_estimates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`plan_run`, `feasibility_report`, and `Forecaster.dry_run` surface duration & cost."""
+    import logging
+
+    import scale_forecasting as sf
+
+    cfg_unbounded = _cfg(
+        data={"source_table": "source_series_native", "horizon": 14},
+        models=["holtwinters", "arima_plus"],
+    )
+    with caplog.at_level(logging.INFO, logger="scale_forecasting"):
+        plan = launch_plan.plan_run(cfg_unbounded)
+    assert plan.duration_estimate is not None
+    assert plan.duration_estimate.n_series_source == "default_100"
+    assert "estimate (approx, not a quote):" in caplog.text
+    assert "assumed 100 series" in caplog.text
+
+    # Feasibility report wires both read_series_lengths and dry_run_source_bytes when native present
+    monkeypatch.setattr(launch_plan, "read_series_lengths", lambda cfg, **kw: [500] * 250)
+    monkeypatch.setattr(launch_plan, "dry_run_source_bytes", lambda cfg, **kw: 50 * 1024**3)
+    lines = launch_plan.feasibility_report(cfg_unbounded)
+    joined = "\n".join(lines)
+    assert "estimate (approx, not a quote):" in joined
+    assert "median_obs=500" in joined
+    assert "families:" in joined
+    assert "bq dry-run" in joined
+
+    # Forecaster SDK dry_run() + predict_duration()
+    forecaster = sf.Forecaster(cfg_unbounded)
+    dry = forecaster.dry_run()
+    assert dry.duration_estimate is not None
+    assert dry.estimated_usd is not None and dry.estimated_usd > 0.0
+    custom_est = forecaster.predict_duration(n_series=250, bq_dry_run_bytes=50 * 1024**3)
+    assert custom_est.n_series == 250
+    assert custom_est.n_series_source == "measured"

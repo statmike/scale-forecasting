@@ -38,6 +38,7 @@ coefficients against their own BigQuery registry via :func:`calibrate_duration_f
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
@@ -157,16 +158,19 @@ EMPIRICAL_MODEL_FIT_PRIORS: dict[str, tuple[float, float]] = {
     "tft": (0.920, 1.750),
     "neuralprophet": (18.500, 32.000),
     # Vertex AI AutoML family (4 models — amortized per series in cloud workflow)
+    "vertex_l2l": (12.000, 22.000),
     "vertex_AutoML": (12.000, 22.000),
     "vertex_seq2seq": (8.500, 15.000),
     "vertex_tft": (10.500, 18.000),
     "vertex_tide": (9.500, 16.500),
     # BigQuery ML Native family (2 models — SQL query execution amortized per series)
+    "arima_plus": (0.085, 0.160),
+    "timesfm": (0.065, 0.120),
     "bqml_arima_plus": (0.085, 0.160),
     "bqml_timesfm": (0.065, 0.120),
 }
 
-# Approximate hourly USD rate per worker slot / node for transparent cost estimation
+# Approximate fallback hourly USD rate per worker slot / node for transparent cost estimation
 _HOURLY_USD_BY_RUNTIME: dict[tuple[str, str], float] = {
     ("local", "cpu"): 0.0,
     ("local", "gpu"): 0.0,
@@ -184,6 +188,45 @@ _HOURLY_USD_BY_RUNTIME: dict[tuple[str, str], float] = {
     ("vertex_automl", "cpu"): 3.50,
     ("vertex_automl", "gpu"): 4.80,
 }
+
+# Approximate us-central1 on-demand (vcpu_usd_hr, gib_usd_hr) rates by GCE machine family
+_CPU_FAMILY_RATES: dict[str, tuple[float, float]] = {
+    "e2": (0.0218, 0.0029),
+    "n1": (0.0316, 0.0042),
+    "n2d": (0.0337, 0.0045),
+    "n2": (0.0388, 0.0052),
+    "c2": (0.0418, 0.0056),
+    "g2": (0.0310, 0.0041),
+    "a2": (0.0316, 0.0042),
+}
+
+# Managed service compute multiplier over raw GCE VM shapes
+_SERVICE_SURCHARGE: dict[str, float] = {
+    "gce": 1.00,
+    "gke": 1.05,
+    "spark": 1.12,
+    "vertex": 1.14,
+    "ray": 1.15,
+}
+
+# Approximate us-central1 on-demand accelerator hourly rates per attached GPU card
+_GPU_CARD_USD_HR: dict[str, float] = {
+    "T4": 0.35,
+    "L4": 0.70,
+    "A100": 2.93,
+    "A100_80GB": 3.93,
+}
+
+# Per-card throughput multiplier (< 1.0 = faster) for GPU-capable models
+_GPU_SPEEDUP_BY_TYPE: dict[str, float] = {
+    "T4": 0.42,
+    "L4": 0.35,
+    "A100": 0.22,
+    "A100_80GB": 0.20,
+}
+
+# Standard BigQuery on-demand analysis rate ($6.25 per TiB scanned)
+_BQ_ONDEMAND_USD_PER_TIB = 6.25
 
 
 @dataclass(frozen=True)
@@ -245,6 +288,10 @@ class FamilyDurationBreakdown:
     total_p50_s: float
     total_p90_s: float
     estimated_usd: float
+    machine_type: str | None = None
+    gpu_type: str | None = None
+    accelerator_count: int = 0
+    pricing_basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -260,6 +307,7 @@ class DurationEstimate:
     estimated_usd: float
     families: tuple[FamilyDurationBreakdown, ...]
     basis: str = "reference_5.49M_cells"
+    n_series_source: str = "configured"
 
     @property
     def total_p50_seconds(self) -> float:
@@ -309,6 +357,7 @@ class DurationEstimate:
         ]
         return {
             "n_series": self.n_series,
+            "n_series_source": self.n_series_source,
             "total_p50_s": round(self.total_p50_s, 2),
             "total_p90_s": round(self.total_p90_s, 2),
             "total_p50_minutes": round(self.total_p50_minutes, 2),
@@ -330,6 +379,8 @@ class DurationEstimate:
                 "runtime": f.runtime,
                 "mode": f.mode,
                 "hardware": f.hardware,
+                "machine_type": f.machine_type or "",
+                "gpu_type": f.gpu_type or "",
                 "n_models": len(f.models),
                 "n_borrowed": len(f.borrowed_models),
                 "n_executed": len(f.executed_models),
@@ -340,6 +391,7 @@ class DurationEstimate:
                 "total_p50_s": round(f.total_p50_s, 1),
                 "total_p90_s": round(f.total_p90_s, 1),
                 "estimated_usd": round(f.estimated_usd, 3),
+                "pricing_basis": f.pricing_basis,
             }
             for f in self.families
         ]
@@ -393,6 +445,118 @@ def _resolve_runtime_mode(
     return runtime, "in_process"
 
 
+def _format_bytes(num_bytes: int | float) -> str:
+    """Format a byte count compactly for pricing basis notes."""
+    val = float(max(0.0, num_bytes))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if val < 1024.0 or unit == "TiB":
+            return f"{val:.0f} {unit}" if unit == "B" else f"{val:.1f} {unit}"
+        val /= 1024.0
+    return f"{val:.1f} TiB"
+
+
+def _vm_hourly_usd(
+    machine_type: str,
+    *,
+    runtime: str,
+    hardware: str,
+    gpu_type: str | None = None,
+    accelerator_count: int = 0,
+) -> float:
+    """Estimate hourly on-demand USD for a single VM or pod node from its GCE shape and GPUs."""
+    from ..resources.catalog import machine_cores, machine_memory_bytes
+
+    cores = max(1, machine_cores(machine_type))
+    mem_gib = float(machine_memory_bytes(machine_type)) / float(1024**3)
+    family_prefix = machine_type.split("-", 1)[0] if "-" in machine_type else "n2"
+    vcpu_rate, gib_rate = _CPU_FAMILY_RATES.get(family_prefix, _CPU_FAMILY_RATES["n2"])
+    surcharge = _SERVICE_SURCHARGE.get(runtime, 1.10)
+    host_hr = (cores * vcpu_rate + mem_gib * gib_rate) * surcharge
+    if hardware == "gpu":
+        eff_gpu = gpu_type or "T4"
+        n_cards = max(1, accelerator_count or 1)
+        gpu_hr = _GPU_CARD_USD_HR.get(eff_gpu, 0.35) * n_cards * surcharge
+        return host_hr + gpu_hr
+    return host_hr
+
+
+def _resolve_family_machine_and_gpu(
+    cfg: RunConfig,
+    comp: Any,
+    eff_runtime: str,
+    eff_mode: str,
+    hardware: str,
+) -> tuple[str | None, str | None, int]:
+    """Resolve ``(machine_type, gpu_type, accelerator_count)`` for pricing & slot estimation."""
+    if eff_runtime in ("local", "bigquery", "vertex_automl"):
+        eff_gpu = (comp.gpu_type or cfg.compute.gpu_type) if hardware == "gpu" and comp else None
+        eff_acc = (comp.accelerator_count or 1) if hardware == "gpu" and comp else 0
+        return None, eff_gpu, eff_acc
+    if eff_runtime == "spark" and eff_mode == "serverless":
+        return None, ("L4" if hardware == "gpu" else None), (1 if hardware == "gpu" else 0)
+
+    eff_gpu = (
+        (comp.gpu_type if comp and comp.gpu_type else cfg.compute.gpu_type)
+        if hardware == "gpu"
+        else None
+    )
+    eff_acc = (
+        max(
+            1,
+            (
+                comp.accelerator_count
+                if comp and comp.accelerator_count
+                else cfg.compute.accelerator_count
+            ),
+        )
+        if hardware == "gpu"
+        else 0
+    )
+    comp_mt = None if comp is None else comp.machine_type
+    if comp_mt and comp_mt != "auto":
+        return comp_mt, eff_gpu, eff_acc
+    if cfg.compute.machine_type and cfg.compute.machine_type != "auto":
+        return cfg.compute.machine_type, eff_gpu, eff_acc
+
+    if hardware == "gpu":
+        if eff_gpu == "L4":
+            l4_map = {
+                1: "g2-standard-8",
+                2: "g2-standard-24",
+                4: "g2-standard-48",
+                8: "g2-standard-96",
+            }
+            return l4_map.get(eff_acc, "g2-standard-8"), eff_gpu, eff_acc
+        if eff_gpu == "A100":
+            a100_map = {
+                1: "a2-highgpu-1g",
+                2: "a2-highgpu-2g",
+                4: "a2-highgpu-4g",
+                8: "a2-highgpu-8g",
+                16: "a2-megagpu-16g",
+            }
+            return a100_map.get(eff_acc, "a2-highgpu-1g"), eff_gpu, eff_acc
+        if eff_gpu == "A100_80GB":
+            a80_map = {
+                1: "a2-ultragpu-1g",
+                2: "a2-ultragpu-2g",
+                4: "a2-ultragpu-4g",
+                8: "a2-ultragpu-8g",
+            }
+            return a80_map.get(eff_acc, "a2-ultragpu-1g"), eff_gpu, eff_acc
+        if eff_runtime == "ray":
+            return cfg.compute.ray_gpu_machine_type or "n1-standard-8", eff_gpu, eff_acc
+        return ("n1-standard-16" if eff_acc == 4 else "n1-standard-8"), eff_gpu, eff_acc
+
+    if eff_runtime == "ray":
+        return cfg.compute.ray_cpu_machine_type or "n1-standard-8", None, 0
+    if eff_runtime == "spark" and eff_mode == "cluster":
+        mfam = cfg.compute.machine_family
+        prefix = "n1" if mfam == "auto" else mfam
+        return f"{prefix}-standard-8", None, 0
+    return "n2-standard-8", None, 0
+
+
 def _estimate_parallel_slots(
     cfg: RunConfig,
     runtime: str,
@@ -400,18 +564,26 @@ def _estimate_parallel_slots(
     workers: int | None,
     n_series: int,
     n_exec_models: int,
+    *,
+    machine_type: str | None = None,
+    accelerator_count: int = 0,
 ) -> int:
     """Estimate effective concurrent series-cell slots for a family job."""
+    from ..resources.catalog import machine_cores
+
     total_cells = max(1, n_series * max(1, n_exec_models))
     if runtime == "local":
         return min(total_cells, 4)
     if runtime == "bigquery":
         return max(1, min(total_cells, 32))
+    cores = machine_cores(machine_type) if machine_type else 8
+    gpu_slots = max(2, 2 * max(1, accelerator_count or 1))
     if runtime == "gce":
-        return min(total_cells, 8 if hardware == "cpu" else 4)
+        per_vm = max(1, cores - 1) if hardware == "cpu" else max(4, gpu_slots)
+        return min(total_cells, per_vm)
     if runtime in ("vertex", "gke"):
         w = max(1, workers or cfg.compute.workers or 1)
-        slots_per_worker = 8 if hardware == "cpu" else 2
+        slots_per_worker = max(1, cores - 1) if hardware == "cpu" else gpu_slots
         return min(total_cells, w * slots_per_worker)
     if runtime == "spark":
         max_exec = cfg.compute.max_executors or cfg.compute.max_workers or 16
@@ -419,7 +591,7 @@ def _estimate_parallel_slots(
         return min(total_cells, max(4, min(max_exec * slots_per_exec, total_cells // 2 + 4)))
     if runtime == "ray":
         max_nodes = cfg.compute.ray_max_nodes or 8
-        slots_per_node = 7 if hardware == "cpu" else 2
+        slots_per_node = max(1, cores - 1) if hardware == "cpu" else gpu_slots
         return min(total_cells, max(4, min(max_nodes * slots_per_node, total_cells // 2 + 4)))
     if runtime == "vertex_automl":
         return max(1, n_series)
@@ -433,6 +605,7 @@ def _model_single_cell_seconds(
     n_series: int,
     median_n_obs: float,
     hardware: str,
+    gpu_type: str | None = None,
     model_priors: Mapping[str, tuple[float, float]],
 ) -> tuple[float, float]:
     """Compute `(p50_s, p90_s)` for one `(ts_id, model_spec)` cell including folds and HPO."""
@@ -480,7 +653,7 @@ def _model_single_cell_seconds(
     if hardware == "gpu":
         try:
             if get_model(bname).gpu_capable:
-                hw_factor = 0.38
+                hw_factor = _GPU_SPEEDUP_BY_TYPE.get(gpu_type or "T4", 0.38)
         except Exception as exc:  # noqa: BLE001 - ignore unknown model
             import logging
 
@@ -492,6 +665,141 @@ def _model_single_cell_seconds(
     return base_p50 * mult, base_p90 * mult
 
 
+def _automl_budget_summary(
+    cfg: RunConfig,
+    fam_exec: tuple[str, ...],
+) -> tuple[float, float, bool]:
+    """Return ``(total_node_hours, avg_node_hours, any_warm_reuse)`` across AutoML models."""
+    total_nh = 0.0
+    any_warm = False
+    for m in fam_exec:
+        bname = base_model_name(m)
+        authored = cfg.model_params.get(m) or cfg.model_params.get(bname) or {}
+        raw_milli = authored.get("train_budget_milli_node_hours", 1000)
+        if isinstance(raw_milli, int | float | str) and not isinstance(raw_milli, bool):
+            try:
+                milli_val = float(raw_milli)
+            except ValueError:
+                milli_val = 1000.0
+        else:
+            milli_val = 1000.0
+        nh = max(0.25, milli_val / 1000.0)
+        warm = bool(
+            authored.get("stage_1_tuning_result_artifact_uri")
+            or authored.get("reuse_tuning_from_run_id")
+        )
+        if warm:
+            any_warm = True
+            nh *= 0.65
+        total_nh += nh
+    avg_nh = total_nh / max(1, len(fam_exec))
+    return total_nh, avg_nh, any_warm
+
+
+def _estimate_family_cost_and_basis(
+    cfg: RunConfig,
+    *,
+    comp: Any,
+    eff_runtime: str,
+    eff_mode: str,
+    hardware: str,
+    fam_exec: tuple[str, ...],
+    eff_n_series: int,
+    eff_n_obs: float,
+    slots: int,
+    tot_p50: float,
+    machine_type: str | None,
+    gpu_type: str | None,
+    accelerator_count: int,
+    bq_dry_run_bytes: int | None = None,
+) -> tuple[float, str]:
+    """Estimate USD cost and human-readable pricing basis for one executed family job."""
+    from ..resources.catalog import machine_cores
+
+    if eff_runtime == "local":
+        return 0.0, "local in-process ($0 cloud)"
+
+    n_passes = (1 + cfg.backtest.n_folds) if cfg.backtest.enabled else 1
+
+    if eff_runtime == "bigquery":
+        if bq_dry_run_bytes is not None and bq_dry_run_bytes >= 0:
+            scan_per_pass = float(bq_dry_run_bytes)
+            scan_label = f"bq dry-run {_format_bytes(bq_dry_run_bytes)}"
+        else:
+            n_cols = 3 + len(cfg.features.all_covariates)
+            scan_per_pass = float(eff_n_series) * eff_n_obs * float(n_cols) * 24.0
+            scan_label = "est. SQL scan"
+        total_scan_bytes = scan_per_pass * max(1, len(fam_exec)) * n_passes
+        scan_usd = (total_scan_bytes / float(1024**4)) * _BQ_ONDEMAND_USD_PER_TIB
+        slot_usd = 0.0
+        for m in fam_exec:
+            bname = base_model_name(m)
+            if "timesfm" in bname or "ai_forecast" in bname:
+                slot_usd += 0.012 + 0.000035 * eff_n_series * n_passes
+            else:
+                slot_usd += 0.008 + 0.000020 * eff_n_series * n_passes
+        return scan_usd + slot_usd, f"{scan_label} + BQML"
+
+    if eff_runtime == "vertex_automl":
+        total_nh, _, any_warm = _automl_budget_summary(cfg, fam_exec)
+        rate_per_nh = 4.80 if hardware == "gpu" else 3.46
+        eval_pred_ovh = len(fam_exec) * (0.45 + 0.00002 * eff_n_series * n_passes)
+        est_usd = total_nh * rate_per_nh + eval_pred_ovh
+        warm_tag = " warm-start" if any_warm else ""
+        return est_usd, f"{total_nh:.1f} node-hr AutoML budget{warm_tag}"
+
+    if eff_runtime == "spark" and eff_mode == "serverless":
+        node_equiv = max(1.0, float(slots) / (8.0 if hardware == "cpu" else 2.0))
+        unit_rate = 0.42 if hardware == "cpu" else 1.35 * max(1, accelerator_count or 1)
+        est_usd = (tot_p50 / 3600.0) * unit_rate * node_equiv
+        hw_label = "L4 GPU" if hardware == "gpu" else "CPU"
+        return est_usd, f"serverless ({hw_label} DCU)"
+
+    if eff_runtime == "spark" and eff_mode == "connect":
+        node_equiv = max(1.0, float(slots) / 8.0)
+        est_usd = (tot_p50 / 3600.0) * 0.38 * node_equiv
+        return est_usd, "spark connect session"
+
+    eff_mt = machine_type or "n2-standard-8"
+    worker_hr = _vm_hourly_usd(
+        eff_mt,
+        runtime=eff_runtime,
+        hardware=hardware,
+        gpu_type=gpu_type,
+        accelerator_count=accelerator_count,
+    )
+    gpu_tag = f" ({max(1, accelerator_count)}x {gpu_type or 'T4'})" if hardware == "gpu" else ""
+
+    if eff_runtime == "gce":
+        return (tot_p50 / 3600.0) * worker_hr, f"1x {eff_mt}{gpu_tag}"
+
+    if eff_runtime == "vertex" or (eff_runtime == "gke" and eff_mode != "gke"):
+        n_workers = max(1, (comp.workers if comp and comp.workers else cfg.compute.workers) or 1)
+        return (tot_p50 / 3600.0) * worker_hr * n_workers, f"{n_workers}x {eff_mt}{gpu_tag}"
+
+    # Autoscaling pool runtimes: ray (vertex / gke / warm_cluster) and spark cluster
+    cores = max(1, machine_cores(eff_mt))
+    per_node_slots = (
+        max(1, cores - 1) if hardware == "cpu" else max(2, 2 * max(1, accelerator_count or 1))
+    )
+    n_workers = max(1, math.ceil(float(slots) / float(per_node_slots)))
+    head_hr = 0.0
+    head_note = ""
+    if eff_runtime == "ray" and eff_mode == "vertex":
+        head_mt = cfg.compute.ray_head_machine_type or "n1-standard-16"
+        head_hr = _vm_hourly_usd(head_mt, runtime="ray", hardware="cpu")
+        head_note = f" + {head_mt} head"
+    elif (
+        eff_runtime == "spark" and eff_mode == "cluster" and not (comp and comp.spark_cluster_name)
+    ):
+        head_mt = f"{eff_mt.split('-', 1)[0]}-standard-4"
+        head_hr = _vm_hourly_usd(head_mt, runtime="spark", hardware="cpu")
+        head_note = " + master"
+
+    est_usd = (tot_p50 / 3600.0) * (n_workers * worker_hr + head_hr)
+    return est_usd, f"~{n_workers}x {eff_mt}{gpu_tag}{head_note}"
+
+
 def predict_run_duration(
     cfg: RunConfig,
     *,
@@ -500,6 +808,7 @@ def predict_run_duration(
     where: str | None = None,
     borrowed_models: Iterable[str] | None = None,
     calibration: DurationCalibration | None = None,
+    bq_dry_run_bytes: int | None = None,
 ) -> DurationEstimate:
     """Predict wall-clock duration (`p50` / `p90`) and cloud cost (`USD`) for ``cfg`` (pure).
 
@@ -514,13 +823,24 @@ def predict_run_duration(
             ``reuse_prior_runs`` instead of re-fitted.
         calibration: Optional custom :class:`DurationCalibration` from
             :func:`calibrate_duration_from_registry`.
+        bq_dry_run_bytes: Optional BigQuery dry-run byte count for ``source_table`` to refine
+            on-demand SQL scan estimates for ``native`` models.
 
     Returns:
         :class:`DurationEstimate` with per-family breakdowns, bottleneck family, and cost.
     """
     from ..dag import plan_dag
 
-    eff_n_series = int(n_series or cfg.data.series_limit or 100)
+    if n_series is not None:
+        eff_n_series = int(n_series)
+        n_series_source = "measured"
+    elif cfg.data.series_limit is not None:
+        eff_n_series = int(cfg.data.series_limit)
+        n_series_source = "series_limit"
+    else:
+        eff_n_series = 100
+        n_series_source = "default_100"
+
     eff_n_obs = float(median_n_obs if median_n_obs is not None else _REF_N_OBS)
     borrowed_set = frozenset(borrowed_models or ())
 
@@ -576,10 +896,14 @@ def predict_run_duration(
                     total_p50_s=1.5 if eff_runtime != "local" else 0.05,
                     total_p90_s=2.5 if eff_runtime != "local" else 0.10,
                     estimated_usd=0.0,
+                    pricing_basis="borrowed from prior run ($0 compute)",
                 )
             )
             continue
 
+        eff_mt, eff_gpu, eff_acc = _resolve_family_machine_and_gpu(
+            cfg, comp, eff_runtime, eff_mode, hardware
+        )
         prov_p50, prov_p90 = prov_priors.get(
             (eff_runtime, eff_mode, hardware),
             prov_priors.get((eff_runtime, eff_mode, "cpu"), (60.0, 90.0)),
@@ -591,6 +915,8 @@ def predict_run_duration(
             None if comp is None else comp.workers,
             eff_n_series,
             len(fam_exec),
+            machine_type=eff_mt,
+            accelerator_count=eff_acc,
         )
 
         # Storage Read + Write I/O time
@@ -607,6 +933,7 @@ def predict_run_duration(
                 n_series=eff_n_series,
                 median_n_obs=eff_n_obs,
                 hardware=hardware,
+                gpu_type=eff_gpu,
                 model_priors=model_priors,
             )
             per_series_p50 += m_p50
@@ -616,6 +943,13 @@ def predict_run_duration(
         exec_p50_s = ovh_p50 + (eff_n_series * per_series_p50) / max(1, slots)
         exec_p90_s = ovh_p90 + (eff_n_series * per_series_p90) / max(1, slots)
 
+        # Scale AutoML wall-clock with train_budget_milli_node_hours / warm-start reuse
+        if eff_runtime == "vertex_automl":
+            _, avg_nh, _ = _automl_budget_summary(cfg, fam_exec)
+            budget_time_mult = max(0.50, avg_nh**0.75)
+            exec_p50_s *= budget_time_mult
+            exec_p90_s *= budget_time_mult
+
         # BigQuery SQL models have a query compilation + slot floor (~35s on live BQ)
         if eff_runtime == "bigquery":
             exec_p50_s = max(35.0, exec_p50_s)
@@ -624,11 +958,22 @@ def predict_run_duration(
         tot_p50 = prov_p50 + io_s + exec_p50_s
         tot_p90 = prov_p90 + io_s * 1.25 + exec_p90_s
 
-        hourly_rate = _HOURLY_USD_BY_RUNTIME.get((eff_runtime, hardware), 0.40)
-        node_equiv = max(1.0, float(slots) / (8.0 if hardware == "cpu" else 2.0))
-        if eff_runtime in ("local", "bigquery"):
-            node_equiv = 1.0
-        est_usd = (tot_p50 / 3600.0) * hourly_rate * node_equiv
+        est_usd, pricing_basis = _estimate_family_cost_and_basis(
+            cfg,
+            comp=comp,
+            eff_runtime=eff_runtime,
+            eff_mode=eff_mode,
+            hardware=hardware,
+            fam_exec=fam_exec,
+            eff_n_series=eff_n_series,
+            eff_n_obs=eff_n_obs,
+            slots=slots,
+            tot_p50=tot_p50,
+            machine_type=eff_mt,
+            gpu_type=eff_gpu,
+            accelerator_count=eff_acc,
+            bq_dry_run_bytes=bq_dry_run_bytes,
+        )
 
         family_breakdowns.append(
             FamilyDurationBreakdown(
@@ -649,6 +994,10 @@ def predict_run_duration(
                 total_p50_s=tot_p50,
                 total_p90_s=tot_p90,
                 estimated_usd=est_usd,
+                machine_type=eff_mt,
+                gpu_type=eff_gpu,
+                accelerator_count=eff_acc,
+                pricing_basis=pricing_basis,
             )
         )
 
@@ -684,6 +1033,7 @@ def predict_run_duration(
         estimated_usd=total_usd,
         families=tuple(family_breakdowns),
         basis=basis,
+        n_series_source=n_series_source,
     )
 
 

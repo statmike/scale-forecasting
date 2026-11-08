@@ -47,7 +47,7 @@ python -m scale_forecasting.playground --catalog
 # Run any installed Python model on synthetic panel data with 3-fold backtesting
 python -m scale_forecasting.playground --model holtwinters --horizon 14 --backtest
 
-# Validate a RunConfig, compute deterministic run_id, and estimate workload offline
+# Validate RunConfig, compute deterministic run_id, and estimate workload/cost
 python -m scale_forecasting.main --config configs/ensemble_demo.json --dry-run
 ```
 
@@ -57,7 +57,8 @@ Python SDK equivalent:
 from scale_forecasting import Forecaster
 
 f = Forecaster.from_file("configs/ensemble_demo.json")
-dry = f.dry_run()          # DryRunResult(run_id, fanout, python_models, bq_models)
+dry = f.dry_run()          # DryRunResult(run_id, fanout, duration_estimate, ...)
+est = f.predict_duration() # DurationEstimate(total_p50_minutes, estimated_usd, ...)
 dag_nodes = f.dag()        # Planned per-family DagNode tuple
 ```
 

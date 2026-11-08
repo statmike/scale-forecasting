@@ -82,6 +82,29 @@ The table below gives estimated cost bands for common operations in `us-central1
 
 ---
 
+## 6. Pre-run duration & cost estimation
+
+Before launching any cloud compute, [`predict_run_duration`](./api/profiling.md) estimates critical-path wall-clock time (`p50`/`p90`) and approximate `us-central1` on-demand USD (`not a quote`) directly from your `RunConfig`. The estimator accounts for GCE machine family and vCPU/GiB size (`e2`, `n1`, `n2d`, `n2`, `c2`), GPU SKU (`T4`, `L4`, `A100`, `A100_80GB`) × `accelerator_count`, managed-service surcharges and cluster head nodes, Vertex AI AutoML `train_budget_milli_node_hours` (including warm-start tuning artifact discounts), and BigQuery on-demand bytes (`\$6.25/TiB` plus BQML model/inference floor).
+
+- **Offline preview (zero GCP calls):** `--dry-run` (CLI), `forecaster.dry_run().duration_estimate` (SDK), and `validate_and_dry_run` (MCP) report the estimate immediately using `data.series_limit` (or an explicit `assumed 100 series` note when unbounded).
+- **Live-panel & BigQuery dry-run calibration:** `--feasibility` (CLI) and `forecaster.feasibility()` (SDK) measure the actual series count and median history length from `data.source_table`, run a zero-cost BigQuery `dry_run=True` byte check when `native` SQL models are configured, and print the per-family breakdown.
+- **Per-family table & custom registry calibration:**
+
+```python
+import scale_forecasting as sf
+
+forecaster = sf.Forecaster.from_file("configs/ensemble_demo.json")
+est = forecaster.predict_duration(n_series=10_000, median_n_obs=730)
+print(est.summary())
+print(est.to_dataframe())   # machine_type, gpu_type, total_p50_s, estimated_usd, pricing_basis
+
+# Optional: fit timing priors against your own completed runs in BigQuery
+cal = sf.Registry().calibrate_duration_model()
+print(forecaster.predict_duration(n_series=10_000, calibration=cal).summary())
+```
+
+---
+
 ## Where next
 
 - **[Choosing a runtime](./choosing_a_runtime.md)** — compare the 7 runtimes by workload fit, sharding, and operational model.
