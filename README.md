@@ -9,6 +9,7 @@
 [![Documentation](https://img.shields.io/badge/Docs-Documentation%20Site-0F9D58?style=for-the-badge&logo=materialformkdocs&logoColor=white)](https://statmike.github.io/scale-forecasting/)
 [![Getting Started](https://img.shields.io/badge/Start%20Here-Getting%20Started-EA4335?style=for-the-badge&logo=readthedocs&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/docs/getting_started.md)
 [![AI Agents & MCP](https://img.shields.io/badge/AI%20Agents-Skill%20%26%20MCP%20Server-8E24AA?style=for-the-badge)](https://github.com/statmike/scale-forecasting/blob/main/docs/agent_and_mcp_guide.md)
+[![Forecaster Showcase](https://img.shields.io/badge/Showcase-25--Min%20Live%20Demo-FB8C00?style=for-the-badge&logo=google-cloud&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/docs/showcase.md)
 [![Workshop](https://img.shields.io/badge/Workshop-Hands--On%20Lab-F4B400?style=for-the-badge&logo=google&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/docs/workshop.md)
 [![Terraform](https://img.shields.io/badge/Terraform-Two--Stage%20Deploy-7B42BC?style=for-the-badge&logo=terraform&logoColor=white)](https://github.com/statmike/scale-forecasting/blob/main/terraform/README.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-4E5D6C?style=for-the-badge)](https://github.com/statmike/scale-forecasting/blob/main/LICENSE)
@@ -124,11 +125,12 @@ import scale_forecasting as sf
 reg = sf.Registry()
 sop_df = reg.sop_summary_df(limit=5)  # Pure BigQuery SQL scorecard — always available
 if reg.probe_bq_agent().ready:        # Safe check-and-run guard
-    turn1 = reg.ask("Which model won on the latest completed run and what was its pooled WAPE?")
-    turn2 = reg.ask("Show the FVA waterfall stages for that same run.", conversation_id=turn1.conversation_id)
+    chat = reg.chat()                 # Stateful multi-turn DataAgent session
+    turn1 = chat("Which model won on the latest completed run and what was its pooled WAPE?")
+    turn2 = chat("Show the FVA waterfall stages for that same run.")
 ```
 
-Full operator loop: [Running and reviewing (`docs/running_and_reviewing.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md) and [Platform overview (`docs/overview.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md).
+Full operator loop & live 25-minute run-of-show: [Forecaster showcase (`docs/showcase.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/showcase.md), [Running and reviewing (`docs/running_and_reviewing.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/running_and_reviewing.md), and [Platform overview (`docs/overview.md`)](https://github.com/statmike/scale-forecasting/blob/main/docs/overview.md).
 
 ---
 

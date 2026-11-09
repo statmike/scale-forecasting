@@ -63,4 +63,5 @@ flowchart TD
 - **[Choosing a runtime](./choosing_a_runtime.md)** — match your workload and team constraints to the right execution engine.
 - **[Cost estimates & controls](./cost_estimates.md)** — review service-by-service billing drivers, order-of-magnitude run bands, and always-on disclosures.
 - **[Getting started](./getting_started.md)** — install the package, run a zero-cloud forecast locally, and deploy to your Google Cloud project.
-- **[Validation ledger](./validation.md)** — inspect the 42 live smoke configurations, 20 demo configurations, and 100k-series scale proofs.
+- **[Forecaster showcase](./showcase.md)** — walk through the 25-minute live practitioner showcase (`configs/forecaster_showcase.json`) with pre-recorded cloud and `DataAgent` outputs.
+- **[Validation ledger](./validation.md)** — inspect the 42 live smoke configurations, 21 demo configurations, and 100k-series scale proofs.

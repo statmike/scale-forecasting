@@ -90,7 +90,7 @@ def test_all_shipped_configs_validate_with_schema_key_and_preserve_run_id() -> N
     ]
     smoke_paths = sorted((REPO_ROOT / "configs" / "smokes").glob("*.json"))
     config_paths = demo_paths + smoke_paths
-    assert len(config_paths) == 62
+    assert len(config_paths) == 63
 
     schema_props = set(schema["properties"].keys())
     for path in config_paths:

@@ -1,7 +1,7 @@
 """Built-in Model Context Protocol (MCP) server for `scale-forecasting` over `stdio`.
 
 Exposes the platform's configuration schema, canonical catalogs (37 models, 21 metrics, 7 runtimes,
-4 GPU types, 13 extras, 11 views, 62 shipped configs), environment readiness probe, offline model
+4 GPU types, 13 extras, 11 views, 63 shipped configs), environment readiness probe, offline model
 playground, `RunConfig` validator and DAG planner, Airflow DAG emitter, and live BigQuery registry
 inspection/review/repair/conversational analytics tools to any MCP-compatible AI coding agent
 (Google Antigravity `agy` CLI & IDE, Claude Code, Cursor, VS Code GitHub Copilot, Windsurf, OpenAI
@@ -266,9 +266,9 @@ class McpServer:
             },
             {
                 "uri": "forecast://catalog/configs",
-                "name": "Shipped Demo & Smoke Configurations (62 Configs)",
+                "name": "Shipped Demo & Smoke Configurations (63 Configs)",
                 "description": (
-                    "All 20 root demo configs and 42 smoke configs with run_ids and models."
+                    "All 21 root demo configs and 42 smoke configs with run_ids and models."
                 ),
                 "mimeType": "application/json",
             },

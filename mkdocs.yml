@@ -68,6 +68,7 @@ plugins:
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - pymdownx.details
   - pymdownx.superfences:
       custom_fences:
@@ -103,6 +104,7 @@ nav:
       - Running & reviewing: running_and_reviewing.md
       - Operations runbook: operations.md
   - Demo:
+      - Forecaster showcase: showcase.md
       - Workshop: workshop.md
       - Notebook tour:
           - notebooks/README.md

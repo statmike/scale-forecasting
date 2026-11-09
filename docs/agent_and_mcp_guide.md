@@ -7,7 +7,7 @@ flowchart TD
     subgraph Truth["Single Source of Truth (Python Code & Registries)"]
         T1["config.py (RunConfig + 14 Blocks) · auto_policy.py · benchmarks.py (20 DGPs + 9 Public)"]
         T2["models/* (37) · metrics/* (21) · resources/catalog.py · registry/views.py (11 Views)"]
-        T3["configs/*.json (20 Demo + 42 Smokes) · registry/metadata.py · bq_agent/*"]
+        T3["configs/*.json (21 Demo + 42 Smokes) · registry/metadata.py · bq_agent/*"]
     end
 
     subgraph Surfaces["Five Agent-First Surfaces"]
@@ -156,7 +156,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | :--- | :--- | :--- |
 | [`skills/scale-forecasting/SKILL.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/SKILL.md) | YAML frontmatter (`name`, `description`) + 4-step operational workflow (Probe → Author & Validate `RunConfig` → Pre-Flight & Execute across 5 paths → Review & Surgically Repair). | Hand-authored workflow guide |
 | [`skills/scale-forecasting/references/config_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/config_reference.md) | Every field, type, default, and constraint across `RunConfig` and all 14 nested Pydantic config classes, 7 cross-field normalization rules, GPU-to-VM shape matrix, and `run_id` digest exclusions. | Auto-generated from [`config.py`](./api/config.md) |
-| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **37 models**, **21 metrics**, **7 runtimes**, **13 extras**, **4 source / 5 registry / 11 view schemas**, and **62 shipped configs** (`20` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
+| [`skills/scale-forecasting/references/catalog_reference.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/catalog_reference.md) | Complete tables for all **37 models**, **21 metrics**, **7 runtimes**, **13 extras**, **4 source / 5 registry / 11 view schemas**, and **63 shipped configs** (`21` root demos + `42` smoke configs). | Auto-generated from [`models/`](./api/models.md), [`metrics/`](./api/metrics.md), [`registry/`](./api/registry_views.md), and [`configs/`](https://github.com/statmike/scale-forecasting/blob/main/configs/README.md) |
 | [`skills/scale-forecasting/references/execution_paths_and_ops.md`](https://github.com/statmike/scale-forecasting/blob/main/skills/scale-forecasting/references/execution_paths_and_ops.md) | Exact CLI commands and Python SDK snippets for `SF_*` environment variables, all 5 execution paths, monitoring/calibration/review, surgical cell repair (`retry_run`), and registry operations (`registry.ops`). | Auto-generated from [`agent_surfaces.py`](./api/agent_surfaces.md) |
 
 ---
@@ -174,7 +174,7 @@ The [`skills/scale-forecasting/`](https://github.com/statmike/scale-forecasting/
 | `forecast://catalog/models` | `application/json` | All 37 models with family, runtime, package, extra, covariate flags, explainability, and local availability. |
 | `forecast://catalog/metrics` | `application/json` | All 21 evaluation metrics (16 point + 5 interval) with direction and requirements. |
 | `forecast://catalog/runtimes` | `application/json` | All 7 compute runtimes and 4 GPU types (`T4`, `L4`, `A100`, `A100_80GB`). |
-| `forecast://catalog/configs` | `application/json` | All 62 shipped configs (20 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
+| `forecast://catalog/configs` | `application/json` | All 63 shipped configs (21 root demo configs + 42 smoke configs) with `run_id`, runtime, and models. |
 | `forecast://catalog/views` | `application/json` | The 4 source tables, 5 registry tables, and 11 analytical SQL views. |
 
 ### 14 MCP Tools (`tools/list` & `tools/call`)
@@ -339,7 +339,7 @@ Add `"$schema"` to any config JSON file to get instant field autocomplete, hover
 
 For LLM web crawlers, documentation indexers, and notebook/chat context attachment, two standard files are generated in `docs/` and published at the root of the documentation site:
 - **[`llms.txt`](./llms.txt):** Concise markdown index of the platform's architecture, agent surfaces, positioning guides, and reference pages.
-- **[`llms-full.txt`](./llms-full.txt):** Single-file context bundle concatenating `llms.txt` with the complete `RunConfig` schema reference, all 37 models / 21 metrics / 7 runtimes / 13 extras / 62 configs, and all 5 execution paths.
+- **[`llms-full.txt`](./llms-full.txt):** Single-file context bundle concatenating `llms.txt` with the complete `RunConfig` schema reference, all 37 models / 21 metrics / 7 runtimes / 13 extras / 63 configs, and all 5 execution paths.
 
 ---
 
@@ -350,7 +350,7 @@ Hand-written agent prompts and JSON schemas rot the moment a new model is regist
 1. **Introspection Over Duplication ([`scale_forecasting.agent_surfaces`](./api/agent_surfaces.md)):**
    - `build_run_config_json_schema()` calls `RunConfig.model_json_schema()` and injects the optional `"$schema"` property and `$id` URI.
    - `render_skill_config_reference()` walks `_CONFIG_MODELS` (`RunConfig` + all 14 nested Pydantic models) and formats every field's type annotation, default value, and numeric/length constraints directly from `model_cls.model_fields`.
-   - `render_skill_catalog_reference()` iterates over `list_models()`, `METRIC_NAMES`, `RUNTIME_CATALOG`, `ALL_EXTRA_MODULES`, `SOURCE_TABLE_NAMES`, `REGISTRY_TABLE_NAMES`, `VIEW_NAMES`, and all 62 JSON files under `configs/` and `configs/smokes/`.
+   - `render_skill_catalog_reference()` iterates over `list_models()`, `METRIC_NAMES`, `RUNTIME_CATALOG`, `ALL_EXTRA_MODULES`, `SOURCE_TABLE_NAMES`, `REGISTRY_TABLE_NAMES`, `VIEW_NAMES`, and all 63 JSON files under `configs/` and `configs/smokes/`.
 2. **One-Command Regeneration (`make agent-surfaces`):**
    ```bash
    make agent-surfaces
@@ -358,5 +358,5 @@ Hand-written agent prompts and JSON schemas rot the moment a new model is regist
    ```
 3. **Automated Pre-Commit & CI Gate ([`tests/unit/test_agent_surfaces.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_agent_surfaces.py) & [`tests/unit/test_mcp_server.py`](https://github.com/statmike/scale-forecasting/blob/main/tests/unit/test_mcp_server.py)):**
    - `test_agent_surfaces_zero_drift` calls `check_agent_surfaces()` in `.githooks/pre-commit` and CI. If any of the 6 generated files on disk differs by a single byte from what current code produces, the commit is blocked with instructions to run `make agent-surfaces`.
-   - `test_all_shipped_configs_validate_with_schema_key_and_preserve_run_id` validates all 62 shipped configs (plus `"$schema"` round-trip and `run_id` invariance) against `docs/schemas/run_config.schema.json`.
+   - `test_all_shipped_configs_validate_with_schema_key_and_preserve_run_id` validates all 63 shipped configs (plus `"$schema"` round-trip and `run_id` invariance) against `docs/schemas/run_config.schema.json`.
    - `test_mcp_server.py` exercises all 7 MCP resources and 14 MCP tools both in-process and over a real `python -m scale_forecasting.mcp` subprocess `stdio` pipe using both newline-delimited and `Content-Length` JSON-RPC framing.

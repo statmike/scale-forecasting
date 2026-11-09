@@ -1441,7 +1441,7 @@ def test_t1_f1_mode3_hierarchy_config_auto_normalization() -> None:
 
 
 def test_t1_f2_spatial_temporal_weight_and_62_shipped_configs_hash_stability() -> None:
-    """Tier 1 F2 (>= 5 cases): spatial_temporal_weight validation, elision, and 62-config hashes."""
+    """Tier 1 F2 (>= 5 cases): spatial_temporal_weight validation, elision, and 63-config hashes."""
     # Case 1: Default is "auto"
     hc_def = HierarchyConfig()
     assert hc_def.spatial_temporal_weight == "auto"
@@ -1489,7 +1489,7 @@ def test_t1_f2_spatial_temporal_weight_and_62_shipped_configs_hash_stability() -
     )
     assert make_run_id(cfg_ct_auto) != make_run_id(cfg_ct_float)
 
-    # Case 5: All 62 shipped configs load cleanly with identical run_id when "auto" is explicit
+    # Case 5: All 63 shipped configs load cleanly with identical run_id when "auto" is explicit
     root_configs = [
         p
         for p in sorted((REPO_ROOT / "configs").glob("*.json"))
@@ -1497,7 +1497,7 @@ def test_t1_f2_spatial_temporal_weight_and_62_shipped_configs_hash_stability() -
     ]
     smoke_configs = sorted((REPO_ROOT / "configs" / "smokes").glob("*.json"))
     all_configs = root_configs + smoke_configs
-    assert len(all_configs) == 62
+    assert len(all_configs) == 63
     for cfg_path in all_configs:
         raw_dict = json.loads(cfg_path.read_text(encoding="utf-8"))
         c1 = RunConfig.model_validate(raw_dict)

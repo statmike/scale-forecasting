@@ -73,6 +73,7 @@ If you are evaluating `scale-forecasting` for production workloads, start with t
 
 | Recipe | Config File | Scale | Runtimes | What It Proves |
 | :--- | :--- | :--- | :--- | :--- |
+| **0. Forecaster Showcase** | [`configs/forecaster_showcase.json`](./forecaster_showcase.json) | 25 series | Spark + BigQuery ML + `DataAgent` | End-to-end practitioner walkthrough (`naive_seasonal`, `holtwinters`, `theta`, `lightgbm`, `arima_plus`, `timesfm` + `inverse_error`/`nnls` ensembles) with `reuse_prior_runs` cell borrowing and automatic BigQuery `DataAgent` sync. |
 | **1. Quickstart Evaluation** | [`configs/ensemble_demo.json`](./ensemble_demo.json) | 10 series | Spark $\parallel$ BigQuery ML | Fast multi-engine run testing Spark Python models, BigQuery SQL models, and stacked ensembling in under 2 minutes. |
 | **2. Multi-Family Hybrid** | [`configs/per_family_runtimes_demo.json`](./per_family_runtimes_demo.json) | 50 series | Spark + Ray GPU + BigQuery | Routes statistical models to Spark, deep learning to Ray GPU, and native models to BigQuery SQL under one `run_id`. |
 | **3. High-Throughput 100k Benchmark** | [`configs/explode_100k.json`](./explode_100k.json) | 100,000 series | Dataproc Spark Serverless | Full enterprise benchmark: 100,000 series across 4 models (400,000 cells) with dynamic executor autoscaling. |
@@ -85,6 +86,7 @@ Small, fast configurations used by the [interactive notebooks](../notebooks/READ
 
 | File | Series | Models | Runtimes Exercised | Purpose |
 | :--- | ---: | :--- | :--- | :--- |
+| [`forecaster_showcase.json`](./forecaster_showcase.json) | 25 | `naive_seasonal`, `holtwinters`, `theta`, `lightgbm`, `arima_plus`, `timesfm` | Spark + BigQuery + Ensemble + `DataAgent` | Curated hybrid showcase config backing [`docs/showcase.md`](../docs/showcase.md): 3 future covariates (`fallback`), 2-fold backtest, `inverse_error` + `nnls` ensembles, `reuse_prior_runs: true`, and `ensure_bq_agent: true`. |
 | [`explode_demo.json`](./explode_demo.json) | 10 | `theta`, `holtwinters`, `sarimax`, `xgboost` | Spark Serverless (CPU) | Fast Spark cross-join/explode demo with model persistence (`persist_models: true`). |
 | [`bq_native_demo.json`](./bq_native_demo.json) | 100 | `arima_plus`, `timesfm` | BigQuery SQL | Pure SQL-native forecasting with zero Python compute provisioning. |
 | [`mixed_demo.json`](./mixed_demo.json) | 10 | `theta`, `arima_plus`, `timesfm` | Spark $\parallel$ BigQuery | Minimal multi-engine run pairing a Python model with BigQuery native models. |

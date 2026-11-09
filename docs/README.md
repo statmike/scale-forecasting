@@ -40,6 +40,7 @@ Run forecasts, review results, and keep a deployment healthy.
 
 ## Demo
 Show the system end to end.
+- [showcase.md](./showcase.md) — **Forecaster showcase**: end-to-end guided tour (`configs/forecaster_showcase.json`) from a 5-second local baseline to hybrid Spark + BigQuery `TimesFM`, governed BigQuery S&OP views, and multi-turn `DataAgent` Q&A (with pre-recorded cloud outputs included).
 - [workshop.md](./workshop.md) — the guided walkthrough and notebook tour.
 
 ## Reference
@@ -94,7 +95,7 @@ always matches the code.
 End-to-end platform verification across Dataproc Serverless, Dataproc GCE clusters, Vertex AI Ray,
 Vertex AI CustomJob, GCE Single-VM, GKE, Vertex AI AutoML Tabular Workflows, and BigQuery (distinct from forecast backtesting).
 - [validation.md](./validation.md) — **System Validation Ledger**: the CI-enforced matrix of
-  architecture axes, 42 smoke configs, 20 demonstration configs, 13 notebooks, and 19 capabilities
+  architecture axes, 42 smoke configs, 21 demonstration configs, 13 notebooks, and 19 capabilities
   proven on live GCP.
 - [smoke_testing.md](./smoke_testing.md) — **Smoke Testing Guide**: how to run the 42-smoke suite
   (`smoke_harness.py`) to verify a deployment or infrastructure change.

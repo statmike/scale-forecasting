@@ -41,6 +41,9 @@ flowchart TD
 
 In this hands-on workshop, you will deploy and operate **`scale-forecasting`** — Google Cloud's blueprint for enterprise time-series forecasting across **BigQuery ML**, **Managed Service for Apache Spark (Dataproc)**, **Gemini Enterprise (Managed Ray on Vertex AI)**, **Vertex AI `CustomJob`**, **Compute Engine (`gce`) Single-VM**, **Google Kubernetes Engine (`gke`)**, and **Vertex AI AutoML & Tabular Workflows (`vertex_automl`)**.
 
+> [!TIP]
+> **Looking for a concise 20–30 minute end-to-end tour before diving into the full lab curriculum?** See the **[Forecaster Showcase (`docs/showcase.md`)](./showcase.md)** — a single-config walkthrough (`configs/forecaster_showcase.json`) with pre-recorded cloud outputs, Cloud Console service links, and a 4-turn BigQuery `DataAgent` Q&A.
+
 ### Key Learning Outcomes
 1. **Infrastructure as Code:** Deploy the complete data lakehouse and compute infrastructure using Terraform in under 15 minutes.
 2. **Unified Modeling Contract:** Train, backtest, and evaluate 37 statistical, machine learning, deep learning, foundation, Vertex AI AutoML, and BigQuery SQL models with zero code changes.

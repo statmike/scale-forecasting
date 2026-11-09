@@ -3418,3 +3418,46 @@ class WorkbenchMixin(PlaygroundWorkbenchMixin):
             settings=self._settings,
             **kwargs,
         )
+
+    def chat(
+        self,
+        *,
+        run_id: str | None = None,
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        offline: bool | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Open a stateful multi-turn :class:`~scale_forecasting.bq_agent.BQChatSession` over this
+        forecaster's results (routing automatically between local offline sessions and BigQuery
+        `DataAgent`).
+        """
+        from .bq_agent.client import BQChatSession
+
+        use_offline = offline is True or (
+            offline is None
+            and run_id is None
+            and (
+                (self._auto_session is not None and self._auto_session.where == "local")
+                or (
+                    self._auto_session is None
+                    and (
+                        self._predictions_df is not None
+                        or self._oof_df is not None
+                        or self._data is not None
+                    )
+                )
+            )
+        )
+        return BQChatSession(
+            run_id=run_id or self.run_id,
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            settings=self._settings,
+            offline_target=self if use_offline else None,
+            **kwargs,
+        )

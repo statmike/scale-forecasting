@@ -229,10 +229,6 @@ UNPROVEN: dict[str, str] = {
     "compute.ray_read_mode=ray_data": (
         "tests/unit/test_ray_engine.py::test_read_source_series_ray_data_mode_dispatches_and_limits"
     ),
-    "compute.reuse_prior_runs=true": (
-        "tests/unit/test_phase_g5_variants_and_borrowing.py::"
-        "test_match_reusable_models_and_render_borrow_sql"
-    ),
     "compute.spark_deps=container": (
         "reason: this knob has an environment-variable twin, `SF_SERVERLESS_DEPS`, which lives on "
         "the infra object rather than the config precisely so it cannot move the `run_id`. Every "
@@ -449,10 +445,6 @@ UNPROVEN: dict[str, str] = {
     ),
     "output.calibration_method=aci_normalized": (
         "tests/unit/test_aci.py::test_aci_config_and_calibration_dispatch"
-    ),
-    "output.ensure_bq_agent=true": (
-        "tests/unit/test_bq_agent.py::"
-        "test_output_ensure_bq_agent_excluded_from_run_id_and_dispatched"
     ),
     "output.integer_rounding=ceil": (
         "tests/unit/test_phase_g1_workbench.py::"

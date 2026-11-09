@@ -26,6 +26,10 @@
 
 ::: scale_forecasting.bq_agent.probe
 
+## Google Cloud Console Deep Links
+
+::: scale_forecasting.bq_agent.console_urls
+
 ## Authenticated REST & LRO Transport
 
 ::: scale_forecasting.bq_agent.rest

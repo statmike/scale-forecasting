@@ -60,6 +60,29 @@ _CROSS_RUN_PHRASES: tuple[str, ...] = (
     "which source tables",
 )
 
+_STEP_LIKE_COLUMNS: frozenset[str] = frozenset(
+    {"horizon_step", "step", "rank", "fold_id", "n_series", "n_cells"}
+)
+_STEP_AXIS_COLUMNS: frozenset[str] = frozenset(
+    {"horizon_step", "ds", "forecast_date", "date", "step"}
+)
+
+STARTER_QUESTIONS: tuple[str, ...] = (
+    (
+        "Which model won on comparable WAPE and what was the Forecast Value Added (FVA) "
+        "lift over naive_seasonal?"
+    ),
+    (
+        "On that winning model, which series have directional bias or Trigg "
+        "tracking-signal exceptions?"
+    ),
+    (
+        "How does forecast accuracy decay from day 1 to day 14, and which promo or "
+        "holiday covariates mattered most?"
+    ),
+    "Compare recent runs in v_run_summary including our 100,000-series benchmark runs.",
+)
+
 
 @dataclass(frozen=True)
 class BQAgentRegistration:
@@ -82,6 +105,17 @@ class BQAgentRegistration:
     def console_url(self) -> str:
         """Direct Google Cloud Console BigQuery Studio URL for this project."""
         return f"https://console.cloud.google.com/bigquery?project={self.project_id}"
+
+    def console_urls(self, *, region: str = "us-central1") -> Any:
+        """Return the full :class:`~scale_forecasting.bq_agent.console_urls.ConsoleLinkSet`."""
+        from .console_urls import build_registry_console_urls
+
+        return build_registry_console_urls(
+            project_id=self.project_id,
+            dataset_id=self.dataset_id,
+            region=region,
+            agent_id=self.agent_id,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +166,107 @@ class BQAgentResponse:
             if preview:
                 parts.extend(["", preview])
         return "\n".join(parts)
+
+    def plot(
+        self,
+        *,
+        ax: Any = None,
+        max_rows: int = 20,
+        title: str | None = None,
+        render_vegalite: bool = True,
+    ) -> Any:
+        """Plot this conversational response as a chart and return the matplotlib ``Axes``.
+
+        When ``render_vegalite=True``, ``ax=None``, and ``chart_spec`` is populated inside an
+        active IPython/Jupyter kernel, also emits the native Vega-Lite interactive display bundle.
+        """
+        import pandas as pd
+
+        from ..errors import require_extra
+
+        require_extra("notebook", purpose="Plotting")
+        import matplotlib.pyplot as plt
+
+        if render_vegalite and ax is None and isinstance(self.chart_spec, dict):
+            try:
+                from IPython import get_ipython
+                from IPython.display import display
+
+                if get_ipython() is not None:
+                    display(
+                        {
+                            "application/vnd.vegalite.v5+json": self.chart_spec,
+                            "text/plain": self.answer or "Forecast Registry Agent chart",
+                        },
+                        raw=True,
+                    )
+            except Exception:  # noqa: BLE001 - IPython is optional outside notebooks
+                pass
+
+        frame = self.df
+        if (
+            frame.empty
+            and isinstance(self.chart_spec, dict)
+            and isinstance(self.chart_spec.get("data"), dict)
+            and isinstance(self.chart_spec["data"].get("values"), list)
+        ):
+            frame = pd.DataFrame.from_records(
+                [r for r in self.chart_spec["data"]["values"] if isinstance(r, dict)]
+            )
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(9, 4.5))
+
+        chart_title = title or (self.question[:72] if self.question else "Forecast Registry Agent")
+        if frame.empty:
+            ax.set_title(f"{chart_title} (no tabular rows)")
+            return ax
+
+        head = frame.head(max(1, max_rows)).copy()
+        numeric_cols: list[str] = []
+        label_cols: list[str] = []
+        for col in head.columns:
+            coerced = pd.to_numeric(head[col], errors="coerce")
+            if coerced.notna().any() and not pd.api.types.is_bool_dtype(head[col]):
+                head[col] = coerced
+                numeric_cols.append(str(col))
+            else:
+                label_cols.append(str(col))
+
+        if not numeric_cols:
+            ax.set_title(f"{chart_title} (no numeric column)")
+            return ax
+
+        # Prefer metric/value columns over integer step indices when choosing y.
+        preferred_y = [c for c in numeric_cols if c.lower() not in _STEP_LIKE_COLUMNS]
+        y_col = preferred_y[0] if preferred_y else numeric_cols[0]
+        x_step_candidates = [
+            c for c in head.columns if str(c).lower() in _STEP_AXIS_COLUMNS and str(c) != y_col
+        ]
+
+        if x_step_candidates:
+            x_col = str(x_step_candidates[0])
+            ax.plot(head[x_col], head[y_col], marker="o", linewidth=2.0, color="#1A73E8")
+            ax.set_xlabel(x_col)
+            ax.set_ylabel(y_col)
+            ax.grid(True, alpha=0.25)
+        else:
+            lbl_col = label_cols[0] if label_cols else None
+            labels = (
+                [str(v) for v in head[lbl_col]]
+                if lbl_col is not None
+                else [str(idx) for idx in head.index]
+            )
+            positions = list(range(len(head)))
+            ax.barh(positions, head[y_col].fillna(0.0), color="#1A73E8", alpha=0.88)
+            ax.set_yticks(positions)
+            ax.set_yticklabels(labels)
+            ax.invert_yaxis()
+            ax.set_xlabel(y_col)
+            ax.grid(True, axis="x", alpha=0.25)
+
+        ax.set_title(chart_title)
+        return ax
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -796,3 +931,133 @@ def ask_registry(
         mode="bigquery_agent",
         raw_messages=tuple(messages),
     )
+
+
+class BQChatSession:
+    """Stateful multi-turn conversation helper over a BigQuery Registry `DataAgent` or offline run.
+
+    Eliminates manual ``conversation_id`` threading in notebooks, scripts, and live demos::
+
+        chat = res.chat()
+        r1 = chat("Which model won and what was the FVA lift?")
+        r2 = chat("On that winning model, which series have Trigg bias alerts?")
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str | None = "latest",
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        auto_ensure_agent: bool = True,
+        project_id: str | None = None,
+        dataset_id: str | None = None,
+        agent_id: str | None = None,
+        location: str = "global",
+        settings: Settings | None = None,
+        bq_client: Any = None,
+        session: Any = None,
+        offline_target: Any = None,
+    ) -> None:
+        self.run_id = run_id
+        self.conversation_id = conversation_id
+        self.stateful = stateful
+        self.auto_ensure_agent = auto_ensure_agent
+        self.project_id = project_id
+        self.dataset_id = dataset_id
+        self.agent_id = agent_id
+        self.location = location
+        self._settings = settings
+        self._bq_client = bq_client
+        self._session = session
+        self._offline_target = offline_target
+        self._history: list[BQAgentResponse] = []
+        self._agent_verified: bool = False
+
+    @property
+    def history(self) -> tuple[BQAgentResponse, ...]:
+        """All :class:`BQAgentResponse` turns recorded in this session so far."""
+        return tuple(self._history)
+
+    @property
+    def last(self) -> BQAgentResponse | None:
+        """The most recent :class:`BQAgentResponse`, or ``None`` if no turn has executed."""
+        return self._history[-1] if self._history else None
+
+    @property
+    def starters(self) -> tuple[str, ...]:
+        """Curated starter questions for exploring a forecast registry."""
+        return STARTER_QUESTIONS
+
+    def switch_run(self, run_id: str | None) -> BQChatSession:
+        """Change the default ``run_id`` scope (e.g. ``'latest'``, ``'all'``, or an exact ID)."""
+        self.run_id = run_id
+        return self
+
+    def reset(self) -> BQChatSession:
+        """Start a fresh conversation thread and clear in-memory turn history."""
+        self.conversation_id = None
+        self._history.clear()
+        return self
+
+    def ask(
+        self,
+        question: str,
+        *,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> BQAgentResponse:
+        """Send ``question`` as the next turn in this stateful session and return the response."""
+        if run_id is not None:
+            effective_run_id: str | None = run_id
+        elif any(p in question.lower() for p in _CROSS_RUN_PHRASES):
+            effective_run_id = "all"
+        else:
+            effective_run_id = self.run_id
+        if self._offline_target is not None:
+            from .offline import ask_offline
+
+            resp = ask_offline(
+                self._offline_target,
+                question,
+                conversation_id=self.conversation_id,
+            )
+        else:
+            ensure_now = self.auto_ensure_agent and not self._agent_verified
+            resp = ask_registry(
+                question,
+                run_id=effective_run_id,
+                conversation_id=self.conversation_id,
+                stateful=self.stateful,
+                auto_ensure_agent=ensure_now,
+                project_id=self.project_id,
+                dataset_id=self.dataset_id,
+                agent_id=self.agent_id,
+                location=self.location,
+                settings=self._settings,
+                bq_client=self._bq_client,
+                session=self._session,
+                **kwargs,
+            )
+            self._agent_verified = True
+        if resp.conversation_id:
+            self.conversation_id = resp.conversation_id
+        self._history.append(resp)
+        return resp
+
+    def __call__(
+        self,
+        question: str,
+        *,
+        run_id: str | None = None,
+        **kwargs: Any,
+    ) -> BQAgentResponse:
+        """Callable shorthand for :meth:`ask`."""
+        return self.ask(question, run_id=run_id, **kwargs)
+
+    def __repr__(self) -> str:
+        mode = "offline" if self._offline_target is not None else "bigquery_agent"
+        return (
+            f"BQChatSession(mode={mode!r}, run_id={self.run_id!r}, "
+            f"conversation_id={self.conversation_id!r}, turns={len(self._history)})"
+        )

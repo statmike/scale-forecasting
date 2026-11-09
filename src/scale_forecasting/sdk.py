@@ -164,6 +164,44 @@ class RunResult:
             **kwargs,
         )
 
+    def chat(
+        self,
+        *,
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Open a stateful multi-turn :class:`~scale_forecasting.bq_agent.BQChatSession` pinned to
+        ``self.run_id``.
+        """
+        from .bq_agent.client import BQChatSession
+
+        proj, ds = self._dataset_coords()
+        return BQChatSession(
+            run_id=kwargs.pop("run_id", self.run_id),
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            project_id=kwargs.pop("project_id", proj),
+            dataset_id=kwargs.pop("dataset_id", ds),
+            settings=self._settings,
+            **kwargs,
+        )
+
+    def console_urls(self, *, region: str | None = None) -> Any:
+        """Return clickable Google Cloud Console & BigQuery Studio Agent deep links for this run."""
+        proj, ds = self._dataset_coords()
+        reg = Registry(
+            settings=self._settings,
+            project_id=proj,
+            dataset_id=ds,
+            region=region,
+        )
+        return reg.console_urls(run_id=self.run_id, region=region)
+
 
 @dataclass(frozen=True)
 class ModelResult:
@@ -208,6 +246,25 @@ class JobTrace:
     gpu_type: str | None
     spark_mode: str | None
     runtime_seconds: float | None
+    probe_handle: str | dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    def console_url(
+        self,
+        *,
+        project_id: str | None = None,
+        region: str | None = None,
+    ) -> str:
+        """Return the Google Cloud Console URL for this family's runtime job."""
+        from .bq_agent.console_urls import build_job_console_url
+
+        return build_job_console_url(
+            self.runtime,
+            system_job_id=self.system_job_id,
+            project_id=project_id,
+            region=region,
+            spark_mode=self.spark_mode,
+            probe_handle=self.probe_handle,
+        )
 
 
 class _class_or_instance_method:
@@ -1149,6 +1206,7 @@ class Forecaster(WorkbenchMixin):
                 gpu_type=r.get("gpu_type"),
                 spark_mode=r.get("spark_mode"),
                 runtime_seconds=r.get("runtime_seconds"),
+                probe_handle=r.get("probe_handle"),
             )
             for r in rows
         ]
@@ -1738,7 +1796,7 @@ class Forecaster(WorkbenchMixin):
 
     def jobs_df(self, run_id: str | None = None) -> pd.DataFrame:
         """Return a tidy ``DataFrame`` of per-family job execution traces from ``v_run_jobs`` for
-        ``run_id`` (default: this config's id).
+        ``run_id`` (default: this config's id), including direct Google Cloud Console URLs.
         """
         from dataclasses import asdict
 
@@ -1755,11 +1813,24 @@ class Forecaster(WorkbenchMixin):
             "gpu_type",
             "spark_mode",
             "runtime_seconds",
+            "console_url",
         ]
         traces = self.jobs(run_id)
         if not traces:
             return pd.DataFrame(columns=cols)
-        return pd.DataFrame.from_records([asdict(t) for t in traces], columns=cols)
+        ds_ref = self._resolved_dataset_ref()
+        eff_proj = ds_ref.split(".", 1)[0] if ds_ref and "." in ds_ref else None
+        eff_reg = self._settings.region if self._settings is not None else None
+        records: list[dict[str, Any]] = []
+        for trace in traces:
+            rec = asdict(trace)
+            rec["console_url"] = trace.console_url(project_id=eff_proj, region=eff_reg)
+            records.append(rec)
+        return pd.DataFrame.from_records(records, columns=cols)
+
+    def console_urls(self, run_id: str | None = None, *, region: str | None = None) -> Any:
+        """Return clickable Google Cloud Console & BigQuery Studio Agent deep links for this run."""
+        return self.registry().console_urls(run_id=run_id or self.run_id, region=region)
 
     def cohorts_df(self, run_id: str | None = None) -> pd.DataFrame:
         """Return a ``DataFrame`` of backtest cohort coverage, achieved fold histograms, refit
@@ -2480,6 +2551,74 @@ class Registry:
             agent_id=agent_id,
             settings=self._settings,
             **kwargs,
+        )
+
+    def chat(
+        self,
+        *,
+        run_id: str | None = "latest",
+        conversation_id: str | None = None,
+        stateful: bool = True,
+        agent_id: str | None = None,
+        auto_ensure_agent: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Open a stateful multi-turn :class:`~scale_forecasting.bq_agent.BQChatSession` over this
+        registry.
+        """
+        from .bq_agent.client import BQChatSession
+
+        return BQChatSession(
+            run_id=run_id,
+            conversation_id=conversation_id,
+            stateful=stateful,
+            auto_ensure_agent=auto_ensure_agent,
+            agent_id=agent_id,
+            settings=self._settings,
+            **kwargs,
+        )
+
+    def console_urls(
+        self,
+        run_id: str | None = None,
+        *,
+        region: str | None = None,
+        agent_id: str | None = None,
+    ) -> Any:
+        """Return clickable Google Cloud Console & BigQuery Studio Agent deep links for this
+        registry (and ``run_id`` job traces when supplied).
+        """
+        from .bq_agent.console_urls import build_registry_console_urls
+
+        ds_ref = self.dataset_ref
+        proj = ds_ref.split(".", 1)[0] if ds_ref and "." in ds_ref else None
+        ds = ds_ref.split(".", 1)[1] if ds_ref and "." in ds_ref else "scale_forecasting"
+        eff_region = region or (
+            self._settings.region if self._settings is not None else "us-central1"
+        )
+        warehouse = self._settings.warehouse_uri if self._settings is not None else None
+        if warehouse is None and proj:
+            from .errors import ConfigError
+            from .settings import Settings
+
+            with contextlib.suppress(ConfigError):
+                warehouse = Settings.resolve().warehouse_uri
+
+        job_rows: list[dict[str, Any]] = []
+        if run_id and proj:
+            from .registry.jobs import read_run_jobs
+
+            with contextlib.suppress(Exception):
+                job_rows = read_run_jobs(run_id, settings=self._settings)
+
+        return build_registry_console_urls(
+            project_id=proj,
+            dataset_id=ds,
+            region=eff_region,
+            run_id=run_id,
+            agent_id=agent_id,
+            warehouse_uri=warehouse,
+            job_rows=job_rows,
         )
 
 

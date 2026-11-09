@@ -21,7 +21,7 @@ flowchart LR
     subgraph Skill["Portable Agent Skill (skills/scale-forecasting/)"]
         direction TB
         S1["SKILL.md<br/>(4-Step Workflow: Probe → Configure → Run → Review)"]
-        R1["references/config_reference.md<br/>(All 10 RunConfig Sections · 62 Shipped Configs)"]
+        R1["references/config_reference.md<br/>(All 10 RunConfig Sections · 63 Shipped Configs)"]
         R2["references/catalog_reference.md<br/>(37 Models · 21 Metrics · 7 Runtimes · 4 GPUs · 13 Extras)"]
         R3["references/execution_paths_and_ops.md<br/>(5 Execution Paths · Pre-Flight · Review & Surgical Repair)"]
     end
@@ -45,7 +45,7 @@ flowchart LR
 | :--- | :--- | :--- |
 | [`README.md`](./README.md) | Hand-authored | Directory architecture map, progressive-disclosure flow diagram, and file inventory. |
 | [`scale-forecasting/SKILL.md`](./scale-forecasting/SKILL.md) | Hand-authored | Main portable skill entry point with YAML frontmatter (`name: scale-forecasting`) and the mandatory 4-step workflow (Step 0 Environment Probe → Step 1 `RunConfig` Authoring → Step 2 Pre-Flight & Execution → Step 3 Review & Repair). |
-| [`scale-forecasting/references/config_reference.md`](./scale-forecasting/references/config_reference.md) | Auto-generated (`agent_surfaces.py`) | Exhaustive field-by-field reference for all 10 `RunConfig` sections plus the inventory of 20 root demo configs and 42 smoke configs (`01`–`42`). |
+| [`scale-forecasting/references/config_reference.md`](./scale-forecasting/references/config_reference.md) | Auto-generated (`agent_surfaces.py`) | Exhaustive field-by-field reference for all 10 `RunConfig` sections plus the inventory of 21 root demo configs and 42 smoke configs (`01`–`42`). |
 | [`scale-forecasting/references/catalog_reference.md`](./scale-forecasting/references/catalog_reference.md) | Auto-generated (`agent_surfaces.py`) | Complete tables for all 37 models, 21 metrics, 7 compute runtimes, 4 GPU types, 13 dependency extras, and 5 BigQuery analytical SQL views. |
 | [`scale-forecasting/references/execution_paths_and_ops.md`](./scale-forecasting/references/execution_paths_and_ops.md) | Auto-generated (`agent_surfaces.py`) | Commands and Python SDK snippets for environment probing, all 5 execution paths, pre-flight verification (`--dry-run`, `--feasibility`, `--check-quota`), and post-run review/repair (`review_run`, `calibration_report`, `retry_run`, `registry.ops`). |
 

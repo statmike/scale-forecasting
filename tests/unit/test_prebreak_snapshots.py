@@ -185,6 +185,7 @@ _POST_BREAK = {
     "configs/smokes/40_gke_indexed_job.json",
     "configs/smokes/41_gke_ray.json",
     "configs/smokes/42_vertex_automl_tabular_workflow.json",
+    "configs/forecaster_showcase.json",
 }
 
 # The golden panel's fixture. A fixed seed lives inside `playground.sample_data`, so the only

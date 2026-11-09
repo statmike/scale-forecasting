@@ -8,7 +8,7 @@ the canonical Python declarations (`RunConfig`, `list_models`, `METRIC_NAMES`, `
 2. ``skills/scale-forecasting/references/config_reference.md`` — complete field-by-field reference
    for `RunConfig` and every nested Pydantic model, cross-field rules, and ``run_id`` exclusions.
 3. ``skills/scale-forecasting/references/catalog_reference.md`` — all 37 models, 21 metrics,
-   7 compute runtimes, 4 GPU types, 13 dependency extras, BigQuery tables/views, and 62 configs.
+   7 compute runtimes, 4 GPU types, 13 dependency extras, BigQuery tables/views, and 63 configs.
 4. ``skills/scale-forecasting/references/execution_paths_and_ops.md`` — all 5 execution paths,
    environment variables, monitoring/review/calibration, surgical repair, and registry operations.
 5. ``docs/llms.txt`` — concise LLM index following the ``llms.txt`` convention.
@@ -1698,6 +1698,12 @@ def render_llms_txt() -> str:
                 "(`pip install scale-forecasting`) to first cloud run."
             ),
             (
+                f"- [Forecaster Showcase]({_SITE_BASE}/showcase/): "
+                "End-to-end practitioner tour (`configs/forecaster_showcase.json`) from 5-second "
+                "local baseline to hybrid Spark + BigQuery `TimesFM`, governed S&OP views, and "
+                "multi-turn BigQuery `DataAgent` Q&A."
+            ),
+            (
                 f"- [Choosing a Runtime]({_SITE_BASE}/choosing_a_runtime/): Decision flow and fit "
                 "matrix across all 7 Google Cloud runtimes."
             ),
@@ -1820,7 +1826,7 @@ def render_llms_txt() -> str:
             ),
             (
                 f"- [Live Validation Ledger]({_SITE_BASE}/validation/): Proven `run_id` records "
-                "across 42 smokes, 20 demo configs, and 13 notebooks."
+                "across 42 smokes, 21 demo configs, and 13 notebooks."
             ),
             "",
         ]
@@ -1883,7 +1889,7 @@ def _visual_inventory_counts(repo_root: Path | None = None) -> dict[str, int]:
     n_demos = (
         len([p for p in configs_dir.glob("*.json") if p.name != "compute_fallback.json"])
         if configs_dir.is_dir()
-        else 20
+        else 21
     )
     n_tf_mods = (
         len([p for p in tf_mods_dir.iterdir() if p.is_dir()]) if tf_mods_dir.is_dir() else 12

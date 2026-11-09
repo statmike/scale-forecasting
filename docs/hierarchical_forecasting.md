@@ -47,7 +47,7 @@ flowchart TD
 
 ## 1. Three Orthogonal Reconciliation Regimes (`HierarchyConfig`)
 
-`HierarchyConfig` organizes spatial and temporal reconciliation around three clear, opt-in regimes while keeping all 62 shipped configurations 100% `run_id` hash-stable:
+`HierarchyConfig` organizes spatial and temporal reconciliation around three clear, opt-in regimes while keeping all 63 shipped configurations 100% `run_id` hash-stable:
 
 | Mode | Configuration Trigger | `spatial_weight_alpha` | Operational & Leaderboard Behavior |
 | :--- | :--- | :--- | :--- |

@@ -1,0 +1,44 @@
+{
+  "run_name": "forecaster_showcase",
+  "python_runtime": "spark",
+  "data": {
+    "source_table": "source_series_covariates_iceberg",
+    "horizon": 14,
+    "series_limit": 25
+  },
+  "models": [
+    "naive_seasonal",
+    "holtwinters",
+    "theta",
+    "lightgbm",
+    "arima_plus",
+    "timesfm"
+  ],
+  "features": {
+    "future_covariates": [
+      "is_holiday",
+      "promo_flag",
+      "price_index"
+    ],
+    "on_unsupported_covariates": "fallback"
+  },
+  "backtest": {
+    "enabled": true,
+    "n_folds": 2,
+    "horizon": 14,
+    "step": 14
+  },
+  "ensemble": {
+    "enabled": true,
+    "strategies": [
+      "inverse_error",
+      "nnls"
+    ]
+  },
+  "compute": {
+    "reuse_prior_runs": true
+  },
+  "output": {
+    "ensure_bq_agent": true
+  }
+}

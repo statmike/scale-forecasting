@@ -8,14 +8,22 @@ multi-turn conversational forecasting workbench.
 from __future__ import annotations
 
 from .client import (
+    STARTER_QUESTIONS,
     BQAgentRegistration,
     BQAgentResponse,
+    BQChatSession,
     ask_registry,
     default_agent_id,
     delete_registry_agent,
     ensure_registry_agent,
     get_registry_agent,
     resolve_registry_run_id,
+)
+from .console_urls import (
+    ConsoleLink,
+    ConsoleLinkSet,
+    build_job_console_url,
+    build_registry_console_urls,
 )
 from .context import (
     BQAgentScope,
@@ -39,10 +47,14 @@ from .scans import default_profile_scan_id, ensure_knowledge_catalog_scans
 
 __all__ = [
     "GLOSSARY_TERMS",
+    "STARTER_QUESTIONS",
     "BQAgentProbeResult",
     "BQAgentRegistration",
     "BQAgentResponse",
     "BQAgentScope",
+    "BQChatSession",
+    "ConsoleLink",
+    "ConsoleLinkSet",
     "GlossaryTermSpec",
     "GoldenQuery",
     "ScopedTableRef",
@@ -50,7 +62,9 @@ __all__ = [
     "ask_registry",
     "build_context_glossary_terms",
     "build_golden_queries",
+    "build_job_console_url",
     "build_published_context",
+    "build_registry_console_urls",
     "build_schema_relationships",
     "build_system_instruction",
     "default_agent_id",

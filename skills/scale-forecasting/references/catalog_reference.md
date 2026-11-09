@@ -133,6 +133,7 @@
 | `configs/ensemble_demo.json` | `ensemble_demo` | `spark` | `theta`, `arima_plus`, `timesfm` | `expanding` (2f) | `mean`, `median`, `inverse_error` |
 | `configs/explode_100k.json` | `explode_100k` | `spark` | `theta`, `holtwinters`, `sarimax`, `xgboost` | off | off |
 | `configs/explode_demo.json` | `explode_demo` | `spark` | `theta`, `holtwinters`, `sarimax`, `xgboost` | off | off |
+| `configs/forecaster_showcase.json` | `forecaster_showcase` | `spark` | `naive_seasonal`, `holtwinters`, `theta`, `lightgbm` (+2) | `expanding` (2f) | `inverse_error`, `nnls` |
 | `configs/gke_demo.json` | `gke_demo` | `gke` | `theta`, `holtwinters`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
 | `configs/mixed_demo.json` | `mixed_demo` | `spark` | `theta`, `arima_plus`, `timesfm` | `expanding` (2f) | off |
 | `configs/neuralprophet_ab_cluster_cpu.json` | `neuralprophet_ab_cluster_cpu` | `spark` | `neuralprophet` | `expanding` (2f) | off |

@@ -9,13 +9,13 @@ flowchart LR
     subgraph Surface["Declared Surface"]
         Axes["26 Architecture Axes"]
         RunCfg["RunConfig Schema<br/>(170 Literal & Bool Values)"]
-        Configs["42 Smoke Configs +<br/>20 Production Configs +<br/>11 Tour Notebooks"]
+        Configs["42 Smoke Configs +<br/>21 Production Configs +<br/>11 Tour Notebooks"]
     end
 
     subgraph Ledger["System Validation Ledger (docs/validation.md)"]
         T1["Architecture Axes Table"]
         T2["Smoke Suite Table (42)"]
-        T3["Production Configs Table (20)"]
+        T3["Production Configs Table (21)"]
         T4["Notebooks & Capabilities Tables (11 + 22)"]
     end
 
@@ -35,7 +35,7 @@ flowchart LR
 A live validation result is only meaningful relative to the architecture it ran on. Every entry in this ledger declares the **architecture axes** it depends on and the value each axis held when the run was proven:
 
 1. **Staleness Tripwire (`tests/unit/test_validation_ledger.py`)**: When an architectural axis changes, any ledger entry pinned to the previous value becomes mechanically stale. The offline test suite refuses to allow an entry with a superseded axis value, an unrecorded `run_id`, or a missing config row to claim `CURRENT`. Benchmark citations in [Quota, Throughput, and Scale](quota_and_scale.md) are also cross-checked against this ledger.
-2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **176 declared values — 133 proven live, 41 exercised offline, 0 genuine gaps, 2 not work.**
+2. **Config Surface Coverage Tripwire (`tests/unit/test_config_coverage.py`)**: Joins every reachable `Literal` member and `bool` state on `RunConfig` against the `CURRENT` rows in this ledger and the offline unit test suite. Every configuration value must be explicitly accounted for: **176 declared values — 135 proven live, 39 exercised offline, 0 genuine gaps, 2 not work.**
 
 ---
 
@@ -127,10 +127,11 @@ The 42 smoke configurations live in [`configs/smokes/`](https://github.com/statm
 
 ## Demonstration & Scale Configs (`configs/`)
 
-The 20 production, demonstration, and scale benchmark configurations in [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) back the [Hands-On Workshop](workshop.md) and [Quota, Throughput, and Scale](quota_and_scale.md).
+The 21 production, demonstration, and scale benchmark configurations in [`configs/`](https://github.com/statmike/scale-forecasting/tree/main/configs) back the [Forecaster Showcase](showcase.md), [Hands-On Workshop](workshop.md), and [Quota, Throughput, and Scale](quota_and_scale.md).
 
 | Config | Proves | Status | Date | run_id | Axes at proof |
 |--------|--------|--------|------|--------|---------------|
+| `forecaster_showcase.json` | End-to-end 25-minute practitioner showcase (`naive_seasonal`, `holtwinters`, `theta`, `lightgbm` on Serverless Spark in parallel with `arima_plus`, `timesfm` on BigQuery + `inverse_error`/`nnls` ensembles, 3 future covariates with `fallback`, `reuse_prior_runs: true`, and automatic `ensure_bq_agent: true` refresh; 25 series, `200/200` `ok` cells, `timesfm` `#1` at `pooled_wape=0.0984` / `+54.09%` FVA lift). | CURRENT | 2026-11-08 | `forecaster-showcase-f67fec77de66` | `ensemble_weighting=per-series-calculated+batch-fit-learned`, `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `bq_native_demo.json` | BigQuery-native family (`arima_plus`, `timesfm`) with zero cluster provisioning (100 series). | CURRENT | 2026-09-15 | `bq-native-demo-afdc0507e8b5` | `native_source_pin=unpinned-all-sources`, `python=3.11`, `run_id_inputs=authored-config-only-v3` |
 | `explode_demo.json` | Spark `explode` fan-out across `statistical` and `ml` families with GCS artifact persistence (10 series). | CURRENT | 2026-09-10 | `explode-demo-088f172ad2f5` | `serverless_deps=container-image`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |
 | `mixed_demo.json` | Spark and BigQuery-native models under one `run_id`, backtested and ranked on a unified leaderboard (10 series). | CURRENT | 2026-09-10 | `mixed-demo-db2dfb2f675d` | `backtest_scoring=holdout-reserved+embargo-aware+auto-refit`, `serverless_deps=container-image`, `native_source_pin=unpinned-all-sources`, `python=3.11`, `fleet_sizing=derived-overlay-three-way-min`, `run_id_inputs=authored-config-only-v3`, `horizon_features=computed-at-future-dates` |

@@ -1254,3 +1254,297 @@ def test_run_result_ask_airflow_finalize_retry_and_mcp_ensure_polish(
     )
     assert scans_ok["isError"] is False
     assert ensured_calls[-1]["run_scans"] is True
+
+
+def test_console_urls_across_all_runtimes_and_sdk_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scale_forecasting as sf
+    from scale_forecasting.bq_agent.console_urls import (
+        build_job_console_url,
+        build_registry_console_urls,
+    )
+    from scale_forecasting.settings import Settings
+
+    # 1. All 7 compute runtimes + borrowed cell reuse + project-neutral URLs
+    u_spark_srv = build_job_console_url(
+        "spark",
+        system_job_id="sf-run1-statistical-a1",
+        project_id=_PROJECT,
+        probe_handle=json.dumps({"region": "us-central1", "spark_mode": "serverless"}),
+    )
+    assert (
+        u_spark_srv
+        == f"https://console.cloud.google.com/dataproc/batches/us-central1/sf-run1-statistical-a1/monitoring?project={_PROJECT}"
+    )
+
+    u_spark_cls = build_job_console_url(
+        "spark",
+        system_job_id="job-uuid-123",
+        project_id=_PROJECT,
+        region="us-east1",
+        spark_mode="cluster",
+    )
+    assert (
+        u_spark_cls
+        == f"https://console.cloud.google.com/dataproc/jobs/job-uuid-123?region=us-east1&project={_PROJECT}"
+    )
+
+    u_vertex = build_job_console_url(
+        "vertex",
+        system_job_id="projects/12345/locations/us-central1/customJobs/987654321",
+        project_id=_PROJECT,
+    )
+    assert (
+        u_vertex
+        == f"https://console.cloud.google.com/vertex-ai/locations/us-central1/training/987654321/cpu?project={_PROJECT}"
+    )
+
+    u_ray = build_job_console_url(
+        "ray",
+        system_job_id="raysubmit_abc",
+        project_id=_PROJECT,
+        probe_handle={
+            "region": "us-central1",
+            "resource_name": "projects/12345/locations/us-central1/persistentResources/sf-ray-1",
+        },
+    )
+    assert (
+        u_ray
+        == f"https://console.cloud.google.com/vertex-ai/locations/us-central1/ray/sf-ray-1?project={_PROJECT}"
+    )
+
+    assert (
+        build_job_console_url("gce", project_id=_PROJECT)
+        == f"https://console.cloud.google.com/compute/instances?project={_PROJECT}"
+    )
+    assert (
+        build_job_console_url("gke", project_id=_PROJECT)
+        == f"https://console.cloud.google.com/kubernetes/workload/overview?project={_PROJECT}"
+    )
+    assert (
+        build_job_console_url("vertex_automl", project_id=_PROJECT)
+        == f"https://console.cloud.google.com/vertex-ai/pipelines/runs?project={_PROJECT}"
+    )
+    assert (
+        build_job_console_url("bigquery", project_id=_PROJECT)
+        == f"https://console.cloud.google.com/bigquery?project={_PROJECT}"
+    )
+    assert (
+        build_job_console_url("spark", system_job_id="borrowed:prior-run-123", project_id=_PROJECT)
+        == f"https://console.cloud.google.com/bigquery?project={_PROJECT}"
+    )
+    # Project-neutral link omits ?project=
+    assert (
+        build_job_console_url("bigquery", project_id=None)
+        == "https://console.cloud.google.com/bigquery"
+    )
+
+    # 2. Full registry link set + SDK surfaces (JobTrace, jobs_df, RunResult, Forecaster, Registry)
+    links = build_registry_console_urls(
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        region="us-central1",
+        run_id="demo-run-123",
+        warehouse_uri=f"gs://{_PROJECT}-warehouse/warehouse",
+        job_rows=[
+            {
+                "family": "statistical",
+                "runtime": "spark",
+                "system_job_id": "sf-demo-stat-a1",
+                "status": "COMPLETED",
+                "spark_mode": "serverless",
+            },
+            {
+                "family": "ml",
+                "runtime": "spark",
+                "system_job_id": "borrowed:prior-run-1",
+                "status": "COMPLETED",
+            },
+        ],
+    )
+    assert f"project={_PROJECT}" in links.bq_agents_url
+    assert f"d={_DATASET}" in links.dataset_url
+    assert f"project={_PROJECT}" in links.glossary_url
+    assert len(links.by_category("compute")) == 2
+    assert len(links.by_category("storage")) == 1
+    assert "BigQuery Studio" in links.format_text()
+    assert "[Open in Console]" in links._repr_markdown_()
+    assert len(links.to_dataframe()) == len(links.links)
+    assert links.to_dict()["run_id"] == "demo-run-123"
+
+    s = Settings(
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        connection=f"{_PROJECT}.us-central1.sf-iceberg",
+        warehouse_uri=f"gs://{_PROJECT}-warehouse/warehouse",
+    )
+    monkeypatch.setattr(
+        "scale_forecasting.registry.jobs.read_run_jobs",
+        lambda *_a, **_kw: [
+            {
+                "family": "statistical",
+                "job_id": "job-1",
+                "system_job_id": "sf-demo-stat-a1",
+                "runtime": "spark",
+                "status": "COMPLETED",
+                "attempt": 1,
+                "hardware": "cpu",
+                "gpu_type": None,
+                "spark_mode": "serverless",
+                "runtime_seconds": 41.2,
+                "probe_handle": json.dumps({"region": "us-central1", "spark_mode": "serverless"}),
+            }
+        ],
+    )
+    fc = Forecaster(
+        {
+            "run_name": "console_demo",
+            "data": {"source_table": "source_series_native", "horizon": 7},
+            "models": ["theta"],
+        },
+        settings=s,
+    )
+    jdf = fc.jobs_df()
+    assert "console_url" in jdf.columns
+    assert "dataproc/batches/us-central1/sf-demo-stat-a1/monitoring" in jdf.loc[0, "console_url"]
+    assert fc.console_urls().run_id == fc.run_id
+    assert fc.review().console_urls().run_id == fc.run_id
+    assert sf.Registry(settings=s).console_urls(run_id=fc.run_id).project_id == _PROJECT
+
+
+def test_chat_session_response_plot_and_cli_repl(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import matplotlib.pyplot as plt
+
+    from scale_forecasting import playground
+    from scale_forecasting.bq_agent import (
+        STARTER_QUESTIONS,
+        BQAgentResponse,
+        BQChatSession,
+    )
+    from scale_forecasting.settings import Settings
+
+    # 1. BQAgentResponse.plot() covers bar chart, step line chart, Vega-Lite inline values, empty df
+    bar_resp = BQAgentResponse(
+        question="Which model won?",
+        answer="ensemble_nnls won.",
+        sql="SELECT model_type, pooled_wape FROM v_model_leaderboard_comparable",
+        df=pd.DataFrame(
+            {
+                "model_type": ["ensemble_nnls", "lightgbm", "theta"],
+                "pooled_wape": [0.062, 0.069, 0.081],
+            }
+        ),
+    )
+    ax1 = bar_resp.plot()
+    assert ax1.get_xlabel() == "pooled_wape"
+
+    line_resp = BQAgentResponse(
+        question="Horizon decay",
+        answer="WAPE grows gently.",
+        sql="SELECT horizon_step, pooled_wape FROM v_horizon_decay",
+        df=pd.DataFrame({"horizon_step": [1, 2, 3], "pooled_wape": [0.04, 0.05, 0.06]}),
+    )
+    ax2 = line_resp.plot()
+    assert ax2.get_xlabel() == "horizon_step"
+
+    vega_resp = BQAgentResponse(
+        question="Chart from spec",
+        answer="Spec values.",
+        sql="",
+        df=pd.DataFrame(),
+        chart_spec={"data": {"values": [{"series": "s1", "wape": 0.05}]}},
+    )
+    ax3 = vega_resp.plot(render_vegalite=False)
+    assert ax3.get_xlabel() == "wape"
+
+    empty_resp = BQAgentResponse(question="Empty", answer="None", sql="", df=pd.DataFrame())
+    ax4 = empty_resp.plot()
+    assert "no tabular rows" in ax4.get_title()
+    plt.close("all")
+
+    # 2. Offline Forecaster.chat() & live BQChatSession multi-turn statefulness
+    df = playground.sample_data(n_series=2)
+    local_fc = Forecaster.auto(df, tier="first_light", where="local", horizon=7, autofocus=False)
+    local_chat = local_fc.chat()
+    t1 = local_chat("Which model won?")
+    t2 = local_chat("Which series show bias?")
+    assert len(local_chat.history) == 2
+    assert local_chat.last is t2
+    assert local_chat.conversation_id == t1.conversation_id == t2.conversation_id
+    assert len(local_chat.starters) == len(STARTER_QUESTIONS)
+    local_chat.reset()
+    assert len(local_chat.history) == 0 and local_chat.conversation_id is None
+
+    seen_calls: list[dict[str, Any]] = []
+
+    def _fake_ask_registry(question: str, **kw: Any) -> BQAgentResponse:
+        seen_calls.append({"question": question, **kw})
+        cid = kw.get("conversation_id") or "sf-conv-demo123"
+        return BQAgentResponse(
+            question=question,
+            answer=f"Answered: {question}",
+            sql="SELECT 1 AS metric_val",
+            df=pd.DataFrame({"metric_val": [1]}),
+            conversation_id=cid,
+            run_id=kw.get("run_id"),
+        )
+
+    monkeypatch.setattr("scale_forecasting.bq_agent.client.ask_registry", _fake_ask_registry)
+    monkeypatch.setattr(bq_agent_cli, "ask_registry", _fake_ask_registry)
+
+    s = Settings(
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        connection=f"{_PROJECT}.us-central1.sf-iceberg",
+        warehouse_uri=f"gs://{_PROJECT}-warehouse/warehouse",
+    )
+    reg = Registry(settings=s)
+    chat = reg.chat(run_id="forecaster-showcase-f67fec77de66")
+    r_a = chat("Turn 1")
+    r_b = chat("Turn 2")
+    r_c = chat("Compare recent runs in v_run_summary including our 100,000-series benchmark runs.")
+    assert r_a.conversation_id == "sf-conv-demo123"
+    assert seen_calls[0]["conversation_id"] is None
+    assert seen_calls[0]["auto_ensure_agent"] is True
+    assert seen_calls[1]["conversation_id"] == "sf-conv-demo123"
+    assert seen_calls[1]["auto_ensure_agent"] is False
+    assert r_b.run_id == "forecaster-showcase-f67fec77de66"
+    assert r_c.run_id == "all"
+    assert chat.run_id == "forecaster-showcase-f67fec77de66"
+    chat.switch_run("all")
+    assert chat.run_id == "all"
+
+    rr_chat = (
+        Forecaster(
+            {
+                "run_name": "rr_demo",
+                "data": {"source_table": "source_series_native", "horizon": 7},
+                "models": ["theta"],
+            },
+            settings=s,
+        )
+        .review()
+        .chat()
+    )
+    rr_resp = rr_chat("Winner?")
+    assert rr_resp.conversation_id == "sf-conv-demo123"
+
+    # 3. CLI --links and --chat REPL
+    assert bq_agent_cli.main(["--project", _PROJECT, "--dataset", _DATASET, "--links"]) == 0
+    assert "BigQuery Studio" in capsys.readouterr().out
+    assert (
+        bq_agent_cli.main(["--project", _PROJECT, "--dataset", _DATASET, "--links", "--json"]) == 0
+    )
+    assert json.loads(capsys.readouterr().out)["project_id"] == _PROJECT
+
+    inputs = iter(["/starters", "1", "/sql", "/run all", "/links", "/new", "/quit"])
+    repl_session = BQChatSession(project_id=_PROJECT, dataset_id=_DATASET, run_id="latest")
+    assert bq_agent_cli._run_chat_repl(repl_session, input_fn=lambda _p: next(inputs)) == 0
+    repl_out = capsys.readouterr().out
+    assert "Starter questions" in repl_out
+    assert "Last Generated SQL" in repl_out
+    assert "Switched default run scope" in repl_out

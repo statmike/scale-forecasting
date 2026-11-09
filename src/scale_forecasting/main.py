@@ -185,6 +185,7 @@ def run(
     # (never ran, or a prior FAILED/PARTIAL) falls through and runs.
     if not force and header_status(run_id, settings=settings) == "COMPLETED":
         _log.info("run %s already COMPLETED; skipping relaunch (pass force=True to re-run)", run_id)
+        _log_console_summary(run_id, settings)
         return run_id
 
     _log.info(
@@ -443,7 +444,41 @@ def run(
         except Exception as exc:  # noqa: BLE001 - post-run agent registration must not fail completed forecast
             _log.warning("ensure_bq_agent did not complete for run %s: %s", run_id, exc)
     _log.info("run %s done: status=%s", run_id, status)
+    _log_console_summary(run_id, settings)
     return run_id
+
+
+def _log_console_summary(run_id: str, settings: Settings) -> None:
+    """Log best-effort clickable Google Cloud Console links for ``run_id`` and the Registry."""
+    try:
+        from .bq_agent.console_urls import build_registry_console_urls
+        from .registry.jobs import read_run_jobs
+
+        job_rows: list[dict[str, object]] = []
+        try:
+            job_rows = read_run_jobs(run_id, settings=settings)
+        except Exception:  # noqa: BLE001 - unit-test mocks may not populate run_jobs
+            job_rows = []
+
+        links = build_registry_console_urls(
+            project_id=settings.project_id,
+            dataset_id=settings.registry_dataset_id,
+            region=settings.region,
+            run_id=run_id,
+            warehouse_uri=settings.warehouse_uri,
+            job_rows=job_rows,
+            include_service_hubs=False,
+        )
+        _log.info("console registry dataset: %s", links.dataset_url)
+        _log.info(
+            "console BigQuery Studio Agents (left rail -> Agents -> %s): %s",
+            links.agent_id,
+            links.bq_agents_url,
+        )
+        for job_link in links.by_category("compute"):
+            _log.info("console %s: %s", job_link.label, job_link.url)
+    except Exception:  # noqa: BLE001 - console link logging must never affect run completion
+        pass
 
 
 def _emit_airflow(
