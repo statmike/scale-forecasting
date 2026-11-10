@@ -216,8 +216,11 @@ def _resolve_cli_links(
         except Exception:  # noqa: BLE001 - degrade gracefully when offline
             resolved_run = None if run_id == "latest" else run_id
 
+    from .rest import resolve_project_number
+
     return build_registry_console_urls(
         project_id=eff_proj,
+        project_number=resolve_project_number(eff_proj, warehouse_uri=warehouse_uri),
         dataset_id=eff_ds,
         region=eff_region,
         run_id=resolved_run,

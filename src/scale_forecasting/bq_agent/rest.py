@@ -8,6 +8,8 @@ forcing extra generated gRPC client distributions onto workers or notebooks.
 
 from __future__ import annotations
 
+import os
+import re
 import time
 from typing import Any
 
@@ -20,6 +22,8 @@ CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 _DEFAULT_TIMEOUT_SECONDS = 120.0
 _LRO_POLL_INTERVAL_SECONDS = 1.5
 _LRO_MAX_WAIT_SECONDS = 90.0
+_PROJECT_NUMBER_CACHE: dict[str, str] = {}
+_SYNTHETIC_PROJECT_PREFIXES = ("your-", "test-", "test_", "demo-", "fake-", "example")
 
 
 def build_authorized_session(project_id: str) -> Any:  # pragma: no cover - GCP auth boundary
@@ -110,3 +114,48 @@ def wait_for_lro(
     if "error" in current:
         raise RegistryError(f"{service_label} operation {op_name} failed: {current['error']}")
     return dict(current.get("response", current))
+
+
+def resolve_project_number(
+    project_id: str | None,
+    *,
+    warehouse_uri: str | None = None,
+) -> str | None:
+    """Best-effort resolution of numeric GCP ``project_number`` for Dataplex Console deep links."""
+    proj = (project_id or "").strip()
+    if not proj or proj.lower().startswith(_SYNTHETIC_PROJECT_PREFIXES):
+        return None
+    if proj in _PROJECT_NUMBER_CACHE:
+        cached = _PROJECT_NUMBER_CACHE[proj]
+        return cached or None
+
+    if proj == os.environ.get("SF_PROJECT_ID", "").strip():
+        explicit_num = os.environ.get("SF_PROJECT_NUMBER", "").strip()
+        if explicit_num.isdigit():
+            _PROJECT_NUMBER_CACHE[proj] = explicit_num
+            return explicit_num
+        ray_att = os.environ.get("SF_RAY_NETWORK_ATTACHMENT", "").strip()
+        m = re.match(r"^projects/(\d+)/", ray_att)
+        if m:
+            _PROJECT_NUMBER_CACHE[proj] = m.group(1)
+            return m.group(1)
+
+    bucket_name = f"{proj}-warehouse"
+    if warehouse_uri and warehouse_uri.startswith("gs://"):
+        raw_bucket = warehouse_uri[len("gs://") :].split("/", 1)[0].strip()
+        if raw_bucket:
+            bucket_name = raw_bucket
+
+    try:  # pragma: no cover - optional live GCS metadata lookup
+        from google.cloud import storage
+
+        bucket = storage.Client(project=proj).get_bucket(bucket_name)
+        num = str(bucket.project_number or "").strip()
+        if num.isdigit():
+            _PROJECT_NUMBER_CACHE[proj] = num
+            return num
+    except Exception:  # noqa: BLE001 - degrade cleanly to list URL when offline
+        pass
+
+    _PROJECT_NUMBER_CACHE[proj] = ""
+    return None

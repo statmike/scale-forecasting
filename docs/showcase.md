@@ -45,12 +45,12 @@ flowchart TD
 
 ## What This Walkthrough Proves
 
-| Practitioner Question | How `scale-forecasting` Solves It | Covered In |
+| Practitioner Question | How `scale-forecasting` Solves It | Surface &amp; Step |
 | :--- | :--- | :--- |
-| **"Can I keep my trusted statistical and tree baselines?"** | **Yes — run your models and Google's models together.** Fit `holtwinters`, `theta`, and covariate `lightgbm` side-by-side with BigQuery `arima_plus`, zero-shot **`timesfm`** (`AI.FORECAST`), and a learned **`nnls`** stacker on the exact same holdout fold. | [Step 1](#step-1--prototype-locally-in-5-seconds-000-cloud-spend) & [Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) |
-| **"Do I have to tune Spark executors, build containers, or manage VMs?"** | **No Cloud DevOps overhead.** One JSON config right-sizes executors from measured profiles, dispatches Python and BigQuery SQL engines in parallel, and tears down all ephemeral compute automatically (`\$0.00` idle compute). | [Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) & [Step 3](#step-3--inspect-the-cloud-services-that-ran-zero-devops) |
-| **"How are accuracy, Forecast Value Added, and bias governed at scale?"** | **Self-documenting BigQuery S&OP registry.** Every run writes to 5 append-only tables, 11 analytical SQL views (pooled comparable WAPE, FVA waterfall, Trigg tracking signals, horizon decay), and a 44-term **Knowledge Catalog** Business Glossary across 25 to 100,000+ series. | [Step 4](#step-4--govern-accuracy-fva--scale-in-bigquery-25-to-100000-series) |
-| **"Can planners and stakeholders explore results without writing SQL?"** | **Stateful conversational analytics.** Ask multi-turn questions in plain English via the **BigQuery Conversational Analytics `DataAgent`** from your terminal (`--chat`), Python (`reg.chat()`), or directly inside **BigQuery Studio → Agents** — with auditable SQL behind every answer. | [Step 5](#step-5--talk-to-your-forecast-in-terminal-python-or-bigquery-studio) |
+| **"Can I keep my trusted statistical and tree baselines?"** | **Yes — run your models and Google's models together.** Fit `holtwinters`, `theta`, and covariate `lightgbm` side-by-side with BigQuery `arima_plus`, zero-shot **`timesfm`** (`AI.FORECAST`), and a learned **`nnls`** stacker on the exact same holdout fold. | **`[Terminal / Python]`**<br>[Step 1](#step-1--prototype-locally-in-5-seconds-000-cloud-spend) &amp; [Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) |
+| **"Do I have to tune Spark executors, build containers, or manage VMs?"** | **No Cloud DevOps overhead.** One JSON config right-sizes executors from measured profiles, dispatches Python and BigQuery SQL engines in parallel, and tears down all ephemeral compute automatically (`\$0.00` idle compute). | **`[Terminal]` → `[Cloud Console]`**<br>[Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) &amp; [Step 3](#step-3--inspect-the-cloud-services-that-ran-zero-devops) |
+| **"How are accuracy, Forecast Value Added, and bias governed at scale?"** | **Self-documenting BigQuery S&amp;OP registry.** Every run writes to 5 append-only tables, 11 analytical SQL views (pooled comparable WAPE, FVA waterfall, Trigg tracking signals, horizon decay), and a 44-term **Knowledge Catalog** Business Glossary across 25 to 100,000+ series. | **`[Cloud Console]`**<br>[Step 4](#step-4--govern-accuracy-fva--scale-in-bigquery-25-to-100000-series) |
+| **"Can planners and stakeholders explore results without writing SQL?"** | **Stateful conversational analytics.** Ask multi-turn questions in plain English via the **BigQuery Conversational Analytics `DataAgent`** in **BigQuery Agents Hub** or from your terminal (`--chat`) / Python (`reg.chat()`) — with auditable SQL behind every answer. | **`[Cloud Console]` or `[Terminal]`**<br>[Step 5](#step-5--talk-to-your-forecast-in-terminal-python-or-bigquery-studio) |
 
 <details markdown="1">
 <summary><b>Tip — 60-second terminal &amp; browser tab setup (run any step live in any order)</b></summary>
@@ -63,7 +63,7 @@ If you are walking through this page interactively alongside VS Code and Google 
 source .venv/bin/activate
 ```
 
-**2. Set your deployed GCP Project ID** *(if you already keep your `SF_*` variables in a local gitignored `.env` file, run `source .env` instead; otherwise paste this prompt and enter your project ID)*:
+**2. Set your deployed GCP Project ID** *(if you already keep your `SF_*` variables in a local gitignored `.env` file, run `set -a && source .env && set +a` instead; otherwise paste this prompt and enter your project ID)*:
 
 ```bash
 read -rp "Enter your GCP Project ID: " PROJECT
@@ -87,7 +87,7 @@ python -m scale_forecasting.registry.ops doctor
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id forecaster-showcase-f67fec77de66 --links
 ```
 
-- **Pre-open Console tabs in one click:** **Cmd+Click** `[1]` (BigQuery Studio → Agents), `[2]` (BigQuery Dataset `scale_forecasting`), `[3]` (Knowledge Catalog Glossary), and `[5]`/`[7]` (Serverless Spark Batches) from `--links`.
+- **Pre-open Console tabs in one click:** **Cmd+Click** `[1]` (BigQuery Agents Hub), `[2]` (BigQuery Dataset `scale_forecasting`), `[3]` (Knowledge Catalog Glossary `sf-glossary-scale-forecasting`), `[5]`/`[7]` (Serverless Spark Batches), and `[8]` (GCS Run Artifacts) from `--links`.
 - **100% Idempotent &amp; Order-Independent:** Once setup is confirmed, **every command in Steps 1–5 is safe to run in any order and as many times as you want**:
   - `playground` (Step 1) runs purely in local memory (`\$0.00` cloud spend, zero writes).
   - `--dry-run --feasibility` (Step 2a), `ops doctor`, and `--links` (Step 3) are strictly read-only.
@@ -99,6 +99,8 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id foreca
 ---
 
 ## Step 1 — Prototype Locally in 5 Seconds (`$0.00` Cloud Spend)
+
+**Where you work:** **`[Terminal or Python]`** — *runs 100% on local CPU (`\$0.00` cloud spend, no Google Cloud Console tabs needed yet).*
 
 `scale-forecasting` starts as a pure offline Python library — you do **not** need Google Cloud credentials or a deployed project to test any of the 31 Python models (or a custom one-file `BaseModel` plugin) locally across all **21 evaluation metrics**.
 
@@ -157,7 +159,9 @@ python -c 'from scale_forecasting import playground; bo = playground.bakeoff(mod
 
 ## Step 2 — Run Your Baselines Alongside Google's Models in One Config
 
-When you are ready to benchmark across a BigQuery / BigLake Iceberg panel (deployed via the 15-minute Terraform setup in [Deploying on GCP](./deploying_on_gcp.md)), you do not rewrite your modeling code. One declarative JSON file — [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json) (`run_id`: `forecaster-showcase-f67fec77de66`) — runs Python statistical/ML baselines on Serverless Spark in parallel with BigQuery `arima_plus` and zero-shot `timesfm`, blends them with Non-Negative Least Squares (`nnls`), and refreshes the BigQuery `DataAgent`:
+**Where you work:** **`[Editor + Terminal / Python]`** — *review [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json), then run pre-flight cost/fold estimation and cloud execution from your terminal.*
+
+When you are ready to benchmark across a BigQuery / BigLake Iceberg panel (deployed via the 15-minute Terraform setup in [Deploying on GCP](./deploying_on_gcp.md)), you do not rewrite your modeling code. One declarative JSON file — [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json) (`run_id`: `forecaster-showcase-f67fec77de66`) — runs Python statistical/ML baselines on Serverless Spark in parallel with BigQuery `arima_plus` and zero-shot `timesfm` (`AI.FORECAST`), blends them with Non-Negative Least Squares (`nnls`), and refreshes the BigQuery `DataAgent`:
 
 ```json
 {
@@ -279,7 +283,8 @@ INFO scale_forecasting.ensemble_run | ensemble run done: run_id=forecaster-showc
 INFO __main__ | registered BigQuery Conversational Agent: projects/your-gcp-project-id/locations/global/dataAgents/sf-registry-scale-forecasting
 INFO __main__ | run forecaster-showcase-f67fec77de66 done: status=COMPLETED
 INFO __main__ | console registry dataset: https://console.cloud.google.com/bigquery?project=your-gcp-project-id&p=your-gcp-project-id&d=scale_forecasting&page=dataset
-INFO __main__ | console BigQuery Studio Agents (left rail -> Agents -> sf-registry-scale-forecasting): https://console.cloud.google.com/bigquery?project=your-gcp-project-id
+INFO __main__ | console BigQuery Studio Agents Hub (sf-registry-scale-forecasting): https://console.cloud.google.com/bigquery/agents_hub?project=your-gcp-project-id
+INFO __main__ | console Knowledge Catalog glossary: https://console.cloud.google.com/dataplex/dp-glossaries/projects/000000000000/locations/global/glossaries/sf-glossary-scale-forecasting?project=your-gcp-project-id
 INFO __main__ | console Job [ensemble] on bigquery: https://console.cloud.google.com/bigquery?project=your-gcp-project-id
 INFO __main__ | console Job [ml] on spark: https://console.cloud.google.com/dataproc/batches/us-central1/sf-forecaster-showcase-f67fec77de66-ml-a1/monitoring?project=your-gcp-project-id
 INFO __main__ | console Job [native] on bigquery: https://console.cloud.google.com/bigquery?project=your-gcp-project-id
@@ -292,7 +297,8 @@ INFO __main__ | console Job [statistical] on spark: https://console.cloud.google
 INFO scale_forecasting.launch_plan | compute profile source: auto -> forecaster-showcase-f67fec77de66
 INFO __main__ | run forecaster-showcase-f67fec77de66 already COMPLETED; skipping relaunch (pass force=True to re-run)
 INFO __main__ | console registry dataset: https://console.cloud.google.com/bigquery?project=your-gcp-project-id&p=your-gcp-project-id&d=scale_forecasting&page=dataset
-INFO __main__ | console BigQuery Studio Agents (left rail -> Agents -> sf-registry-scale-forecasting): https://console.cloud.google.com/bigquery?project=your-gcp-project-id
+INFO __main__ | console BigQuery Studio Agents Hub (sf-registry-scale-forecasting): https://console.cloud.google.com/bigquery/agents_hub?project=your-gcp-project-id
+INFO __main__ | console Knowledge Catalog glossary: https://console.cloud.google.com/dataplex/dp-glossaries/projects/000000000000/locations/global/glossaries/sf-glossary-scale-forecasting?project=your-gcp-project-id
 INFO __main__ | submitted: forecaster-showcase-f67fec77de66
 ```
 
@@ -328,23 +334,28 @@ print("completed:", res.run_id)
 
 ## Step 3 — Inspect the Cloud Services That Ran (Zero DevOps)
 
-At the end of every run (or anytime via `python -m scale_forecasting.bq_agent --dataset scale_forecasting --links` or `reg.console_urls()`), `scale-forecasting` prints direct Google Cloud Console links to every managed service that executed your DAG:
+**Where you work:** **`[Terminal]`** *(run `--links` once)* → **`[Cloud Console: Compute & Storage Tabs]`** *(inspect the managed jobs and artifacts in your browser).*
+
+First, print the clickable Google Cloud Console deep links for `forecaster-showcase-f67fec77de66` from your terminal (or call `res.console_urls()` in Python):
 
 ```bash
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id forecaster-showcase-f67fec77de66 --links
 ```
 
 > [!TIP]
-> **Opening Google Cloud Console Surfaces:**
-> Static links in public documentation omit project IDs — click any link in the table below and select your project in the Google Cloud Console top bar. When you run `--links` (or `res.console_urls()`) locally, `scale-forecasting` automatically populates `?project=<your-project-id>` from `SF_PROJECT_ID` or Application Default Credentials so you can **Cmd+Click** directly into each batch, table, view, and agent.
+> **Static vs. Local Deep Links:**
+> Static links in the table below omit project IDs so they work for any reader (select your project in the Google Cloud Console top bar). When you run `--links` locally, `scale-forecasting` automatically attaches `?project=<your-project-id>` and your numeric project ID so **Cmd+Click** opens the exact Spark batch monitoring page, glossary, dataset, and Agents Hub directly.
 
-| Google Cloud Console Surface (Select Your Project in Top Bar) | What Happened Automatically Under the Hood |
-| :--- | :--- |
-| **[Dataproc → Serverless → Batches](https://console.cloud.google.com/dataproc/batches)** | The DAG router (`dag.py`) launched two independent, right-sized Serverless Spark batches in parallel: `statistical` (`1` vCPU/task, `OMP_NUM_THREADS=1` to avoid BLAS oversubscription) and `ml` (`2` vCPUs/task, `OMP_NUM_THREADS=2` for `lightgbm`), then scaled back to **`0` executors** immediately upon completion. |
-| **[BigQuery Studio → Job History](https://console.cloud.google.com/bigquery)** *(Bottom bar → **Personal / Project history**)* | Concurrently, `bigquery_engine.py` executed `arima_plus` (`ARIMA_PLUS_XREG` with covariates) and zero-shot **`timesfm`** (`AI.FORECAST`) directly in BigQuery in **`125.7s`**, followed by the barrier `ensemble` job (`inverse_error` + `nnls` in **`14.9s`**). |
-| **[BigQuery Studio → Explorer (`scale_forecasting`)](https://console.cloud.google.com/bigquery)** | All cell predictions, fit diagnostics, and out-of-fold rows streamed via the BigQuery Storage Write API into the 5 append-only registry tables and 11 analytical SQL views. |
-| **[Dataplex → Knowledge Catalog → Glossaries](https://console.cloud.google.com/dataplex/glossaries)** | Synchronized 44 governed S&OP and forecasting definitions (`sf-glossary-scale-forecasting`) linked directly to the registry schema. |
-| **[BigQuery Studio → Agents](https://console.cloud.google.com/bigquery)** *(Left rail → **Agents** → `scale-forecasting Registry Agent`)* | Registered/updated `sf-registry-scale-forecasting` with the 11 views, 44 glossary terms, and 32 verified Golden SQL examples. |
+Now switch to **`[Cloud Console]`** and walk through what ran automatically without writing infrastructure code:
+
+| `[Cloud Console]` Tab to Open | What to Look At in Console | What `scale-forecasting` Handled Automatically |
+| :--- | :--- | :--- |
+| **[Dataproc → Serverless → Batches](https://console.cloud.google.com/dataproc/batches)**<br>*(Links `[5]` &amp; `[7]` from `--links`)* | Open `sf-forecaster-showcase-f67fec77de66-statistical-a1` and `...-ml-a1` → **Details / Properties** | `dag.py` launched 2 independent Serverless Spark batches in parallel — right-sizing `statistical` (`OMP_NUM_THREADS=1`, `maxExecutors=3`) separately from `ml` (`lightgbm`, `maxExecutors=2`) — then scaled back to **`0` executors** (`\$0.00` idle). |
+| **[BigQuery Studio → Project History](https://console.cloud.google.com/bigquery)**<br>*(Links `[4]` &amp; `[6]` from `--links`)* | Bottom bar → **Personal / Project history** | Concurrently, `bigquery_engine.py` ran `arima_plus` (`ARIMA_PLUS_XREG`) and zero-shot **`timesfm`** (`AI.FORECAST`) in **`125.7s`**, followed by the barrier `ensemble` job (`inverse_error` + `nnls` in **`14.9s`**). |
+| **[Cloud Storage → Run Artifacts](https://console.cloud.google.com/storage/browser)**<br>*(Link `[8]` from `--links`)* | `.../warehouse/artifacts/<project>/scale_forecasting/forecaster-showcase-f67fec77de66/` | Persisted fitted stacker weights (`ensemble_34432fdde9fa_nnls.pkl`) alongside BigLake Iceberg Parquet files under a deterministic, registry-scoped prefix. |
+| **[BigQuery Studio → Explorer (`scale_forecasting`)](https://console.cloud.google.com/bigquery)**<br>*(Link `[2]` from `--links` — covered in Step 4)* | Expand dataset `scale_forecasting` | Streamed all predictions, 21 metrics, and out-of-fold rows into the 5 append-only tables and 11 analytical SQL views. |
+| **[Knowledge Catalog → Glossaries](https://console.cloud.google.com/dataplex/dp-glossaries)**<br>*(Link `[3]` from `--links` — covered in Step 4)* | Open `sf-glossary-scale-forecasting` | Synchronized 44 governed S&amp;OP and forecasting definitions linked directly to the BigQuery tables and views. |
+| **[BigQuery Studio → Agents Hub](https://console.cloud.google.com/bigquery/agents_hub)**<br>*(Link `[1]` from `--links` — covered in Step 5)* | Open `scale-forecasting Registry Agent (scale_forecasting)` | Registered/updated `sf-registry-scale-forecasting` with the 11 views, 44 glossary terms, and 32 verified Golden SQL examples. |
 
 Every family job is permanently recorded in `v_run_jobs`:
 
@@ -360,14 +371,14 @@ Every family job is permanently recorded in `v_run_jobs`:
 
 ```text
 Google Cloud Console Links (project=your-gcp-project-id, dataset=scale_forecasting, run_id=forecaster-showcase-f67fec77de66):
-  [1] BigQuery Studio — Agents (scale-forecasting Registry Agent: sf-registry-scale-forecasting)
-      https://console.cloud.google.com/bigquery?project=your-gcp-project-id
-      -> In BigQuery Studio left rail -> Agents -> scale-forecasting Registry Agent (scale_forecasting)
+  [1] BigQuery Studio — Agents Hub (Registry Agent: sf-registry-scale-forecasting)
+      https://console.cloud.google.com/bigquery/agents_hub?project=your-gcp-project-id
+      -> Open scale-forecasting Registry Agent (scale_forecasting) (sf-registry-scale-forecasting) for zero-code chat
   [2] BigQuery Registry Dataset (scale_forecasting)
       https://console.cloud.google.com/bigquery?project=your-gcp-project-id&p=your-gcp-project-id&d=scale_forecasting&page=dataset
       -> 5 append-only registry tables + 11 self-documenting analytical SQL views
   [3] Knowledge Catalog Business Glossary (sf-glossary-scale-forecasting)
-      https://console.cloud.google.com/dataplex/glossaries?project=your-gcp-project-id
+      https://console.cloud.google.com/dataplex/dp-glossaries/projects/000000000000/locations/global/glossaries/sf-glossary-scale-forecasting?project=your-gcp-project-id
       -> 44 governed forecasting & S&OP definitions linked to registry tables and views
   [4] Job [ensemble] on bigquery
       https://console.cloud.google.com/bigquery?project=your-gcp-project-id
@@ -392,17 +403,37 @@ Google Cloud Console Links (project=your-gcp-project-id, dataset=scale_forecasti
 
 ## Step 4 — Govern Accuracy, FVA & Scale in BigQuery (25 to 100,000 Series)
 
-Instead of scattering CSV exports or notebook DataFrames across machines, every run lands in a governed BigQuery warehouse schema ([Output schemas](./output_schemas.md)):
+**Where you work:** **`[Cloud Console: BigQuery Explorer & Knowledge Catalog Tabs]`** *(links `[2]`, `[3]`, and `[9]`–`[16]` from `--links`).*
 
-- **5 Append-Only Registry Tables:** `run_registry`, `run_jobs`, `forecast_predictions` (`2,800` rows for `forecaster-showcase-f67fec77de66`), `forecast_metadata` (`200` cell rows), and `backtest_oof` (`5,600` out-of-fold rows).
-- **11 Self-Documenting Analytical SQL Views:** Every view and column embeds `OPTIONS(description=...)` metadata synchronized with **44 Knowledge Catalog Business Glossary terms** (`sf-glossary-scale-forecasting`), so BI dashboards, SQL analysts, and AI agents share one canonical definition of pooled WAPE, Forecast Value Added (FVA), and Trigg's tracking signal.
+Instead of scattering CSV exports or notebook DataFrames across laptops, every run lands in a governed, Knowledge-Catalog-enriched BigQuery warehouse ([Output schemas](./output_schemas.md)). Every table, view, and column carries DDL `OPTIONS(description=...)` metadata synchronized with **44 Knowledge Catalog Business Glossary terms** (`sf-glossary-scale-forecasting`).
+
+### Complete BigQuery Registry Reference (`5 Tables` + `11 Analytical SQL Views`)
+
+| Object Name | Kind | Row Grain | What It Contains &amp; When to Query It |
+| :--- | :---: | :--- | :--- |
+| **`run_registry`** | Table | `1 row / run_id` | Run-level audit header: validated `RunConfig` JSON, `snapshot_millis`, status, wall time, lineage, and borrowed-model telemetry. |
+| **`run_jobs`** | Table | `1 row / (run_id, family, attempt)` | Per-family cloud execution trace: `job_id`, `runtime`, `system_job_id`, Spark/Ray/Vertex sizing, runtime seconds, and `borrowed:*` markers. |
+| **`forecast_predictions`** | Table | `1 row / (run_id, ts_id, model, date)` | Forward horizon forecasts (`yhat`, `yhat_lower`, `yhat_upper`, `quantiles`) plus Tier-2 per-step feature attributions (`2,800` rows in this run). |
+| **`forecast_metadata`** | Table | `1 row / (run_id, ts_id, model, fold)` | All **21 point &amp; interval metrics** (`wape`, `mae`, `mase`, `rmsse`, `coverage`, `msis`, `bias`, etc.), CPU/RSS telemetry, calibration decisions, and Tier-1 attributions (`200` cell rows in this run). |
+| **`backtest_oof`** | Table | `1 row / (run_id, ts_id, model, fold, date)` | Rolling-origin out-of-fold (`OOF`) actuals (`y_true`) vs. predictions (`yhat`, `horizon_step`) used for stacker fitting, horizon decay, and interval calibration (`5,600` rows in this run). |
+| **`v_executive_sop_summary`** | View | `1 row / run_id` | One-row S&amp;OP executive scorecard: champion model, comparable WAPE, FVA lift %, exception series count, interval coverage, and total forward volume. |
+| **`v_model_leaderboard_comparable`** | View | `1 row / (run_id, model_type)` | **Primary apples-to-apples leaderboard:** pooled holdout WAPE, MAE, MASE, and series count restricted to the exact shared `(ts_id, holdout_fold_id)` support set. |
+| **`v_fva_waterfall`** | View | `1 row / (run_id, stage, model_type)` | **Forecast Value Added (FVA)** ladder measuring incremental accuracy lift from `1_baseline_naive` → `2_statistical` → `4_covariate_ml_dl` → `5_ensemble`. |
+| **`v_bias_and_exceptions`** | View | `1 row / (run_id, model_type, ts_id)` | Planner exception queue: signed bias, **Trigg's tracking signal** (`\|tracking_signal\| > 4.0`), Syntetos-Boylan (`SBC`) demand class, and chronic over/under-forecast alerts. |
+| **`v_horizon_decay`** | View | `1 row / (run_id, model_type, step)` | Lead-time accuracy curve (`Day 1` → `Day H` pooled WAPE, MAE, signed bias, empirical interval coverage, and average interval width). |
+| **`v_feature_attributions`** | View | `1 row / (run_id, model, ts_id, scope, feature)` | Unified global and horizon-local driver impacts (`price_index`, `promo_flag`, `is_holiday`, lags, trend, and seasonality). |
+| **`v_anomalies`** | View | `1 row / flagged point` | Historical spike/dip outlier flags and structural changepoints across backtest residuals and BigQuery ML anomaly detection. |
+| **`v_model_leaderboard`** | View | `1 row / (run_id, model_type)` | Full per-model cell summary across all folds (`mean_wape`, `median_fit_seconds`, `no_artifact_rate`, `compute_engine`). |
+| **`v_backtest_coverage`** | View | `1 row / (run_id, model_type)` | Fold-survival audit reporting series counts at full folds vs. short-series fallbacks (`n_folds_achieved`, `backtest_status`). |
+| **`v_run_summary`** | View | `1 row / run_id` | Cross-run fleet ledger (`n_series` from `25` to `100,000+`, `n_models`, `runtime_seconds`, `longest_job_seconds`, orchestration overhead). |
+| **`v_run_jobs`** | View | `1 row / (run_id, family)` | Latest attempt per family node (`native`, `statistical`, `ml`, `deep_learning`, `automl`, `ensemble`, `*_repair`) with status and wall-clock duration. |
 
 <details markdown="1">
-<summary><b>Tip — Inspecting self-documenting column descriptions &amp; Knowledge Catalog lineage in the Console</b></summary>
+<summary><b>Tip — What to click in BigQuery Studio &amp; Knowledge Catalog (`[Cloud Console]`)</b></summary>
 
-- **BigQuery Schema Descriptions:** In **BigQuery Studio → Explorer → `scale_forecasting`** (link `[2]` from `--links`), click `v_fva_waterfall`, `v_bias_and_exceptions`, or `v_executive_sop_summary` and open the **Schema** tab — every metric and flag column (`pooled_wape`, `fva_relative_lift_pct`, `tracking_signal`, `sbc_class`) displays governed S&amp;OP definitions populated automatically via DDL `OPTIONS(description=...)`.
-- **Knowledge Catalog Business Glossary:** Open **Dataplex → Knowledge Catalog → Glossaries → `sf-glossary-scale-forecasting`** (link `[3]` from `--links`) to browse all **44 governed forecasting &amp; S&amp;OP definitions** linked to the registry tables and views, or click **Lineage** on any view in BigQuery Studio to trace upstream dependencies.
-- **Deduplicated Append-Only Safety:** Every analytical view applies `QUALIFY ROW_NUMBER() OVER (...) = 1`, guaranteeing clean, duplicate-free reporting across retries, cell borrowing, and surgical repairs.
+1. **Inspect Self-Documenting Column Descriptions:** In **[BigQuery Studio → Explorer → `scale_forecasting`](https://console.cloud.google.com/bigquery)** (link `[2]` from `--links`), click `v_fva_waterfall`, `v_bias_and_exceptions`, or `v_executive_sop_summary` → open the **Schema** tab to see governed business definitions on every column, then click **Preview** to inspect rows at zero query cost.
+2. **Browse the 44-Term Business Glossary:** Open **[Knowledge Catalog → Glossaries](https://console.cloud.google.com/dataplex/dp-glossaries)** (link `[3]` from `--links` jumps directly into `sf-glossary-scale-forecasting`) to see canonical definitions of *WAPE*, *Forecast Value Added (FVA)*, *Trigg's Tracking Signal*, *MASE*, and *Syntetos-Boylan Classification* linked to the BigQuery tables and views.
+3. **Deduplicated Append-Only Safety:** Every analytical view applies `QUALIFY ROW_NUMBER() OVER (...) = 1`, guaranteeing clean, duplicate-free metrics across retries, cell borrowing, and surgical repairs.
 
 </details>
 
@@ -441,11 +472,19 @@ Without changing a single table or view, `v_run_summary` and `v_executive_sop_su
 
 ## Step 5 — Talk to Your Forecast in Terminal, Python, or BigQuery Studio
 
-Because `output.ensure_bq_agent: true` registered **`sf-registry-scale-forecasting`** with all 11 analytical views, 44 glossary definitions, and 32 golden SQL examples, you can interrogate your forecast in plain English from **either** a developer terminal/notebook or the zero-code Google Cloud Console UI.
+**Where you work:** **`[Cloud Console: BigQuery Agents Hub]`** *(zero-code browser chat)* **OR** **`[Terminal: --chat / Python: reg.chat()]`** *(developer CLI &amp; notebook SDK).*
 
-### Option A — Interactive Terminal REPL (`--chat`) & Python SDK (`reg.chat()`)
+Because `output.ensure_bq_agent: true` registered **`sf-registry-scale-forecasting`** with all 11 analytical views, 44 Knowledge Catalog glossary definitions, and 32 verified Golden SQL examples, planners and data scientists can ask the exact same multi-turn questions in **either** surface.
 
-Start a stateful multi-turn terminal session:
+### Option A — `[Cloud Console]` BigQuery Agents Hub (Zero Code)
+
+1. Open **[BigQuery Studio → Agents Hub](https://console.cloud.google.com/bigquery/agents_hub)** and select your project in the top bar (or **Cmd+Click** link `[1]` from `--links`).
+2. Click **`scale-forecasting Registry Agent (scale_forecasting)`** (`sf-registry-scale-forecasting`) to open a new Console chat session.
+3. Paste any question from the **4 Ready-to-Ask Questions** table below directly into the Console chat box to get narrative answers, interactive charts, and expandable BigQuery SQL.
+
+### Option B — `[Terminal / Python]` Interactive `--chat` REPL &amp; `reg.chat()`
+
+Start a stateful multi-turn terminal session scoped to `forecaster-showcase-f67fec77de66`:
 
 ```bash
 python -m scale_forecasting.bq_agent \
@@ -454,7 +493,7 @@ python -m scale_forecasting.bq_agent \
   --chat
 ```
 
-Inside `--chat`, use `/starters` (then type `1`–`4`) to try built-in S&OP questions, ask any free-form question, type `/sql` to inspect the exact BigQuery SQL generated for the last turn, `/run all` to query across all runs in the dataset, `/links` to print Console URLs, or `/quit` to exit.
+Inside `--chat`, type `/starters` and enter **`1`–`4`** (or ask any free-form question), type **`/sql`** after any turn to print the exact BigQuery SQL executed, `/run all` to switch default scope across all runs, `/links` to reprint Console URLs, or `/quit` to exit.
 
 <details markdown="1">
 <summary><b>Tip — How <code>/sql</code>, <code>/starters</code>, and <code>/run</code> work inside interactive <code>--chat</code></b></summary>
@@ -486,7 +525,7 @@ Inside `--chat`, use `/starters` (then type `1`–`4`) to try built-in S&OP ques
 
 </details>
 
-From Python or a notebook ([`notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb`](./notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb)):
+Equivalent Python / notebook session ([`notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb`](./notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb)):
 
 ```python
 import scale_forecasting as sf
@@ -503,13 +542,16 @@ r2 = chat("On that winning model, which series have directional bias or Trigg tr
 display(r2.df.head())
 ```
 
-### Option B — Google Cloud Console (`BigQuery Studio → Agents`)
+### 4 Ready-to-Ask Questions (Paste in BigQuery Agents Hub or Run `1`–`4` in `--chat`)
 
-Demand planners and business stakeholders can query the exact same governed agent directly in the browser with **zero code**:
+*(In **BigQuery Agents Hub**, including `forecaster-showcase-f67fec77de66` in Turn 1 anchors the conversation to this run even if your dataset holds hundreds of prior runs; Turns 2 and 3 then carry that context statefully.)*
 
-1. Open **[BigQuery Studio](https://console.cloud.google.com/bigquery)** and select your Google Cloud project in the top bar (or **Cmd+Click** link `[1]` from `--links`).
-2. In the BigQuery Studio left navigation rail, click **Agents**.
-3. Open **`scale-forecasting Registry Agent (scale_forecasting)`** (`sf-registry-scale-forecasting`) and ask any question in the Console chat pane to see narrative summaries, charts, and expandable SQL.
+| Turn | Question to Paste in Console Agents Hub (or Ask in `--chat`) | `--chat` Shortcut | Governed View(s) Queried &amp; What It Demonstrates |
+| :---: | :--- | :---: | :--- |
+| **1** | `In run forecaster-showcase-f67fec77de66, which model won on comparable WAPE and what was the Forecast Value Added (FVA) lift over naive_seasonal?` | `1` | **`v_fva_waterfall`** &amp; **`v_model_leaderboard_comparable`** — Ranks all 8 models/ensembles (`timesfm` `#1` at `9.84%` WAPE, `+54.09%` FVA lift; `ensemble_nnls` `#2` at `10.83%`). |
+| **2** | `On that winning model, which series have directional bias or Trigg tracking-signal exceptions?` | `2` | **`v_bias_and_exceptions`** — Demonstrates **stateful multi-turn memory** (*"that winning model"* → `timesfm`) and flags chronic under/over-forecasted series (`\|tracking_signal\| > 4.0`). |
+| **3** | `How does forecast accuracy decay from day 1 to day 14, and which promo or holiday covariates mattered most?` | `3` | **`v_horizon_decay`** &amp; **`v_feature_attributions`** — Audits Day 1 → Day 14 WAPE and interval coverage alongside `price_index`, `is_holiday`, and `promo_flag` driver impacts. |
+| **4** | `Compare recent runs in v_run_summary including our 100,000-series benchmark runs.` | `4` | **`v_run_summary`** &amp; **`v_executive_sop_summary`** — Compares this 25-series hybrid run against **100,000-series** Dataproc Serverless Spark, Vertex AI Ray, and BigQuery runs. |
 
 ---
 

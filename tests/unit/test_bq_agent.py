@@ -1363,9 +1363,19 @@ def test_console_urls_across_all_runtimes_and_sdk_surfaces(
             },
         ],
     )
-    assert f"project={_PROJECT}" in links.bq_agents_url
+    assert f"bigquery/agents_hub?project={_PROJECT}" in links.bq_agents_url
     assert f"d={_DATASET}" in links.dataset_url
-    assert f"project={_PROJECT}" in links.glossary_url
+    assert f"dataplex/dp-glossaries?project={_PROJECT}" in links.glossary_url
+
+    links_with_num = build_registry_console_urls(
+        project_id=_PROJECT,
+        project_number="123456789012",
+        dataset_id=_DATASET,
+    )
+    assert (
+        "dataplex/dp-glossaries/projects/123456789012/locations/global/"
+        f"glossaries/sf-glossary-scale-forecasting?project={_PROJECT}"
+    ) in links_with_num.glossary_url
     assert len(links.by_category("compute")) == 2
     assert len(links.by_category("storage")) == 1
     assert "BigQuery Studio" in links.format_text()

@@ -103,15 +103,17 @@ class BQAgentRegistration:
 
     @property
     def console_url(self) -> str:
-        """Direct Google Cloud Console BigQuery Studio URL for this project."""
-        return f"https://console.cloud.google.com/bigquery?project={self.project_id}"
+        """Direct Google Cloud Console BigQuery Agents Hub URL for this project."""
+        return f"https://console.cloud.google.com/bigquery/agents_hub?project={self.project_id}"
 
     def console_urls(self, *, region: str = "us-central1") -> Any:
         """Return the full :class:`~scale_forecasting.bq_agent.console_urls.ConsoleLinkSet`."""
         from .console_urls import build_registry_console_urls
+        from .rest import resolve_project_number
 
         return build_registry_console_urls(
             project_id=self.project_id,
+            project_number=resolve_project_number(self.project_id),
             dataset_id=self.dataset_id,
             region=region,
             agent_id=self.agent_id,

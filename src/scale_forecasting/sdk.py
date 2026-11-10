@@ -2611,8 +2611,11 @@ class Registry:
             with contextlib.suppress(Exception):
                 job_rows = read_run_jobs(run_id, settings=self._settings)
 
+        from .bq_agent.rest import resolve_project_number
+
         return build_registry_console_urls(
             project_id=proj,
+            project_number=resolve_project_number(proj, warehouse_uri=warehouse),
             dataset_id=ds,
             region=eff_region,
             run_id=run_id,

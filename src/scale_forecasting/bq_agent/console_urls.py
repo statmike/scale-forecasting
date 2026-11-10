@@ -216,14 +216,17 @@ class ConsoleLinkSet:
     run_id: str | None
     agent_id: str
     links: tuple[ConsoleLink, ...]
+    project_number: str | None = None
 
     @property
     def bq_agents_url(self) -> str:
-        """Console URL for BigQuery Studio -> Agents."""
+        """Console URL for BigQuery Agents Hub."""
         for link in self.links:
             if link.category == "agent":
                 return link.url
-        return _append_query(f"{CONSOLE_BASE_URL}/bigquery", {"project": self.project_id})
+        return _append_query(
+            f"{CONSOLE_BASE_URL}/bigquery/agents_hub", {"project": self.project_id}
+        )
 
     @property
     def dataset_url(self) -> str:
@@ -235,12 +238,12 @@ class ConsoleLinkSet:
 
     @property
     def glossary_url(self) -> str:
-        """Console URL for Dataplex Knowledge Catalog Glossaries."""
+        """Console URL for Dataplex Knowledge Catalog Business Glossaries."""
         for link in self.links:
             if link.category == "catalog":
                 return link.url
         return _append_query(
-            f"{CONSOLE_BASE_URL}/dataplex/glossaries",
+            f"{CONSOLE_BASE_URL}/dataplex/dp-glossaries",
             {"project": self.project_id},
         )
 
@@ -312,6 +315,7 @@ class ConsoleLinkSet:
 def build_registry_console_urls(
     *,
     project_id: str | None = None,
+    project_number: str | None = None,
     dataset_id: str = "scale_forecasting",
     region: str = "us-central1",
     run_id: str | None = None,
@@ -322,23 +326,34 @@ def build_registry_console_urls(
 ) -> ConsoleLinkSet:
     """Construct a complete :class:`ConsoleLinkSet` for a forecast registry and optional ``run_id``.
 
-    Includes direct links for **BigQuery Studio -> Agents**, the **Registry Dataset**, key
-    analytical SQL views, **Knowledge Catalog** Business Glossaries, executed per-family compute
-    jobs (or runtime hubs), and GCS warehouse artifacts.
+    Includes direct links for **BigQuery Agents Hub**, the **Registry Dataset**, key analytical SQL
+    views, **Knowledge Catalog** Business Glossaries, executed per-family compute jobs (or runtime
+    hubs), and GCS warehouse artifacts.
     """
     eff_project = (project_id or "").strip() or None
+    raw_proj_num = (project_number or "").strip()
+    eff_proj_num = raw_proj_num if raw_proj_num.isdigit() else None
     eff_dataset = (dataset_id or "scale_forecasting").strip()
     eff_region = (region or "us-central1").strip()
     eff_agent_id = (agent_id or _slug_agent_id(eff_dataset)).strip()
+    glossary_id = default_glossary_id(eff_dataset)
+
+    if eff_proj_num:
+        glossary_path = (
+            f"{CONSOLE_BASE_URL}/dataplex/dp-glossaries/projects/{eff_proj_num}"
+            f"/locations/global/glossaries/{glossary_id}"
+        )
+    else:
+        glossary_path = f"{CONSOLE_BASE_URL}/dataplex/dp-glossaries"
 
     links: list[ConsoleLink] = [
         ConsoleLink(
             category="agent",
-            label=f"BigQuery Studio — Agents (scale-forecasting Registry Agent: {eff_agent_id})",
-            url=_append_query(f"{CONSOLE_BASE_URL}/bigquery", {"project": eff_project}),
+            label=f"BigQuery Studio — Agents Hub (Registry Agent: {eff_agent_id})",
+            url=_append_query(f"{CONSOLE_BASE_URL}/bigquery/agents_hub", {"project": eff_project}),
             hint=(
-                f"In BigQuery Studio left rail -> Agents -> "
-                f"scale-forecasting Registry Agent ({eff_dataset})"
+                f"Open scale-forecasting Registry Agent ({eff_dataset}) "
+                f"({eff_agent_id}) for zero-code chat"
             ),
         ),
         ConsoleLink(
@@ -361,8 +376,8 @@ def build_registry_console_urls(
         ),
         ConsoleLink(
             category="catalog",
-            label=f"Knowledge Catalog Business Glossary ({default_glossary_id(eff_dataset)})",
-            url=_append_query(f"{CONSOLE_BASE_URL}/dataplex/glossaries", {"project": eff_project}),
+            label=f"Knowledge Catalog Business Glossary ({glossary_id})",
+            url=_append_query(glossary_path, {"project": eff_project}),
             hint="44 governed forecasting & S&OP definitions linked to registry tables and views",
         ),
     ]
@@ -477,4 +492,5 @@ def build_registry_console_urls(
         run_id=run_id,
         agent_id=eff_agent_id,
         links=tuple(links),
+        project_number=eff_proj_num,
     )
