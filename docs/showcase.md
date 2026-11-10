@@ -55,25 +55,34 @@ flowchart TD
 <details markdown="1">
 <summary><b>Tip — 60-second terminal &amp; browser tab setup (run any step live in any order)</b></summary>
 
-If you are walking through this page interactively alongside VS Code and Google Cloud Console (deployed via [Deploying on GCP](./deploying_on_gcp.md)), paste this one-time setup block into your terminal to wire the convention-based `SF_*` environment variables, confirm registry health, and print clickable Console deep links:
+If you are walking through this page interactively alongside VS Code and Google Cloud Console (deployed via [Deploying on GCP](./deploying_on_gcp.md)), run these three short, copy-pasteable steps once in your terminal:
+
+**1. Activate your virtual environment** *(in a repo clone, activate `.venv` first so `python` resolves directly to the project environment rather than system or `pyenv` shims)*:
 
 ```bash
-source .venv/bin/activate  # or your Python environment with scale-forecasting installed
+source .venv/bin/activate
+```
 
-# Set your deployed project + region; all remaining SF_* paths follow deployment conventions
-PROJECT="your-gcp-project-id"
-REGION="us-central1"
-export SF_PROJECT_ID="$PROJECT"
+**2. Set your deployed GCP Project ID** *(if you already keep your `SF_*` variables in a local gitignored `.env` file, run `source .env` instead; otherwise paste this prompt and enter your project ID)*:
+
+```bash
+read -rp "Enter your GCP Project ID: " PROJECT
+```
+
+**3. Export convention-based `SF_*` variables, verify registry health &amp; print clickable Console links** *(no edits required — paste directly)*:
+
+```bash
+REGION="${REGION:-us-central1}"
+export SF_PROJECT_ID="${SF_PROJECT_ID:-$PROJECT}"
 export SF_REGION="$REGION"
-export SF_DATASET_ID="scale_forecasting"
-export SF_CONNECTION="$PROJECT.$REGION.sf-iceberg"
-export SF_WAREHOUSE_URI="gs://$PROJECT-warehouse/warehouse"
-export SF_CODE_BUCKET="$PROJECT-code"
-export SF_COMPUTE_SA="scale-forecasting-compute@$PROJECT.iam.gserviceaccount.com"
-export SF_CONTAINER_IMAGE="$REGION-docker.pkg.dev/$PROJECT/scale-forecasting/spark-runtime:latest"
-export SF_SUBNETWORK_URI="https://www.googleapis.com/compute/v1/projects/$PROJECT/regions/$REGION/subnetworks/scale-forecasting-compute"
+export SF_DATASET_ID="${SF_DATASET_ID:-scale_forecasting}"
+export SF_CONNECTION="${SF_CONNECTION:-$SF_PROJECT_ID.$REGION.sf-iceberg}"
+export SF_WAREHOUSE_URI="${SF_WAREHOUSE_URI:-gs://$SF_PROJECT_ID-warehouse/warehouse}"
+export SF_CODE_BUCKET="${SF_CODE_BUCKET:-$SF_PROJECT_ID-code}"
+export SF_COMPUTE_SA="${SF_COMPUTE_SA:-scale-forecasting-compute@$SF_PROJECT_ID.iam.gserviceaccount.com}"
+export SF_CONTAINER_IMAGE="${SF_CONTAINER_IMAGE:-$REGION-docker.pkg.dev/$SF_PROJECT_ID/scale-forecasting/spark-runtime:latest}"
+export SF_SUBNETWORK_URI="${SF_SUBNETWORK_URI:-https://www.googleapis.com/compute/v1/projects/$SF_PROJECT_ID/regions/$REGION/subnetworks/scale-forecasting-compute}"
 
-# Verify registry health and print Cmd+Clickable Console & BigQuery Agent links
 python -m scale_forecasting.registry.ops doctor
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id forecaster-showcase-f67fec77de66 --links
 ```
@@ -91,10 +100,17 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id foreca
 
 ## Step 1 — Prototype Locally in 5 Seconds (`$0.00` Cloud Spend)
 
-`scale-forecasting` starts as a pure offline Python library — you do **not** need Google Cloud credentials or a deployed project to test any of the 31 Python models (or a custom one-file `BaseModel` plugin) locally across all **21 evaluation metrics**:
+`scale-forecasting` starts as a pure offline Python library — you do **not** need Google Cloud credentials or a deployed project to test any of the 31 Python models (or a custom one-file `BaseModel` plugin) locally across all **21 evaluation metrics**.
+
+If you have not already activated an environment with `scale-forecasting` installed, activate `.venv` (in a repo clone) or install into a virtual environment:
 
 ```bash
-pip install "scale-forecasting[models-stats,models-trees]"
+source .venv/bin/activate  # repo clone — or in a fresh venv: pip install "scale-forecasting[models-stats,models-trees]"
+```
+
+Run a 3-fold local backtest and 14-day forecast (`~5s`, `\$0.00` cloud spend):
+
+```bash
 python -m scale_forecasting.playground --model holtwinters --horizon 14 --backtest
 ```
 
@@ -366,7 +382,7 @@ Google Cloud Console Links (project=your-gcp-project-id, dataset=scale_forecasti
       https://console.cloud.google.com/dataproc/batches/us-central1/sf-forecaster-showcase-f67fec77de66-statistical-a1/monitoring?project=your-gcp-project-id
       -> status=COMPLETED · sf-forecaster-showcase-f67fec77de66-statistical-a1
   [8] Cloud Storage Warehouse & Run Artifacts
-      https://console.cloud.google.com/storage/browser/your-gcp-project-id-warehouse/warehouse/runs/forecaster-showcase-f67fec77de66?project=your-gcp-project-id
+      https://console.cloud.google.com/storage/browser/your-gcp-project-id-warehouse/warehouse/artifacts/your-gcp-project-id/scale_forecasting/forecaster-showcase-f67fec77de66?project=your-gcp-project-id
       -> gs://your-gcp-project-id-warehouse/warehouse
 ```
 
@@ -696,21 +712,18 @@ LIMIT 10;
 
 ## Reproduce Everything End-to-End
 
-With a deployed `scale-forecasting` Google Cloud project ([15-minute Terraform setup](./deploying_on_gcp.md)), these commands reproduce the entire workflow above from scratch:
+With a deployed `scale-forecasting` Google Cloud project ([15-minute Terraform setup](./deploying_on_gcp.md)), activate your virtual environment (or Colab Enterprise `sf-main` runtime), run the 60-second setup tip at the top of this page to export `SF_*`, and run:
 
 ```bash
-# 1. Install locally with GCP + statistical/tree extras (or open the pre-built Colab Enterprise `sf-main` runtime)
-pip install "scale-forecasting[gcp,submit,models-stats,models-trees]"
-
-# 2. Prototype locally in 5 seconds ($0.00 cloud spend)
+# 1. Prototype locally in 5 seconds ($0.00 cloud spend)
 python -m scale_forecasting.playground --model holtwinters --horizon 14 --backtest
 
-# 3. Export SF_* for your deployed project (see 60-second setup tip at top), verify health & preview cost (~$0.22 USD)
+# 2. Verify cloud health, preview cost (~$0.22 USD), and run the hybrid Spark + BigQuery config
 python -m scale_forecasting.registry.ops doctor
 python -m scale_forecasting.main --config configs/forecaster_showcase.json --dry-run --feasibility
 python -m scale_forecasting.main --config configs/forecaster_showcase.json
 
-# 4. Print Cloud Console deep links and chat live with your BigQuery Registry DataAgent
+# 3. Print Cloud Console deep links and chat live with your BigQuery Registry DataAgent
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --links
 python -m scale_forecasting.bq_agent --dataset scale_forecasting --chat
 ```

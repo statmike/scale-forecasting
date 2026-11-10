@@ -430,7 +430,10 @@ def build_registry_console_urls(
     if warehouse_uri and warehouse_uri.startswith("gs://"):
         bucket_and_prefix = warehouse_uri[len("gs://") :].strip("/")
         if bucket_and_prefix:
-            storage_path = f"{bucket_and_prefix}/runs/{run_id}" if run_id else bucket_and_prefix
+            if run_id and eff_project:
+                storage_path = f"{bucket_and_prefix}/artifacts/{eff_project}/{eff_dataset}/{run_id}"
+            else:
+                storage_path = bucket_and_prefix
             links.append(
                 ConsoleLink(
                     category="storage",

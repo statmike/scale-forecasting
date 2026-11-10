@@ -193,6 +193,13 @@ def configure_cli_logging(default_level: str = "INFO") -> None:
     (Airflow, a notebook) does not get a second copy of every line. ``SF_LOG_LEVEL`` overrides the
     level.
     """
+    import warnings
+
+    warnings.filterwarnings(
+        "ignore",
+        category=FutureWarning,
+        module=r"^google\.api_core\._python_version_support$",
+    )
     if logging.getLogger().handlers:
         return
     logging.basicConfig(
