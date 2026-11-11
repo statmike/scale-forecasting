@@ -392,7 +392,7 @@ flowchart TD
 
     subgraph MGD_FAMS["4–5. Managed Cloud (6)"]
         AM1["automl (4 — Vertex AI)<br/>vertex_l2l · vertex_tide<br/>vertex_tft · vertex_seq2seq"]
-        NT1["native (2 — BigQuery SQL)<br/>arima_plus · timesfm"]
+        NT1["native (2 — BigQuery SQL)<br/>arima_plus (ARIMA_PLUS / ARIMA_PLUS_XREG)<br/>timesfm (AI.FORECAST)"]
         AM1 --> NT1
     end
 

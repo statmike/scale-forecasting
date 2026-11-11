@@ -384,6 +384,13 @@ def test_ensure_registry_agent_and_stateful_ask_with_fake_session() -> None:
         assert resp1.mode == "bigquery_agent"
         assert resp1.run_id == "ensemble-demo-111111111111"
         assert resp1.conversation_id is not None
+        conv_matches = [
+            v
+            for k, v in fake_sess.resources.items()
+            if k.endswith(f"/conversations/{resp1.conversation_id}")
+        ]
+        assert len(conv_matches) == 1
+        assert conv_matches[0]["title"] == "Which model won?"
         assert "ensemble_ridge" in resp1.answer
         assert "v_model_leaderboard_comparable" in resp1.sql
         assert len(resp1.df) == 2
@@ -1513,12 +1520,13 @@ def test_chat_session_response_plot_and_cli_repl(
         warehouse_uri=f"gs://{_PROJECT}-warehouse/warehouse",
     )
     reg = Registry(settings=s)
-    chat = reg.chat(run_id="forecaster-showcase-f67fec77de66")
+    chat = reg.chat(run_id="forecaster-showcase-f67fec77de66", title="Showcase Review")
     r_a = chat("Turn 1")
     r_b = chat("Turn 2")
     r_c = chat("Compare recent runs in v_run_summary including our 100,000-series benchmark runs.")
     assert r_a.conversation_id == "sf-conv-demo123"
     assert seen_calls[0]["conversation_id"] is None
+    assert seen_calls[0]["conversation_title"] == "Showcase Review"
     assert seen_calls[0]["auto_ensure_agent"] is True
     assert seen_calls[1]["conversation_id"] == "sf-conv-demo123"
     assert seen_calls[1]["auto_ensure_agent"] is False

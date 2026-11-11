@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>From a 5-Second Local Baseline to Hybrid Spark &amp; TimesFM, Knowledge Catalog Governance, and Conversational Q&amp;A</b><br>
-  <i>Benchmark your trusted statistical and tree models alongside BigQuery ARIMA_PLUS &amp; TimesFM without cloud DevOps — then explore every metric, bias alert, and driver in BigQuery or plain English.</i>
+  <i>Benchmark your trusted statistical and tree models alongside BigQuery ARIMA_PLUS &amp; TimesFM without cloud DevOps — then explore accuracy, Forecast Value Added, bias alerts, and drivers in BigQuery or plain English.</i>
 </p>
 
 Every step below is backed by [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json) (`run_id`: `forecaster-showcase-f67fec77de66`) with expandable cloud outputs and a live 4-turn BigQuery `DataAgent` transcript (`sf-conv-953ee3a44057`).
@@ -28,10 +28,10 @@ flowchart LR
 
 | Practitioner Question | Key Proof | Surface &amp; Step |
 | :--- | :--- | :--- |
-| **"Can I keep my trusted baselines?"** | Run `holtwinters`, `theta`, and `lightgbm` side-by-side with BigQuery `arima_plus`, zero-shot **`timesfm`** (`AI.FORECAST`), and an **`nnls`** ensemble on the same holdout fold. | **`[Terminal / Python]`**<br>[Step 1](#step-1--prototype-locally-in-5-seconds-000-cloud-spend) · [Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) |
-| **"Do I have to manage Spark or VMs?"** | One JSON config right-sizes Spark from measured profiles, runs BigQuery in parallel, and tears down to **`0` idle compute**. | **`[Terminal]` → `[Cloud Console]`**<br>[Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) · [Step 3](#step-3--inspect-the-cloud-services-that-ran-zero-devops) |
-| **"How are accuracy &amp; bias governed at scale?"** | 5 append-only BigQuery tables, 11 S&amp;OP SQL views, and a 44-term **Knowledge Catalog** glossary — identical from `25` to `100,000+` series. | **`[Cloud Console]`**<br>[Step 4](#step-4--govern-accuracy-fva--scale-in-bigquery-25-to-100000-series) |
-| **"Can planners explore without writing SQL?"** | Stateful **BigQuery Conversational Analytics `DataAgent`** in **BigQuery Agents Hub** or `--chat` — backed by auditable SQL. | **`[Cloud Console]` or `[Terminal]`**<br>[Step 5](#step-5--talk-to-your-forecast-in-terminal-python-or-bigquery-studio) |
+| **"Can I keep my trusted baselines?"** | Run `holtwinters`, `theta`, and `lightgbm` side-by-side with BigQuery `arima_plus`, zero-shot **`timesfm`** (`AI.FORECAST`), and a learned Non-Negative Least Squares (**`nnls`**) ensemble on the same holdout window. | **`[Terminal / Python]`**<br>[Step 1](#step-1--prototype-locally-in-5-seconds-000-cloud-spend) · [Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) |
+| **"Do I have to manage Spark or VMs?"** | One JSON config right-sizes Serverless Spark from measured profiles, runs BigQuery in parallel, and tears down to **`0` idle compute**. | **`[Terminal]` → `[Cloud Console]`**<br>[Step 2](#step-2--run-your-baselines-alongside-googles-models-in-one-config) · [Step 3](#step-3--inspect-the-cloud-services-that-ran-zero-devops) |
+| **"How are accuracy &amp; bias governed at scale?"** | 5 append-only BigQuery tables, 11 Sales &amp; Operations Planning (**S&amp;OP**) SQL views, and a 44-term **Knowledge Catalog** Business Glossary — identical from `25` to `100,000+` series. | **`[Cloud Console]`**<br>[Step 4](#step-4--govern-accuracy-fva--scale-in-bigquery-25-to-100000-series) |
+| **"Can planners explore without writing SQL?"** | Stateful **BigQuery Conversational Analytics `DataAgent`** in **BigQuery Agents Hub** or `--chat` — backed by auditable SQL on every turn. | **`[Cloud Console]` or `[Terminal]`**<br>[Step 5](#step-5--talk-to-your-forecast-in-terminal-python-or-bigquery-studio) |
 
 <details markdown="1">
 <summary><b>Tip — 60-second terminal &amp; browser tab setup (run any step live in any order)</b></summary>
@@ -77,9 +77,9 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id foreca
 
 ## Step 1 — Prototype Locally in 5 Seconds (`$0.00` Cloud Spend)
 
-**Surface:** **`[Terminal or Python]`** · *Local CPU only — no GCP credentials or cloud spend required.*
+**Surface:** **`[Terminal or Python]`** · *Local CPU &amp; in-memory synthetic data — zero BigQuery tables, credentials, or cloud spend.*
 
-Test any of the 31 Python models (or your own one-file `BaseModel` plugin) locally across all **21 evaluation metrics**:
+Step 1 touches **no database or cloud table**: `playground` generates a built-in, reproducible `730`-day synthetic pandas `DataFrame` in local memory (`playground.sample_data()`, series `s_000000`–`s_000002`, or pass your own `DataFrame` / CSV in Python) and scores any of the 31 Python models across all **21 point and interval metrics**:
 
 ```bash
 source .venv/bin/activate  # repo clone — or in a fresh venv: pip install "scale-forecasting[models-stats,models-trees]"
@@ -102,6 +102,8 @@ horizon    : 2023-01-01 → 2023-01-14
 metrics    : mae=11.201, rmse=16.206, mse=282.629, mape=0.059, smape=0.061, wape=0.061, mase=0.430, rmsse=0.528, bias=-3.168, coverage=0.667, pinball=3.168, mase_seasonal=0.919, maape=0.059, interval_score=63.353, interval_width=24.332, ope=0.048, rmsle=0.087, msse=0.300, msis=5.203, r2=0.769, cv=0.088
 ```
 
+*(Note: `playground` executes the model cell in local Python memory with zero Spark or cloud dependencies; `engine: spark` simply reflects the default target runtime on `RunConfig`.)*
+
 </details>
 
 <details markdown="1">
@@ -112,6 +114,7 @@ See [`notebooks/00_model_playground.ipynb`](./notebooks/00_model_playground.ipyn
 ```python
 from scale_forecasting import playground
 
+# Uses built-in synthetic sample_data() by default, or pass data=your_pandas_df
 run = playground.run_model("holtwinters", horizon=14, backtest=True)
 print(playground.summarize(run))
 ```
@@ -135,9 +138,9 @@ python -c 'from scale_forecasting import playground; bo = playground.bakeoff(mod
 
 ## Step 2 — Run Your Baselines Alongside Google's Models in One Config
 
-**Surface:** **`[Editor + Terminal]`** · *Review [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json), check cost/feasibility, and execute.*
+**Surface:** **`[Editor + Terminal]`** · *Review [`configs/forecaster_showcase.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/forecaster_showcase.json), check pre-flight cost/folds, and execute.*
 
-Without rewriting modeling code, one declarative config benchmarks Python baselines on Serverless Spark in parallel with BigQuery `arima_plus` and zero-shot **`timesfm`** (`AI.FORECAST`), fits an **`nnls`** ensemble, and refreshes the BigQuery `DataAgent`:
+Without rewriting modeling code, this config forecasts `25` daily series (`14`-day horizon) from the seeded BigLake Iceberg panel (`source_series_covariates_iceberg`) — running Python statistical/ML baselines on Serverless Spark in parallel with BigQuery `arima_plus` (running as `ARIMA_PLUS_XREG` with future covariates) and zero-shot **`timesfm`** (`AI.FORECAST`), then fitting out-of-fold (**OOF**) ensembles (`inverse_error` and Non-Negative Least Squares `nnls`):
 
 ```json
 {
@@ -186,12 +189,13 @@ Without rewriting modeling code, one declarative config benchmarks Python baseli
 }
 ```
 
-- **Mixed covariates without friction (`on_unsupported_covariates: "fallback"`):** `lightgbm`, `arima_plus`, and `timesfm` use `is_holiday`, `promo_flag`, and `price_index`; univariate baselines fall back automatically.
-- **Pre-flight FinOps (`--dry-run --feasibility`):** Verifies 100% fold survival and estimates duration/cost before launching compute ([Cost estimates & controls](./cost_estimates.md)).
-- **Idempotency & cell borrowing (`reuse_prior_runs: true`):** Skips duplicate runs and reuses unchanged `(series, model)` cells across edits.
+- **Mixed univariate + covariate models (`on_unsupported_covariates: "fallback"`):** `lightgbm`, `arima_plus` (automatically upgraded from `ARIMA_PLUS` to `ARIMA_PLUS_XREG`), and `timesfm` ingest `is_holiday`, `promo_flag`, and `price_index`; univariate baselines (`naive_seasonal`, `holtwinters`, `theta`) fall back to target history automatically.
+- **Pre-flight fold &amp; cost check (`--dry-run --feasibility`):** Confirms every series has enough history for 2 rolling backtest folds and estimates runtime and USD cost before launching compute ([Cost estimates &amp; controls](./cost_estimates.md)).
+- **Idempotency &amp; cell borrowing (`reuse_prior_runs: true`):** Skips duplicate runs and reuses already-computed `(series, model)` cells when you iterate on the config.
+- **1 JSON Config, 5 Launch Surfaces &amp; 7 Cloud Runtimes:** Run this exact file unchanged from the **CLI** (`main`), **Python SDK** (`Forecaster.from_file`), **Interactive Notebooks** (Colab Enterprise `sf-main` / Jupyter), **Cloud Composer 3 / Airflow** (`--emit-airflow` generates the DAG), or **Headless Cloud Batch / CI containers** (`submit` / `--config-uri gs://...`) — and switch `"python_runtime"` across Spark, Ray, Vertex AI, GCE, GKE, AutoML, or BigQuery SQL with zero code changes.
 
 > [!NOTE]
-> **Runtime & Approximate Cloud Cost:** **Cold run:** `~\$0.22–\$0.35 USD` total (`~2m` BigQuery `timesfm`/`arima_plus`; `~4–6m` Serverless Spark with warm image cache or `~12–16m` on first regional pull; `\$0.00` idle afterward). **Unchanged repeat run:** `~9s` (`\$0.00`). **Incremental edit:** `~25–45s` (`0.00s` borrow of unchanged models; pass `--force` for a full cold re-run).
+> **Expected Runtime & Cloud Cost:** **Cold run:** `~\$0.22–\$0.35 USD` total (`~2m` BigQuery `timesfm`/`arima_plus`; `~4–6m` Serverless Spark with warm image cache or `~12–16m` on first regional image pull; `\$0.00` idle afterward). **Unchanged repeat run:** `~9s` (`\$0.00`). **Incremental edit:** `~25–45s` (`0.00s` borrow of unchanged models; pass `--force` for a full cold re-run).
 
 ### 2a. Preview Fold Survival & Cost (`~3s`)
 
@@ -268,7 +272,7 @@ INFO __main__ | submitted: forecaster-showcase-f67fec77de66
 </details>
 
 <details markdown="1">
-<summary><b>Python / Notebook SDK equivalent (<code>Forecaster.from_file</code>)</b></summary>
+<summary><b>Python SDK &amp; Airflow DAG equivalents (<code>Forecaster.from_file</code> · <code>--emit-airflow</code>)</b></summary>
 
 ```python
 import scale_forecasting as sf
@@ -278,12 +282,17 @@ res = fc.run()
 res.console_urls()  # Renders clickable Cloud Console & BigQuery Agent links in notebooks
 ```
 
+```bash
+# Emit a scheduled Cloud Composer 3 / Apache Airflow DAG from the exact same JSON config:
+python -m scale_forecasting.main --config configs/forecaster_showcase.json --emit-airflow
+```
+
 </details>
 
 <details markdown="1">
 <summary><b>Tip — Live modification to try (~25s incremental run via 6-of-6 model borrowing)</b></summary>
 
-Add `"ridge"` to `ensemble.strategies` without touching the JSON file on disk — `reuse_prior_runs: true` borrows **all 6 base models (`6 of 6`)** from `forecaster-showcase-f67fec77de66` via BigQuery SQL (`0` Spark batches, `0` BQML trainings) and fits only the new `ensemble` node (`forecaster-showcase-885a83835385`) in **~25–35s**:
+Add `"ridge"` (L2-regularized ensemble stacker) to `ensemble.strategies` without modifying the JSON file on disk — `reuse_prior_runs: true` borrows **all 6 base models (`6 of 6`)** from `forecaster-showcase-f67fec77de66` via BigQuery SQL (`0` Spark batches, `0` BQML trainings) and fits only the downstream `ensemble` node (`forecaster-showcase-885a83835385`) in **~25–35s**:
 
 ```bash
 python -c '
@@ -313,18 +322,18 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id foreca
 
 | `[Cloud Console]` Tab | What to Check | Automated Under the Hood |
 | :--- | :--- | :--- |
-| **[Dataproc → Serverless → Batches](https://console.cloud.google.com/dataproc/batches)**<br>*(Links `[5]` &amp; `[7]`)* | `sf-forecaster-showcase-...-statistical-a1` &amp; `-ml-a1` → **Details** | Two parallel, profile-sized batches (`OMP_NUM_THREADS=1`, right-sized executor memory); scaled back to **`0` executors** (`\$0.00` idle). |
-| **[BigQuery Studio → Project History](https://console.cloud.google.com/bigquery)**<br>*(Links `[4]` &amp; `[6]`)* | Bottom bar → **Personal / Project history** | Executed `arima_plus` (`ARIMA_PLUS_XREG`) + zero-shot **`timesfm`** (`AI.FORECAST`) in **`125.7s`**, then barrier `ensemble` (`14.9s`). |
-| **[Cloud Storage → Run Artifacts](https://console.cloud.google.com/storage/browser)**<br>*(Link `[8]`)* | `.../warehouse/artifacts/<project>/scale_forecasting/forecaster-showcase-.../` | Stored fitted stacker artifact (`ensemble_34432fdde9fa_nnls.pkl`) alongside BigLake Iceberg Parquet files. |
+| **[Dataproc → Serverless → Batches](https://console.cloud.google.com/dataproc/batches)**<br>*(Links `[5]` &amp; `[7]`)* | `sf-forecaster-showcase-...-statistical-a1` &amp; `-ml-a1` → **Details** | Two parallel, profile-sized Spark batches (`OMP_NUM_THREADS=1`, right-sized executor memory); scaled back to **`0` executors** (`\$0.00` idle). |
+| **[BigQuery Studio → Project History](https://console.cloud.google.com/bigquery)**<br>*(Links `[4]` &amp; `[6]`)* | Bottom bar → **Personal / Project history** | Executed `arima_plus` (`ARIMA_PLUS_XREG`) + zero-shot **`timesfm`** (`AI.FORECAST`) in **`125.7s`**, followed by the downstream `ensemble` join (`14.9s`) once all base families finished. |
+| **[Cloud Storage → Run Artifacts](https://console.cloud.google.com/storage/browser)**<br>*(Link `[8]`)* | `.../warehouse/artifacts/<project>/scale_forecasting/forecaster-showcase-.../` | Stored fitted `nnls` stacker weights (`ensemble_34432fdde9fa_nnls.pkl`) alongside BigLake Iceberg Parquet files. |
 
 All 4 DAG jobs are recorded in `v_run_jobs`:
 
-| Family | `job_id` | Runtime | Models | Status | Cells |
+| Family (`family`) | `job_id` | Runtime (`runtime`) | Models Executed | `status` | Series × Models Scored |
 | :--- | :--- | :--- | :--- | :---: | ---: |
-| `native` | `sf-forecaster-showcase-f67fec77de66-native-a1` | `bigquery` | `arima_plus`, `timesfm` | `COMPLETED` | `50` |
-| `ml` | `sf-forecaster-showcase-f67fec77de66-ml-a1` | `spark` (`serverless`) | `lightgbm` | `COMPLETED` | `25` |
-| `statistical` | `sf-forecaster-showcase-f67fec77de66-statistical-a1` | `spark` (`serverless`) | `naive_seasonal`, `holtwinters`, `theta` | `COMPLETED` | `75` |
-| `ensemble` | `sf-forecaster-showcase-f67fec77de66-ensemble-a1` | `bigquery` | `ensemble_inverse_error`, `ensemble_nnls` | `COMPLETED` | `50` |
+| `native` | `sf-forecaster-showcase-f67fec77de66-native-a1` | `bigquery` | `arima_plus`, `timesfm` | `COMPLETED` | `50` (`25 × 2`) |
+| `ml` | `sf-forecaster-showcase-f67fec77de66-ml-a1` | `spark` (`serverless`) | `lightgbm` | `COMPLETED` | `25` (`25 × 1`) |
+| `statistical` | `sf-forecaster-showcase-f67fec77de66-statistical-a1` | `spark` (`serverless`) | `naive_seasonal`, `holtwinters`, `theta` | `COMPLETED` | `75` (`25 × 3`) |
+| `ensemble` | `sf-forecaster-showcase-f67fec77de66-ensemble-a1` | `bigquery` | `ensemble_inverse_error`, `ensemble_nnls` | `COMPLETED` | `50` (`25 × 2`) |
 
 <details markdown="1">
 <summary><b>View pre-recorded output — <code>python -m scale_forecasting.bq_agent --links</code></b></summary>
@@ -366,67 +375,72 @@ Google Cloud Console Links (project=your-gcp-project-id, dataset=scale_forecasti
 **Surface:** **`[Cloud Console: BigQuery Explorer & Knowledge Catalog]`** *(links `[2]`, `[3]`, and `[9]`–`[16]` from `--links`).*
 
 - **[BigQuery Explorer → `scale_forecasting`](https://console.cloud.google.com/bigquery) (Link `[2]`):** Click any of the **5 append-only tables** or **11 analytical SQL views** → **Schema** to inspect governed `OPTIONS(description=...)` column definitions, or **Preview** to inspect rows ([Output schemas](./output_schemas.md)).
-- **[Knowledge Catalog → Glossaries](https://console.cloud.google.com/dataplex/dp-glossaries) (Link `[3]`):** Open `sf-glossary-scale-forecasting` to browse **44 governed forecasting & S&OP terms** (*WAPE*, *Forecast Value Added*, *Trigg's Tracking Signal*, *MASE*) linked directly to the registry.
+- **[Knowledge Catalog → Glossaries](https://console.cloud.google.com/dataplex/dp-glossaries) (Link `[3]`):** Open `sf-glossary-scale-forecasting` to browse **44 governed forecasting & S&OP definitions** linked directly to the BigQuery tables and views:
+  - **Pooled WAPE (`pooled_wape`):** Volume-weighted percentage error `SUM(|actual - forecast|) / SUM(|actual|)` across the shared holdout window (prevents low-volume SKUs from skewing overall accuracy).
+  - **Forecast Value Added (`fva_wape_delta`, `fva_relative_lift_pct`):** Accuracy gain over the seasonal naive baseline (`naive_seasonal`), measuring whether each modeling or ensemble layer earns its complexity: `(baseline_wape - pooled_wape) / baseline_wape`.
+  - **Trigg's Tracking Signal (`tracking_signal`):** Cumulative signed bias divided by smoothed absolute error; values beyond `±4.0` flag sustained under-forecasting (`< -4.0`) or over-forecasting (`> +4.0`).
 
 <details markdown="1">
 <summary><b>Reference — All 5 Registry Tables &amp; 11 Analytical SQL Views (click to expand)</b></summary>
 
 | Object Name | Kind | Row Grain | Contents |
 | :--- | :---: | :--- | :--- |
-| **`run_registry`** | Table | `1 row / run_id` | Run header: validated `RunConfig` JSON, `snapshot_millis`, status, wall time, lineage, and borrowed-model telemetry. |
-| **`run_jobs`** | Table | `1 row / (run, family, attempt)` | Cloud compute trace: `job_id`, `runtime`, `system_job_id`, sizing, duration, and `borrowed:*` markers. |
-| **`forecast_predictions`** | Table | `1 row / (run, ts_id, model, date)` | Forward horizon forecasts (`yhat`, `yhat_lower`, `yhat_upper`, `quantiles`) and per-step explanations (`2,800` rows here). |
-| **`forecast_metadata`** | Table | `1 row / (run, ts_id, model, fold)` | All **21 point &amp; interval metrics**, CPU/RSS telemetry, calibration status, and global attributions (`200` rows here). |
-| **`backtest_oof`** | Table | `1 row / (run, ts_id, model, fold, date)` | Rolling-origin out-of-fold (`OOF`) actuals vs. predictions (`y_true`, `yhat`, `horizon_step`; `5,600` rows here). |
-| **`v_executive_sop_summary`** | View | `1 row / run_id` | One-row S&amp;OP scorecard: champion model, comparable WAPE, FVA lift %, exception count, coverage, and total volume. |
-| **`v_model_leaderboard_comparable`** | View | `1 row / (run, model)` | **Apples-to-apples leaderboard:** pooled holdout WAPE, MAE, and MASE on the shared `(ts_id, holdout_fold_id)` support set. |
-| **`v_fva_waterfall`** | View | `1 row / (run, stage, model)` | **Forecast Value Added (FVA)** ladder from `1_baseline_naive` → `2_statistical` → `4_covariate_ml_dl` → `5_ensemble`. |
-| **`v_bias_and_exceptions`** | View | `1 row / (run, model, ts_id)` | Planner exception queue: signed bias, **Trigg's tracking signal** (`\|tracking_signal\| > 4.0`), and `SBC` demand class. |
-| **`v_horizon_decay`** | View | `1 row / (run, model, step)` | Lead-time accuracy curve (`Day 1` → `Day H` pooled WAPE, MAE, bias, coverage, and interval width). |
+| **`run_registry`** | Table | `1 row / run_id` | Run audit header: validated `RunConfig` JSON, `snapshot_millis`, status, wall time, lineage, and borrowed-model metadata. |
+| **`run_jobs`** | Table | `1 row / (run, family, attempt)` | Per-family compute trace: `job_id`, `runtime`, `system_job_id`, sizing, duration, and whether cells ran fresh or reused a prior run (`0.00s`). |
+| **`forecast_predictions`** | Table | `1 row / (run, ts_id, model, date)` | Forward horizon forecasts (`yhat`, `yhat_lower`, `yhat_upper`, `quantiles`) and per-step driver explanations (`2,800` rows here). |
+| **`forecast_metadata`** | Table | `1 row / (run, ts_id, model, fold)` | All **21 point &amp; interval metrics**, CPU and peak memory usage, interval calibration status, and overall feature importances (`200` rows here). |
+| **`backtest_oof`** | Table | `1 row / (run, ts_id, model, fold, date)` | Rolling out-of-fold (`OOF`) actuals vs. predictions (`y_true`, `yhat`, `horizon_step`) on historical holdout folds (`5,600` rows here). |
+| **`v_executive_sop_summary`** | View | `1 row / run_id` | One-row S&amp;OP scorecard: `champion_model`, `champion_pooled_wape`, Forecast Value Added lift (`fva_relative_lift_pct`), exception count, coverage, and `total_forecast_units`. |
+| **`v_model_leaderboard_comparable`** | View | `1 row / (run, model)` | **Apples-to-apples leaderboard:** `pooled_wape`, `pooled_mae`, and `mean_mase` restricted to the exact shared `(ts_id, holdout_fold_id)` support set. |
+| **`v_fva_waterfall`** | View | `1 row / (run, stage, model)` | **Forecast Value Added (FVA)** waterfall measuring error reduction vs. `naive_seasonal` across `1_baseline_naive` → `2_statistical` → `4_covariate_ml_dl` → `5_ensemble`. |
+| **`v_bias_and_exceptions`** | View | `1 row / (run, model, ts_id)` | Planner exception queue: `signed_bias`, **Trigg's `tracking_signal`** (`\|tracking_signal\| > 4.0`), and Syntetos-Boylan (`sbc_class`) demand category. |
+| **`v_horizon_decay`** | View | `1 row / (run, model, step)` | Lead-time accuracy curve (`Day 1` → `Day H` `pooled_wape`, `pooled_mae`, `signed_bias`, empirical interval coverage, and interval width). |
 | **`v_feature_attributions`** | View | `1 row / (run, model, ts_id, scope, feature)` | Global and horizon-local driver impacts (`price_index`, `promo_flag`, `is_holiday`, lags, trend, seasonality). |
 | **`v_anomalies`** | View | `1 row / flagged point` | Historical outlier spikes/dips and structural changepoints across backtest residuals and BQML anomaly runs. |
 | **`v_model_leaderboard`** | View | `1 row / (run, model)` | Full per-model cell summary across all folds (`mean_wape`, `median_fit_seconds`, `no_artifact_rate`). |
-| **`v_backtest_coverage`** | View | `1 row / (run, model)` | Fold-survival audit showing series counts at full folds vs. short-series fallbacks. |
-| **`v_run_summary`** | View | `1 row / run_id` | Cross-run fleet ledger (`n_series` from `25` to `100,000+`, `runtime_seconds`, orchestration overhead). |
+| **`v_backtest_coverage`** | View | `1 row / (run, model)` | Fold-survival audit showing series counts achieving full folds vs. short-series fallbacks (`n_folds_achieved`). |
+| **`v_run_summary`** | View | `1 row / run_id` | Cross-run fleet ledger (`n_series` from `25` to `100,000+`, `n_models`, `backtest_on`, `runtime_seconds`, orchestration overhead). |
 | **`v_run_jobs`** | View | `1 row / (run, family)` | Latest attempt per family node (`native`, `statistical`, `ml`, `deep_learning`, `automl`, `ensemble`, `*_repair`). |
 
 </details>
 
 ### Holdout Leaderboard & Forecast Value Added (`v_fva_waterfall`)
 
-All **6 base models + 2 ensembles** scored on the exact same `350` holdout points (`25` series × `14` days, `holdout_fold_id = 1`):
+All **6 base models + 2 ensembles** are scored on the exact same `350` out-of-fold holdout points (`25` series × `14` days, `holdout_fold_id = 1`). **Forecast Value Added (`FVA`)** answers whether adding statistical models, external drivers, or ensembles actually improves accuracy over a free, zero-effort **`naive_seasonal`** baseline ("same day last week", `21.43%` WAPE here): `fva_wape_delta = baseline_wape - pooled_wape` measures percentage-point error reduction, and **`fva_relative_lift_pct = (baseline_wape - pooled_wape) / baseline_wape`** measures the share of baseline error eliminated (positive = value added; negative = complexity made the forecast worse):
 
-| Rank | `model_type` | Stage | Engine | Pooled WAPE | Pooled MAE | FVA Lift vs. `naive_seasonal` |
+| Rank | Model (`model_type`) | FVA Stage (`stage_name`) | Execution Engine | `pooled_wape` | `pooled_mae` | FVA Lift (`fva_relative_lift_pct`) |
 | :---: | :--- | :--- | :--- | ---: | ---: | ---: |
 | **1** | **`timesfm`** | `4_covariate_ml_dl` | BigQuery `AI.FORECAST` | **9.84%** (`0.0984`) | **9.57** | **+54.09%** |
 | **2** | **`ensemble_nnls`** | `5_ensemble` | BigQuery + OOF Stacker | **10.83%** (`0.1083`) | **10.54** | **+49.45%** |
-| **3** | **`arima_plus`** | `2_statistical` | BigQuery ML SQL | **10.96%** (`0.1096`) | **10.67** | **+48.84%** |
+| **3** | **`arima_plus`** | `2_statistical` | BigQuery `ARIMA_PLUS_XREG` | **10.96%** (`0.1096`) | **10.67** | **+48.84%** |
 | **4** | **`ensemble_inverse_error`** | `5_ensemble` | BigQuery + OOF Blend | **12.47%** (`0.1247`) | **12.13** | **+41.81%** |
 | **5** | **`lightgbm`** | `4_covariate_ml_dl` | Serverless Spark | **14.21%** (`0.1421`) | **13.82** | **+33.70%** |
 | **6** | **`holtwinters`** | `2_statistical` | Serverless Spark | **14.78%** (`0.1478`) | **14.38** | **+31.03%** |
 | **7** | **`theta`** | `2_statistical` | Serverless Spark | **16.50%** (`0.1650`) | **16.05** | **+23.00%** |
-| **8** | **`naive_seasonal`** | `1_baseline_naive` | Serverless Spark | **21.43%** (`0.2143`) | **20.85** | **0.00%** *(anchor)* |
+| **8** | **`naive_seasonal`** | `1_baseline_naive` | Serverless Spark | **21.43%** (`0.2143`) | **20.85** | **0.00%** *(baseline)* |
 
-- **Zero-Shot Foundation Winner:** **`timesfm`** (`AI.FORECAST`) ranked `#1` at **9.84% WAPE** (**+54.09% FVA lift** over `naive_seasonal` and **33% lower error** than `holtwinters`) in ~2 minutes of BigQuery SQL with zero tuning.
-- **Cross-Engine Stacker:** **`ensemble_nnls`** (`10.83%` WAPE) blended Spark Python models with BigQuery models to beat every statistical and tree baseline.
+- **Zero-Shot Foundation Winner:** **`timesfm`** (`AI.FORECAST`) ranked `#1` at **9.84% `pooled_wape`** — eliminating **+54.09%** of `naive_seasonal` error (**33% lower error** than `holtwinters`) in ~2 minutes of BigQuery SQL with zero tuning.
+- **Cross-Engine Stacker:** **`ensemble_nnls`** (`10.83%` `pooled_wape`, **+49.45% FVA lift**) learned constrained non-negative weights across the Spark Python models and BigQuery models to beat every individual statistical and tree baseline.
 
-### Same Governance Schema at 100,000 Series (`v_run_summary`)
+### Same Governance Schema & Auto-Sizing at 100,000 Series (`v_run_summary` + `v_executive_sop_summary`)
 
-Without changing a single table or view, the same registry governs `25`-series runs alongside **100,000-series** fleet runs ([`configs/explode_100k.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/explode_100k.json), [`configs/ray_100k.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/ray_100k.json), [Quota, throughput, and scale](./quota_and_scale.md)):
+Without changing a single table or view, the registry governs `25`-series runs alongside **100,000-series** fleet runs ([`configs/explode_100k.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/explode_100k.json), [`configs/ray_100k.json`](https://github.com/statmike/scale-forecasting/blob/main/configs/ray_100k.json), [Quota, throughput, and scale](./quota_and_scale.md)) — automatically scaling compute from `2–3` executors up to `160` vCPUs (and back to `0` when done). Here `total_forecast_units` is the champion model's summed forward `yhat` demand across all series and horizon days (`backtest_on = false` indicates a forward-only production run):
 
-| `run_id` | Series | Runtime | Backtest | Wall Time | Champion | Forecast Volume |
-| :--- | ---: | :--- | :---: | ---: | :--- | ---: |
-| `forecaster-showcase-f67fec77de66` | **25** | Spark + BigQuery | 2 folds | `16.5 min` cold (`~9s` cached) | `timesfm` (`9.84%` WAPE) | `33,271` |
-| `w1a-spark-srv-n100000-f0ce6ad0a782` | **100,000** | Serverless Spark | Enabled | `66.7 min` (`4,000s`) | `ensemble_inverse_error` (`14.10%` WAPE) | — |
-| `w1a-bq-scale-n100000-97e2fbd32ed2` | **100,000** | BigQuery Native | Enabled | `84.3 min` (`5,056s`) | `ensemble_nnls` (`11.24%` WAPE) | — |
-| `explode-100k-ef602ea229b4` | **100,000** | Serverless Spark (`400k` cells) | Forward | `97.9 min` (`5,873s`) | `holtwinters` | `295,862,672` |
-| `ray-100k-3fbc82fe3b6d` | **100,000** | Vertex AI Ray (`400k` cells) | Forward | `123.4 min` (`7,405s`) | `holtwinters` | `295,862,639` |
+| `run_id` | `n_series` | Runtime &amp; Auto-Sized Compute Shape (`job_telemetry`) | `backtest_on` | `runtime_seconds` | `champion_model` | `champion_pooled_wape` | `total_forecast_units` |
+| :--- | ---: | :--- | :---: | ---: | :--- | ---: | ---: |
+| `forecaster-showcase-f67fec77de66` | **25** | **Serverless Spark** (`3` + `2` × `4`-vCPU execs, `20` peak vCPUs, `2.2` DCU-hrs) + **BQ SQL** | `true` | `988.5s` (`~9s` cached) | `timesfm` | `0.0984` (`9.84%`) | `33,271` |
+| `w1a-spark-srv-n100000-f0ce6ad0a782` | **100,000** | **Serverless Spark** (`20` × `4`-vCPU executors = **`80` vCPUs**, `53.6` DCU-hrs) | `true` | `4,000.0s` (`66.7m`) | `ensemble_inverse_error` | `0.1410` (`14.10%`) | `149,600,400` |
+| `w1a-bq-scale-n100000-97e2fbd32ed2` | **100,000** | **BigQuery Native SQL** (`0` VMs — serverless BigQuery slot pool) | `true` | `5,055.7s` (`84.3m`) | `ensemble_nnls` | `0.1124` (`11.24%`) | `146,925,703` |
+| `explode-100k-ef602ea229b4` | **100,000** | **Serverless Spark** (`2` batches × `20` × `4`-vCPU execs = **`160` peak vCPUs**, `101.5` DCU-hrs) | `false` | `5,872.9s` (`97.9m`) | `holtwinters` | — *(forward-only)* | `295,862,672` |
+| `ray-100k-3fbc82fe3b6d` | **100,000** | **Vertex AI Ray** (`1` `n1-highmem-32` head + `1→20` `n1-standard-8` workers = **`160` worker vCPUs**) | `false` | `7,405.3s` (`123.4m`) | `holtwinters` | — *(forward-only)* | `295,862,639` |
 
 ---
 
 ## Step 5 — Talk to Your Forecast in Terminal, Python, or BigQuery Studio
 
 **Surface:** **`[Cloud Console: BigQuery Agents Hub]`** *(zero-code UI)* **OR** **`[Terminal: --chat]`** *(developer CLI).*
+
+`output.ensure_bq_agent: true` registers **`sf-registry-scale-forecasting`** — a stateful **BigQuery Conversational Analytics `DataAgent`** pre-loaded with all 11 views, 44 Knowledge Catalog glossary definitions, and 32 verified SQL examples so questions translate directly into auditable BigQuery SQL:
 
 - **Option A — `[Cloud Console]` (Zero Code):** Open **[BigQuery Studio → Agents Hub](https://console.cloud.google.com/bigquery/agents_hub)** (link `[1]` from `--links`), click **`scale-forecasting Registry Agent (scale_forecasting)`**, and paste any question below.
 - **Option B — `[Terminal]` (`--chat` REPL):** Launch `--chat`, then type `/starters` → **`1`–`4`** (and **`/sql`** after any turn to print the exact BigQuery SQL from memory):
@@ -457,17 +471,17 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --run-id foreca
 
 | Turn | Copy-Paste Question (Works in Console Agents Hub &amp; `--chat`) | `--chat` Key | View(s) Queried &amp; Live Answer Summary |
 | :---: | :--- | :---: | :--- |
-| **1** | `In run forecaster-showcase-f67fec77de66, which model won on comparable WAPE and what was the Forecast Value Added (FVA) lift over naive_seasonal?` | `1` | **`v_fva_waterfall`** — **`timesfm`** won at **`9.84%` WAPE** (**`+54.09%`** FVA lift); **`ensemble_nnls`** `#2` at `10.83%`. |
-| **2** | `On that winning model, which series have directional bias or Trigg tracking-signal exceptions?` | `2` | **`v_bias_and_exceptions`** — Stateful follow-up (*"that winning model"* → `timesfm`); flags **`23` series** (`18` under, `5` over). |
-| **3** | `How does forecast accuracy decay from day 1 to day 14, and which promo or holiday covariates mattered most?` | `3` | **`v_horizon_decay`** &amp; **`v_feature_attributions`** — Day 1 (`9.6%`) → Day 14 (`17.2%` WAPE); top drivers: **`price_index`**, **`is_holiday`**, **`promo_flag`**. |
-| **4** | `Compare recent runs in v_run_summary including our 100,000-series benchmark runs.` | `4` | **`v_run_summary`** &amp; **`v_executive_sop_summary`** — Compares `25`-series run against **`100,000`-series** Spark (`66.7m`), BQ (`84.3m`), and Ray runs. |
+| **1** | `In run forecaster-showcase-f67fec77de66, which model won on comparable WAPE and what was the Forecast Value Added (FVA) lift over naive_seasonal?` | `1` | **`v_fva_waterfall`** — **`timesfm`** won at **`9.84%` `pooled_wape`** (**`+54.09%`** FVA lift); **`ensemble_nnls`** `#2` at `10.83%`. |
+| **2** | `On that winning model, which series have directional bias or Trigg tracking-signal exceptions?` | `2` | **`v_bias_and_exceptions`** — Stateful follow-up (*"that winning model"* → `timesfm`); flags **`23` series** (`18` under-forecasted, `5` over-forecasted). |
+| **3** | `How does forecast accuracy decay from day 1 to day 14, and which promo or holiday covariates mattered most?` | `3` | **`v_horizon_decay`** &amp; **`v_feature_attributions`** — `timesfm` Day 1 (`9.6%`) → Day 14 (`17.2%` WAPE); top explainable drivers: **`price_index`**, **`is_holiday`**, **`promo_flag`**. |
+| **4** | `Compare recent runs in v_run_summary including our 100,000-series benchmark runs.` | `4` | **`v_run_summary`** &amp; **`v_executive_sop_summary`** — Compares `25`-series run against **`100,000`-series** Spark (`66.7m`), BigQuery (`84.3m`), and Ray runs. |
 
 ### Pre-Recorded Live `DataAgent` Transcript & SQL (`sf-conv-953ee3a44057`)
 
 <details markdown="1">
 <summary><b>Turn 1 Output — Champion Model &amp; FVA Waterfall (<code>timesfm</code> 9.84% WAPE, +54.09% lift · <code>v_fva_waterfall</code>)</b></summary>
 
-For run `forecaster-showcase-f67fec77de66`, **`timesfm`** won on comparable holdout WAPE with a pooled WAPE of **0.0984** (9.84%) and achieved an FVA relative lift of **54.09%** (absolute WAPE reduction of **0.1159**) over `naive_seasonal` (pooled WAPE of `0.2143`). `ensemble_nnls` placed second at **0.1083** pooled WAPE (**49.45%** lift), outperforming `arima_plus` (`0.1096`), and every candidate model achieved positive FVA delta over baseline.
+For run `forecaster-showcase-f67fec77de66`, **`timesfm`** won on comparable holdout WAPE with a `pooled_wape` of **0.0984** (9.84%) and achieved an FVA relative lift of **54.09%** (absolute WAPE reduction of **0.1159**) over `naive_seasonal` (`baseline_wape = 0.2143`). `ensemble_nnls` placed second at **0.1083** `pooled_wape` (**49.45%** lift), outperforming `arima_plus` (`0.1096`), and every candidate model achieved positive FVA lift over baseline.
 
 ```sql
 SELECT f.run_id, f.stage_order, f.stage_name, f.model_type,
@@ -522,7 +536,7 @@ ORDER BY ABS(e.tracking_signal) DESC NULLS LAST, e.wape DESC NULLS LAST;
 <details markdown="1">
 <summary><b>Turn 3 Output — 14-Day Horizon Decay &amp; Promo/Price/Holiday Drivers (<code>v_horizon_decay</code> &amp; <code>v_feature_attributions</code>)</b></summary>
 
-On **`timesfm`**, pooled WAPE holds near **0.07–0.11** across most lead times (`0.0960` on Day 1 → `0.1715` on Day 14, with weekly peaks of `0.184` on Days 7 and 12), while empirical 80% interval coverage remains calibrated at **70%–88%** (width growing smoothly from `23.40` to `31.68` units). Across explainable models in `v_feature_attributions`, **`price_index`** led external covariates (`59.26` mean abs attribution in `arima_plus`), followed by **`is_holiday`** (`~1.08` in `lightgbm`) and **`promo_flag`** (`~0.96` in `arima_plus`).
+On **`timesfm`** (`v_horizon_decay`), `pooled_wape` holds near **0.07–0.11** across most lead times (`0.0960` on Day 1 → `0.1715` on Day 14, with weekly peaks of `0.184` on Days 7 and 12), while empirical 80% interval coverage stays calibrated at **70%–88%** (width growing smoothly from `23.40` to `31.68` units). Across models that emit explicit feature decompositions in `v_feature_attributions` (`arima_plus` and `lightgbm`), **`price_index`** led external covariates (`59.26` mean abs attribution in `arima_plus`), followed by **`is_holiday`** (`~1.08` in `lightgbm`) and **`promo_flag`** (`~0.96` in `arima_plus`).
 
 ```sql
 SELECT a.model_type, a.attribution_scope, a.feature_name,
@@ -549,12 +563,12 @@ ORDER BY avg_abs_importance DESC;
 <details markdown="1">
 <summary><b>Turn 4 Output — Cross-Run Scale Comparison: 25 vs. 100,000 Series (<code>v_run_summary</code> + <code>v_executive_sop_summary</code>)</b></summary>
 
-Across `scale_forecasting`, **100,000-series** production benchmarks run under the identical schema alongside agile `25`-series runs: `w1a-spark-srv-n100000-f0ce6ad0a782` (`4,000.0s`, `0.1410` WAPE, `+16.53%` lift), `w1a-bq-scale-n100000-97e2fbd32ed2` (`5,055.7s`, `0.1124` WAPE, `+9.19%` lift), `explode-100k-ef602ea229b4` (`400,000` cells in `5,872.9s`), and `ray-100k-3fbc82fe3b6d` (`400,000` cells in `7,405.3s`).
+Across `scale_forecasting`, **100,000-series** production benchmarks run under the identical schema alongside agile `25`-series runs: `w1a-spark-srv-n100000-f0ce6ad0a782` (`4,000.0s`, `0.1410` WAPE, `+16.53%` FVA lift, `149.6M` forward units), `w1a-bq-scale-n100000-97e2fbd32ed2` (`5,055.7s`, `0.1124` WAPE, `+9.19%` FVA lift, `146.9M` forward units), `explode-100k-ef602ea229b4` (`400,000` cells in `5,872.9s`, `295.9M` forward units), and `ray-100k-3fbc82fe3b6d` (`400,000` cells in `7,405.3s`, `295.9M` forward units).
 
 ```sql
 SELECT s.run_id, s.created_at, s.status, s.n_series, s.n_models, s.backtest_on,
        s.runtime_seconds, s.n_jobs, s.longest_job_seconds, s.overhead_seconds,
-       e.champion_model, e.champion_pooled_wape, e.fva_relative_lift_pct
+       e.champion_model, e.champion_pooled_wape, e.fva_relative_lift_pct, e.total_forecast_units
 FROM `your-gcp-project-id.scale_forecasting.v_run_summary` AS s
 LEFT JOIN `your-gcp-project-id.scale_forecasting.v_executive_sop_summary` AS e USING (run_id)
 WHERE s.n_series >= 1000 OR s.run_id LIKE '%100k%' OR s.run_id LIKE '%scale%'
@@ -562,12 +576,12 @@ ORDER BY s.n_series DESC NULLS LAST, s.created_at DESC
 LIMIT 10;
 ```
 
-| `run_id` | `n_series` | `n_models` | `backtest_on` | `runtime_seconds` | `champion_model` | `champion_pooled_wape` | `fva_relative_lift_pct` |
-| :--- | ---: | ---: | :---: | ---: | :--- | ---: | ---: |
-| `w1a-bq-scale-n100000-97e2fbd32ed2` | `100,000` | `2` | `true` | `5,055.7s` | `ensemble_nnls` | `0.1124` | `+9.19%` |
-| `w1a-spark-srv-n100000-f0ce6ad0a782` | `100,000` | `2` | `true` | `4,000.0s` | `ensemble_inverse_error` | `0.1410` | `+16.53%` |
-| `explode-100k-ef602ea229b4` | `100,000` | `4` | `false` | `5,872.9s` | `holtwinters` | — | — |
-| `ray-100k-3fbc82fe3b6d` | `100,000` | `4` | `false` | `7,405.3s` | `holtwinters` | — | — |
+| `run_id` | `n_series` | `n_models` | `backtest_on` | `runtime_seconds` | `champion_model` | `champion_pooled_wape` | `fva_relative_lift_pct` | `total_forecast_units` |
+| :--- | ---: | ---: | :---: | ---: | :--- | ---: | ---: | ---: |
+| `w1a-bq-scale-n100000-97e2fbd32ed2` | `100,000` | `2` | `true` | `5,055.7s` | `ensemble_nnls` | `0.1124` | `+9.19%` | `146,925,703` |
+| `w1a-spark-srv-n100000-f0ce6ad0a782` | `100,000` | `2` | `true` | `4,000.0s` | `ensemble_inverse_error` | `0.1410` | `+16.53%` | `149,600,400` |
+| `explode-100k-ef602ea229b4` | `100,000` | `4` | `false` | `5,872.9s` | `holtwinters` | — | — | `295,862,672` |
+| `ray-100k-3fbc82fe3b6d` | `100,000` | `4` | `false` | `7,405.3s` | `holtwinters` | — | — | `295,862,639` |
 
 </details>
 
@@ -595,4 +609,4 @@ python -m scale_forecasting.bq_agent --dataset scale_forecasting --chat
 | :--- | :--- |
 | **Deploy the lakehouse & 100k seed dataset** | [Deploying on GCP](./deploying_on_gcp.md) · [Hands-on workshop](./workshop.md) |
 | **Notebook & AI Agent integrations** | [Notebook 12: Conversational Analytics & Knowledge Catalog](./notebooks/12_conversational_analytics_and_knowledge_catalog.ipynb) · [AI agents, skills & MCP](./agent_and_mcp_guide.md) |
-| **FinOps, 100k throughput & Python API** | [Cost estimates & controls](./cost_estimates.md) · [Quota, throughput, and scale](./quota_and_scale.md) · [BigQuery Agent API](./api/bq_agent.md) |
+| **Cost controls, 100k throughput & Python API** | [Cost estimates & controls](./cost_estimates.md) · [Quota, throughput, and scale](./quota_and_scale.md) · [BigQuery Agent API](./api/bq_agent.md) |

@@ -782,6 +782,7 @@ def ask_registry(
     *,
     run_id: str | None = "latest",
     conversation_id: str | None = None,
+    conversation_title: str | None = None,
     stateful: bool = True,
     auto_ensure_agent: bool = True,
     project_id: str | None = None,
@@ -799,8 +800,9 @@ def ask_registry(
     - Auto-provisions the `DataAgent` on first use when ``auto_ensure_agent=True`` and the agent
       does not yet exist, and auto-refreshes its allowlisted `publishedContext` when a newer run
       has introduced an additional ``source_table`` not yet present on the agent.
-    - Maintains multi-turn conversation memory in Google Cloud when ``stateful=True``; pass back
-      ``resp.conversation_id`` to ask follow-up questions in the same session.
+    - Maintains multi-turn conversation memory in Google Cloud when ``stateful=True`` (naming new
+      threads from ``conversation_title`` or the opening ``question`` so BigQuery Studio displays a
+      readable chat title); pass back ``resp.conversation_id`` to ask follow-up questions.
     """
     if not question or not question.strip():
         raise ConfigError("question must be a non-empty string")
@@ -886,12 +888,18 @@ def ask_registry(
     if stateful:
         if not eff_conv_id:
             eff_conv_id = f"sf-conv-{uuid.uuid4().hex[:12]}"
+            raw_title = (
+                conversation_title.strip()
+                if conversation_title and conversation_title.strip()
+                else question.strip()
+            )
+            eff_title = " ".join(raw_title.split())[:120]
             request_json(
                 sess,
                 "POST",
                 f"{GEMINI_ANALYTICS_BASE_URL}/{parent}/conversations",
                 params={"conversationId": eff_conv_id},
-                json_body={"agents": [agent_name]},
+                json_body={"agents": [agent_name], "title": eff_title},
                 service_label="BigQuery Conversational Analytics",
             )
         conv_name = (
@@ -950,6 +958,7 @@ class BQChatSession:
         *,
         run_id: str | None = "latest",
         conversation_id: str | None = None,
+        title: str | None = None,
         stateful: bool = True,
         auto_ensure_agent: bool = True,
         project_id: str | None = None,
@@ -963,6 +972,7 @@ class BQChatSession:
     ) -> None:
         self.run_id = run_id
         self.conversation_id = conversation_id
+        self.title = title
         self.stateful = stateful
         self.auto_ensure_agent = auto_ensure_agent
         self.project_id = project_id
@@ -1026,10 +1036,12 @@ class BQChatSession:
             )
         else:
             ensure_now = self.auto_ensure_agent and not self._agent_verified
+            eff_title = kwargs.pop("conversation_title", self.title)
             resp = ask_registry(
                 question,
                 run_id=effective_run_id,
                 conversation_id=self.conversation_id,
+                conversation_title=eff_title,
                 stateful=self.stateful,
                 auto_ensure_agent=ensure_now,
                 project_id=self.project_id,

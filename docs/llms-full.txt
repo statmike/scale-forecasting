@@ -369,6 +369,7 @@ Resource ceiling (`max_executors`) for surgical `--retry` repairs.
 | `<model>@cold_start` / `<model>@analog_transfer` / `<model>@bass_diffusion` / `<model>@weibull_lifecycle` / `<model>@arps_decline` / `<model>@cold_start_arps` | Enable cold-start & NPI Empirical-Bayes shrinkage transfer and optionally pin the launch or depletion archetype (`analog_transfer`, `bass_diffusion`, `weibull_lifecycle`, or `arps_decline` with analytical `eur_total` / `eur_remaining`). |
 | `<model>@aci` / `<model>@aci_norm` / `<model>@aci_normalized` | Per-model online Adaptive Conformal Inference (`aci`) or Locally Adaptive Normalized CQR (`aci_normalized`) interval calibration override. |
 | `<model>@similarity_global` / `<model>@similarity_cold_start` | Enable similarity-clustered global pooling (`@similarity_global`, injecting `__similarity_cluster_id__`) or similarity-driven cold-start donor transfer (`@similarity_cold_start`, `cold_start_matching = 'similarity'`). |
+| `arima_plus_xreg` / `arima_plus@xreg` · `bq_timesfm` | Explicit BigQuery ML `ARIMA_PLUS_XREG` covariate alias (pins `arima_plus` to univariate `ARIMA_PLUS` when both are listed together; `arima_plus` alone also upgrades automatically to `ARIMA_PLUS_XREG` when `future_covariates` are configured) and explicit BigQuery `AI.FORECAST` alias (`bq_timesfm` -> `timesfm`). |
 
 ---
 

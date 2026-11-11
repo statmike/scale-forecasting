@@ -223,7 +223,10 @@ RUNTIME_CATALOG: tuple[dict[str, Any], ...] = (
         "gpu_types": (),
         "scaling": "Managed BigQuery slots (no VM provisioning)",
         "submitter": "scale_forecasting.engines.bigquery_engine",
-        "summary": "Zero-copy in-warehouse SQL execution for arima_plus and timesfm.",
+        "summary": (
+            "Zero-copy in-warehouse SQL execution for arima_plus "
+            "(ARIMA_PLUS / ARIMA_PLUS_XREG) and timesfm (AI.FORECAST)."
+        ),
     },
 )
 
@@ -490,6 +493,15 @@ _VARIANT_SYNTAX_ROWS: tuple[tuple[str, str], ...] = (
             "Enable similarity-clustered global pooling (`@similarity_global`, injecting "
             "`__similarity_cluster_id__`) or similarity-driven cold-start donor transfer "
             "(`@similarity_cold_start`, `cold_start_matching = 'similarity'`)."
+        ),
+    ),
+    (
+        "`arima_plus_xreg` / `arima_plus@xreg` · `bq_timesfm`",
+        (
+            "Explicit BigQuery ML `ARIMA_PLUS_XREG` covariate alias (pins `arima_plus` to "
+            "univariate `ARIMA_PLUS` when both are listed together; `arima_plus` alone also "
+            "upgrades automatically to `ARIMA_PLUS_XREG` when `future_covariates` are configured) "
+            "and explicit BigQuery `AI.FORECAST` alias (`bq_timesfm` -> `timesfm`)."
         ),
     ),
 )
